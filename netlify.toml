@@ -1,0 +1,8 @@
+[build]
+  command = "bash ./build.sh"
+  publish = "dist"
+
+[build.environment]
+  RUSTUP_HOME = "/opt/buildhome/.rustup"
+  CARGO_HOME = "/opt/buildhome/.cargo"
+  TRUNK_VERSION = "0.21.14"
