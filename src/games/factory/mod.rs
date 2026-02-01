@@ -52,6 +52,10 @@ impl Game for FactoryGame {
                 self.state.tool = PlacementTool::Exporter;
                 true
             }
+            '5' => {
+                self.state.tool = PlacementTool::Fabricator;
+                true
+            }
             'b' => {
                 self.state.tool = PlacementTool::Belt;
                 true
@@ -60,8 +64,8 @@ impl Game for FactoryGame {
                 self.state.tool = PlacementTool::Delete;
                 true
             }
-            'r' => {
-                logic::rotate_belt(&mut self.state);
+            't' => {
+                logic::toggle_miner_mode(&mut self.state);
                 true
             }
             // Cursor movement (WASD-style + arrow-like)
@@ -139,10 +143,10 @@ mod tests {
     }
 
     #[test]
-    fn factory_game_rotate_belt() {
+    fn factory_game_belt_direction_follows_cursor() {
         let mut game = FactoryGame::new();
         assert_eq!(game.state.belt_direction, grid::Direction::Right);
-        game.handle_input(&InputEvent::Key('r'));
+        game.handle_input(&InputEvent::Key('j')); // move down
         assert_eq!(game.state.belt_direction, grid::Direction::Down);
     }
 }

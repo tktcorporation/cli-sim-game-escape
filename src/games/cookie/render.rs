@@ -195,6 +195,14 @@ fn render_producers(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    // Find the best ROI (lowest payback time) among affordable producers
+    let best_payback = state
+        .producers
+        .iter()
+        .filter(|p| state.cookies >= p.cost())
+        .filter_map(|p| p.payback_seconds())
+        .fold(f64::MAX, f64::min);
+
     let items: Vec<ListItem> = state
         .producers
         .iter()
@@ -202,6 +210,14 @@ fn render_producers(
             let can_afford = state.cookies >= p.cost();
             let cost_str = format_number(p.cost().floor());
             let cps_str = format_number(p.cps());
+            let next_cps = p.next_unit_cps();
+            let payback = p.payback_seconds();
+
+            // Check if this is the best ROI among affordable options
+            let is_best_roi = can_afford
+                && payback
+                    .map(|pb| (pb - best_payback).abs() < 0.01)
+                    .unwrap_or(false);
 
             // Production indicator animation
             let prod_indicator = if p.count > 0 {
@@ -211,7 +227,19 @@ fn render_producers(
                 "  ".to_string()
             };
 
-            let key_style = if can_afford {
+            // Format payback time
+            let payback_str = match payback {
+                Some(s) if s < 60.0 => format!("{}s", s.round() as u32),
+                Some(s) if s < 3600.0 => format!("{}m", (s / 60.0).round() as u32),
+                Some(s) => format!("{}h", (s / 3600.0).round() as u32),
+                None => "---".to_string(),
+            };
+
+            let key_style = if is_best_roi {
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else if can_afford {
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD)
@@ -228,16 +256,32 @@ fn render_producers(
             } else {
                 Style::default().fg(Color::DarkGray)
             };
+            let roi_style = if is_best_roi {
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else if can_afford {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            let best_marker = if is_best_roi { "★" } else { " " };
 
             ListItem::new(Line::from(vec![
-                Span::styled(format!(" [{}] ", p.kind.key()), key_style),
+                Span::styled(format!("{}[{}] ", best_marker, p.kind.key()), key_style),
                 Span::styled(
                     format!("{:<8} {:>2}x ", p.kind.name(), p.count),
                     text_style,
                 ),
                 Span::styled(prod_indicator, active_style),
                 Span::styled(format!("{}/s ", cps_str), active_style),
-                Span::styled(format!("${}", cost_str), text_style),
+                Span::styled(format!("${} ", cost_str), text_style),
+                Span::styled(
+                    format!("+{}/s ", format_number(next_cps)),
+                    roi_style,
+                ),
+                Span::styled(format!("回収{}", payback_str), roi_style),
             ]))
         })
         .collect();
@@ -246,7 +290,7 @@ fn render_producers(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Green))
-            .title(" Producers [1-5]で購入 "),
+            .title(" Producers [1-5]で購入 ★=最高効率 "),
     );
     f.render_widget(widget, area);
 
