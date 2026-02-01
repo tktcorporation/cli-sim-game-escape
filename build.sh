@@ -7,6 +7,9 @@ if ! command -v rustup &> /dev/null; then
   source "$CARGO_HOME/env"
 fi
 
+# Ensure a default toolchain is installed
+rustup default stable
+
 # Add WASM target
 rustup target add wasm32-unknown-unknown
 
