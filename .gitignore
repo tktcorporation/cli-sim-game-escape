@@ -1,4 +1,3 @@
 /target
 /dist
 *.wasm
-.github/workflows/
