@@ -1,6 +1,6 @@
 /// Tiny Factory game state.
 
-use super::grid::{Cell, GRID_H, GRID_W};
+use super::grid::{Cell, GRID_H, GRID_W, VIEW_H, VIEW_W};
 
 /// What the player is placing.
 #[derive(Clone, Debug, PartialEq)]
@@ -10,6 +10,7 @@ pub enum PlacementTool {
     Smelter,
     Assembler,
     Exporter,
+    Fabricator,
     Belt, // uses current belt direction
     Delete,
 }
@@ -30,7 +31,8 @@ pub struct FactoryState {
     /// Current belt direction (used when placing belts).
     pub belt_direction: super::grid::Direction,
     /// Stats: items produced per kind (for display).
-    pub produced_count: [u64; 3], // IronOre, IronPlate, Gear
+    /// [IronOre, IronPlate, Gear, CopperOre, CopperPlate, Circuit]
+    pub produced_count: [u64; 6],
     /// Message log.
     pub log: Vec<String>,
     /// Animation frame counter.
@@ -43,6 +45,9 @@ pub struct FactoryState {
     pub total_money_earned: u64,
     /// Tick counter for income rate calculation.
     pub total_ticks: u64,
+    /// Viewport top-left corner (scroll offset).
+    pub viewport_x: usize,
+    pub viewport_y: usize,
 }
 
 impl FactoryState {
@@ -56,13 +61,15 @@ impl FactoryState {
             cursor_y: 0,
             tool: PlacementTool::None,
             belt_direction: super::grid::Direction::Right,
-            produced_count: [0; 3],
+            produced_count: [0; 6],
             log: vec!["Tiny Factory へようこそ！".into()],
             anim_frame: 0,
             export_flash: 0,
             last_export_value: 0,
             total_money_earned: 0,
             total_ticks: 0,
+            viewport_x: 0,
+            viewport_y: 0,
         }
     }
 
@@ -73,12 +80,39 @@ impl FactoryState {
         }
     }
 
-    /// Move cursor, clamped to grid bounds.
+    /// Move cursor, clamped to grid bounds. Scrolls viewport to follow cursor.
+    /// Also updates belt_direction to match movement direction.
     pub fn move_cursor(&mut self, dx: i32, dy: i32) {
         let nx = (self.cursor_x as i32 + dx).clamp(0, GRID_W as i32 - 1) as usize;
         let ny = (self.cursor_y as i32 + dy).clamp(0, GRID_H as i32 - 1) as usize;
+        // Auto-set belt direction from cursor movement
+        if dx == 1 && dy == 0 { self.belt_direction = super::grid::Direction::Right; }
+        else if dx == -1 && dy == 0 { self.belt_direction = super::grid::Direction::Left; }
+        else if dx == 0 && dy == 1 { self.belt_direction = super::grid::Direction::Down; }
+        else if dx == 0 && dy == -1 { self.belt_direction = super::grid::Direction::Up; }
         self.cursor_x = nx;
         self.cursor_y = ny;
+        self.scroll_to_cursor();
+    }
+
+    /// Adjust viewport so the cursor is visible, with 1-cell margin from edges.
+    pub fn scroll_to_cursor(&mut self) {
+        let margin = 1usize;
+        // Horizontal
+        if self.cursor_x < self.viewport_x + margin {
+            self.viewport_x = self.cursor_x.saturating_sub(margin);
+        } else if self.cursor_x >= self.viewport_x + VIEW_W - margin {
+            self.viewport_x = (self.cursor_x + margin + 1).saturating_sub(VIEW_W);
+        }
+        // Vertical
+        if self.cursor_y < self.viewport_y + margin {
+            self.viewport_y = self.cursor_y.saturating_sub(margin);
+        } else if self.cursor_y >= self.viewport_y + VIEW_H - margin {
+            self.viewport_y = (self.cursor_y + margin + 1).saturating_sub(VIEW_H);
+        }
+        // Clamp viewport to grid bounds
+        self.viewport_x = self.viewport_x.min(GRID_W.saturating_sub(VIEW_W));
+        self.viewport_y = self.viewport_y.min(GRID_H.saturating_sub(VIEW_H));
     }
 }
 
@@ -104,6 +138,32 @@ mod tests {
 
         s.move_cursor(100, 100); // clamp to max
         assert_eq!((s.cursor_x, s.cursor_y), (GRID_W - 1, GRID_H - 1));
+    }
+
+    #[test]
+    fn viewport_scrolls_with_cursor() {
+        let mut s = FactoryState::new();
+        assert_eq!(s.viewport_x, 0);
+        assert_eq!(s.viewport_y, 0);
+
+        // Move cursor to right edge of viewport — should start scrolling
+        for _ in 0..VIEW_W {
+            s.move_cursor(1, 0);
+        }
+        assert!(s.viewport_x > 0, "viewport should have scrolled right");
+        assert!(s.cursor_x >= s.viewport_x, "cursor should be within viewport");
+        assert!(s.cursor_x < s.viewport_x + VIEW_W, "cursor should be within viewport");
+    }
+
+    #[test]
+    fn viewport_clamped_to_grid() {
+        let mut s = FactoryState::new();
+        // Move cursor to far bottom-right
+        s.move_cursor(GRID_W as i32, GRID_H as i32);
+        assert_eq!(s.cursor_x, GRID_W - 1);
+        assert_eq!(s.cursor_y, GRID_H - 1);
+        assert!(s.viewport_x + VIEW_W <= GRID_W);
+        assert!(s.viewport_y + VIEW_H <= GRID_H);
     }
 
     #[test]

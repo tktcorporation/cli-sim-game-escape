@@ -1,7 +1,11 @@
 /// Grid types for the Tiny Factory game.
 
-pub const GRID_W: usize = 10;
-pub const GRID_H: usize = 8;
+pub const GRID_W: usize = 40;
+pub const GRID_H: usize = 30;
+
+/// Viewport size (how many cells are visible at once).
+pub const VIEW_W: usize = 20;
+pub const VIEW_H: usize = 14;
 
 /// Cardinal direction for belts.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -32,6 +36,16 @@ impl Direction {
             Direction::Right => '>',
         }
     }
+
+    /// Opposite direction.
+    pub fn opposite(&self) -> Direction {
+        match self {
+            Direction::Up => Direction::Down,
+            Direction::Down => Direction::Up,
+            Direction::Left => Direction::Right,
+            Direction::Right => Direction::Left,
+        }
+    }
 }
 
 /// Items that flow through the factory.
@@ -40,6 +54,9 @@ pub enum ItemKind {
     IronOre,
     IronPlate,
     Gear,
+    CopperOre,
+    CopperPlate,
+    Circuit,
 }
 
 impl ItemKind {
@@ -48,6 +65,9 @@ impl ItemKind {
             ItemKind::IronOre => 'o',
             ItemKind::IronPlate => '=',
             ItemKind::Gear => '*',
+            ItemKind::CopperOre => 'c',
+            ItemKind::CopperPlate => '~',
+            ItemKind::Circuit => '#',
         }
     }
 
@@ -58,6 +78,9 @@ impl ItemKind {
             ItemKind::IronOre => Color::Cyan,
             ItemKind::IronPlate => Color::LightBlue,
             ItemKind::Gear => Color::Yellow,
+            ItemKind::CopperOre => Color::LightRed,
+            ItemKind::CopperPlate => Color::Red,
+            ItemKind::Circuit => Color::LightGreen,
         }
     }
 }
@@ -65,14 +88,16 @@ impl ItemKind {
 /// Machine types.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MachineKind {
-    /// Produces IronOre from nothing.
+    /// Produces IronOre or CopperOre (depending on mode).
     Miner,
-    /// Converts IronOre → IronPlate.
+    /// Converts ore → plate (auto-detects input type).
     Smelter,
     /// Converts IronPlate → Gear.
     Assembler,
     /// Exports items for money.
     Exporter,
+    /// Converts IronPlate + CopperPlate → Circuit (2-input).
+    Fabricator,
 }
 
 impl MachineKind {
@@ -82,6 +107,7 @@ impl MachineKind {
             MachineKind::Smelter => "Smelter",
             MachineKind::Assembler => "Assembler",
             MachineKind::Exporter => "Exporter",
+            MachineKind::Fabricator => "Fabricator",
         }
     }
 
@@ -91,6 +117,7 @@ impl MachineKind {
             MachineKind::Smelter => 'S',
             MachineKind::Assembler => 'A',
             MachineKind::Exporter => 'E',
+            MachineKind::Fabricator => 'F',
         }
     }
 
@@ -101,26 +128,30 @@ impl MachineKind {
             MachineKind::Smelter => 25,
             MachineKind::Assembler => 50,
             MachineKind::Exporter => 15,
+            MachineKind::Fabricator => 75,
         }
     }
 
     /// Ticks to produce one output.
     pub fn recipe_time(&self) -> u32 {
         match self {
-            MachineKind::Miner => 10,    // 1 per second
-            MachineKind::Smelter => 15,  // 0.67 per second
-            MachineKind::Assembler => 20, // 0.5 per second
-            MachineKind::Exporter => 5,  // 2 per second
+            MachineKind::Miner => 10,     // 1 per second
+            MachineKind::Smelter => 15,   // 0.67 per second
+            MachineKind::Assembler => 20,  // 0.5 per second
+            MachineKind::Exporter => 5,   // 2 per second
+            MachineKind::Fabricator => 25, // 0.4 per second
         }
     }
 
-    /// Input required (None for Miner).
+    /// Primary input required (None for Miner, Exporter, Fabricator).
+    /// Fabricator uses special 2-input logic handled in tick.
     pub fn input(&self) -> Option<ItemKind> {
         match self {
             MachineKind::Miner => None,
-            MachineKind::Smelter => Some(ItemKind::IronOre),
+            MachineKind::Smelter => None, // polymorphic: accepts IronOre or CopperOre
             MachineKind::Assembler => Some(ItemKind::IronPlate),
             MachineKind::Exporter => None, // accepts any
+            MachineKind::Fabricator => None, // 2-input: IronPlate + CopperPlate
         }
     }
 
@@ -128,9 +159,10 @@ impl MachineKind {
     pub fn output(&self) -> Option<ItemKind> {
         match self {
             MachineKind::Miner => Some(ItemKind::IronOre),
-            MachineKind::Smelter => Some(ItemKind::IronPlate),
+            MachineKind::Smelter => Some(ItemKind::IronPlate), // default; actual output depends on input
             MachineKind::Assembler => Some(ItemKind::Gear),
             MachineKind::Exporter => None,
+            MachineKind::Fabricator => Some(ItemKind::Circuit),
         }
     }
 
@@ -140,8 +172,18 @@ impl MachineKind {
             ItemKind::IronOre => 1,
             ItemKind::IronPlate => 5,
             ItemKind::Gear => 20,
+            ItemKind::CopperOre => 2,
+            ItemKind::CopperPlate => 8,
+            ItemKind::Circuit => 50,
         }
     }
+}
+
+/// Miner production mode.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MinerMode {
+    Iron,
+    Copper,
 }
 
 /// A machine placed on the grid.
@@ -156,6 +198,17 @@ pub struct Machine {
     pub progress: u32,
     /// Maximum buffer size.
     pub max_buffer: usize,
+    /// Miner mode (only relevant for Miner kind).
+    pub mode: MinerMode,
+    // ── Statistics ──
+    /// Total items produced by this machine.
+    pub stat_produced: u64,
+    /// Total money earned (Exporter only).
+    pub stat_revenue: u64,
+    /// Ticks this machine was actively working (progress > 0 or producing).
+    pub stat_active_ticks: u64,
+    /// Total ticks since placement.
+    pub stat_total_ticks: u64,
 }
 
 impl Machine {
@@ -166,23 +219,38 @@ impl Machine {
             output_buffer: Vec::new(),
             progress: 0,
             max_buffer: 5,
+            mode: MinerMode::Iron,
+            stat_produced: 0,
+            stat_revenue: 0,
+            stat_active_ticks: 0,
+            stat_total_ticks: 0,
+        }
+    }
+
+    /// Utilization rate (0.0 - 1.0).
+    pub fn utilization(&self) -> f64 {
+        if self.stat_total_ticks == 0 {
+            0.0
+        } else {
+            self.stat_active_ticks as f64 / self.stat_total_ticks as f64
         }
     }
 }
 
-/// A belt segment.
+/// A belt segment (undirected; items auto-route away from their source).
 #[derive(Clone, Debug)]
 pub struct Belt {
-    pub direction: Direction,
     /// Item currently on this belt tile (at most one).
     pub item: Option<ItemKind>,
+    /// Direction the current item entered from (to avoid backtracking).
+    pub item_from: Option<Direction>,
 }
 
 impl Belt {
-    pub fn new(direction: Direction) -> Self {
+    pub fn new() -> Self {
         Self {
-            direction,
             item: None,
+            item_from: None,
         }
     }
 }
@@ -241,7 +309,7 @@ mod tests {
     fn machine_recipes() {
         assert_eq!(MachineKind::Miner.input(), None);
         assert_eq!(MachineKind::Miner.output(), Some(ItemKind::IronOre));
-        assert_eq!(MachineKind::Smelter.input(), Some(ItemKind::IronOre));
+        assert_eq!(MachineKind::Smelter.input(), None); // polymorphic: accepts IronOre or CopperOre
         assert_eq!(MachineKind::Smelter.output(), Some(ItemKind::IronPlate));
     }
 
