@@ -224,12 +224,19 @@ fn render_narrow_layout(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    // Actions panel height: items + 2 (top/bottom border), minimum 3
+    let action_count = match gs.input_mode {
+        InputMode::Explore => gs.actions.len(),
+        InputMode::Inventory => gs.inventory_display().len(),
+    };
+    let action_height = (action_count as u16 + 2).max(3);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(5),
-            Constraint::Min(4),
-            Constraint::Min(4),
+            Constraint::Length(5),            // Room description (compact)
+            Constraint::Length(action_height), // Actions: exact fit
+            Constraint::Min(3),              // Log: gets all remaining space
         ])
         .split(area);
 
