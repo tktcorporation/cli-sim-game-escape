@@ -324,8 +324,12 @@ pub fn place(state: &mut FactoryState) -> bool {
                         return false;
                     }
                     state.money -= cost;
-                    state.grid[y][x] = Cell::Belt(Belt::new(state.belt_direction));
-                    state.add_log(&format!("Belt {} を設置", state.belt_direction.arrow()));
+                    let dir = state.belt_direction;
+                    state.grid[y][x] = Cell::Belt(Belt::new(dir));
+                    state.add_log(&format!("Belt {} を設置", dir.arrow()));
+                    // Auto-advance cursor in belt direction
+                    let (dx, dy) = dir.delta();
+                    state.move_cursor(dx, dy);
                     true
                 }
                 _ => false,

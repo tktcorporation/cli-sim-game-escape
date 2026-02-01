@@ -51,10 +51,9 @@ fn render_wide(
     let left_chunks = Layout::default()
         .direction(LayoutDir::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Min(5),    // Grid
-            Constraint::Length(3), // Tool select
-            Constraint::Length(5), // Help
+            Constraint::Length(3),                       // Header
+            Constraint::Length(GRID_H as u16 + 2),       // Grid (fixed to grid height + border)
+            Constraint::Length(11),                       // Tool panel (selection + description)
         ])
         .split(h_chunks[0]);
 
@@ -65,8 +64,7 @@ fn render_wide(
 
     render_header(state, f, left_chunks[0], false);
     render_grid(state, f, left_chunks[1]);
-    render_tool_bar(state, f, left_chunks[2], click_state);
-    render_help(state, f, left_chunks[3]);
+    render_tool_panel(state, f, left_chunks[2], click_state);
     render_stats(state, f, right_chunks[0]);
     render_log(state, f, right_chunks[1]);
 }
@@ -80,17 +78,15 @@ fn render_narrow(
     let chunks = Layout::default()
         .direction(LayoutDir::Vertical)
         .constraints([
-            Constraint::Length(3),  // Header
-            Constraint::Min(5),    // Grid
-            Constraint::Length(3), // Tool select
-            Constraint::Length(5), // Help
+            Constraint::Length(3),                       // Header
+            Constraint::Length(GRID_H as u16 + 2),       // Grid (fixed)
+            Constraint::Length(11),                       // Tool panel
         ])
         .split(area);
 
     render_header(state, f, chunks[0], true);
     render_grid(state, f, chunks[1]);
-    render_tool_bar(state, f, chunks[2], click_state);
-    render_help(state, f, chunks[3]);
+    render_tool_panel(state, f, chunks[2], click_state);
 }
 
 fn render_header(state: &FactoryState, f: &mut Frame, area: Rect, is_narrow: bool) {
@@ -198,17 +194,6 @@ fn tool_name(tool: &PlacementTool, belt_dir: &super::grid::Direction) -> String 
     }
 }
 
-fn tool_short(tool: &PlacementTool) -> &str {
-    match tool {
-        PlacementTool::None => "---",
-        PlacementTool::Miner => "Miner",
-        PlacementTool::Smelter => "Smelt",
-        PlacementTool::Assembler => "Asm",
-        PlacementTool::Exporter => "Exp",
-        PlacementTool::Belt => "Belt",
-        PlacementTool::Delete => "Del",
-    }
-}
 
 fn render_grid(state: &FactoryState, f: &mut Frame, area: Rect) {
     let anim_idx = (state.anim_frame / 3) as usize;
@@ -224,10 +209,22 @@ fn render_grid(state: &FactoryState, f: &mut Frame, area: Rect) {
             let (ch, base_style) = match &state.grid[y][x] {
                 Cell::Empty => ('.', Style::default().fg(Color::DarkGray)),
                 Cell::Machine(m) => {
-                    // Animate active machines
-                    let ch = if m.progress > 0 || !m.output_buffer.is_empty() {
-                        let idx = (anim_idx + x + y) % SPINNER.len();
-                        SPINNER[idx]
+                    // Show progress as block characters, or output indicator
+                    let ch = if !m.output_buffer.is_empty() && m.progress == 0 {
+                        // Has output ready, waiting to push — show full block
+                        '█'
+                    } else if m.progress > 0 {
+                        // Show progress as block shading
+                        let ratio = m.progress as f32 / m.kind.recipe_time() as f32;
+                        if ratio < 0.25 {
+                            '░'
+                        } else if ratio < 0.5 {
+                            '▒'
+                        } else if ratio < 0.75 {
+                            '▓'
+                        } else {
+                            '█'
+                        }
                     } else {
                         m.kind.symbol()
                     };
@@ -405,94 +402,101 @@ fn render_log(state: &FactoryState, f: &mut Frame, area: Rect) {
     f.render_widget(widget, area);
 }
 
-fn render_tool_bar(
+/// Tool descriptions for each placement tool.
+fn tool_description(tool: &PlacementTool) -> &'static str {
+    match tool {
+        PlacementTool::None => "↑キーまたはクリックでツールを選択してください",
+        PlacementTool::Miner => "鉱石(o)を自動生産。隣のベルトに出力します",
+        PlacementTool::Smelter => "鉱石(o)→鉄板(=)に精錬。入力:鉱石",
+        PlacementTool::Assembler => "鉄板(=)→歯車(*)を組立。入力:鉄板",
+        PlacementTool::Exporter => "アイテムを売却して$に変換。何でも受付",
+        PlacementTool::Belt => "アイテムを運ぶベルトコンベア [R]で回転",
+        PlacementTool::Delete => "設置済みの機械やベルトを撤去します",
+    }
+}
+
+/// Tool color for each placement tool.
+fn tool_color(tool: &PlacementTool) -> Color {
+    match tool {
+        PlacementTool::None => Color::DarkGray,
+        PlacementTool::Miner => Color::Cyan,
+        PlacementTool::Smelter => Color::Red,
+        PlacementTool::Assembler => Color::Magenta,
+        PlacementTool::Exporter => Color::Green,
+        PlacementTool::Belt => Color::White,
+        PlacementTool::Delete => Color::Red,
+    }
+}
+
+fn render_tool_panel(
     state: &FactoryState,
     f: &mut Frame,
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let spans = vec![
-        Span::styled("[1]", style_tool_key(&state.tool, &PlacementTool::Miner)),
-        Span::styled("M ", Style::default().fg(Color::Cyan)),
-        Span::styled("[2]", style_tool_key(&state.tool, &PlacementTool::Smelter)),
-        Span::styled("S ", Style::default().fg(Color::Red)),
-        Span::styled("[3]", style_tool_key(&state.tool, &PlacementTool::Assembler)),
-        Span::styled("A ", Style::default().fg(Color::Magenta)),
-        Span::styled("[4]", style_tool_key(&state.tool, &PlacementTool::Exporter)),
-        Span::styled("E ", Style::default().fg(Color::Green)),
-        Span::styled("[B]", style_tool_key(&state.tool, &PlacementTool::Belt)),
-        Span::styled(
-            format!("{} ", state.belt_direction.arrow()),
-            Style::default().fg(Color::White),
-        ),
-        Span::styled("[D]", style_tool_key(&state.tool, &PlacementTool::Delete)),
-        Span::styled("X ", Style::default().fg(Color::Red)),
+    // Tool definitions: (key, tool variant, label, cost_str)
+    let tools: Vec<(char, PlacementTool, &str, String)> = vec![
+        ('1', PlacementTool::Miner, "Miner", "$10".into()),
+        ('2', PlacementTool::Smelter, "Smelter", "$25".into()),
+        ('3', PlacementTool::Assembler, "Assembler", "$50".into()),
+        ('4', PlacementTool::Exporter, "Exporter", "$15".into()),
+        ('b', PlacementTool::Belt, "Belt", format!("$2 {}", state.belt_direction.arrow())),
+        ('d', PlacementTool::Delete, "Delete", "---".into()),
     ];
 
-    let widget = Paragraph::new(Line::from(spans))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .title(" ツール選択 "),
-        )
-        .alignment(Alignment::Center);
-    f.render_widget(widget, area);
+    let mut lines: Vec<Line> = Vec::new();
 
-    let mut cs = click_state.borrow_mut();
-    for row in area.y..area.y + area.height {
-        cs.add_target(row, ' ');
+    // Tool selection rows
+    for (key, tool, label, cost) in &tools {
+        let is_selected = std::mem::discriminant(&state.tool) == std::mem::discriminant(tool);
+        let color = tool_color(tool);
+
+        let marker = if is_selected { "▶" } else { " " };
+
+        let key_style = if is_selected {
+            Style::default()
+                .fg(color)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let label_style = if is_selected {
+            Style::default()
+                .fg(color)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {}[{}] ", marker, key), key_style),
+            Span::styled(format!("{:<10}", label), label_style),
+            Span::styled(format!("{:<6}", cost), label_style),
+        ]));
     }
-}
 
-fn render_help(_state: &FactoryState, f: &mut Frame, area: Rect) {
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(
-                " [H/J/K/L] ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("カーソル移動  ", Style::default().fg(Color::White)),
-            Span::styled(
-                "[Space] ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("設置", Style::default().fg(Color::White)),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                " [R] ",
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::styled("ベルト回転  ", Style::default().fg(Color::DarkGray)),
-            Span::styled("[Q/Esc] ", Style::default().fg(Color::DarkGray)),
-            Span::styled("メニューに戻る", Style::default().fg(Color::DarkGray)),
-        ]),
-        Line::from(Span::styled(
-            " 目標: Miner→Belt→Smelter→Belt→Exporter",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+    // Description of selected tool
+    let desc = tool_description(&state.tool);
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        format!(" {}", desc),
+        Style::default()
+            .fg(tool_color(&state.tool))
+            .add_modifier(Modifier::BOLD),
+    )));
 
     let widget = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
-            .title(" 操作方法 "),
+            .title(" ツール [↑↓/Space設置/R回転/Q戻る] "),
     );
     f.render_widget(widget, area);
-}
 
-fn style_tool_key(current: &PlacementTool, this: &PlacementTool) -> Style {
-    if std::mem::discriminant(current) == std::mem::discriminant(this) {
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
+    // Register click targets for each tool row
+    let mut cs = click_state.borrow_mut();
+    for (i, (key, _, _, _)) in tools.iter().enumerate() {
+        cs.add_target(area.y + 1 + i as u16, *key);
     }
 }
+
