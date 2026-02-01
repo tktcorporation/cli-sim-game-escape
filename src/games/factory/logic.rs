@@ -230,7 +230,15 @@ fn machine_accepts(grid: &[Vec<Cell>], ax: usize, ay: usize, item: &ItemKind) ->
             MachineKind::Exporter => true,
             MachineKind::Smelter => matches!(item, ItemKind::IronOre | ItemKind::CopperOre),
             MachineKind::Assembler => *item == ItemKind::IronPlate,
-            MachineKind::Fabricator => matches!(item, ItemKind::IronPlate | ItemKind::CopperPlate),
+            MachineKind::Fabricator => {
+                if !matches!(item, ItemKind::IronPlate | ItemKind::CopperPlate) {
+                    return false;
+                }
+                // Per-type limit: each input type gets half the buffer
+                let per_type_limit = m.max_buffer / 2;
+                let same_count = m.input_buffer.iter().filter(|i| *i == item).count();
+                same_count < per_type_limit
+            }
         }
     } else {
         false
@@ -1130,6 +1138,36 @@ mod tests {
             assert_eq!(m.output_buffer[0], ItemKind::Circuit);
             assert!(m.input_buffer.is_empty());
         }
+    }
+
+    #[test]
+    fn fabricator_per_type_buffer_limit() {
+        let mut state = FactoryState::new();
+        place_machine_at(&mut state, 0, 0, MachineKind::Fabricator);
+        // max_buffer=5, per_type_limit=2
+        if let Cell::Machine(m) = &mut state.grid[0][0] {
+            m.input_buffer.push(ItemKind::IronPlate);
+            m.input_buffer.push(ItemKind::IronPlate);
+        }
+        // 2 IronPlates = at limit, should reject more
+        assert!(
+            !machine_accepts(&state.grid, 0, 0, &ItemKind::IronPlate),
+            "should reject IronPlate at per-type limit"
+        );
+        // CopperPlate has 0, should accept
+        assert!(
+            machine_accepts(&state.grid, 0, 0, &ItemKind::CopperPlate),
+            "should accept CopperPlate (0 of 2 limit)"
+        );
+        // Fill CopperPlate to limit too
+        if let Cell::Machine(m) = &mut state.grid[0][0] {
+            m.input_buffer.push(ItemKind::CopperPlate);
+            m.input_buffer.push(ItemKind::CopperPlate);
+        }
+        assert!(
+            !machine_accepts(&state.grid, 0, 0, &ItemKind::CopperPlate),
+            "should reject CopperPlate at per-type limit"
+        );
     }
 
     #[test]
