@@ -12,9 +12,10 @@ use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratzilla::ratatui::Terminal;
 use ratzilla::{DomBackend, WebRenderer};
+use wasm_bindgen::prelude::*;
 
 /// Query the grid container's bounding rect and convert pixel coordinates to a row.
-fn dom_pixel_to_row(mouse_x: u32, mouse_y: u32, cs: &ClickState) -> Option<u16> {
+fn dom_pixel_to_row(client_x: f64, client_y: f64, cs: &ClickState) -> Option<u16> {
     let window = web_sys::window()?;
     let document = window.document()?;
 
@@ -22,26 +23,93 @@ fn dom_pixel_to_row(mouse_x: u32, mouse_y: u32, cs: &ClickState) -> Option<u16> 
     let grid = document.query_selector("body > div").ok()??;
     let rect = grid.get_bounding_client_rect();
 
-    let click_y = mouse_y as f64 - rect.top();
-    let click_x = mouse_x as f64 - rect.left();
+    let click_y = client_y - rect.top();
+    let click_x = client_x - rect.left();
 
     if click_x < 0.0 {
         return None;
     }
 
-    let row = pixel_y_to_row(click_y, rect.height(), cs.terminal_rows);
+    pixel_y_to_row(click_y, rect.height(), cs.terminal_rows)
+}
 
-    web_sys::console::log_1(
-        &format!(
-            "click: pixel_y={}, row={:?}, targets={}",
-            mouse_y,
-            row,
-            cs.targets.len()
-        )
-        .into(),
+/// Process a tap/click at the given client coordinates. Shared by mouse and touch handlers.
+fn handle_tap(
+    client_x: f64,
+    client_y: f64,
+    state: &Rc<RefCell<GameState>>,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let cs = click_state.borrow();
+    if cs.terminal_rows == 0 || cs.terminal_cols == 0 {
+        return;
+    }
+
+    let row = match dom_pixel_to_row(client_x, client_y, &cs) {
+        Some(r) => r,
+        None => return,
+    };
+
+    let matched_key = cs.find_target_key(row);
+    drop(cs);
+
+    if let Some(key) = matched_key {
+        let mut gs = state.borrow_mut();
+        match gs.input_mode {
+            InputMode::Explore => {
+                if key == 'i' {
+                    gs.input_mode = InputMode::Inventory;
+                } else if key == 'r' && gs.phase == GamePhase::Escaped {
+                    *gs = GameState::new();
+                } else {
+                    gs.handle_action(key);
+                }
+            }
+            InputMode::Inventory => {
+                if key == 'i' {
+                    gs.input_mode = InputMode::Explore;
+                }
+            }
+        }
+    }
+}
+
+/// Register a native touchstart listener on document for reliable mobile tap handling.
+fn register_touch_handler(
+    state: &Rc<RefCell<GameState>>,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let state = state.clone();
+    let click_state = click_state.clone();
+
+    let closure = Closure::<dyn FnMut(_)>::new(move |event: web_sys::TouchEvent| {
+        let touches = event.touches();
+        if touches.length() == 0 {
+            return;
+        }
+        let touch = match touches.get(0) {
+            Some(t) => t,
+            None => return,
+        };
+        handle_tap(
+            touch.client_x() as f64,
+            touch.client_y() as f64,
+            &state,
+            &click_state,
+        );
+    });
+
+    let window = web_sys::window().unwrap();
+    let document = window.document().unwrap();
+    // Use passive: false so we can reliably capture the event
+    let opts = web_sys::AddEventListenerOptions::new();
+    opts.set_passive(true);
+    let _ = document.add_event_listener_with_callback_and_add_event_listener_options(
+        "touchstart",
+        closure.as_ref().unchecked_ref(),
+        &opts,
     );
-
-    row
+    closure.forget();
 }
 
 fn main() -> io::Result<()> {
@@ -52,7 +120,7 @@ fn main() -> io::Result<()> {
     let backend = DomBackend::new()?;
     let terminal = Terminal::new(backend)?;
 
-    // Mouse/touch click handler
+    // Mouse click handler (desktop)
     terminal.on_mouse_event({
         let state = state.clone();
         let click_state = click_state.clone();
@@ -62,41 +130,18 @@ fn main() -> io::Result<()> {
             {
                 return;
             }
-
-            let cs = click_state.borrow();
-            if cs.terminal_rows == 0 || cs.terminal_cols == 0 {
-                return;
-            }
-
-            let row = match dom_pixel_to_row(mouse_event.x, mouse_event.y, &cs) {
-                Some(r) => r,
-                None => return,
-            };
-
-            let matched_key = cs.find_target_key(row);
-            drop(cs);
-
-            if let Some(key) = matched_key {
-                let mut gs = state.borrow_mut();
-                match gs.input_mode {
-                    InputMode::Explore => {
-                        if key == 'i' {
-                            gs.input_mode = InputMode::Inventory;
-                        } else if key == 'r' && gs.phase == GamePhase::Escaped {
-                            *gs = GameState::new();
-                        } else {
-                            gs.handle_action(key);
-                        }
-                    }
-                    InputMode::Inventory => {
-                        if key == 'i' {
-                            gs.input_mode = InputMode::Explore;
-                        }
-                    }
-                }
-            }
+            handle_tap(
+                mouse_event.x as f64,
+                mouse_event.y as f64,
+                &state,
+                &click_state,
+            );
         }
     });
+
+    // Native touch handler (mobile) — touchstart fires reliably on mobile
+    // whereas synthesized mousedown from touch events can be unreliable.
+    register_touch_handler(&state, &click_state);
 
     // Keyboard handler
     terminal.on_key_event({
