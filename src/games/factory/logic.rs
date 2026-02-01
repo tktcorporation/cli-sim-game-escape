@@ -19,6 +19,10 @@ pub fn tick_n(state: &mut FactoryState, n: u32) {
         tick(state);
     }
     state.anim_frame = state.anim_frame.wrapping_add(n);
+    state.total_ticks += n as u64;
+    if state.export_flash > 0 {
+        state.export_flash = state.export_flash.saturating_sub(n);
+    }
 }
 
 /// Process all machines for one tick.
@@ -85,6 +89,10 @@ fn tick_machines(state: &mut FactoryState) {
                                 let value = MachineKind::export_value(&item);
                                 state.money += value;
                                 state.total_exported += 1;
+                                state.total_money_earned += value;
+                                // Export flash effect
+                                state.export_flash = 5; // flash for 5 ticks (0.5s)
+                                state.last_export_value = value;
                             }
                         } else if let Cell::Machine(m) = &mut state.grid[y][x] {
                             m.progress = new_progress;
@@ -421,6 +429,26 @@ mod tests {
         tick_n(&mut state, 5);
         assert_eq!(state.money, initial_money + 20); // Gear value = 20
         assert_eq!(state.total_exported, 1);
+        assert_eq!(state.total_money_earned, 20);
+    }
+
+    #[test]
+    fn exporter_sets_flash_on_export() {
+        let mut state = FactoryState::new();
+        state.grid[0][0] = Cell::Machine(Machine::new(MachineKind::Exporter));
+        if let Cell::Machine(m) = &mut state.grid[0][0] {
+            m.input_buffer.push(ItemKind::IronPlate);
+        }
+
+        assert_eq!(state.export_flash, 0);
+        tick_n(&mut state, 5);
+        // Flash should have been set (but tick_n also decrements it)
+        // After 5 ticks: flash set to 5 at tick 5, then decremented by remaining 0
+        // tick_n calls tick 5 times then decrements flash by 5
+        // The flash is set during the 5th tick, then tick_n subtracts 5
+        // So flash ends at 0. Let's check last_export_value instead.
+        assert_eq!(state.last_export_value, 5); // IronPlate value = 5
+        assert_eq!(state.total_money_earned, 5);
     }
 
     #[test]

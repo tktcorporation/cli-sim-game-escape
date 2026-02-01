@@ -35,6 +35,14 @@ pub struct FactoryState {
     pub log: Vec<String>,
     /// Animation frame counter.
     pub anim_frame: u32,
+    /// Flash timer for export events (ticks remaining).
+    pub export_flash: u32,
+    /// Value of the last export (for display during flash).
+    pub last_export_value: u64,
+    /// Total money earned from exports (for income rate calculation).
+    pub total_money_earned: u64,
+    /// Tick counter for income rate calculation.
+    pub total_ticks: u64,
 }
 
 impl FactoryState {
@@ -51,6 +59,10 @@ impl FactoryState {
             produced_count: [0; 3],
             log: vec!["Tiny Factory へようこそ！".into()],
             anim_frame: 0,
+            export_flash: 0,
+            last_export_value: 0,
+            total_money_earned: 0,
+            total_ticks: 0,
         }
     }
 

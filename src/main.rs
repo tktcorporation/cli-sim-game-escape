@@ -120,6 +120,10 @@ fn main() -> io::Result<()> {
             let event = match key_event.code {
                 KeyCode::Char(c) => InputEvent::Key(c),
                 KeyCode::Esc => InputEvent::Key('q'),
+                KeyCode::Left => InputEvent::Key('h'),
+                KeyCode::Right => InputEvent::Key('l'),
+                KeyCode::Up => InputEvent::Key('k'),
+                KeyCode::Down => InputEvent::Key('j'),
                 _ => return,
             };
             dispatch_event(&event, &app_state);

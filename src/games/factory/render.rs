@@ -102,22 +102,24 @@ fn render_header(state: &FactoryState, f: &mut Frame, area: Rect, is_narrow: boo
         "  ".to_string()
     };
 
-    let text = if is_narrow {
-        format!(
-            "{}${} Exp:{} Tool:{}",
-            money_anim,
-            state.money,
-            state.total_exported,
-            tool_short(&state.tool),
-        )
+    // Income rate ($/sec) based on total earnings and time elapsed
+    let income_str = if state.total_ticks > 0 && state.total_money_earned > 0 {
+        let seconds = state.total_ticks as f64 / 10.0;
+        let rate = state.total_money_earned as f64 / seconds;
+        if rate >= 1.0 {
+            format!(" ${:.1}/s", rate)
+        } else {
+            format!(" ${:.2}/s", rate)
+        }
     } else {
-        format!(
-            "{} $: {}    Exported: {}    Tool: {}",
-            money_anim,
-            state.money,
-            state.total_exported,
-            tool_name(&state.tool, &state.belt_direction),
-        )
+        String::new()
+    };
+
+    // Export flash: show earned amount
+    let flash_str = if state.export_flash > 0 {
+        format!(" +${}", state.last_export_value)
+    } else {
+        String::new()
     };
 
     let borders = if is_narrow {
@@ -126,19 +128,60 @@ fn render_header(state: &FactoryState, f: &mut Frame, area: Rect, is_narrow: boo
         Borders::ALL
     };
 
-    let widget = Paragraph::new(Line::from(Span::styled(
-        text,
+    // Build header with flash effect
+    let money_style = if state.export_flash > 0 {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
         Style::default()
             .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    )))
-    .block(
-        Block::default()
-            .borders(borders)
-            .border_style(Style::default().fg(Color::Yellow))
-            .title(" Tiny Factory "),
-    )
-    .alignment(Alignment::Center);
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let flash_style = Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD);
+
+    let income_style = Style::default().fg(Color::Cyan);
+
+    let spans = if is_narrow {
+        vec![
+            Span::styled(
+                format!("{}${} Exp:{}", money_anim, state.money, state.total_exported),
+                money_style,
+            ),
+            Span::styled(flash_str, flash_style),
+            Span::styled(income_str, income_style),
+        ]
+    } else {
+        vec![
+            Span::styled(
+                format!(
+                    "{} $: {}    Exported: {}",
+                    money_anim, state.money, state.total_exported,
+                ),
+                money_style,
+            ),
+            Span::styled(flash_str, flash_style),
+            Span::styled(income_str, income_style),
+            Span::styled(
+                format!("    Tool: {}", tool_name(&state.tool, &state.belt_direction)),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]
+    };
+
+    let widget = Paragraph::new(Line::from(spans))
+        .block(
+            Block::default()
+                .borders(borders)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(" Tiny Factory "),
+        )
+        .alignment(Alignment::Center);
 
     f.render_widget(widget, area);
 }
@@ -194,7 +237,13 @@ fn render_grid(state: &FactoryState, f: &mut Frame, area: Rect) {
                         MachineKind::Assembler => Color::Magenta,
                         MachineKind::Exporter => Color::Green,
                     };
-                    let style = if m.progress > 0 || !m.output_buffer.is_empty() {
+                    // Exporter flash effect when export just happened
+                    let style = if m.kind == MachineKind::Exporter && state.export_flash > 0 {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .bg(Color::Green)
+                            .add_modifier(Modifier::BOLD)
+                    } else if m.progress > 0 || !m.output_buffer.is_empty() {
                         Style::default()
                             .fg(color)
                             .add_modifier(Modifier::BOLD)

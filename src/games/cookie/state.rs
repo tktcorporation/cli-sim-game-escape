@@ -94,6 +94,22 @@ impl Producer {
     pub fn cps(&self) -> f64 {
         self.count as f64 * self.kind.base_rate() * self.multiplier
     }
+
+    /// CPS gained by buying the next unit.
+    pub fn next_unit_cps(&self) -> f64 {
+        self.kind.base_rate() * self.multiplier
+    }
+
+    /// Payback time in seconds: how long until the next unit pays for itself.
+    /// Returns None if next_unit_cps is zero (shouldn't happen normally).
+    pub fn payback_seconds(&self) -> Option<f64> {
+        let cps = self.next_unit_cps();
+        if cps > 0.0 {
+            Some(self.cost() / cps)
+        } else {
+            None
+        }
+    }
 }
 
 /// An available upgrade.
@@ -281,6 +297,31 @@ mod tests {
         state.producers[1].count = 3;  // 3 grandmas = 3.0 cps
         let expected = 10.0 * 0.1 + 3.0 * 1.0;
         assert!((state.total_cps() - expected).abs() < 0.001);
+    }
+
+    #[test]
+    fn producer_next_unit_cps() {
+        let mut p = Producer::new(ProducerKind::Grandma);
+        // Base rate is 1.0, multiplier is 1.0
+        assert!((p.next_unit_cps() - 1.0).abs() < 0.001);
+        p.multiplier = 2.0;
+        assert!((p.next_unit_cps() - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn producer_payback_seconds() {
+        let p = Producer::new(ProducerKind::Cursor);
+        // Cost 15, rate 0.1 → payback = 150s
+        let payback = p.payback_seconds().unwrap();
+        assert!((payback - 150.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn producer_payback_grandma_better_than_cursor() {
+        let cursor = Producer::new(ProducerKind::Cursor);
+        let grandma = Producer::new(ProducerKind::Grandma);
+        // Grandma payback (100/1.0=100s) should be less than Cursor (15/0.1=150s)
+        assert!(grandma.payback_seconds().unwrap() < cursor.payback_seconds().unwrap());
     }
 
     #[test]
