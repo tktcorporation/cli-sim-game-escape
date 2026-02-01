@@ -1,7 +1,9 @@
+mod click;
 mod game;
 
 use std::{cell::RefCell, io, rc::Rc};
 
+use click::{is_narrow_layout, pixel_y_to_row, ClickState};
 use game::{GamePhase, GameState, InputMode};
 use ratzilla::event::{KeyCode, MouseButton, MouseEventKind};
 use ratzilla::ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -11,51 +13,42 @@ use ratzilla::ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap
 use ratzilla::ratatui::Terminal;
 use ratzilla::{DomBackend, WebRenderer};
 
-/// A region on screen that can be tapped/clicked to trigger an action.
-struct ClickTarget {
-    row: u16,
-    key: char,
-}
-
-/// Shared state between the render loop and click handler.
-struct ClickState {
-    targets: Vec<ClickTarget>,
-    terminal_cols: u16,
-    terminal_rows: u16,
-}
-
-/// Convert pixel coordinates to a terminal row using the <pre> element's dimensions.
-fn pixel_to_row(mouse_x: u32, mouse_y: u32, cs: &ClickState) -> Option<u16> {
+/// Query the grid container's bounding rect and convert pixel coordinates to a row.
+fn dom_pixel_to_row(mouse_x: u32, mouse_y: u32, cs: &ClickState) -> Option<u16> {
     let window = web_sys::window()?;
     let document = window.document()?;
-    let pre = document.query_selector("pre").ok()??;
-    let rect = pre.get_bounding_client_rect();
-    let pre_width = rect.width();
-    let pre_height = rect.height();
 
-    if pre_width == 0.0 || pre_height == 0.0 {
-        return None;
-    }
+    // DomBackend creates a <div> as the grid container inside <body>.
+    let grid = document.query_selector("body > div").ok()??;
+    let rect = grid.get_bounding_client_rect();
 
-    let cell_height = pre_height / cs.terminal_rows as f64;
     let click_y = mouse_y as f64 - rect.top();
+    let click_x = mouse_x as f64 - rect.left();
 
-    if click_y < 0.0 || mouse_x as f64 - rect.left() < 0.0 {
+    if click_x < 0.0 {
         return None;
     }
 
-    Some((click_y / cell_height) as u16)
+    let row = pixel_y_to_row(click_y, rect.height(), cs.terminal_rows);
+
+    web_sys::console::log_1(
+        &format!(
+            "click: pixel_y={}, row={:?}, targets={}",
+            mouse_y,
+            row,
+            cs.targets.len()
+        )
+        .into(),
+    );
+
+    row
 }
 
 fn main() -> io::Result<()> {
     console_error_panic_hook::set_once();
 
     let state = Rc::new(RefCell::new(GameState::new()));
-    let click_state = Rc::new(RefCell::new(ClickState {
-        targets: Vec::new(),
-        terminal_cols: 0,
-        terminal_rows: 0,
-    }));
+    let click_state = Rc::new(RefCell::new(ClickState::new()));
     let backend = DomBackend::new()?;
     let terminal = Terminal::new(backend)?;
 
@@ -75,13 +68,12 @@ fn main() -> io::Result<()> {
                 return;
             }
 
-            let row = match pixel_to_row(mouse_event.x, mouse_event.y, &cs) {
+            let row = match dom_pixel_to_row(mouse_event.x, mouse_event.y, &cs) {
                 Some(r) => r,
                 None => return,
             };
 
-            // Find the click target for this row
-            let matched_key = cs.targets.iter().find(|t| t.row == row).map(|t| t.key);
+            let matched_key = cs.find_target_key(row);
             drop(cs);
 
             if let Some(key) = matched_key {
@@ -145,10 +137,10 @@ fn main() -> io::Result<()> {
                 let mut cs = click_state.borrow_mut();
                 cs.terminal_cols = size.width;
                 cs.terminal_rows = size.height;
-                cs.targets.clear();
+                cs.clear_targets();
             }
 
-            let is_narrow = size.width < 60;
+            let is_narrow = is_narrow_layout(size.width);
 
             // Main layout: title, content, help
             let main_chunks = Layout::default()
@@ -294,10 +286,7 @@ fn render_actions_or_inventory(
             // Record click targets: each action starts at area.y + 1 (border)
             let mut cs = click_state.borrow_mut();
             for (i, action) in gs.actions.iter().enumerate() {
-                cs.targets.push(ClickTarget {
-                    row: area.y + 1 + i as u16,
-                    key: action.key,
-                });
+                cs.add_target(area.y + 1 + i as u16, action.key);
             }
         }
         InputMode::Inventory => {
@@ -323,7 +312,7 @@ fn render_actions_or_inventory(
             // The whole inventory panel area is clickable to close
             let mut cs = click_state.borrow_mut();
             for row in area.y..area.y + area.height {
-                cs.targets.push(ClickTarget { row, key: 'i' });
+                cs.add_target(row, 'i');
             }
         }
     }
@@ -402,6 +391,6 @@ fn render_help(
         'i'
     };
     for row in area.y..area.y + area.height {
-        cs.targets.push(ClickTarget { row, key });
+        cs.add_target(row, key);
     }
 }

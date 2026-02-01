@@ -364,3 +364,197 @@ impl GameState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Game action tests (same actions triggered by keyboard or tap) ──
+
+    #[test]
+    fn initial_state() {
+        let gs = GameState::new();
+        assert_eq!(gs.room, Room::Office);
+        assert_eq!(gs.phase, GamePhase::Playing);
+        assert_eq!(gs.input_mode, InputMode::Explore);
+        assert!(gs.inventory.is_empty());
+        assert!(!gs.actions.is_empty());
+    }
+
+    #[test]
+    fn office_actions_available() {
+        let gs = GameState::new();
+        let keys: Vec<char> = gs.actions.iter().map(|a| a.key).collect();
+        assert!(keys.contains(&'1')); // デスクを調べる
+        assert!(keys.contains(&'2')); // 引き出し
+        assert!(keys.contains(&'n')); // 北のドア
+    }
+
+    #[test]
+    fn search_desk_gives_note() {
+        let mut gs = GameState::new();
+        gs.handle_action('1');
+        assert!(gs.office_desk_searched);
+        assert!(gs.has_item(&Item::Note));
+    }
+
+    #[test]
+    fn locked_drawer_without_key() {
+        let mut gs = GameState::new();
+        gs.handle_action('2');
+        // Drawer stays locked, no item gained
+        assert!(!gs.office_drawer_opened);
+        assert!(!gs.has_item(&Item::Flashlight));
+    }
+
+    #[test]
+    fn move_to_hallway() {
+        let mut gs = GameState::new();
+        gs.handle_action('n');
+        assert_eq!(gs.room, Room::Hallway);
+    }
+
+    #[test]
+    fn hallway_to_storage_requires_flashlight() {
+        let mut gs = GameState::new();
+        gs.handle_action('n'); // Office → Hallway
+        gs.handle_action('w'); // Try Hallway → Storage (need flashlight)
+        assert_eq!(gs.room, Room::Hallway); // Still in hallway
+
+        gs.inventory.push(Item::Flashlight);
+        gs.update_actions();
+        gs.handle_action('w'); // Now should work
+        assert_eq!(gs.room, Room::Storage);
+    }
+
+    #[test]
+    fn storage_shelf_gives_key() {
+        let mut gs = GameState::new();
+        gs.room = Room::Storage;
+        gs.update_actions();
+        gs.handle_action('1');
+        assert!(gs.storage_shelf_searched);
+        assert!(gs.has_item(&Item::Key));
+    }
+
+    #[test]
+    fn full_game_walkthrough() {
+        let mut gs = GameState::new();
+
+        // 1. Search desk → get Note
+        gs.handle_action('1');
+        assert!(gs.has_item(&Item::Note));
+
+        // 2. Go to hallway
+        gs.handle_action('n');
+        assert_eq!(gs.room, Room::Hallway);
+
+        // 3. Can't enter storage without flashlight
+        gs.handle_action('w');
+        assert_eq!(gs.room, Room::Hallway);
+
+        // 4. Go back to office, need key first
+        gs.handle_action('s');
+        assert_eq!(gs.room, Room::Office);
+
+        // Shortcut: give ourselves the items for full walkthrough
+        gs.inventory.push(Item::Key);
+        gs.update_actions();
+        gs.handle_action('2'); // Open drawer with key → Flashlight
+        assert!(gs.has_item(&Item::Flashlight));
+
+        gs.inventory.push(Item::Screwdriver);
+
+        // Go to hallway then storage
+        gs.handle_action('n');
+        gs.handle_action('w');
+        assert_eq!(gs.room, Room::Storage);
+
+        // Search shelf (already have key from shortcut)
+        // Open vent with screwdriver → Keycard
+        gs.handle_action('2');
+        assert!(gs.has_item(&Item::Keycard));
+
+        // Go back to exit
+        gs.handle_action('s'); // Storage → Office
+        gs.handle_action('n'); // Office → Hallway
+        gs.handle_action('n'); // Hallway → Exit
+        assert_eq!(gs.room, Room::Exit);
+
+        // Use keycard
+        gs.handle_action('1');
+        assert!(gs.exit_unlocked);
+
+        // Walk out
+        gs.handle_action('1');
+        assert_eq!(gs.phase, GamePhase::Escaped);
+    }
+
+    #[test]
+    fn input_mode_toggle() {
+        let mut gs = GameState::new();
+        assert_eq!(gs.input_mode, InputMode::Explore);
+
+        gs.input_mode = InputMode::Inventory;
+        assert_eq!(gs.input_mode, InputMode::Inventory);
+
+        gs.input_mode = InputMode::Explore;
+        assert_eq!(gs.input_mode, InputMode::Explore);
+    }
+
+    #[test]
+    fn handle_action_ignored_when_escaped() {
+        let mut gs = GameState::new();
+        gs.phase = GamePhase::Escaped;
+        let log_len = gs.log.len();
+        gs.handle_action('1');
+        // No new log entries since action is ignored
+        assert_eq!(gs.log.len(), log_len);
+    }
+
+    #[test]
+    fn handle_action_invalid_key_ignored() {
+        let mut gs = GameState::new();
+        let log_len = gs.log.len();
+        gs.handle_action('z'); // Not a valid action
+        assert_eq!(gs.log.len(), log_len);
+    }
+
+    #[test]
+    fn inventory_display_empty() {
+        let gs = GameState::new();
+        let display = gs.inventory_display();
+        assert_eq!(display, vec!["(何も持っていない)"]);
+    }
+
+    #[test]
+    fn inventory_display_with_items() {
+        let mut gs = GameState::new();
+        gs.inventory.push(Item::Key);
+        gs.inventory.push(Item::Flashlight);
+        let display = gs.inventory_display();
+        assert_eq!(display, vec!["古い鍵", "懐中電灯"]);
+    }
+
+    #[test]
+    fn actions_update_after_room_change() {
+        let mut gs = GameState::new();
+        let office_keys: Vec<char> = gs.actions.iter().map(|a| a.key).collect();
+        assert!(office_keys.contains(&'n'));
+
+        gs.handle_action('n'); // Move to hallway
+        let hallway_keys: Vec<char> = gs.actions.iter().map(|a| a.key).collect();
+        assert!(hallway_keys.contains(&'s')); // Back to office
+        assert!(hallway_keys.contains(&'w')); // To storage
+        assert!(hallway_keys.contains(&'n')); // To exit
+    }
+
+    #[test]
+    fn log_truncation() {
+        let mut gs = GameState::new();
+        for i in 0..60 {
+            gs.add_log(&format!("message {}", i), false);
+        }
+        assert!(gs.log.len() <= 50);
+    }
+}
