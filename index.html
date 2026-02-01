@@ -16,11 +16,17 @@
         touch-action: manipulation;
         -webkit-tap-highlight-color: transparent;
       }
+      body > div {
+        width: 100% !important;
+        min-width: 100%;
+      }
       pre {
         font-family: "Fira Code", "Courier New", monospace;
         font-size: 14px;
         touch-action: manipulation;
         cursor: default;
+        width: 100%;
+        box-sizing: border-box;
       }
       @media (max-width: 600px) {
         pre {
