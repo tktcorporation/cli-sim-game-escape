@@ -101,13 +101,9 @@ fn register_touch_handler(
 
     let window = web_sys::window().unwrap();
     let document = window.document().unwrap();
-    // Use passive: false so we can reliably capture the event
-    let opts = web_sys::AddEventListenerOptions::new();
-    opts.set_passive(true);
-    let _ = document.add_event_listener_with_callback_and_add_event_listener_options(
+    let _ = document.add_event_listener_with_callback(
         "touchstart",
         closure.as_ref().unchecked_ref(),
-        &opts,
     );
     closure.forget();
 }
