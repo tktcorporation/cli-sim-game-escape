@@ -1,6 +1,6 @@
 /// Cookie Factory game logic — pure functions, fully testable.
 
-use super::state::{CookieState, ProducerKind};
+use super::state::{CookieState, Particle, ProducerKind};
 
 /// Advance the game by `delta_ticks` ticks (at 10 ticks/sec).
 pub fn tick(state: &mut CookieState, delta_ticks: u32) {
@@ -15,14 +15,53 @@ pub fn tick(state: &mut CookieState, delta_ticks: u32) {
     if state.click_flash > 0 {
         state.click_flash = state.click_flash.saturating_sub(delta_ticks);
     }
+    if state.purchase_flash > 0 {
+        state.purchase_flash = state.purchase_flash.saturating_sub(delta_ticks);
+    }
+    // Update particles
+    for p in &mut state.particles {
+        p.life = p.life.saturating_sub(delta_ticks);
+    }
+    state.particles.retain(|p| p.life > 0);
 }
 
-/// Manual click: add cookies_per_click to cookies.
+/// Simple pseudo-random number generator (xorshift32).
+fn next_rng(state: &mut CookieState) -> u32 {
+    let mut x = state.rng_state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    state.rng_state = x;
+    x
+}
+
+/// Manual click: add cookies_per_click to cookies + spawn particles.
 pub fn click(state: &mut CookieState) {
-    state.cookies += state.cookies_per_click;
-    state.cookies_all_time += state.cookies_per_click;
+    let amount = state.cookies_per_click;
+    state.cookies += amount;
+    state.cookies_all_time += amount;
     state.total_clicks += 1;
     state.click_flash = 3; // flash for 3 ticks
+
+    // Spawn floating "+N" particle
+    let col_offset = (next_rng(state) % 13) as i16 - 6; // -6..+6
+    let life = 8 + (next_rng(state) % 5); // 8-12 ticks
+    let text = if amount >= 10.0 {
+        format!("+{}", format_number(amount))
+    } else {
+        format!("+{}", amount as u32)
+    };
+    state.particles.push(Particle {
+        text,
+        col_offset,
+        life,
+        max_life: life,
+    });
+
+    // Cap particles to avoid memory issues
+    if state.particles.len() > 20 {
+        state.particles.remove(0);
+    }
 }
 
 /// Try to buy a producer by kind. Returns true if successful.
@@ -37,13 +76,14 @@ pub fn buy_producer(state: &mut CookieState, kind: &ProducerKind) -> bool {
     if state.cookies >= cost {
         state.cookies -= cost;
         state.producers[idx].count += 1;
+        state.purchase_flash = 5; // flash for 5 ticks (0.5s)
         state.add_log(
             &format!(
-                "{} を購入！ ({}台)",
+                "🎉 {} を購入！ ({}台)",
                 state.producers[idx].kind.name(),
                 state.producers[idx].count
             ),
-            false,
+            true,
         );
         true
     } else {
@@ -66,6 +106,7 @@ pub fn buy_upgrade(state: &mut CookieState, upgrade_idx: usize) -> bool {
 
     state.cookies -= cost;
     state.upgrades[upgrade_idx].purchased = true;
+    state.purchase_flash = 8; // longer flash for upgrades (0.8s)
 
     let upgrade = &state.upgrades[upgrade_idx];
     let name = upgrade.name.clone();

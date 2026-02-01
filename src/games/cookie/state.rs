@@ -125,6 +125,19 @@ pub struct Upgrade {
     pub purchased: bool,
 }
 
+/// A floating text particle (e.g. "+1" rising from click area).
+#[derive(Clone, Debug)]
+pub struct Particle {
+    /// Text to display.
+    pub text: String,
+    /// Column offset from the center of the cookie display.
+    pub col_offset: i16,
+    /// Remaining lifetime in ticks (starts high, counts down).
+    pub life: u32,
+    /// Maximum lifetime (for computing vertical position).
+    pub max_life: u32,
+}
+
 /// Log entry for the Cookie game.
 #[derive(Clone, Debug)]
 pub struct CookieLogEntry {
@@ -154,6 +167,12 @@ pub struct CookieState {
     pub anim_frame: u32,
     /// Recent click flash timer (ticks remaining for visual feedback).
     pub click_flash: u32,
+    /// Purchase celebration flash timer.
+    pub purchase_flash: u32,
+    /// Active floating particles.
+    pub particles: Vec<Particle>,
+    /// Simple RNG state for particle spread.
+    pub rng_state: u32,
 }
 
 impl CookieState {
@@ -228,6 +247,9 @@ impl CookieState {
             show_upgrades: false,
             anim_frame: 0,
             click_flash: 0,
+            purchase_flash: 0,
+            particles: Vec::new(),
+            rng_state: 42,
         }
     }
 
