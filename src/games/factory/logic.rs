@@ -1,6 +1,6 @@
 /// Tiny Factory game logic — pure functions, fully testable.
 
-use super::grid::{Belt, Cell, Direction, ItemKind, Machine, MachineKind, GRID_H, GRID_W};
+use super::grid::{anchor_of, Belt, Cell, Direction, ItemKind, Machine, MachineKind, GRID_H, GRID_W};
 use super::state::{FactoryState, PlacementTool};
 
 /// Advance the factory by one tick.
@@ -184,7 +184,7 @@ fn transfer_items(state: &mut FactoryState) {
                     try_push_to_belt(state, x, y);
                 }
                 Cell::Belt(belt) if belt.item.is_some() => {
-                    // Check if belt points at a machine
+                    // Check if belt points at a machine (or machine part)
                     let (dx, dy) = belt.direction.delta();
                     let nx = x as i32 + dx;
                     let ny = y as i32 + dy;
@@ -193,7 +193,10 @@ fn transfer_items(state: &mut FactoryState) {
                     }
                     let nx = nx as usize;
                     let ny = ny as usize;
-                    try_feed_machine(state, x, y, nx, ny);
+                    // Resolve anchor if belt points at a MachinePart
+                    if let Some((ax, ay)) = anchor_of(&state.grid, nx, ny) {
+                        try_feed_machine(state, x, y, ax, ay);
+                    }
                 }
                 _ => {}
             }
@@ -201,21 +204,12 @@ fn transfer_items(state: &mut FactoryState) {
     }
 }
 
-/// Push from machine output buffer at (x,y) to an adjacent belt.
-fn try_push_to_belt(state: &mut FactoryState, x: usize, y: usize) {
-    let directions = [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)];
-    for (dx, dy) in &directions {
-        let nx = x as i32 + dx;
-        let ny = y as i32 + dy;
-        if nx < 0 || nx >= GRID_W as i32 || ny < 0 || ny >= GRID_H as i32 {
-            continue;
-        }
-        let nx = nx as usize;
-        let ny = ny as usize;
-        if let Cell::Belt(belt) = &state.grid[ny][nx] {
+/// Push from machine output buffer at anchor (ax,ay) to an adjacent belt on the 2×2 perimeter.
+fn try_push_to_belt(state: &mut FactoryState, ax: usize, ay: usize) {
+    for (px, py) in perimeter_2x2(ax, ay) {
+        if let Cell::Belt(belt) = &state.grid[py][px] {
             if belt.item.is_none() {
-                // Check belt direction is facing away from machine (or at least not toward it)
-                let item = if let Cell::Machine(m) = &mut state.grid[y][x] {
+                let item = if let Cell::Machine(m) = &mut state.grid[ay][ax] {
                     if m.output_buffer.is_empty() {
                         None
                     } else {
@@ -225,7 +219,7 @@ fn try_push_to_belt(state: &mut FactoryState, x: usize, y: usize) {
                     None
                 };
                 if let Some(item) = item {
-                    if let Cell::Belt(belt) = &mut state.grid[ny][nx] {
+                    if let Cell::Belt(belt) = &mut state.grid[py][px] {
                         belt.item = Some(item);
                     }
                     return;
@@ -235,9 +229,9 @@ fn try_push_to_belt(state: &mut FactoryState, x: usize, y: usize) {
     }
 }
 
-/// Feed item from belt at (bx,by) into machine at (mx,my).
-fn try_feed_machine(state: &mut FactoryState, bx: usize, by: usize, mx: usize, my: usize) {
-    let accepts = if let Cell::Machine(m) = &state.grid[my][mx] {
+/// Feed item from belt at (bx,by) into machine at anchor (ax,ay).
+fn try_feed_machine(state: &mut FactoryState, bx: usize, by: usize, ax: usize, ay: usize) {
+    let accepts = if let Cell::Machine(m) = &state.grid[ay][ax] {
         if m.input_buffer.len() >= m.max_buffer {
             return;
         }
@@ -266,11 +260,49 @@ fn try_feed_machine(state: &mut FactoryState, bx: usize, by: usize, mx: usize, m
             None
         };
         if let Some(item) = item {
-            if let Cell::Machine(m) = &mut state.grid[my][mx] {
+            if let Cell::Machine(m) = &mut state.grid[ay][ax] {
                 m.input_buffer.push(item);
             }
         }
     }
+}
+
+/// Check if all 4 cells for a 2×2 machine at (x,y) anchor are empty and within bounds.
+fn can_place_2x2(state: &FactoryState, x: usize, y: usize) -> bool {
+    if x + 1 >= GRID_W || y + 1 >= GRID_H {
+        return false;
+    }
+    for dy in 0..2 {
+        for dx in 0..2 {
+            if !matches!(state.grid[y + dy][x + dx], Cell::Empty) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Place a 2×2 machine on the grid: anchor at (x,y), parts at the other 3 cells.
+fn place_2x2_machine(state: &mut FactoryState, x: usize, y: usize, kind: MachineKind) {
+    state.grid[y][x] = Cell::Machine(Machine::new(kind));
+    state.grid[y][x + 1] = Cell::MachinePart { anchor_x: x, anchor_y: y };
+    state.grid[y + 1][x] = Cell::MachinePart { anchor_x: x, anchor_y: y };
+    state.grid[y + 1][x + 1] = Cell::MachinePart { anchor_x: x, anchor_y: y };
+}
+
+/// Remove a 2×2 machine given its anchor position. Returns the machine kind for refund calculation.
+fn remove_2x2_machine(state: &mut FactoryState, ax: usize, ay: usize) -> Option<MachineKind> {
+    let kind = if let Cell::Machine(m) = &state.grid[ay][ax] {
+        Some(m.kind)
+    } else {
+        return None;
+    };
+    for dy in 0..2 {
+        for dx in 0..2 {
+            state.grid[ay + dy][ax + dx] = Cell::Empty;
+        }
+    }
+    kind
 }
 
 /// Place a machine or belt at cursor position.
@@ -283,9 +315,23 @@ pub fn place(state: &mut FactoryState) -> bool {
         PlacementTool::Delete => {
             match &state.grid[y][x] {
                 Cell::Empty => false,
-                _ => {
+                Cell::Machine(_) | Cell::MachinePart { .. } => {
+                    // Find anchor, then remove all 4 cells
+                    let (ax, ay) = anchor_of(&state.grid, x, y).unwrap();
+                    if let Some(kind) = remove_2x2_machine(state, ax, ay) {
+                        let refund = kind.cost() / 2;
+                        state.money += refund;
+                        state.add_log(&format!("削除しました (+${} 返金)", refund));
+                        true
+                    } else {
+                        false
+                    }
+                }
+                Cell::Belt(_) => {
+                    let refund = 1u64; // belt costs $2, refund 50%
                     state.grid[y][x] = Cell::Empty;
-                    state.add_log("削除しました");
+                    state.money += refund;
+                    state.add_log(&format!("削除しました (+${} 返金)", refund));
                     true
                 }
             }
@@ -312,9 +358,14 @@ pub fn place(state: &mut FactoryState) -> bool {
                         state.add_log("資金不足！");
                         return false;
                     }
+                    if !can_place_2x2(state, x, y) {
+                        state.add_log("スペース不足！(2×2必要)");
+                        return false;
+                    }
                     state.money -= cost;
-                    state.grid[y][x] = Cell::Machine(Machine::new(kind));
+                    place_2x2_machine(state, x, y, kind);
                     state.add_log(&format!("{} を設置 (-${})", kind.name(), cost));
+                    placement_advice(state, x, y, kind);
                     true
                 }
                 PlacementTool::Belt => {
@@ -338,6 +389,66 @@ pub fn place(state: &mut FactoryState) -> bool {
     }
 }
 
+/// Collect all cells on the outer perimeter of a 2×2 machine anchored at (ax, ay).
+/// Returns coordinates of cells adjacent to the 2×2 block but not part of it.
+fn perimeter_2x2(ax: usize, ay: usize) -> Vec<(usize, usize)> {
+    let mut cells = Vec::new();
+    // Top edge (y = ay - 1, x = ax..=ax+1)
+    if ay > 0 {
+        for dx in 0..2 {
+            cells.push((ax + dx, ay - 1));
+        }
+    }
+    // Bottom edge (y = ay + 2, x = ax..=ax+1)
+    if ay + 2 < GRID_H {
+        for dx in 0..2 {
+            cells.push((ax + dx, ay + 2));
+        }
+    }
+    // Left edge (x = ax - 1, y = ay..=ay+1)
+    if ax > 0 {
+        for dy in 0..2 {
+            cells.push((ax - 1, ay + dy));
+        }
+    }
+    // Right edge (x = ax + 2, y = ay..=ay+1)
+    if ax + 2 < GRID_W {
+        for dy in 0..2 {
+            cells.push((ax + 2, ay + dy));
+        }
+    }
+    // Corners
+    if ay > 0 && ax > 0 {
+        cells.push((ax - 1, ay - 1));
+    }
+    if ay > 0 && ax + 2 < GRID_W {
+        cells.push((ax + 2, ay - 1));
+    }
+    if ay + 2 < GRID_H && ax > 0 {
+        cells.push((ax - 1, ay + 2));
+    }
+    if ay + 2 < GRID_H && ax + 2 < GRID_W {
+        cells.push((ax + 2, ay + 2));
+    }
+    cells
+}
+
+/// Give placement advice after a machine is placed.
+fn placement_advice(state: &mut FactoryState, x: usize, y: usize, kind: MachineKind) {
+    let has_adjacent_belt = perimeter_2x2(x, y)
+        .iter()
+        .any(|&(px, py)| matches!(state.grid[py][px], Cell::Belt(_)));
+
+    if !has_adjacent_belt {
+        state.add_log("💡 隣にベルトを設置して接続しよう");
+    }
+
+    // Non-Miner machines need belt-fed input
+    if kind != MachineKind::Miner && kind != MachineKind::Exporter && !has_adjacent_belt {
+        state.add_log("💡 入力にはベルト経由で原料が必要");
+    }
+}
+
 /// Rotate belt direction clockwise.
 pub fn rotate_belt(state: &mut FactoryState) {
     state.belt_direction = match state.belt_direction {
@@ -352,9 +463,17 @@ pub fn rotate_belt(state: &mut FactoryState) {
 mod tests {
     use super::*;
 
+    /// Helper: place a 2×2 machine manually at (x,y) in tests.
+    fn place_machine_at(state: &mut FactoryState, x: usize, y: usize, kind: MachineKind) {
+        state.grid[y][x] = Cell::Machine(Machine::new(kind));
+        state.grid[y][x + 1] = Cell::MachinePart { anchor_x: x, anchor_y: y };
+        state.grid[y + 1][x] = Cell::MachinePart { anchor_x: x, anchor_y: y };
+        state.grid[y + 1][x + 1] = Cell::MachinePart { anchor_x: x, anchor_y: y };
+    }
+
     fn make_state_with_miner() -> FactoryState {
         let mut state = FactoryState::new();
-        state.grid[0][0] = Cell::Machine(Machine::new(MachineKind::Miner));
+        place_machine_at(&mut state, 0, 0, MachineKind::Miner);
         state
     }
 
@@ -391,7 +510,7 @@ mod tests {
     #[test]
     fn smelter_processes_input() {
         let mut state = FactoryState::new();
-        state.grid[0][0] = Cell::Machine(Machine::new(MachineKind::Smelter));
+        place_machine_at(&mut state, 0, 0, MachineKind::Smelter);
         if let Cell::Machine(m) = &mut state.grid[0][0] {
             m.input_buffer.push(ItemKind::IronOre);
         }
@@ -413,7 +532,7 @@ mod tests {
     #[test]
     fn smelter_needs_input() {
         let mut state = FactoryState::new();
-        state.grid[0][0] = Cell::Machine(Machine::new(MachineKind::Smelter));
+        place_machine_at(&mut state, 0, 0, MachineKind::Smelter);
         tick_n(&mut state, 30);
         if let Cell::Machine(m) = &state.grid[0][0] {
             assert!(m.output_buffer.is_empty());
@@ -424,7 +543,7 @@ mod tests {
     fn exporter_earns_money() {
         let mut state = FactoryState::new();
         let initial_money = state.money;
-        state.grid[0][0] = Cell::Machine(Machine::new(MachineKind::Exporter));
+        place_machine_at(&mut state, 0, 0, MachineKind::Exporter);
         if let Cell::Machine(m) = &mut state.grid[0][0] {
             m.input_buffer.push(ItemKind::Gear);
         }
@@ -439,18 +558,13 @@ mod tests {
     #[test]
     fn exporter_sets_flash_on_export() {
         let mut state = FactoryState::new();
-        state.grid[0][0] = Cell::Machine(Machine::new(MachineKind::Exporter));
+        place_machine_at(&mut state, 0, 0, MachineKind::Exporter);
         if let Cell::Machine(m) = &mut state.grid[0][0] {
             m.input_buffer.push(ItemKind::IronPlate);
         }
 
         assert_eq!(state.export_flash, 0);
         tick_n(&mut state, 5);
-        // Flash should have been set (but tick_n also decrements it)
-        // After 5 ticks: flash set to 5 at tick 5, then decremented by remaining 0
-        // tick_n calls tick 5 times then decrements flash by 5
-        // The flash is set during the 5th tick, then tick_n subtracts 5
-        // So flash ends at 0. Let's check last_export_value instead.
         assert_eq!(state.last_export_value, 5); // IronPlate value = 5
         assert_eq!(state.total_money_earned, 5);
     }
@@ -476,20 +590,21 @@ mod tests {
     #[test]
     fn belt_feeds_machine() {
         let mut state = FactoryState::new();
-        // Belt pointing right at a Smelter
-        state.grid[0][0] = Cell::Belt(Belt::new(Direction::Right));
-        state.grid[0][1] = Cell::Machine(Machine::new(MachineKind::Smelter));
-        if let Cell::Belt(b) = &mut state.grid[0][0] {
+        // Belt pointing right at a Smelter (2×2 at (2,0))
+        // Belt at (1,0) → points into Smelter's left side at (2,0)
+        place_machine_at(&mut state, 2, 0, MachineKind::Smelter);
+        state.grid[0][1] = Cell::Belt(Belt::new(Direction::Right));
+        if let Cell::Belt(b) = &mut state.grid[0][1] {
             b.item = Some(ItemKind::IronOre);
         }
 
         tick(&mut state);
         // Item should be in smelter's input buffer
-        if let Cell::Machine(m) = &state.grid[0][1] {
+        if let Cell::Machine(m) = &state.grid[0][2] {
             assert_eq!(m.input_buffer.len(), 1);
             assert_eq!(m.input_buffer[0], ItemKind::IronOre);
         }
-        if let Cell::Belt(b) = &state.grid[0][0] {
+        if let Cell::Belt(b) = &state.grid[0][1] {
             assert!(b.item.is_none());
         }
     }
@@ -497,8 +612,9 @@ mod tests {
     #[test]
     fn machine_pushes_to_belt() {
         let mut state = FactoryState::new();
-        state.grid[0][0] = Cell::Machine(Machine::new(MachineKind::Miner));
-        state.grid[0][1] = Cell::Belt(Belt::new(Direction::Right));
+        // Miner 2×2 at (0,0), belt at (2,0) — right of machine
+        place_machine_at(&mut state, 0, 0, MachineKind::Miner);
+        state.grid[0][2] = Cell::Belt(Belt::new(Direction::Right));
 
         // Give miner an output item
         if let Cell::Machine(m) = &mut state.grid[0][0] {
@@ -509,7 +625,7 @@ mod tests {
         if let Cell::Machine(m) = &state.grid[0][0] {
             assert!(m.output_buffer.is_empty());
         }
-        if let Cell::Belt(b) = &state.grid[0][1] {
+        if let Cell::Belt(b) = &state.grid[0][2] {
             assert_eq!(b.item, Some(ItemKind::IronOre));
         }
     }
@@ -517,19 +633,18 @@ mod tests {
     #[test]
     fn full_chain_miner_belt_smelter() {
         let mut state = FactoryState::new();
-        // Miner → Belt → Smelter
-        state.grid[0][0] = Cell::Machine(Machine::new(MachineKind::Miner));
-        state.grid[0][1] = Cell::Belt(Belt::new(Direction::Right));
-        state.grid[0][2] = Cell::Machine(Machine::new(MachineKind::Smelter));
+        // Miner(0,0) → Belt(2,0) → Belt(3,0) → Smelter(4,0)
+        // 2×2 machines: Miner occupies (0,0)-(1,1), Smelter occupies (4,0)-(5,1)
+        place_machine_at(&mut state, 0, 0, MachineKind::Miner);
+        state.grid[0][2] = Cell::Belt(Belt::new(Direction::Right));
+        state.grid[0][3] = Cell::Belt(Belt::new(Direction::Right));
+        place_machine_at(&mut state, 4, 0, MachineKind::Smelter);
 
-        // Run enough ticks for full pipeline:
-        // Miner produces at tick 10, transfer takes ~2 ticks,
-        // Smelter needs 15 ticks to process → ~27 ticks minimum
-        tick_n(&mut state, 30);
+        // Run enough ticks for full pipeline
+        tick_n(&mut state, 40);
 
         // Smelter should have received and started processing
-        if let Cell::Machine(m) = &state.grid[0][2] {
-            // Either produced output or consumed input (progress > 0)
+        if let Cell::Machine(m) = &state.grid[0][4] {
             assert!(
                 !m.output_buffer.is_empty() || m.progress > 0 || state.produced_count[1] > 0,
                 "smelter should have received and started processing input"
@@ -537,9 +652,8 @@ mod tests {
         }
 
         // Run more to ensure full production
-        tick_n(&mut state, 20);
+        tick_n(&mut state, 30);
 
-        // By now, at least one iron plate should have been produced
         assert!(
             state.produced_count[1] > 0,
             "should have produced at least one iron plate"
@@ -550,17 +664,14 @@ mod tests {
     fn full_chain_60_ticks_export() {
         let mut state = FactoryState::new();
         let initial_money = state.money;
-        // Miner → Belt → Exporter
-        state.grid[0][0] = Cell::Machine(Machine::new(MachineKind::Miner));
-        state.grid[0][1] = Cell::Belt(Belt::new(Direction::Right));
-        state.grid[0][2] = Cell::Machine(Machine::new(MachineKind::Exporter));
+        // Miner(0,0) → Belt(2,0) → Belt(3,0) → Exporter(4,0)
+        place_machine_at(&mut state, 0, 0, MachineKind::Miner);
+        state.grid[0][2] = Cell::Belt(Belt::new(Direction::Right));
+        state.grid[0][3] = Cell::Belt(Belt::new(Direction::Right));
+        place_machine_at(&mut state, 4, 0, MachineKind::Exporter);
 
-        tick_n(&mut state, 60);
+        tick_n(&mut state, 80);
 
-        // After 60 ticks, miner produces at tick 10, 20, 30, 40, 50 → 5 ores
-        // Each needs ~2 ticks to reach exporter (push + feed) + 5 ticks to export
-        // So first export at ~tick 17, then every ~12 ticks
-        // Rough check: at least 1 export happened
         assert!(
             state.money > initial_money,
             "should have earned money from exports"
@@ -585,7 +696,7 @@ mod tests {
     fn place_on_occupied_fails() {
         let mut state = FactoryState::new();
         state.money = 200;
-        state.grid[0][0] = Cell::Machine(Machine::new(MachineKind::Miner));
+        place_machine_at(&mut state, 0, 0, MachineKind::Miner);
         state.tool = PlacementTool::Smelter;
         state.cursor_x = 0;
         state.cursor_y = 0;
@@ -622,11 +733,53 @@ mod tests {
     #[test]
     fn delete_cell() {
         let mut state = FactoryState::new();
-        state.grid[0][0] = Cell::Machine(Machine::new(MachineKind::Miner));
+        place_machine_at(&mut state, 0, 0, MachineKind::Miner);
         state.tool = PlacementTool::Delete;
 
         assert!(place(&mut state));
+        // All 4 cells should be empty
         assert!(matches!(state.grid[0][0], Cell::Empty));
+        assert!(matches!(state.grid[0][1], Cell::Empty));
+        assert!(matches!(state.grid[1][0], Cell::Empty));
+        assert!(matches!(state.grid[1][1], Cell::Empty));
+    }
+
+    #[test]
+    fn delete_machine_refunds_half() {
+        let mut state = FactoryState::new();
+        state.money = 100;
+        place_machine_at(&mut state, 0, 0, MachineKind::Smelter); // cost 25
+        state.tool = PlacementTool::Delete;
+
+        assert!(place(&mut state));
+        assert_eq!(state.money, 112); // 100 + 25/2 = 112
+    }
+
+    #[test]
+    fn delete_from_machine_part_cell() {
+        // Delete when cursor is on a MachinePart (not the anchor)
+        let mut state = FactoryState::new();
+        state.money = 100;
+        place_machine_at(&mut state, 0, 0, MachineKind::Miner); // cost 10
+        state.tool = PlacementTool::Delete;
+        state.cursor_x = 1;
+        state.cursor_y = 1; // bottom-right part
+
+        assert!(place(&mut state));
+        assert_eq!(state.money, 105); // 100 + 10/2 = 105
+        assert!(matches!(state.grid[0][0], Cell::Empty));
+        assert!(matches!(state.grid[1][1], Cell::Empty));
+    }
+
+    #[test]
+    fn delete_belt_refunds_one() {
+        let mut state = FactoryState::new();
+        state.money = 100;
+        state.grid[0][0] = Cell::Belt(Belt::new(Direction::Right));
+        state.tool = PlacementTool::Delete;
+
+        assert!(place(&mut state));
+        assert_eq!(state.money, 101); // 100 + 1
     }
 
     #[test]

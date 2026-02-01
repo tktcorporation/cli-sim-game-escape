@@ -11,7 +11,7 @@ use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
 
-use super::grid::{Cell, MachineKind, GRID_H, GRID_W};
+use super::grid::{anchor_of, machine_at, Cell, MachineKind, GRID_H, GRID_W};
 use super::state::{FactoryState, PlacementTool};
 
 /// Spinner for active machines.
@@ -195,50 +195,207 @@ fn tool_name(tool: &PlacementTool, belt_dir: &super::grid::Direction) -> String 
 }
 
 
+/// Check if a 2×2 machine anchored at (ax,ay) has output buffer full and no adjacent belt.
+fn is_output_blocked(grid: &[Vec<Cell>], ax: usize, ay: usize, m: &super::grid::Machine) -> bool {
+    if m.output_buffer.len() < m.max_buffer {
+        return false;
+    }
+    if m.kind == MachineKind::Exporter {
+        return false; // Exporters don't output
+    }
+    // Check 2×2 perimeter for any belt
+    for (px, py) in perimeter_2x2(ax, ay) {
+        if matches!(grid[py][px], Cell::Belt(_)) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Collect perimeter cells around a 2×2 block anchored at (ax, ay).
+fn perimeter_2x2(ax: usize, ay: usize) -> Vec<(usize, usize)> {
+    let mut cells = Vec::new();
+    if ay > 0 {
+        for dx in 0..2 { cells.push((ax + dx, ay - 1)); }
+    }
+    if ay + 2 < GRID_H {
+        for dx in 0..2 { cells.push((ax + dx, ay + 2)); }
+    }
+    if ax > 0 {
+        for dy in 0..2 { cells.push((ax - 1, ay + dy)); }
+    }
+    if ax + 2 < GRID_W {
+        for dy in 0..2 { cells.push((ax + 2, ay + dy)); }
+    }
+    if ay > 0 && ax > 0 { cells.push((ax - 1, ay - 1)); }
+    if ay > 0 && ax + 2 < GRID_W { cells.push((ax + 2, ay - 1)); }
+    if ay + 2 < GRID_H && ax > 0 { cells.push((ax - 1, ay + 2)); }
+    if ay + 2 < GRID_H && ax + 2 < GRID_W { cells.push((ax + 2, ay + 2)); }
+    cells
+}
+
+/// Compute I/O hint arrows for cells adjacent to the cursor's machine (2×2 perimeter).
+/// Returns vec of (x, y, char, color) for each hint to display.
+fn compute_io_hints(state: &FactoryState) -> Vec<(usize, usize, char, Color)> {
+    let cx = state.cursor_x;
+    let cy = state.cursor_y;
+
+    // Resolve anchor if cursor is on any part of a machine
+    let (ax, ay) = match anchor_of(&state.grid, cx, cy) {
+        Some(a) => a,
+        None => return Vec::new(),
+    };
+    let m = match machine_at(&state.grid, ax, ay) {
+        Some(m) => m,
+        None => return Vec::new(),
+    };
+
+    let has_output = m.kind.output().is_some();
+    let has_input = m.kind.input().is_some() || m.kind == MachineKind::Exporter;
+
+    let mut hints = Vec::new();
+    for (px, py) in perimeter_2x2(ax, ay) {
+        match &state.grid[py][px] {
+            Cell::Empty => {
+                // Pick an arrow based on relative position to the 2×2 block
+                let arrow = if px < ax { '←' }
+                    else if px > ax + 1 { '→' }
+                    else if py < ay { '↑' }
+                    else if py > ay + 1 { '↓' }
+                    else { '·' };
+
+                if has_output && has_input {
+                    hints.push((px, py, arrow, Color::DarkGray));
+                } else if has_output {
+                    hints.push((px, py, arrow, Color::Green));
+                } else if has_input {
+                    hints.push((px, py, arrow, Color::Yellow));
+                }
+            }
+            _ => {}
+        }
+    }
+    hints
+}
+
+/// Get the 2-char string for a machine cell at position (dx, dy) relative to anchor.
+/// dx, dy are 0 or 1.
+fn machine_cell_chars(kind: MachineKind, dx: usize, dy: usize, m: &super::grid::Machine) -> &'static str {
+    // Progress indicator for top-left second char (TL[1])
+    let progress_char = if !m.output_buffer.is_empty() && m.progress == 0 {
+        '█' // output ready
+    } else if m.progress > 0 {
+        let ratio = m.progress as f32 / kind.recipe_time() as f32;
+        if ratio < 0.25 { '░' }
+        else if ratio < 0.5 { '▒' }
+        else if ratio < 0.75 { '▓' }
+        else { '█' }
+    } else {
+        '\0' // use default char
+    };
+
+    // Position key: (dx, dy)
+    match (kind, dx, dy) {
+        // Miner: ╔═╗  / ║M║
+        (MachineKind::Miner, 0, 0) => if progress_char != '\0' { match progress_char {
+            '░' => "╔░", '▒' => "╔▒", '▓' => "╔▓", '█' => "╔█", _ => "╔═" }
+        } else { "╔═" },
+        (MachineKind::Miner, 1, 0) => "╗ ",
+        (MachineKind::Miner, 0, 1) => "║M",
+        (MachineKind::Miner, 1, 1) => "║ ",
+
+        // Smelter: ▄▄▄ / █S█
+        (MachineKind::Smelter, 0, 0) => if progress_char != '\0' { match progress_char {
+            '░' => "▄░", '▒' => "▄▒", '▓' => "▄▓", '█' => "▄█", _ => "▄▄" }
+        } else { "▄▄" },
+        (MachineKind::Smelter, 1, 0) => "▄ ",
+        (MachineKind::Smelter, 0, 1) => "█S",
+        (MachineKind::Smelter, 1, 1) => "█ ",
+
+        // Assembler: ╭─╮ / │A│
+        (MachineKind::Assembler, 0, 0) => if progress_char != '\0' { match progress_char {
+            '░' => "╭░", '▒' => "╭▒", '▓' => "╭▓", '█' => "╭█", _ => "╭─" }
+        } else { "╭─" },
+        (MachineKind::Assembler, 1, 0) => "╮ ",
+        (MachineKind::Assembler, 0, 1) => "│A",
+        (MachineKind::Assembler, 1, 1) => "│ ",
+
+        // Exporter: ┌$┐ / └E┘
+        (MachineKind::Exporter, 0, 0) => if progress_char != '\0' { match progress_char {
+            '░' => "┌░", '▒' => "┌▒", '▓' => "┌▓", '█' => "┌█", _ => "┌$" }
+        } else { "┌$" },
+        (MachineKind::Exporter, 1, 0) => "┐ ",
+        (MachineKind::Exporter, 0, 1) => "└E",
+        (MachineKind::Exporter, 1, 1) => "┘ ",
+
+        _ => "  ",
+    }
+}
+
+/// Blocked indicator: replace TL's second char with '!'
+fn machine_cell_chars_blocked(kind: MachineKind, dx: usize, dy: usize) -> &'static str {
+    match (kind, dx, dy) {
+        (MachineKind::Miner, 0, 0) => "╔!",
+        (MachineKind::Smelter, 0, 0) => "▄!",
+        (MachineKind::Assembler, 0, 0) => "╭!",
+        (MachineKind::Exporter, 0, 0) => "┌!",
+        _ => machine_cell_chars(kind, dx, dy, &super::grid::Machine::new(kind)),
+    }
+}
+
+fn machine_color(kind: MachineKind) -> Color {
+    match kind {
+        MachineKind::Miner => Color::Cyan,
+        MachineKind::Smelter => Color::Red,
+        MachineKind::Assembler => Color::Magenta,
+        MachineKind::Exporter => Color::Green,
+    }
+}
+
+/// Check if cursor is on any part of the 2×2 machine anchored at (ax, ay).
+fn cursor_on_machine(state: &FactoryState, ax: usize, ay: usize) -> bool {
+    let cx = state.cursor_x;
+    let cy = state.cursor_y;
+    cx >= ax && cx <= ax + 1 && cy >= ay && cy <= ay + 1
+}
+
 fn render_grid(state: &FactoryState, f: &mut Frame, area: Rect) {
     let anim_idx = (state.anim_frame / 3) as usize;
     let mut lines: Vec<Line> = Vec::new();
+
+    // Pre-compute I/O hints for adjacent cells when cursor is on a machine
+    let io_hints = compute_io_hints(state);
 
     for y in 0..GRID_H {
         let mut spans: Vec<Span> = Vec::new();
         spans.push(Span::styled(" ", Style::default()));
 
         for x in 0..GRID_W {
-            let is_cursor = x == state.cursor_x && y == state.cursor_y;
-
-            let (ch, base_style) = match &state.grid[y][x] {
-                Cell::Empty => ('.', Style::default().fg(Color::DarkGray)),
-                Cell::Machine(m) => {
-                    // Show progress as block characters, or output indicator
-                    let ch = if !m.output_buffer.is_empty() && m.progress == 0 {
-                        // Has output ready, waiting to push — show full block
-                        '█'
-                    } else if m.progress > 0 {
-                        // Show progress as block shading
-                        let ratio = m.progress as f32 / m.kind.recipe_time() as f32;
-                        if ratio < 0.25 {
-                            '░'
-                        } else if ratio < 0.5 {
-                            '▒'
-                        } else if ratio < 0.75 {
-                            '▓'
-                        } else {
-                            '█'
-                        }
+            let (text, base_style) = match &state.grid[y][x] {
+                Cell::Empty => {
+                    // Check for I/O hints on empty cells
+                    if let Some((_, _, hint_ch, hint_color)) = io_hints.iter().find(|(hx, hy, _, _)| *hx == x && *hy == y) {
+                        (format!("{} ", hint_ch), Style::default().fg(*hint_color))
                     } else {
-                        m.kind.symbol()
+                        (". ".to_string(), Style::default().fg(Color::DarkGray))
+                    }
+                }
+                Cell::Machine(m) => {
+                    // This is the anchor (TL) of a 2×2 machine
+                    let blocked = is_output_blocked(&state.grid, x, y, m);
+                    let color = machine_color(m.kind);
+                    let chars = if blocked {
+                        machine_cell_chars_blocked(m.kind, 0, 0).to_string()
+                    } else {
+                        machine_cell_chars(m.kind, 0, 0, m).to_string()
                     };
-                    let color = match m.kind {
-                        MachineKind::Miner => Color::Cyan,
-                        MachineKind::Smelter => Color::Red,
-                        MachineKind::Assembler => Color::Magenta,
-                        MachineKind::Exporter => Color::Green,
-                    };
-                    // Exporter flash effect when export just happened
                     let style = if m.kind == MachineKind::Exporter && state.export_flash > 0 {
                         Style::default()
                             .fg(Color::Yellow)
-                            .bg(Color::Green)
+                            .add_modifier(Modifier::BOLD)
+                    } else if blocked {
+                        Style::default()
+                            .fg(Color::Red)
                             .add_modifier(Modifier::BOLD)
                     } else if m.progress > 0 || !m.output_buffer.is_empty() {
                         Style::default()
@@ -247,19 +404,52 @@ fn render_grid(state: &FactoryState, f: &mut Frame, area: Rect) {
                     } else {
                         Style::default().fg(color)
                     };
-                    (ch, style)
+                    (chars, style)
+                }
+                Cell::MachinePart { anchor_x, anchor_y } => {
+                    let ax = *anchor_x;
+                    let ay = *anchor_y;
+                    let dx = x - ax;
+                    let dy = y - ay;
+                    // Get machine data from anchor
+                    let (chars, style) = if let Some(m) = machine_at(&state.grid, ax, ay) {
+                        let blocked = is_output_blocked(&state.grid, ax, ay, m);
+                        let color = machine_color(m.kind);
+                        let chars = if blocked && dx == 0 && dy == 0 {
+                            machine_cell_chars_blocked(m.kind, dx, dy).to_string()
+                        } else {
+                            machine_cell_chars(m.kind, dx, dy, m).to_string()
+                        };
+                        let style = if m.kind == MachineKind::Exporter && state.export_flash > 0 {
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD)
+                        } else if blocked {
+                            Style::default()
+                                .fg(Color::Red)
+                                .add_modifier(Modifier::BOLD)
+                        } else if m.progress > 0 || !m.output_buffer.is_empty() {
+                            Style::default()
+                                .fg(color)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(color)
+                        };
+                        (chars, style)
+                    } else {
+                        ("  ".to_string(), Style::default())
+                    };
+                    (chars, style)
                 }
                 Cell::Belt(b) => {
                     if let Some(item) = &b.item {
-                        // Item on belt: show item with bold
                         (
-                            item.symbol(),
+                            format!("{} ", item.symbol()),
                             Style::default()
-                                .fg(Color::Yellow)
+                                .fg(item.color())
                                 .add_modifier(Modifier::BOLD),
                         )
                     } else {
-                        // Empty belt: animated directional arrow
                         let idx = anim_idx % 4;
                         let ch = match b.direction {
                             super::grid::Direction::Right => BELT_ANIM_R[idx],
@@ -267,12 +457,19 @@ fn render_grid(state: &FactoryState, f: &mut Frame, area: Rect) {
                             super::grid::Direction::Up => BELT_ANIM_U[idx],
                             super::grid::Direction::Down => BELT_ANIM_D[idx],
                         };
-                        (ch, Style::default().fg(Color::White))
+                        (format!("{} ", ch), Style::default().fg(Color::White))
                     }
                 }
             };
 
-            let style = if is_cursor {
+            // Cursor highlighting: highlight 2×2 block if cursor is on any part of a machine
+            let is_highlighted = if let Some((ax, ay)) = anchor_of(&state.grid, x, y) {
+                cursor_on_machine(state, ax, ay)
+            } else {
+                x == state.cursor_x && y == state.cursor_y
+            };
+
+            let style = if is_highlighted {
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Yellow)
@@ -281,7 +478,7 @@ fn render_grid(state: &FactoryState, f: &mut Frame, area: Rect) {
                 base_style
             };
 
-            spans.push(Span::styled(format!("{} ", ch), style));
+            spans.push(Span::styled(text, style));
         }
 
         lines.push(Line::from(spans));

@@ -50,6 +50,16 @@ impl ItemKind {
             ItemKind::Gear => '*',
         }
     }
+
+    /// Display color for this item kind.
+    pub fn color(&self) -> ratzilla::ratatui::style::Color {
+        use ratzilla::ratatui::style::Color;
+        match self {
+            ItemKind::IronOre => Color::Cyan,
+            ItemKind::IronPlate => Color::LightBlue,
+            ItemKind::Gear => Color::Yellow,
+        }
+    }
 }
 
 /// Machine types.
@@ -182,9 +192,29 @@ impl Belt {
 pub enum Cell {
     Empty,
     Machine(Machine),
+    /// Part of a 2×2 machine; the actual Machine data lives at the anchor cell.
+    MachinePart { anchor_x: usize, anchor_y: usize },
     Belt(Belt),
 }
 
+
+/// Given any cell coordinate, return the anchor (top-left) position of the machine occupying it.
+/// Returns None if the cell is not a machine or machine part.
+pub fn anchor_of(grid: &[Vec<Cell>], x: usize, y: usize) -> Option<(usize, usize)> {
+    match &grid[y][x] {
+        Cell::Machine(_) => Some((x, y)),
+        Cell::MachinePart { anchor_x, anchor_y } => Some((*anchor_x, *anchor_y)),
+        _ => None,
+    }
+}
+
+/// Get a reference to the Machine at the given anchor position.
+pub fn machine_at(grid: &[Vec<Cell>], ax: usize, ay: usize) -> Option<&Machine> {
+    match &grid[ay][ax] {
+        Cell::Machine(m) => Some(m),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 mod tests {
