@@ -3,6 +3,18 @@
 /// This module separates the pure logic (coordinate conversion, target matching,
 /// action dispatch) from web_sys DOM access so it can be unit tested.
 
+use crate::game::{GamePhase, GameState, InputMode};
+
+/// All possible input events, normalized from keyboard, mouse, and touch sources.
+/// This is the single entry point for all user interactions.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputEvent {
+    /// A key press (from keyboard).
+    Key(char),
+    /// A tap/click resolved to a terminal row.
+    TapRow(u16),
+}
+
 /// A region on screen that can be tapped/clicked to trigger an action.
 #[derive(Debug, Clone)]
 pub struct ClickTarget {
@@ -67,9 +79,183 @@ pub fn is_narrow_layout(width: u16) -> bool {
     width < 60
 }
 
+/// Resolve a tap row to a key using click targets, then dispatch as a Key event.
+/// Returns None if the tap didn't hit any target.
+pub fn resolve_tap(row: u16, click_state: &ClickState) -> Option<InputEvent> {
+    click_state
+        .find_target_key(row)
+        .map(InputEvent::Key)
+}
+
+/// Process a single input event and mutate game state accordingly.
+/// This is a pure function (no DOM, no web_sys) — fully testable.
+///
+/// Returns true if the input was handled, false if ignored.
+pub fn dispatch_input(event: &InputEvent, gs: &mut GameState) -> bool {
+    let key = match event {
+        InputEvent::Key(c) => *c,
+        InputEvent::TapRow(_) => return false, // TapRow should be resolved first
+    };
+
+    match gs.input_mode {
+        InputMode::Explore => {
+            if key == 'i' {
+                gs.input_mode = InputMode::Inventory;
+                true
+            } else if key == 'r' && gs.phase == GamePhase::Escaped {
+                *gs = GameState::new();
+                true
+            } else {
+                gs.handle_action(key);
+                true
+            }
+        }
+        InputMode::Inventory => {
+            if key == 'i' || key == '\x1b' {
+                // 'i' or Escape
+                gs.input_mode = InputMode::Explore;
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::GameState;
+
+    // ── dispatch_input tests ──────────────────────────────────────────
+
+    #[test]
+    fn dispatch_key_action_in_explore_mode() {
+        let mut gs = GameState::new();
+        // '1' is "デスクを調べる" in Office
+        let result = dispatch_input(&InputEvent::Key('1'), &mut gs);
+        assert!(result);
+        // Log should have a new entry
+        assert!(gs.log.len() > 2); // initial log + action result
+    }
+
+    #[test]
+    fn dispatch_key_i_toggles_inventory() {
+        let mut gs = GameState::new();
+        assert_eq!(gs.input_mode, InputMode::Explore);
+
+        dispatch_input(&InputEvent::Key('i'), &mut gs);
+        assert_eq!(gs.input_mode, InputMode::Inventory);
+
+        dispatch_input(&InputEvent::Key('i'), &mut gs);
+        assert_eq!(gs.input_mode, InputMode::Explore);
+    }
+
+    #[test]
+    fn dispatch_escape_closes_inventory() {
+        let mut gs = GameState::new();
+        gs.input_mode = InputMode::Inventory;
+
+        dispatch_input(&InputEvent::Key('\x1b'), &mut gs);
+        assert_eq!(gs.input_mode, InputMode::Explore);
+    }
+
+    #[test]
+    fn dispatch_r_restarts_when_escaped() {
+        let mut gs = GameState::new();
+        gs.phase = GamePhase::Escaped;
+        let old_log_len = gs.log.len();
+
+        dispatch_input(&InputEvent::Key('r'), &mut gs);
+        // Should have reset to a fresh game
+        assert_eq!(gs.phase, GamePhase::Playing);
+        assert!(gs.log.len() != old_log_len || gs.log.len() == 2);
+    }
+
+    #[test]
+    fn dispatch_r_ignored_when_playing() {
+        let mut gs = GameState::new();
+
+        dispatch_input(&InputEvent::Key('r'), &mut gs);
+        // 'r' is not a valid action in Office, game should not have reset
+        assert_eq!(gs.phase, GamePhase::Playing);
+    }
+
+    #[test]
+    fn dispatch_invalid_key_in_inventory_ignored() {
+        let mut gs = GameState::new();
+        gs.input_mode = InputMode::Inventory;
+
+        let result = dispatch_input(&InputEvent::Key('z'), &mut gs);
+        assert!(!result);
+        assert_eq!(gs.input_mode, InputMode::Inventory);
+    }
+
+    #[test]
+    fn dispatch_tap_row_is_not_dispatched_directly() {
+        let mut gs = GameState::new();
+        let result = dispatch_input(&InputEvent::TapRow(5), &mut gs);
+        assert!(!result, "TapRow should not be dispatched directly");
+    }
+
+    // ── resolve_tap tests ─────────────────────────────────────────────
+
+    #[test]
+    fn resolve_tap_finds_target() {
+        let mut cs = ClickState::new();
+        cs.add_target(10, '1');
+        cs.add_target(11, '2');
+
+        assert_eq!(resolve_tap(10, &cs), Some(InputEvent::Key('1')));
+        assert_eq!(resolve_tap(11, &cs), Some(InputEvent::Key('2')));
+    }
+
+    #[test]
+    fn resolve_tap_misses_returns_none() {
+        let mut cs = ClickState::new();
+        cs.add_target(10, '1');
+
+        assert_eq!(resolve_tap(9, &cs), None);
+        assert_eq!(resolve_tap(11, &cs), None);
+    }
+
+    // ── end-to-end: pixel → resolve_tap → dispatch_input ──────────────
+
+    #[test]
+    fn end_to_end_tap_dispatches_action() {
+        let mut gs = GameState::new();
+        let mut cs = ClickState::new();
+        cs.terminal_rows = 30;
+        cs.add_target(11, '1'); // "デスクを調べる"
+
+        // Simulate pixel → row
+        let grid_height = 450.0;
+        let click_y = 11.0 * (grid_height / 30.0) + 7.0;
+        let row = pixel_y_to_row(click_y, grid_height, cs.terminal_rows).unwrap();
+
+        // Resolve row → InputEvent
+        let event = resolve_tap(row, &cs).expect("should hit target");
+        assert_eq!(event, InputEvent::Key('1'));
+
+        // Dispatch
+        let log_before = gs.log.len();
+        dispatch_input(&event, &mut gs);
+        assert!(gs.log.len() > log_before, "action should have added log entries");
+    }
+
+    #[test]
+    fn end_to_end_tap_on_empty_area_does_nothing() {
+        let mut cs = ClickState::new();
+        cs.terminal_rows = 30;
+        cs.add_target(11, '1');
+
+        let grid_height = 450.0;
+        let click_y = 20.0 * (grid_height / 30.0) + 7.0; // row 20, no target
+        let row = pixel_y_to_row(click_y, grid_height, cs.terminal_rows).unwrap();
+
+        let event = resolve_tap(row, &cs);
+        assert_eq!(event, None, "no target at row 20");
+    }
 
     // ── pixel_y_to_row tests ───────────────────────────────────────────
 

@@ -3,7 +3,7 @@ mod game;
 
 use std::{cell::RefCell, io, rc::Rc};
 
-use click::{is_narrow_layout, pixel_y_to_row, ClickState};
+use click::{dispatch_input, is_narrow_layout, pixel_y_to_row, resolve_tap, ClickState, InputEvent};
 use game::{GamePhase, GameState, InputMode};
 use ratzilla::event::{KeyCode, MouseButton, MouseEventKind};
 use ratzilla::ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -33,7 +33,8 @@ fn dom_pixel_to_row(client_x: f64, client_y: f64, cs: &ClickState) -> Option<u16
     pixel_y_to_row(click_y, rect.height(), cs.terminal_rows)
 }
 
-/// Process a tap/click at the given client coordinates. Shared by mouse and touch handlers.
+/// Process a tap/click at the given client coordinates.
+/// DOM layer: converts pixel coords to row, then delegates to pure logic.
 fn handle_tap(
     client_x: f64,
     client_y: f64,
@@ -50,27 +51,11 @@ fn handle_tap(
         None => return,
     };
 
-    let matched_key = cs.find_target_key(row);
-    drop(cs);
-
-    if let Some(key) = matched_key {
+    // resolve_tap: row → Option<InputEvent::Key>
+    if let Some(event) = resolve_tap(row, &cs) {
+        drop(cs);
         let mut gs = state.borrow_mut();
-        match gs.input_mode {
-            InputMode::Explore => {
-                if key == 'i' {
-                    gs.input_mode = InputMode::Inventory;
-                } else if key == 'r' && gs.phase == GamePhase::Escaped {
-                    *gs = GameState::new();
-                } else {
-                    gs.handle_action(key);
-                }
-            }
-            InputMode::Inventory => {
-                if key == 'i' {
-                    gs.input_mode = InputMode::Explore;
-                }
-            }
-        }
+        dispatch_input(&event, &mut gs);
     }
 }
 
@@ -139,31 +124,17 @@ fn main() -> io::Result<()> {
     // whereas synthesized mousedown from touch events can be unreliable.
     register_touch_handler(&state, &click_state);
 
-    // Keyboard handler
+    // Keyboard handler — convert KeyCode to InputEvent, then dispatch
     terminal.on_key_event({
         let state = state.clone();
         move |key_event| {
+            let event = match key_event.code {
+                KeyCode::Char(c) => InputEvent::Key(c),
+                KeyCode::Esc => InputEvent::Key('\x1b'),
+                _ => return,
+            };
             let mut gs = state.borrow_mut();
-            match gs.input_mode {
-                InputMode::Explore => match key_event.code {
-                    KeyCode::Char('i') => {
-                        gs.input_mode = InputMode::Inventory;
-                    }
-                    KeyCode::Char('r') if gs.phase == GamePhase::Escaped => {
-                        *gs = GameState::new();
-                    }
-                    KeyCode::Char(c) => {
-                        gs.handle_action(c);
-                    }
-                    _ => {}
-                },
-                InputMode::Inventory => match key_event.code {
-                    KeyCode::Char('i') | KeyCode::Esc => {
-                        gs.input_mode = InputMode::Explore;
-                    }
-                    _ => {}
-                },
-            }
+            dispatch_input(&event, &mut gs);
         }
     });
 
