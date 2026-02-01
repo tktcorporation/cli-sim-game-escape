@@ -242,4 +242,144 @@ mod tests {
         assert_eq!(row, 20);
         assert_eq!(cs.find_target_key(row), None);
     }
+
+    // ── Grid height drift regression tests ───────────────────────────────
+    //
+    // DomBackend sets each <pre> to height: 15px. If CSS overrides (e.g.
+    // box-sizing: border-box) change the effective row height, grid_height
+    // passed to pixel_y_to_row will differ from the expected value, causing
+    // row calculations to drift and targets to be missed.
+
+    /// Helper: simulate tapping the center of a given target row and check
+    /// that the correct key is returned.
+    fn assert_tap_hits(cs: &ClickState, grid_height: f64, target_row: u16, expected_key: char) {
+        let cell_height = grid_height / cs.terminal_rows as f64;
+        // Tap center of the target row
+        let click_y = target_row as f64 * cell_height + cell_height / 2.0;
+        let row = pixel_y_to_row(click_y, grid_height, cs.terminal_rows);
+        assert_eq!(
+            row,
+            Some(target_row),
+            "grid_height={grid_height}, target_row={target_row}: expected row {target_row}, got {row:?}"
+        );
+        assert_eq!(
+            cs.find_target_key(target_row),
+            Some(expected_key),
+            "grid_height={grid_height}: no target at row {target_row}"
+        );
+    }
+
+    #[test]
+    fn grid_height_drift_breaks_targeting() {
+        // Scenario: 30 rows, expected cell_height=15px, grid_height=450px.
+        // If CSS shrinks grid_height (e.g. box-sizing: border-box reducing
+        // each row by 4px padding → cell_height=11px → grid_height=330px),
+        // a tap at pixel y=172 (intended for row 11) would land on a
+        // different row.
+        let mut cs = ClickState::new();
+        cs.terminal_cols = 40;
+        cs.terminal_rows = 30;
+
+        cs.add_target(11, '1');
+        cs.add_target(12, '2');
+        cs.add_target(13, 'n');
+
+        let correct_grid_height = 450.0; // 30 rows × 15px
+        let cell_height = correct_grid_height / 30.0;
+
+        // With correct grid_height, tapping center of row 11 hits target '1'
+        assert_tap_hits(&cs, correct_grid_height, 11, '1');
+
+        // Simulate CSS shrinking grid_height (e.g. box-sizing eats padding)
+        let broken_grid_height = 330.0; // 30 rows × 11px
+
+        // Same pixel coordinate that was intended for row 11 center
+        let pixel_y = 11.0 * cell_height + cell_height / 2.0; // 172.5px
+
+        // With the broken (smaller) grid, this pixel maps to a higher row
+        let drifted_row = pixel_y_to_row(pixel_y, broken_grid_height, 30);
+        assert!(
+            drifted_row.is_none() || drifted_row != Some(11),
+            "Expected drift: pixel {pixel_y} with grid_height {broken_grid_height} \
+             should NOT map to row 11 (got {drifted_row:?}). \
+             If grid_height shrinks but pixel coords don't change, rows drift."
+        );
+
+        // This demonstrates the bug: the pixel is now out of bounds or on wrong row
+        let drifted = drifted_row.unwrap_or(u16::MAX);
+        assert_ne!(
+            cs.find_target_key(drifted),
+            Some('1'),
+            "Drifted row {drifted} should NOT hit target '1' at row 11"
+        );
+    }
+
+    #[test]
+    fn consistent_cell_height_assumption() {
+        // Verify that pixel_y_to_row produces correct rows when
+        // grid_height = terminal_rows × EXPECTED_CELL_HEIGHT.
+        // This is the contract between DomBackend (height: 15px per pre)
+        // and our click handler.
+        const EXPECTED_CELL_HEIGHT: f64 = 15.0;
+        let terminal_rows: u16 = 30;
+        let grid_height = terminal_rows as f64 * EXPECTED_CELL_HEIGHT;
+
+        // Every row center should map to the correct row
+        for target_row in 0..terminal_rows {
+            let center_y = target_row as f64 * EXPECTED_CELL_HEIGHT + EXPECTED_CELL_HEIGHT / 2.0;
+            let result = pixel_y_to_row(center_y, grid_height, terminal_rows);
+            assert_eq!(
+                result,
+                Some(target_row),
+                "Row {target_row} center (y={center_y}) should map correctly \
+                 with cell_height={EXPECTED_CELL_HEIGHT}"
+            );
+        }
+
+        // Row boundaries: top pixel of each row
+        for target_row in 0..terminal_rows {
+            let top_y = target_row as f64 * EXPECTED_CELL_HEIGHT;
+            let result = pixel_y_to_row(top_y, grid_height, terminal_rows);
+            assert_eq!(result, Some(target_row));
+        }
+
+        // Bottom pixel of each row (just before next row)
+        for target_row in 0..terminal_rows {
+            let bottom_y = (target_row + 1) as f64 * EXPECTED_CELL_HEIGHT - 0.1;
+            let result = pixel_y_to_row(bottom_y, grid_height, terminal_rows);
+            assert_eq!(result, Some(target_row));
+        }
+    }
+
+    #[test]
+    fn mobile_narrow_click_pipeline() {
+        // Simulate a narrow mobile terminal (e.g. 37x50 on a phone)
+        // with DomBackend's cell_height = 15px → grid_height = 750px
+        let mut cs = ClickState::new();
+        cs.terminal_cols = 37;
+        cs.terminal_rows = 50;
+
+        // Narrow layout: title(3) + room(5) → actions start at row 9
+        // (row 8 = top border of actions panel, row 9 = first action)
+        cs.add_target(9, '1');
+        cs.add_target(10, '2');
+        cs.add_target(11, 'n');
+
+        // Help bar at rows 47-49
+        for row in 47..50 {
+            cs.add_target(row, 'i');
+        }
+
+        let grid_height = 50.0 * 15.0; // 750px
+        assert_tap_hits(&cs, grid_height, 9, '1');
+        assert_tap_hits(&cs, grid_height, 10, '2');
+        assert_tap_hits(&cs, grid_height, 11, 'n');
+        assert_tap_hits(&cs, grid_height, 48, 'i');
+
+        // Verify that non-target rows don't match
+        let cell_h = grid_height / 50.0;
+        let click_y = 20.0 * cell_h + cell_h / 2.0;
+        let row = pixel_y_to_row(click_y, grid_height, 50).unwrap();
+        assert_eq!(cs.find_target_key(row), None);
+    }
 }
