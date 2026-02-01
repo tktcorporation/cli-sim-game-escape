@@ -38,4 +38,20 @@
     </style>
   </head>
   <body></body>
+  <script>
+    // Fallback: convert touchstart to mousedown for ratzilla's on_mouse_event handler.
+    // iOS Safari may not reliably synthesize mousedown from touch events on WASM canvases.
+    document.addEventListener('touchstart', function(e) {
+      if (e.touches.length > 0) {
+        var touch = e.touches[0];
+        var mouseEvent = new MouseEvent('mousedown', {
+          clientX: touch.clientX,
+          clientY: touch.clientY,
+          button: 0,
+          bubbles: true
+        });
+        document.dispatchEvent(mouseEvent);
+      }
+    }, { passive: true });
+  </script>
 </html>

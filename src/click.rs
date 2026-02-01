@@ -9,10 +9,8 @@ use crate::game::{GamePhase, GameState, InputMode};
 /// This is the single entry point for all user interactions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
-    /// A key press (from keyboard).
+    /// A key press (from keyboard, mouse click, or touch tap).
     Key(char),
-    /// A tap/click resolved to a terminal row.
-    TapRow(u16),
 }
 
 /// A region on screen that can be tapped/clicked to trigger an action.
@@ -94,7 +92,6 @@ pub fn resolve_tap(row: u16, click_state: &ClickState) -> Option<InputEvent> {
 pub fn dispatch_input(event: &InputEvent, gs: &mut GameState) -> bool {
     let key = match event {
         InputEvent::Key(c) => *c,
-        InputEvent::TapRow(_) => return false, // TapRow should be resolved first
     };
 
     match gs.input_mode {
@@ -189,13 +186,6 @@ mod tests {
         let result = dispatch_input(&InputEvent::Key('z'), &mut gs);
         assert!(!result);
         assert_eq!(gs.input_mode, InputMode::Inventory);
-    }
-
-    #[test]
-    fn dispatch_tap_row_is_not_dispatched_directly() {
-        let mut gs = GameState::new();
-        let result = dispatch_input(&InputEvent::TapRow(5), &mut gs);
-        assert!(!result, "TapRow should not be dispatched directly");
     }
 
     // ── resolve_tap tests ─────────────────────────────────────────────

@@ -12,7 +12,6 @@ use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratzilla::ratatui::Terminal;
 use ratzilla::{DomBackend, WebRenderer};
-use wasm_bindgen::prelude::*;
 
 /// Query the grid container's bounding rect and convert pixel coordinates to a row.
 fn dom_pixel_to_row(client_x: f64, client_y: f64, cs: &ClickState) -> Option<u16> {
@@ -59,40 +58,6 @@ fn handle_tap(
     }
 }
 
-/// Register a native touchstart listener on document for reliable mobile tap handling.
-fn register_touch_handler(
-    state: &Rc<RefCell<GameState>>,
-    click_state: &Rc<RefCell<ClickState>>,
-) {
-    let state = state.clone();
-    let click_state = click_state.clone();
-
-    let closure = Closure::<dyn FnMut(_)>::new(move |event: web_sys::TouchEvent| {
-        let touches = event.touches();
-        if touches.length() == 0 {
-            return;
-        }
-        let touch = match touches.get(0) {
-            Some(t) => t,
-            None => return,
-        };
-        handle_tap(
-            touch.client_x() as f64,
-            touch.client_y() as f64,
-            &state,
-            &click_state,
-        );
-    });
-
-    let window = web_sys::window().unwrap();
-    let document = window.document().unwrap();
-    let _ = document.add_event_listener_with_callback(
-        "touchstart",
-        closure.as_ref().unchecked_ref(),
-    );
-    closure.forget();
-}
-
 fn main() -> io::Result<()> {
     console_error_panic_hook::set_once();
 
@@ -119,10 +84,6 @@ fn main() -> io::Result<()> {
             );
         }
     });
-
-    // Native touch handler (mobile) — touchstart fires reliably on mobile
-    // whereas synthesized mousedown from touch events can be unreliable.
-    register_touch_handler(&state, &click_state);
 
     // Keyboard handler — convert KeyCode to InputEvent, then dispatch
     terminal.on_key_event({
