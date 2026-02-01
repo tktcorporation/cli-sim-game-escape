@@ -4,7 +4,7 @@ mod game;
 use std::{cell::RefCell, io, rc::Rc};
 
 use click::{dispatch_input, is_narrow_layout, pixel_y_to_row, resolve_tap, ClickState, InputEvent};
-use game::{GamePhase, GameState, InputMode};
+use game::{GamePhase, GameState, InputMode, Room};
 use ratzilla::event::{KeyCode, MouseButton, MouseEventKind};
 use ratzilla::ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
@@ -175,7 +175,7 @@ fn render_title(f: &mut ratzilla::ratatui::Frame, gs: &GameState, area: Rect, is
     f.render_widget(title_block, area);
 }
 
-/// Wide layout: left panel (room + actions) | right panel (log)
+/// Wide layout: left panel (map + room + actions) | right panel (log)
 fn render_wide_layout(
     f: &mut ratzilla::ratatui::Frame,
     gs: &GameState,
@@ -189,15 +189,20 @@ fn render_wide_layout(
 
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Min(5)])
+        .constraints([
+            Constraint::Length(13), // Map (11 lines + 2 border)
+            Constraint::Length(7),  // Room description
+            Constraint::Min(5),    // Actions
+        ])
         .split(content_chunks[0]);
 
-    render_room_description(f, gs, left_chunks[0], false);
-    render_actions_or_inventory(f, gs, left_chunks[1], click_state, false);
+    render_map(f, gs, left_chunks[0], false);
+    render_room_description(f, gs, left_chunks[1], false);
+    render_actions_or_inventory(f, gs, left_chunks[2], click_state, false);
     render_log(f, gs, content_chunks[1], false);
 }
 
-/// Narrow layout: room description, actions, log stacked vertically
+/// Narrow layout: map, room description, actions, log stacked vertically
 fn render_narrow_layout(
     f: &mut ratzilla::ratatui::Frame,
     gs: &GameState,
@@ -214,15 +219,17 @@ fn render_narrow_layout(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(3),            // Map (compact, 1 line + 2 border)
             Constraint::Length(5),            // Room description (compact)
             Constraint::Length(action_height), // Actions: exact fit
             Constraint::Min(3),              // Log: gets all remaining space
         ])
         .split(area);
 
-    render_room_description(f, gs, chunks[0], true);
-    render_actions_or_inventory(f, gs, chunks[1], click_state, true);
-    render_log(f, gs, chunks[2], true);
+    render_map(f, gs, chunks[0], true);
+    render_room_description(f, gs, chunks[1], true);
+    render_actions_or_inventory(f, gs, chunks[2], click_state, true);
+    render_log(f, gs, chunks[3], true);
 }
 
 fn render_room_description(
@@ -341,20 +348,35 @@ fn render_log(f: &mut ratzilla::ratatui::Frame, gs: &GameState, area: Rect, is_n
         0
     };
 
+    let total = gs.log.len();
     let log_lines: Vec<Line> = gs.log[start..]
         .iter()
-        .map(|entry| {
+        .enumerate()
+        .map(|(i, entry)| {
+            let global_idx = start + i;
+            // Highlight the most recent entries (last 3 from the latest action)
+            let is_recent = total > 0 && global_idx >= total.saturating_sub(3);
+
             if entry.is_important {
+                let style = if is_recent {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::Yellow)
+                };
+                Line::from(Span::styled(&entry.text, style))
+            } else if is_recent {
                 Line::from(Span::styled(
                     &entry.text,
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 ))
             } else {
                 Line::from(Span::styled(
                     &entry.text,
-                    Style::default().fg(Color::Gray),
+                    Style::default().fg(Color::DarkGray),
                 ))
             }
         })
@@ -375,6 +397,126 @@ fn render_log(f: &mut ratzilla::ratatui::Frame, gs: &GameState, area: Rect, is_n
         .wrap(Wrap { trim: false });
 
     f.render_widget(log_widget, area);
+}
+
+fn render_map(f: &mut ratzilla::ratatui::Frame, gs: &GameState, area: Rect, is_narrow: bool) {
+    // Style helpers
+    let style_for = |room: &Room| -> Style {
+        if gs.room == *room {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else if gs.visited_rooms.contains(room) {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        }
+    };
+
+    // Connection line style: dashed if locked, solid if accessible
+    let storage_accessible = gs.has_item(&game::Item::Flashlight);
+    let exit_accessible = gs.exit_unlocked || gs.has_item(&game::Item::Keycard);
+    let conn_hallway_storage = if storage_accessible { "─" } else { "╌" };
+    let conn_hallway_exit = if exit_accessible { "│" } else { "╎" };
+
+    let storage_style = style_for(&Room::Storage);
+    let office_style = style_for(&Room::Office);
+    let hallway_style = style_for(&Room::Hallway);
+    let exit_style = style_for(&Room::Exit);
+    let conn_hs_style = if storage_accessible {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let conn_he_style = if exit_accessible {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let conn_style = Style::default().fg(Color::White);
+
+    if is_narrow {
+        // Compact inline map (single line indicator)
+        let rooms = vec![
+            Span::styled("倉庫", storage_style),
+            Span::styled(conn_hallway_storage, conn_hs_style),
+            Span::styled("廊下", hallway_style),
+            Span::styled("─", conn_style),
+            Span::styled("事務", office_style),
+            Span::styled(" ", Style::default()),
+            Span::styled(conn_hallway_exit, conn_he_style),
+            Span::styled("出口", exit_style),
+        ];
+        let map_line = Line::from(rooms);
+        let borders = Borders::TOP | Borders::BOTTOM;
+        let widget = Paragraph::new(map_line)
+            .block(
+                Block::default()
+                    .borders(borders)
+                    .border_style(Style::default().fg(Color::DarkGray))
+                    .title(" MAP "),
+            )
+            .alignment(ratzilla::ratatui::layout::Alignment::Center);
+        f.render_widget(widget, area);
+    } else {
+        // Multi-line ASCII map
+        let line1 = Line::from(vec![
+            Span::styled(" ┌────┐ ┌────┐", Style::default().fg(Color::DarkGray)),
+        ]);
+        let line2 = Line::from(vec![
+            Span::styled(" │", Style::default().fg(Color::DarkGray)),
+            Span::styled("倉庫", storage_style),
+            Span::styled("├", Style::default().fg(Color::DarkGray)),
+            Span::styled(conn_hallway_storage, conn_hs_style),
+            Span::styled("┤", Style::default().fg(Color::DarkGray)),
+            Span::styled("事務", office_style),
+            Span::styled("│", Style::default().fg(Color::DarkGray)),
+        ]);
+        let line3 = Line::from(vec![
+            Span::styled(" └────┘ └─┬──┘", Style::default().fg(Color::DarkGray)),
+        ]);
+        let line4 = Line::from(vec![
+            Span::styled("          ", Style::default()),
+            Span::styled("│", conn_style),
+        ]);
+        let line5 = Line::from(vec![
+            Span::styled("       ┌──┴─┐", Style::default().fg(Color::DarkGray)),
+        ]);
+        let line6 = Line::from(vec![
+            Span::styled("       │", Style::default().fg(Color::DarkGray)),
+            Span::styled("廊下", hallway_style),
+            Span::styled("│", Style::default().fg(Color::DarkGray)),
+        ]);
+        let line7 = Line::from(vec![
+            Span::styled("       └──┬─┘", Style::default().fg(Color::DarkGray)),
+        ]);
+        let line8 = Line::from(vec![
+            Span::styled("          ", Style::default()),
+            Span::styled(conn_hallway_exit, conn_he_style),
+        ]);
+        let line9 = Line::from(vec![
+            Span::styled("       ┌──┴─┐", Style::default().fg(Color::DarkGray)),
+        ]);
+        let line10 = Line::from(vec![
+            Span::styled("       │", Style::default().fg(Color::DarkGray)),
+            Span::styled("出口", exit_style),
+            Span::styled("│", Style::default().fg(Color::DarkGray)),
+        ]);
+        let line11 = Line::from(vec![
+            Span::styled("       └────┘", Style::default().fg(Color::DarkGray)),
+        ]);
+
+        let widget = Paragraph::new(vec![
+            line1, line2, line3, line4, line5, line6, line7, line8, line9, line10, line11,
+        ])
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(" MAP "),
+        );
+        f.render_widget(widget, area);
+    }
 }
 
 fn render_help(

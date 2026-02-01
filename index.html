@@ -39,18 +39,36 @@
   </head>
   <body></body>
   <script>
-    // Fallback: convert touchstart to mousedown for ratzilla's on_mouse_event handler.
-    // iOS Safari may not reliably synthesize mousedown from touch events on WASM canvases.
+    // Standard click handler: parse action keys from clicked <pre> text content
+    // and dispatch corresponding keyboard events for ratzilla's on_key_event handler.
+    function handleClickOrTap(clientX, clientY) {
+      var el = document.elementFromPoint(clientX, clientY);
+      if (!el) return;
+      // Walk up to find a <pre> element (ratzilla renders each row as <pre>)
+      while (el && el.tagName !== 'PRE') {
+        el = el.parentElement;
+      }
+      if (!el) return;
+      var text = el.textContent || '';
+      // Match action keys like [1], [2], [N], [S], [I], [R], [H]
+      var match = text.match(/\[([1-9A-Za-z])\]/);
+      if (!match) return;
+      var key = match[1].toLowerCase();
+      document.dispatchEvent(new KeyboardEvent('keydown', {
+        key: key,
+        code: 'Key' + key.toUpperCase(),
+        bubbles: true
+      }));
+    }
+
+    document.addEventListener('click', function(e) {
+      handleClickOrTap(e.clientX, e.clientY);
+    });
+
     document.addEventListener('touchstart', function(e) {
       if (e.touches.length > 0) {
         var touch = e.touches[0];
-        var mouseEvent = new MouseEvent('mousedown', {
-          clientX: touch.clientX,
-          clientY: touch.clientY,
-          button: 0,
-          bubbles: true
-        });
-        document.dispatchEvent(mouseEvent);
+        handleClickOrTap(touch.clientX, touch.clientY);
       }
     }, { passive: true });
   </script>
