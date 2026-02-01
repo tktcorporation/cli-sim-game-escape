@@ -153,7 +153,7 @@ fn main() -> io::Result<()> {
                 .split(size);
 
             // Title bar
-            render_title(f, &gs, main_chunks[0]);
+            render_title(f, &gs, main_chunks[0], is_narrow);
 
             // Content area — responsive layout
             if is_narrow {
@@ -163,16 +163,18 @@ fn main() -> io::Result<()> {
             }
 
             // Help bar (also a click target)
-            render_help(f, &gs, main_chunks[2], &click_state);
+            render_help(f, &gs, main_chunks[2], &click_state, is_narrow);
         }
     });
 
     Ok(())
 }
 
-fn render_title(f: &mut ratzilla::ratatui::Frame, gs: &GameState, area: Rect) {
+fn render_title(f: &mut ratzilla::ratatui::Frame, gs: &GameState, area: Rect, is_narrow: bool) {
     let title = if gs.phase == GamePhase::Escaped {
         "★ 脱出成功！ ★"
+    } else if is_narrow {
+        "脱出ゲーム"
     } else {
         "脱出ゲーム - Escape Room"
     };
@@ -185,10 +187,15 @@ fn render_title(f: &mut ratzilla::ratatui::Frame, gs: &GameState, area: Rect) {
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD)
     };
+    let borders = if is_narrow {
+        Borders::TOP | Borders::BOTTOM
+    } else {
+        Borders::ALL
+    };
     let title_block = Paragraph::new(Line::from(Span::styled(title, title_style)))
         .block(
             Block::default()
-                .borders(Borders::ALL)
+                .borders(borders)
                 .border_style(Style::default().fg(Color::DarkGray)),
         )
         .alignment(ratzilla::ratatui::layout::Alignment::Center);
@@ -212,9 +219,9 @@ fn render_wide_layout(
         .constraints([Constraint::Length(7), Constraint::Min(5)])
         .split(content_chunks[0]);
 
-    render_room_description(f, gs, left_chunks[0]);
-    render_actions_or_inventory(f, gs, left_chunks[1], click_state);
-    render_log(f, gs, content_chunks[1]);
+    render_room_description(f, gs, left_chunks[0], false);
+    render_actions_or_inventory(f, gs, left_chunks[1], click_state, false);
+    render_log(f, gs, content_chunks[1], false);
 }
 
 /// Narrow layout: room description, actions, log stacked vertically
@@ -240,17 +247,27 @@ fn render_narrow_layout(
         ])
         .split(area);
 
-    render_room_description(f, gs, chunks[0]);
-    render_actions_or_inventory(f, gs, chunks[1], click_state);
-    render_log(f, gs, chunks[2]);
+    render_room_description(f, gs, chunks[0], true);
+    render_actions_or_inventory(f, gs, chunks[1], click_state, true);
+    render_log(f, gs, chunks[2], true);
 }
 
-fn render_room_description(f: &mut ratzilla::ratatui::Frame, gs: &GameState, area: Rect) {
+fn render_room_description(
+    f: &mut ratzilla::ratatui::Frame,
+    gs: &GameState,
+    area: Rect,
+    is_narrow: bool,
+) {
+    let borders = if is_narrow {
+        Borders::TOP | Borders::BOTTOM
+    } else {
+        Borders::ALL
+    };
     let room_desc = Paragraph::new(gs.room_description())
         .style(Style::default().fg(Color::White))
         .block(
             Block::default()
-                .borders(Borders::ALL)
+                .borders(borders)
                 .border_style(Style::default().fg(Color::Green))
                 .title(" 現在地 "),
         )
@@ -263,16 +280,28 @@ fn render_actions_or_inventory(
     gs: &GameState,
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
+    is_narrow: bool,
 ) {
+    let borders = if is_narrow {
+        Borders::TOP | Borders::BOTTOM
+    } else {
+        Borders::ALL
+    };
+
     match gs.input_mode {
         InputMode::Explore => {
             let action_items: Vec<ListItem> = gs
                 .actions
                 .iter()
                 .map(|a| {
+                    let prefix = if is_narrow {
+                        format!("[{}] ", a.key.to_uppercase())
+                    } else {
+                        format!(" [{}] ", a.key.to_uppercase())
+                    };
                     ListItem::new(Line::from(vec![
                         Span::styled(
-                            format!(" [{}] ", a.key.to_uppercase()),
+                            prefix,
                             Style::default()
                                 .fg(Color::Yellow)
                                 .add_modifier(Modifier::BOLD),
@@ -282,11 +311,16 @@ fn render_actions_or_inventory(
                 })
                 .collect();
 
+            let title = if is_narrow {
+                " アクション "
+            } else {
+                " ▶ アクション（タップで選択） "
+            };
             let actions_block = List::new(action_items).block(
                 Block::default()
-                    .borders(Borders::ALL)
+                    .borders(borders)
                     .border_style(Style::default().fg(Color::Yellow))
-                    .title(" ▶ アクション（タップで選択） "),
+                    .title(title),
             );
             f.render_widget(actions_block, area);
 
@@ -301,8 +335,9 @@ fn render_actions_or_inventory(
                 .inventory_display()
                 .iter()
                 .map(|item| {
+                    let prefix = if is_narrow { "" } else { "  " };
                     ListItem::new(Span::styled(
-                        format!("  {}", item),
+                        format!("{}{}", prefix, item),
                         Style::default().fg(Color::Magenta),
                     ))
                 })
@@ -310,7 +345,7 @@ fn render_actions_or_inventory(
 
             let inv_block = List::new(inv_items).block(
                 Block::default()
-                    .borders(Borders::ALL)
+                    .borders(borders)
                     .border_style(Style::default().fg(Color::Magenta))
                     .title(" 持ち物 "),
             );
@@ -325,7 +360,7 @@ fn render_actions_or_inventory(
     }
 }
 
-fn render_log(f: &mut ratzilla::ratatui::Frame, gs: &GameState, area: Rect) {
+fn render_log(f: &mut ratzilla::ratatui::Frame, gs: &GameState, area: Rect, is_narrow: bool) {
     let visible_height = area.height.saturating_sub(2) as usize;
     let start = if gs.log.len() > visible_height {
         gs.log.len() - visible_height
@@ -352,10 +387,15 @@ fn render_log(f: &mut ratzilla::ratatui::Frame, gs: &GameState, area: Rect) {
         })
         .collect();
 
+    let borders = if is_narrow {
+        Borders::TOP | Borders::BOTTOM
+    } else {
+        Borders::ALL
+    };
     let log_widget = Paragraph::new(log_lines)
         .block(
             Block::default()
-                .borders(Borders::ALL)
+                .borders(borders)
                 .border_style(Style::default().fg(Color::Blue))
                 .title(" ログ "),
         )
@@ -369,6 +409,7 @@ fn render_help(
     gs: &GameState,
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
+    is_narrow: bool,
 ) {
     let help_text = if gs.phase == GamePhase::Escaped {
         "[R] もう一度プレイ"
@@ -378,13 +419,18 @@ fn render_help(
             InputMode::Inventory => "[I] 閉じる",
         }
     };
+    let borders = if is_narrow {
+        Borders::TOP | Borders::BOTTOM
+    } else {
+        Borders::ALL
+    };
     let help = Paragraph::new(Line::from(Span::styled(
         help_text,
         Style::default().fg(Color::DarkGray),
     )))
     .block(
         Block::default()
-            .borders(Borders::ALL)
+            .borders(borders)
             .border_style(Style::default().fg(Color::DarkGray)),
     )
     .alignment(ratzilla::ratatui::layout::Alignment::Center);
