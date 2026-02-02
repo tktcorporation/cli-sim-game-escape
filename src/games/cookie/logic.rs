@@ -1,7 +1,8 @@
 //! Cookie Factory game logic — pure functions, fully testable.
 
 use super::state::{
-    ActiveBuff, CookieState, GoldenCookieEvent, GoldenEffect, ProducerKind, UpgradeEffect,
+    ActiveBuff, CookieState, GoldenCookieEvent, GoldenEffect, MiniEventKind, ProducerKind,
+    UpgradeEffect,
 };
 
 /// Advance the game by `delta_ticks` ticks (at 10 ticks/sec).
@@ -23,6 +24,9 @@ pub fn tick(state: &mut CookieState, delta_ticks: u32) {
 
     // Tick golden cookie spawning
     tick_golden(state, delta_ticks);
+
+    // Tick mini-events
+    tick_mini_event(state, delta_ticks);
 }
 
 /// Tick down active buffs and remove expired ones.
@@ -141,6 +145,91 @@ fn pick_golden_effect(state: &mut CookieState) -> GoldenEffect {
     }
 }
 
+/// Tick mini-event timer and auto-fire events.
+fn tick_mini_event(state: &mut CookieState, delta_ticks: u32) {
+    // Only fire mini-events once the player has some CPS
+    if state.total_cps() <= 0.0 {
+        return;
+    }
+
+    state.mini_event_next = state.mini_event_next.saturating_sub(delta_ticks);
+    if state.mini_event_next == 0 {
+        let event = pick_mini_event(state);
+        apply_mini_event(state, &event);
+
+        // Schedule next: 15-30 seconds (150-300 ticks)
+        let delay = 150 + (state.next_random() % 150);
+        state.mini_event_next = delay;
+    }
+}
+
+/// Pick a random mini-event based on game state.
+fn pick_mini_event(state: &mut CookieState) -> MiniEventKind {
+    let r = state.next_random() % 100;
+    if r < 30 {
+        MiniEventKind::LuckyDrop { cps_seconds: 3.0 }
+    } else if r < 50 {
+        MiniEventKind::SugarRush { multiplier: 5.0 }
+    } else if r < 80 {
+        // Pick a random active producer for the surge
+        let active_producers: Vec<ProducerKind> = state
+            .producers
+            .iter()
+            .filter(|p| p.count > 0)
+            .map(|p| p.kind.clone())
+            .collect();
+        if active_producers.is_empty() {
+            MiniEventKind::LuckyDrop { cps_seconds: 3.0 }
+        } else {
+            let idx = state.next_random() as usize % active_producers.len();
+            MiniEventKind::ProductionSurge {
+                target: active_producers[idx].clone(),
+                multiplier: 3.0,
+            }
+        }
+    } else {
+        MiniEventKind::DiscountWave { discount: 0.25 }
+    }
+}
+
+/// Apply a mini-event's effect to the game state.
+fn apply_mini_event(state: &mut CookieState, event: &MiniEventKind) {
+    let desc = event.description();
+    match event {
+        MiniEventKind::LuckyDrop { cps_seconds } => {
+            let bonus = state.total_cps() * cps_seconds;
+            state.cookies += bonus;
+            state.cookies_all_time += bonus;
+            state.add_log(
+                &format!("{} (+{})", desc, format_number(bonus)),
+                true,
+            );
+        }
+        MiniEventKind::SugarRush { multiplier } => {
+            state.active_buffs.push(ActiveBuff {
+                effect: GoldenEffect::ClickFrenzy {
+                    multiplier: *multiplier,
+                },
+                ticks_left: 50, // 5 seconds
+            });
+            state.add_log(&desc, true);
+        }
+        MiniEventKind::ProductionSurge { multiplier, .. } => {
+            state.active_buffs.push(ActiveBuff {
+                effect: GoldenEffect::ProductionFrenzy {
+                    multiplier: *multiplier,
+                },
+                ticks_left: 100, // 10 seconds
+            });
+            state.add_log(&desc, true);
+        }
+        MiniEventKind::DiscountWave { discount } => {
+            state.active_discount = *discount;
+            state.add_log(&desc, true);
+        }
+    }
+}
+
 /// Manual click: add cookies_per_click to cookies (with buffs).
 pub fn click(state: &mut CookieState) {
     let power = state.effective_click_power();
@@ -158,18 +247,32 @@ pub fn buy_producer(state: &mut CookieState, kind: &ProducerKind) -> bool {
         None => return false,
     };
 
-    let cost = state.producers[idx].cost();
+    let base_cost = state.producers[idx].cost();
+    let cost = base_cost * (1.0 - state.active_discount);
     if state.cookies >= cost {
         state.cookies -= cost;
         state.producers[idx].count += 1;
-        state.add_log(
-            &format!(
-                "{} を購入！ ({}台)",
-                state.producers[idx].kind.name(),
-                state.producers[idx].count
-            ),
-            false,
-        );
+        let had_discount = state.active_discount > 0.0;
+        if had_discount {
+            state.add_log(
+                &format!(
+                    "{} を購入！ ({}台) 💰割引適用！",
+                    state.producers[idx].kind.name(),
+                    state.producers[idx].count
+                ),
+                false,
+            );
+            state.active_discount = 0.0;
+        } else {
+            state.add_log(
+                &format!(
+                    "{} を購入！ ({}台)",
+                    state.producers[idx].kind.name(),
+                    state.producers[idx].count
+                ),
+                false,
+            );
+        }
         true
     } else {
         false
@@ -184,7 +287,8 @@ pub fn buy_upgrade(state: &mut CookieState, upgrade_idx: usize) -> bool {
     if state.upgrades[upgrade_idx].purchased {
         return false;
     }
-    let cost = state.upgrades[upgrade_idx].cost;
+    let base_cost = state.upgrades[upgrade_idx].cost;
+    let cost = base_cost * (1.0 - state.active_discount);
     if state.cookies < cost {
         return false;
     }
@@ -196,6 +300,9 @@ pub fn buy_upgrade(state: &mut CookieState, upgrade_idx: usize) -> bool {
     }
 
     state.cookies -= cost;
+    if state.active_discount > 0.0 {
+        state.active_discount = 0.0;
+    }
     state.upgrades[upgrade_idx].purchased = true;
 
     let effect = state.upgrades[upgrade_idx].effect.clone();
@@ -237,6 +344,20 @@ fn apply_upgrade_effect(state: &mut CookieState, effect: &UpgradeEffect, name: &
                 *bonus_per_unit,
             ));
             state.add_log(&format!("✦ {} 適用！新シナジー追加！", name), true);
+        }
+        UpgradeEffect::CountScaling { target, bonus_per_unit } => {
+            state.count_scalings.push((target.clone(), *bonus_per_unit));
+            state.add_log(
+                &format!("✦ {} 適用！台数ボーナス追加！", name),
+                true,
+            );
+        }
+        UpgradeEffect::CpsPercentBonus { target, percentage } => {
+            state.cps_percent_bonuses.push((target.clone(), *percentage));
+            state.add_log(
+                &format!("✦ {} 適用！CPS連動ボーナス！", name),
+                true,
+            );
         }
     }
 }
@@ -510,5 +631,75 @@ mod tests {
     #[test]
     fn format_number_with_fraction() {
         assert_eq!(format_number(12.5), "12.5");
+    }
+
+    #[test]
+    fn count_scaling_upgrade_effect() {
+        let mut state = CookieState::new();
+        state.cookies = 10_000_000.0;
+        state.producers[0].count = 50; // 50 cursors
+        // Manually apply CountScaling
+        state.count_scalings.push((ProducerKind::Cursor, 0.005));
+        // Each cursor gives +0.5% → 50 * 0.5% = 25% bonus
+        let cs_bonus = state.count_scaling_bonus(&ProducerKind::Cursor);
+        assert!((cs_bonus - 0.25).abs() < 0.001);
+    }
+
+    #[test]
+    fn cps_percent_bonus_effect() {
+        let mut state = CookieState::new();
+        state.producers[1].count = 10; // 10 grandmas = 10 CPS base
+        let base_cps = state.total_cps();
+        assert!((base_cps - 10.0).abs() < 0.01);
+        // Add CPS percent bonus: each grandma adds 0.01% of total CPS
+        state.cps_percent_bonuses.push((ProducerKind::Grandma, 0.0001));
+        let new_cps = state.total_cps();
+        // Extra = 10.0 (base) * 10 (grandmas) * 0.0001 = 0.01
+        assert!(new_cps > base_cps);
+        assert!((new_cps - 10.01).abs() < 0.01);
+    }
+
+    #[test]
+    fn mini_event_fires_after_countdown() {
+        let mut state = CookieState::new();
+        state.producers[1].count = 5; // Need CPS > 0
+        state.mini_event_next = 5;
+        let log_len_before = state.log.len();
+        tick(&mut state, 5);
+        // A mini-event should have fired and added a log entry
+        assert!(state.log.len() > log_len_before);
+    }
+
+    #[test]
+    fn mini_event_no_fire_without_cps() {
+        let mut state = CookieState::new();
+        state.mini_event_next = 1;
+        let log_len_before = state.log.len();
+        tick(&mut state, 5);
+        // No mini-event without CPS (only the golden check logs nothing either)
+        assert_eq!(state.log.len(), log_len_before);
+    }
+
+    #[test]
+    fn discount_applies_to_producer_purchase() {
+        let mut state = CookieState::new();
+        state.cookies = 12.0; // Less than Cursor cost (15), but 25% off = 11.25
+        state.active_discount = 0.25;
+        assert!(buy_producer(&mut state, &ProducerKind::Cursor));
+        assert_eq!(state.producers[0].count, 1);
+        assert!((state.cookies - (12.0 - 11.25)).abs() < 0.01);
+        // Discount should be consumed
+        assert!((state.active_discount - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn discount_applies_to_upgrade_purchase() {
+        let mut state = CookieState::new();
+        state.cookies = 80.0; // Less than 100 (強化クリック cost), but 25% off = 75
+        state.active_discount = 0.25;
+        assert!(buy_upgrade(&mut state, 0));
+        assert!(state.upgrades[0].purchased);
+        assert!((state.cookies - 5.0).abs() < 0.01); // 80 - 75 = 5
+        assert!((state.active_discount - 0.0).abs() < 0.001);
     }
 }

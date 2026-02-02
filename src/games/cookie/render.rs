@@ -49,7 +49,8 @@ fn render_wide(
     // Calculate left panel height based on active buffs
     let buff_height = if state.active_buffs.is_empty() { 0 } else { 2 + state.active_buffs.len() as u16 };
     let golden_height = if state.golden_event.is_some() { 3 } else { 0 };
-    let extra_height = buff_height + golden_height;
+    let discount_height: u16 = if state.active_discount > 0.0 { 1 } else { 0 };
+    let extra_height = buff_height + golden_height + discount_height;
 
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -80,7 +81,8 @@ fn render_narrow(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let buff_height = if state.active_buffs.is_empty() && state.golden_event.is_none() { 0 } else { 3 };
+    let has_anything = !state.active_buffs.is_empty() || state.golden_event.is_some() || state.active_discount > 0.0;
+    let buff_height = if has_anything { 3 } else { 0 };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -291,6 +293,16 @@ fn render_buffs_and_golden(
         ]));
     }
 
+    // Discount indicator
+    if state.active_discount > 0.0 {
+        lines.push(Line::from(Span::styled(
+            format!(" 💰 割引ウェーブ発動中！次の購入{:.0}%OFF", state.active_discount * 100.0),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
     if !lines.is_empty() {
         let widget = Paragraph::new(lines).block(
             Block::default()
@@ -311,24 +323,36 @@ fn render_producers(
     let best_payback = state
         .producers
         .iter()
-        .filter(|p| state.cookies >= p.cost())
+        .filter(|p| {
+            let eff_cost = p.cost() * (1.0 - state.active_discount);
+            state.cookies >= eff_cost
+        })
         .filter_map(|p| {
             let syn = state.synergy_bonus(&p.kind);
             p.payback_seconds_with_synergy(syn)
         })
         .fold(f64::MAX, f64::min);
 
+    let has_discount = state.active_discount > 0.0;
+
     let items: Vec<ListItem> = state
         .producers
         .iter()
         .map(|p| {
-            let can_afford = state.cookies >= p.cost();
-            let cost_str = format_number(p.cost().floor());
+            let eff_cost = p.cost() * (1.0 - state.active_discount);
+            let can_afford = state.cookies >= eff_cost;
+            let cost_str = if has_discount {
+                format!("{}→{}", format_number(p.cost().floor()), format_number(eff_cost.floor()))
+            } else {
+                format_number(p.cost().floor())
+            };
             let syn_bonus = state.synergy_bonus(&p.kind);
-            let cps = p.cps_with_synergy(syn_bonus);
+            let cs_bonus = state.count_scaling_bonus(&p.kind);
+            let total_bonus = syn_bonus + cs_bonus;
+            let cps = p.cps_with_synergy(total_bonus);
             let cps_str = format_number(cps);
-            let next_cps = p.next_unit_cps_with_synergy(syn_bonus);
-            let payback = p.payback_seconds_with_synergy(syn_bonus);
+            let next_cps = p.next_unit_cps_with_synergy(total_bonus);
+            let payback = p.payback_seconds_with_synergy(total_bonus);
 
             // Check if this is the best ROI among affordable options
             let is_best_roi = can_afford
@@ -352,9 +376,9 @@ fn render_producers(
                 None => "---".to_string(),
             };
 
-            // Synergy indicator
-            let syn_str = if syn_bonus > 0.001 {
-                format!("+{:.0}%", syn_bonus * 100.0)
+            // Bonus indicator (synergy + count scaling)
+            let syn_str = if total_bonus > 0.001 {
+                format!("+{:.0}%", total_bonus * 100.0)
             } else {
                 String::new()
             };

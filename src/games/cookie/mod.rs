@@ -2,6 +2,8 @@
 
 pub mod logic;
 pub mod render;
+#[cfg(test)]
+mod simulator;
 pub mod state;
 
 use std::cell::RefCell;
