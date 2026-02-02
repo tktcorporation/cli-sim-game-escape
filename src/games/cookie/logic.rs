@@ -732,3 +732,297 @@ mod tests {
         assert!((state.active_discount - 0.0).abs() < 0.001);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use crate::games::cookie::state::Producer;
+    use proptest::prelude::*;
+
+    // ── Strategy helpers ──────────────────────────────────
+
+    fn arb_producer_kind() -> impl Strategy<Value = ProducerKind> {
+        prop_oneof![
+            Just(ProducerKind::Cursor),
+            Just(ProducerKind::Grandma),
+            Just(ProducerKind::Farm),
+            Just(ProducerKind::Mine),
+            Just(ProducerKind::Factory),
+        ]
+    }
+
+    // ── format_number properties ──────────────────────────
+
+    proptest! {
+        #[test]
+        fn prop_format_number_no_panic(n in -1e12f64..1e12) {
+            let _ = format_number(n);
+        }
+
+        #[test]
+        fn prop_format_number_nonneg_no_leading_minus(n in 0.0f64..1e12) {
+            let s = format_number(n);
+            prop_assert!(!s.starts_with('-'), "got: {}", s);
+        }
+
+        #[test]
+        fn prop_format_number_negative_has_minus(n in -1e12f64..-0.1) {
+            let s = format_number(n);
+            prop_assert!(s.starts_with('-'), "got: {}", s);
+        }
+
+        #[test]
+        fn prop_format_number_integer_no_dot(int_val in 0u64..1_000_000_000) {
+            let s = format_number(int_val as f64);
+            prop_assert!(!s.contains('.'), "integer {} formatted as: {}", int_val, s);
+        }
+
+        #[test]
+        fn prop_format_number_commas_at_correct_positions(int_val in 0u64..1_000_000_000) {
+            let s = format_number(int_val as f64);
+            let stripped: String = s.chars().filter(|c| *c != ',').collect();
+            prop_assert_eq!(stripped, int_val.to_string());
+        }
+
+        #[test]
+        fn prop_format_number_small_values_no_comma(n in 0.0f64..1000.0) {
+            let s = format_number(n);
+            // Integer part < 1000 should never have a comma
+            let int_part: String = s.split('.').next().unwrap().to_string();
+            prop_assert!(!int_part.contains(','), "got: {}", s);
+        }
+    }
+
+    // ── Producer cost properties ──────────────────────────
+
+    proptest! {
+        #[test]
+        fn prop_producer_cost_always_positive(
+            kind in arb_producer_kind(),
+            count in 0u32..200,
+        ) {
+            let mut p = Producer::new(kind);
+            p.count = count;
+            prop_assert!(p.cost() > 0.0, "cost was {}", p.cost());
+        }
+
+        #[test]
+        fn prop_producer_cost_strictly_increases(
+            kind in arb_producer_kind(),
+            count in 0u32..199,
+        ) {
+            let mut p = Producer::new(kind.clone());
+            p.count = count;
+            let cost_before = p.cost();
+            p.count = count + 1;
+            let cost_after = p.cost();
+            prop_assert!(cost_after > cost_before,
+                "cost did not increase: {} -> {}", cost_before, cost_after);
+        }
+
+        #[test]
+        fn prop_producer_cost_ratio_is_1_15(
+            kind in arb_producer_kind(),
+            count in 0u32..150,
+        ) {
+            let mut p = Producer::new(kind.clone());
+            p.count = count;
+            let cost_a = p.cost();
+            p.count = count + 1;
+            let cost_b = p.cost();
+            let ratio = cost_b / cost_a;
+            prop_assert!((ratio - 1.15).abs() < 0.0001,
+                "expected ratio 1.15, got {} (count={})", ratio, count);
+        }
+    }
+
+    // ── Producer CPS properties ───────────────────────────
+
+    proptest! {
+        #[test]
+        fn prop_producer_cps_nonnegative(
+            kind in arb_producer_kind(),
+            count in 0u32..500,
+            multiplier in 1.0f64..100.0,
+        ) {
+            let mut p = Producer::new(kind);
+            p.count = count;
+            p.multiplier = multiplier;
+            prop_assert!(p.base_cps() >= 0.0);
+        }
+
+        #[test]
+        fn prop_producer_cps_zero_when_zero_count(
+            kind in arb_producer_kind(),
+            multiplier in 1.0f64..100.0,
+        ) {
+            let mut p = Producer::new(kind);
+            p.count = 0;
+            p.multiplier = multiplier;
+            prop_assert!((p.base_cps() - 0.0).abs() < f64::EPSILON);
+        }
+
+        #[test]
+        fn prop_producer_cps_linear_in_count(
+            kind in arb_producer_kind(),
+            count in 1u32..100,
+            multiplier in 1.0f64..50.0,
+        ) {
+            let mut p = Producer::new(kind.clone());
+            p.multiplier = multiplier;
+            p.count = count;
+            let cps_a = p.base_cps();
+            p.count = count * 2;
+            let cps_b = p.base_cps();
+            prop_assert!((cps_b / cps_a - 2.0).abs() < 0.0001,
+                "CPS should double when count doubles: {} vs {}", cps_a, cps_b);
+        }
+
+        #[test]
+        fn prop_synergy_bonus_increases_cps(
+            kind in arb_producer_kind(),
+            count in 1u32..100,
+            multiplier in 1.0f64..50.0,
+            synergy in 0.01f64..5.0,
+        ) {
+            let mut p = Producer::new(kind);
+            p.count = count;
+            p.multiplier = multiplier;
+            prop_assert!(p.cps_with_synergy(synergy) > p.base_cps());
+        }
+
+        #[test]
+        fn prop_payback_positive_when_has_production(
+            kind in arb_producer_kind(),
+            count in 0u32..100,
+            multiplier in 1.0f64..50.0,
+        ) {
+            let mut p = Producer::new(kind);
+            p.count = count;
+            p.multiplier = multiplier;
+            if let Some(pb) = p.payback_seconds_with_synergy(0.0) {
+                prop_assert!(pb > 0.0, "payback should be positive: {}", pb);
+            }
+        }
+    }
+
+    // ── buy_producer properties ───────────────────────────
+
+    proptest! {
+        #[test]
+        fn prop_buy_producer_fails_without_funds(
+            kind in arb_producer_kind(),
+        ) {
+            let mut state = CookieState::new();
+            state.cookies = 0.0;
+            prop_assert!(!buy_producer(&mut state, &kind));
+        }
+
+        #[test]
+        fn prop_buy_producer_deducts_exact_cost(
+            kind in arb_producer_kind(),
+            extra in 0.0f64..1000.0,
+        ) {
+            let mut state = CookieState::new();
+            let idx = kind.index();
+            let cost = state.producers[idx].cost();
+            state.cookies = cost + extra;
+            let before = state.cookies;
+            let success = buy_producer(&mut state, &kind);
+            prop_assert!(success);
+            let expected = before - cost;
+            prop_assert!((state.cookies - expected).abs() < 0.001,
+                "expected {} cookies left, got {}", expected, state.cookies);
+        }
+
+        #[test]
+        fn prop_buy_producer_increments_count(
+            kind in arb_producer_kind(),
+        ) {
+            let mut state = CookieState::new();
+            let idx = kind.index();
+            state.cookies = 1e12;
+            let count_before = state.producers[idx].count;
+            buy_producer(&mut state, &kind);
+            prop_assert_eq!(state.producers[idx].count, count_before + 1);
+        }
+
+        #[test]
+        fn prop_buy_producer_preserves_cookies_all_time(
+            kind in arb_producer_kind(),
+        ) {
+            let mut state = CookieState::new();
+            state.cookies = 1e12;
+            state.cookies_all_time = 1e12;
+            let all_time_before = state.cookies_all_time;
+            buy_producer(&mut state, &kind);
+            prop_assert_eq!(state.cookies_all_time, all_time_before,
+                "cookies_all_time should not change on purchase");
+        }
+
+        #[test]
+        fn prop_buy_producer_with_discount_cheaper(
+            kind in arb_producer_kind(),
+            discount in 0.01f64..0.99,
+        ) {
+            let idx = kind.index();
+            let state_full = CookieState::new();
+            let full_cost = state_full.producers[idx].cost();
+
+            let mut state_disc = CookieState::new();
+            state_disc.active_discount = discount;
+            let disc_cost = state_disc.producers[idx].cost() * (1.0 - discount);
+
+            prop_assert!(disc_cost < full_cost);
+        }
+    }
+
+    // ── tick properties ───────────────────────────────────
+
+    proptest! {
+        #[test]
+        fn prop_tick_zero_is_noop(cookies in 0.0f64..1e12) {
+            let mut state = CookieState::new();
+            state.cookies = cookies;
+            tick(&mut state, 0);
+            prop_assert!((state.cookies - cookies).abs() < f64::EPSILON);
+        }
+
+        #[test]
+        fn prop_tick_never_reduces_cookies(
+            delta in 1u32..100,
+        ) {
+            let mut state = CookieState::new();
+            state.cookies = 100.0;
+            state.producers[0].count = 5; // some production
+            let before = state.cookies;
+            tick(&mut state, delta);
+            prop_assert!(state.cookies >= before,
+                "cookies decreased from {} to {}", before, state.cookies);
+        }
+
+        #[test]
+        fn prop_tick_production_proportional_to_delta(
+            delta in 1u32..50,
+        ) {
+            // With no buffs/golden, production is delta * cps / 10
+            let mut s1 = CookieState::new();
+            s1.producers[0].count = 10;
+            s1.golden_next_spawn = 99999;
+            s1.mini_event_next = 99999;
+
+            let mut s2 = CookieState::new();
+            s2.producers[0].count = 10;
+            s2.golden_next_spawn = 99999;
+            s2.mini_event_next = 99999;
+
+            tick(&mut s1, delta);
+            tick(&mut s2, delta * 2);
+
+            let prod1 = s1.cookies;
+            let prod2 = s2.cookies;
+            prop_assert!((prod2 / prod1 - 2.0).abs() < 0.01,
+                "expected 2x production, got {} / {} = {}", prod2, prod1, prod2 / prod1);
+        }
+    }
+}

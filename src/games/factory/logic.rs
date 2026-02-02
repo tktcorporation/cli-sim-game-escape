@@ -1240,3 +1240,126 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_direction() -> impl Strategy<Value = Direction> {
+        prop_oneof![
+            Just(Direction::Up),
+            Just(Direction::Down),
+            Just(Direction::Left),
+            Just(Direction::Right),
+        ]
+    }
+
+    fn arb_machine_kind() -> impl Strategy<Value = MachineKind> {
+        prop_oneof![
+            Just(MachineKind::Miner),
+            Just(MachineKind::Smelter),
+            Just(MachineKind::Assembler),
+            Just(MachineKind::Exporter),
+            Just(MachineKind::Fabricator),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn prop_preferred_dirs_no_backtrack(from in arb_direction()) {
+            let dirs = preferred_directions(Some(from));
+            prop_assert!(!dirs.contains(&from),
+                "backward direction {:?} found in preferred_directions", from);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_preferred_dirs_forward_first(from in arb_direction()) {
+            let dirs = preferred_directions(Some(from));
+            prop_assert_eq!(dirs[0], from.opposite(),
+                "first direction should be forward (opposite of from)");
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_preferred_dirs_has_three_when_from_given(from in arb_direction()) {
+            let dirs = preferred_directions(Some(from));
+            prop_assert_eq!(dirs.len(), 3,
+                "expected 3 directions, got {}", dirs.len());
+        }
+    }
+
+    #[test]
+    fn prop_preferred_dirs_none_has_four() {
+        let dirs = preferred_directions(None);
+        assert_eq!(dirs.len(), 4);
+    }
+
+    proptest! {
+        #[test]
+        fn prop_place_2x2_on_empty_grid_within_bounds(
+            x in 0usize..GRID_W-1,
+            y in 0usize..GRID_H-1,
+        ) {
+            let state = FactoryState::new();
+            prop_assert!(can_place_2x2(&state, x, y),
+                "should be placeable at ({}, {}) on empty grid", x, y);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_place_2x2_out_of_bounds_fails(
+            _kind in arb_machine_kind(),
+        ) {
+            let state = FactoryState::new();
+            prop_assert!(!can_place_2x2(&state, GRID_W - 1, 0));
+            prop_assert!(!can_place_2x2(&state, 0, GRID_H - 1));
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_place_remove_roundtrip(
+            kind in arb_machine_kind(),
+            x in 0usize..GRID_W-1,
+            y in 0usize..GRID_H-1,
+        ) {
+            let mut state = FactoryState::new();
+            place_2x2_machine(&mut state, x, y, kind);
+
+            prop_assert!(!matches!(state.grid[y][x], Cell::Empty));
+            prop_assert!(!matches!(state.grid[y][x+1], Cell::Empty));
+            prop_assert!(!matches!(state.grid[y+1][x], Cell::Empty));
+            prop_assert!(!matches!(state.grid[y+1][x+1], Cell::Empty));
+
+            let removed_kind = remove_2x2_machine(&mut state, x, y);
+            prop_assert_eq!(removed_kind, Some(kind));
+
+            prop_assert!(matches!(state.grid[y][x], Cell::Empty));
+            prop_assert!(matches!(state.grid[y][x+1], Cell::Empty));
+            prop_assert!(matches!(state.grid[y+1][x], Cell::Empty));
+            prop_assert!(matches!(state.grid[y+1][x+1], Cell::Empty));
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_miner_produces_within_recipe_time(ticks in 1u32..200) {
+            let mut state = FactoryState::new();
+            place_2x2_machine(&mut state, 0, 0, MachineKind::Miner);
+
+            tick_n(&mut state, ticks);
+
+            if let Cell::Machine(m) = &state.grid[0][0] {
+                let expected_produced = (ticks / MachineKind::Miner.recipe_time()) as u64;
+                prop_assert!(m.stat_produced <= expected_produced + 1,
+                    "produced {} but expected at most {} (ticks={})",
+                    m.stat_produced, expected_produced + 1, ticks);
+            }
+        }
+    }
+}

@@ -320,3 +320,119 @@ mod tests {
         assert_eq!(MachineKind::export_value(&ItemKind::Gear), 20);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_direction() -> impl Strategy<Value = Direction> {
+        prop_oneof![
+            Just(Direction::Up),
+            Just(Direction::Down),
+            Just(Direction::Left),
+            Just(Direction::Right),
+        ]
+    }
+
+    fn arb_item_kind() -> impl Strategy<Value = ItemKind> {
+        prop_oneof![
+            Just(ItemKind::IronOre),
+            Just(ItemKind::IronPlate),
+            Just(ItemKind::Gear),
+            Just(ItemKind::CopperOre),
+            Just(ItemKind::CopperPlate),
+            Just(ItemKind::Circuit),
+        ]
+    }
+
+    fn arb_machine_kind() -> impl Strategy<Value = MachineKind> {
+        prop_oneof![
+            Just(MachineKind::Miner),
+            Just(MachineKind::Smelter),
+            Just(MachineKind::Assembler),
+            Just(MachineKind::Exporter),
+            Just(MachineKind::Fabricator),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn prop_opposite_is_involution(dir in arb_direction()) {
+            prop_assert_eq!(dir.opposite().opposite(), dir);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_opposite_has_negated_delta(dir in arb_direction()) {
+            let (dx, dy) = dir.delta();
+            let (ox, oy) = dir.opposite().delta();
+            prop_assert_eq!((dx + ox, dy + oy), (0, 0));
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_direction_delta_unit_length(dir in arb_direction()) {
+            let (dx, dy) = dir.delta();
+            prop_assert_eq!(dx.abs() + dy.abs(), 1,
+                "delta should be a unit vector, got ({}, {})", dx, dy);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_direction_delta_is_axis_aligned(dir in arb_direction()) {
+            let (dx, dy) = dir.delta();
+            prop_assert!((dx == 0) != (dy == 0),
+                "delta not axis-aligned: ({}, {})", dx, dy);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_export_value_positive(item in arb_item_kind()) {
+            prop_assert!(MachineKind::export_value(&item) > 0);
+        }
+    }
+
+    #[test]
+    fn prop_processed_items_worth_more_than_raw() {
+        let iron_ore = MachineKind::export_value(&ItemKind::IronOre);
+        let iron_plate = MachineKind::export_value(&ItemKind::IronPlate);
+        let gear = MachineKind::export_value(&ItemKind::Gear);
+        let copper_ore = MachineKind::export_value(&ItemKind::CopperOre);
+        let copper_plate = MachineKind::export_value(&ItemKind::CopperPlate);
+        let circuit = MachineKind::export_value(&ItemKind::Circuit);
+
+        assert!(iron_plate > iron_ore);
+        assert!(gear > iron_plate);
+        assert!(copper_plate > copper_ore);
+        assert!(circuit > copper_plate);
+    }
+
+    proptest! {
+        #[test]
+        fn prop_machine_recipe_time_positive(kind in arb_machine_kind()) {
+            prop_assert!(kind.recipe_time() > 0);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_machine_cost_positive(kind in arb_machine_kind()) {
+            prop_assert!(kind.cost() > 0);
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn prop_machine_new_starts_empty(kind in arb_machine_kind()) {
+            let m = Machine::new(kind);
+            prop_assert!(m.input_buffer.is_empty());
+            prop_assert!(m.output_buffer.is_empty());
+            prop_assert_eq!(m.progress, 0);
+        }
+    }
+}
