@@ -120,60 +120,59 @@ fn render_tab_bar(
         }
     };
 
-    let milestone_label = if ready_count > 0 {
-        format!(" [M] Milestones({}) ", ready_count)
-    } else {
-        " [M] Milestones ".to_string()
-    };
-
     let milestone_color = if ready_count > 0 { Color::Green } else { Color::Cyan };
 
-    // Tab labels with tracked positions for click targets
-    let tab0 = " [1-5] Producers ";
-    let sep = " | ";  // ASCII pipe — 1 byte = 1 column (avoids UTF-8 width mismatch)
-    let tab1 = " [U] Upgrades ";
-    let tab2 = &milestone_label;
+    // Build tab labels — adapt length to available width.
+    // Each tab gets roughly 1/3 of the width. Use Layout to split evenly.
+    let tab_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+            Constraint::Ratio(1, 3),
+        ])
+        .split(area);
 
-    let spans = vec![
-        Span::styled(tab0, tab_style(0, Color::Green)),
-        Span::styled(sep, Style::default().fg(Color::DarkGray)),
-        Span::styled(tab1, tab_style(1, Color::Magenta)),
-        Span::styled(sep, Style::default().fg(Color::DarkGray)),
-        Span::styled(tab2.as_str(), tab_style(2, milestone_color)),
-    ];
+    // Tab 0: Producers
+    let t0_label = if tab_chunks[0].width >= 12 { " Producers " } else { " Prod " };
+    let t0 = Paragraph::new(Line::from(Span::styled(t0_label, tab_style(0, Color::Green))))
+        .alignment(Alignment::Center);
+    f.render_widget(t0, tab_chunks[0]);
 
-    // Calculate column positions for each tab (all ASCII, so len() == display width)
-    let col0_start = area.x;
-    let col0_end = col0_start + tab0.len() as u16;
-    let col1_start = col0_end + sep.len() as u16;
-    let col1_end = col1_start + tab1.len() as u16;
-    let col2_start = col1_end + sep.len() as u16;
-    let col2_end = col2_start + tab2.len() as u16;
+    // Tab 1: Upgrades
+    let t1_label = if tab_chunks[1].width >= 11 { " Upgrades " } else { " Upgr " };
+    let t1 = Paragraph::new(Line::from(Span::styled(t1_label, tab_style(1, Color::Magenta))))
+        .alignment(Alignment::Center);
+    f.render_widget(t1, tab_chunks[1]);
 
-    let widget = Paragraph::new(Line::from(spans));
-    f.render_widget(widget, area);
+    // Tab 2: Milestones
+    let t2_label = if ready_count > 0 {
+        if tab_chunks[2].width >= 18 {
+            format!(" Miles.({}) ", ready_count)
+        } else {
+            format!(" M({}) ", ready_count)
+        }
+    } else if tab_chunks[2].width >= 14 {
+        " Milestones ".to_string()
+    } else {
+        " Miles. ".to_string()
+    };
+    let t2 = Paragraph::new(Line::from(Span::styled(&t2_label, tab_style(2, milestone_color))))
+        .alignment(Alignment::Center);
+    f.render_widget(t2, tab_chunks[2]);
 
-    // Register column-specific click targets for each tab
+    // Register click targets for each tab zone
     let mut cs = click_state.borrow_mut();
-    // Producers tab: pressing any number key works, but 'u' toggles off upgrades
-    // We use a special convention: clicking Producers tab sends 'u' when on upgrades,
-    // 'm' when on milestones, or nothing when already on producers.
-    // Simpler: always register the tab's toggle key.
-    // 'u' toggles upgrade view, 'm' toggles milestone view.
-    // Clicking Producers tab when NOT on producers: need to go back.
-    // Since 'u' and 'm' are toggles, clicking the active tab's key turns it off (back to producers).
-    // So: register 'u' on upgrades tab, 'm' on milestones tab.
-    // For producers tab: if on upgrades, send 'u' to toggle off; if on milestones, send 'm' to toggle off.
     let producers_key = if state.show_upgrades {
         'u'
     } else if state.show_milestones {
         'm'
     } else {
-        'c' // already on producers, clicking = cookie click (harmless)
+        'c' // already on producers
     };
-    cs.add_target_col(area.y, col0_start, col0_end, producers_key);
-    cs.add_target_col(area.y, col1_start, col1_end, 'u');
-    cs.add_target_col(area.y, col2_start, col2_end, 'm');
+    cs.add_target_col(area.y, tab_chunks[0].x, tab_chunks[0].x + tab_chunks[0].width, producers_key);
+    cs.add_target_col(area.y, tab_chunks[1].x, tab_chunks[1].x + tab_chunks[1].width, 'u');
+    cs.add_target_col(area.y, tab_chunks[2].x, tab_chunks[2].x + tab_chunks[2].width, 'm');
 }
 
 fn render_cookie_display(
