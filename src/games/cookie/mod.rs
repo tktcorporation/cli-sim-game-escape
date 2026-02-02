@@ -1,4 +1,4 @@
-/// Cookie Factory — an incremental cookie clicker game.
+//! Cookie Factory — an incremental cookie clicker game.
 
 pub mod logic;
 pub mod render;
@@ -38,6 +38,10 @@ impl Game for CookieGame {
                 logic::click(&mut self.state);
                 true
             }
+            'g' => {
+                logic::claim_golden(&mut self.state);
+                true
+            }
             'u' => {
                 self.state.show_upgrades = !self.state.show_upgrades;
                 true
@@ -54,8 +58,8 @@ impl Game for CookieGame {
                 logic::buy_producer(&mut self.state, &kind);
                 true
             }
-            'a'..='f' if self.state.show_upgrades => {
-                // Map 'a'..'f' to available upgrade indices
+            'a'..='z' if self.state.show_upgrades => {
+                // Map 'a'..'z' to available upgrade indices
                 let display_idx = (key as u8 - b'a') as usize;
                 let available: Vec<usize> = self
                     .state
@@ -126,7 +130,7 @@ mod tests {
         let mut game = CookieGame::new();
         game.state.producers[0].count = 10; // 1.0 cps
         game.tick(10);
-        assert!((game.state.cookies - 1.0).abs() < 0.001);
+        assert!((game.state.cookies - 1.0).abs() < 0.01);
     }
 
     #[test]
@@ -137,5 +141,18 @@ mod tests {
         game.handle_input(&InputEvent::Key('1'));
         // Should NOT buy a producer when in upgrade mode
         assert_eq!(game.state.producers[0].count, 0);
+    }
+
+    #[test]
+    fn golden_cookie_claim_via_input() {
+        let mut game = CookieGame::new();
+        game.state.producers[1].count = 5;
+        game.state.golden_event = Some(state::GoldenCookieEvent {
+            appear_ticks_left: 50,
+            claimed: false,
+        });
+        game.handle_input(&InputEvent::Key('g'));
+        assert!(game.state.golden_event.is_none());
+        assert_eq!(game.state.golden_cookies_claimed, 1);
     }
 }

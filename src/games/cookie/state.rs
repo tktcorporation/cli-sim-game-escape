@@ -1,4 +1,4 @@
-/// Cookie Factory game state definitions.
+//! Cookie Factory game state definitions.
 
 /// Kinds of producers (auto-clickers).
 #[derive(Clone, Debug, PartialEq)]
@@ -65,6 +65,17 @@ impl ProducerKind {
             ProducerKind::Factory => '5',
         }
     }
+
+    /// Index in the producers vec.
+    pub fn index(&self) -> usize {
+        match self {
+            ProducerKind::Cursor => 0,
+            ProducerKind::Grandma => 1,
+            ProducerKind::Farm => 2,
+            ProducerKind::Mine => 3,
+            ProducerKind::Factory => 4,
+        }
+    }
 }
 
 /// A single type of producer.
@@ -90,18 +101,45 @@ impl Producer {
         self.kind.base_cost() * 1.15_f64.powi(self.count as i32)
     }
 
-    /// Cookies per second from this producer type.
-    pub fn cps(&self) -> f64 {
+    /// Base CPS from this producer type (without synergy).
+    pub fn base_cps(&self) -> f64 {
         self.count as f64 * self.kind.base_rate() * self.multiplier
     }
 
-    /// CPS gained by buying the next unit.
+    /// CPS with synergy bonus applied.
+    pub fn cps_with_synergy(&self, synergy_bonus: f64) -> f64 {
+        self.base_cps() * (1.0 + synergy_bonus)
+    }
+
+    /// CPS gained by buying the next unit (with synergy).
+    pub fn next_unit_cps_with_synergy(&self, synergy_bonus: f64) -> f64 {
+        self.kind.base_rate() * self.multiplier * (1.0 + synergy_bonus)
+    }
+
+    /// Payback time in seconds with synergy.
+    pub fn payback_seconds_with_synergy(&self, synergy_bonus: f64) -> Option<f64> {
+        let cps = self.next_unit_cps_with_synergy(synergy_bonus);
+        if cps > 0.0 {
+            Some(self.cost() / cps)
+        } else {
+            None
+        }
+    }
+
+    /// CPS without synergy (used in tests).
+    #[cfg(test)]
+    pub fn cps(&self) -> f64 {
+        self.base_cps()
+    }
+
+    /// Next unit CPS without synergy (used in tests).
+    #[cfg(test)]
     pub fn next_unit_cps(&self) -> f64 {
         self.kind.base_rate() * self.multiplier
     }
 
-    /// Payback time in seconds: how long until the next unit pays for itself.
-    /// Returns None if next_unit_cps is zero (shouldn't happen normally).
+    /// Payback without synergy (used in tests).
+    #[cfg(test)]
     pub fn payback_seconds(&self) -> Option<f64> {
         let cps = self.next_unit_cps();
         if cps > 0.0 {
@@ -112,17 +150,76 @@ impl Producer {
     }
 }
 
+/// Upgrade effect type.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UpgradeEffect {
+    /// Add to cookies_per_click.
+    ClickPower(f64),
+    /// Multiply a producer's base rate.
+    ProducerMultiplier { target: ProducerKind, multiplier: f64 },
+    /// Double the synergy bonus for a producer.
+    SynergyBoost { target: ProducerKind },
+    /// Each unit of `source` gives `target` +bonus% production.
+    CrossSynergy { source: ProducerKind, target: ProducerKind, bonus_per_unit: f64 },
+}
+
 /// An available upgrade.
 #[derive(Clone, Debug)]
 pub struct Upgrade {
     pub name: String,
     pub description: String,
     pub cost: f64,
-    /// Which producer kind this upgrade affects.
-    pub target: ProducerKind,
-    /// Multiplier to apply (e.g. 2.0 = double rate).
-    pub multiplier: f64,
     pub purchased: bool,
+    /// Effect to apply when purchased.
+    pub effect: UpgradeEffect,
+    /// Unlock condition: requires this producer to have >= count.
+    pub unlock_condition: Option<(ProducerKind, u32)>,
+}
+
+/// Golden cookie bonus effect types.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GoldenEffect {
+    /// Multiply all production for duration.
+    ProductionFrenzy { multiplier: f64 },
+    /// Multiply click power for duration.
+    ClickFrenzy { multiplier: f64 },
+    /// Instant cookies = CPS * seconds.
+    InstantBonus { cps_seconds: f64 },
+}
+
+impl GoldenEffect {
+    pub fn description(&self) -> &str {
+        match self {
+            GoldenEffect::ProductionFrenzy { .. } => "生産フィーバー！",
+            GoldenEffect::ClickFrenzy { .. } => "クリックラッシュ！",
+            GoldenEffect::InstantBonus { .. } => "ラッキークッキー！",
+        }
+    }
+
+    pub fn detail(&self) -> String {
+        match self {
+            GoldenEffect::ProductionFrenzy { multiplier } => format!("生産×{} 発動中！", multiplier),
+            GoldenEffect::ClickFrenzy { multiplier } => format!("クリック×{} 発動中！", multiplier),
+            GoldenEffect::InstantBonus { cps_seconds } => format!("CPS×{}秒分GET！", cps_seconds),
+        }
+    }
+}
+
+/// Active golden cookie event.
+#[derive(Clone, Debug)]
+pub struct GoldenCookieEvent {
+    /// Ticks until the golden cookie disappears if not clicked.
+    pub appear_ticks_left: u32,
+    /// Whether the player has claimed this event.
+    pub claimed: bool,
+}
+
+/// Active buff from a golden cookie.
+#[derive(Clone, Debug)]
+pub struct ActiveBuff {
+    pub effect: GoldenEffect,
+    /// Ticks remaining for this buff.
+    pub ticks_left: u32,
 }
 
 /// Log entry for the Cookie game.
@@ -154,6 +251,20 @@ pub struct CookieState {
     pub anim_frame: u32,
     /// Recent click flash timer (ticks remaining for visual feedback).
     pub click_flash: u32,
+    /// Synergy bonus multiplier (from upgrades, default 1.0).
+    pub synergy_multiplier: f64,
+    /// Cross-synergy bonuses: (source, target, bonus_per_unit).
+    pub cross_synergies: Vec<(ProducerKind, ProducerKind, f64)>,
+    /// Golden cookie: ticks until next spawn.
+    pub golden_next_spawn: u32,
+    /// Current golden cookie event (if any).
+    pub golden_event: Option<GoldenCookieEvent>,
+    /// Active buffs from claimed golden cookies.
+    pub active_buffs: Vec<ActiveBuff>,
+    /// Total golden cookies claimed (for stats).
+    pub golden_cookies_claimed: u32,
+    /// Pseudo-random state for deterministic golden cookie spawning.
+    pub rng_state: u32,
 }
 
 impl CookieState {
@@ -163,56 +274,7 @@ impl CookieState {
             .map(|k| Producer::new(k.clone()))
             .collect();
 
-        let upgrades = vec![
-            Upgrade {
-                name: "強化クリック".into(),
-                description: "クリック +1".into(),
-                cost: 100.0,
-                target: ProducerKind::Cursor,
-                multiplier: 1.0, // special: adds to click power
-                purchased: false,
-            },
-            Upgrade {
-                name: "Cursor x2".into(),
-                description: "Cursor の生産 2倍".into(),
-                cost: 200.0,
-                target: ProducerKind::Cursor,
-                multiplier: 2.0,
-                purchased: false,
-            },
-            Upgrade {
-                name: "Grandma x2".into(),
-                description: "Grandma の生産 2倍".into(),
-                cost: 1_000.0,
-                target: ProducerKind::Grandma,
-                multiplier: 2.0,
-                purchased: false,
-            },
-            Upgrade {
-                name: "Farm x2".into(),
-                description: "Farm の生産 2倍".into(),
-                cost: 11_000.0,
-                target: ProducerKind::Farm,
-                multiplier: 2.0,
-                purchased: false,
-            },
-            Upgrade {
-                name: "Mine x2".into(),
-                description: "Mine の生産 2倍".into(),
-                cost: 120_000.0,
-                target: ProducerKind::Mine,
-                multiplier: 2.0,
-                purchased: false,
-            },
-            Upgrade {
-                name: "Factory x2".into(),
-                description: "Factory の生産 2倍".into(),
-                cost: 1_300_000.0,
-                target: ProducerKind::Factory,
-                multiplier: 2.0,
-                purchased: false,
-            },
-        ];
+        let upgrades = Self::create_upgrades();
 
         Self {
             cookies: 0.0,
@@ -228,12 +290,268 @@ impl CookieState {
             show_upgrades: false,
             anim_frame: 0,
             click_flash: 0,
+            synergy_multiplier: 1.0,
+            cross_synergies: Vec::new(),
+            golden_next_spawn: 300, // First golden cookie after 30 seconds
+            golden_event: None,
+            active_buffs: Vec::new(),
+            golden_cookies_claimed: 0,
+            rng_state: 42,
         }
     }
 
-    /// Total cookies per second from all producers.
+    fn create_upgrades() -> Vec<Upgrade> {
+        vec![
+            // === Phase 1: Basic upgrades (original) ===
+            Upgrade {
+                name: "強化クリック".into(),
+                description: "クリック +1".into(),
+                cost: 100.0,
+                purchased: false,
+                effect: UpgradeEffect::ClickPower(1.0),
+                unlock_condition: None,
+            },
+            Upgrade {
+                name: "Cursor x2".into(),
+                description: "Cursor の生産 2倍".into(),
+                cost: 200.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Cursor,
+                    multiplier: 2.0,
+                },
+                unlock_condition: None,
+            },
+            Upgrade {
+                name: "Grandma x2".into(),
+                description: "Grandma の生産 2倍".into(),
+                cost: 1_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Grandma,
+                    multiplier: 2.0,
+                },
+                unlock_condition: None,
+            },
+            Upgrade {
+                name: "Farm x2".into(),
+                description: "Farm の生産 2倍".into(),
+                cost: 11_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Farm,
+                    multiplier: 2.0,
+                },
+                unlock_condition: None,
+            },
+            Upgrade {
+                name: "Mine x2".into(),
+                description: "Mine の生産 2倍".into(),
+                cost: 120_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Mine,
+                    multiplier: 2.0,
+                },
+                unlock_condition: None,
+            },
+            Upgrade {
+                name: "Factory x2".into(),
+                description: "Factory の生産 2倍".into(),
+                cost: 1_300_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Factory,
+                    multiplier: 2.0,
+                },
+                unlock_condition: None,
+            },
+            // === Phase 2: Synergy upgrades (unlocked by milestones) ===
+            Upgrade {
+                name: "おばあちゃんの知恵".into(),
+                description: "Grandma1台→Cursor+1%".into(),
+                cost: 500.0,
+                purchased: false,
+                effect: UpgradeEffect::CrossSynergy {
+                    source: ProducerKind::Grandma,
+                    target: ProducerKind::Cursor,
+                    bonus_per_unit: 0.01,
+                },
+                unlock_condition: Some((ProducerKind::Grandma, 5)),
+            },
+            Upgrade {
+                name: "農場の恵み".into(),
+                description: "Farm1台→Grandma+2%".into(),
+                cost: 5_500.0,
+                purchased: false,
+                effect: UpgradeEffect::CrossSynergy {
+                    source: ProducerKind::Farm,
+                    target: ProducerKind::Grandma,
+                    bonus_per_unit: 0.02,
+                },
+                unlock_condition: Some((ProducerKind::Farm, 5)),
+            },
+            Upgrade {
+                name: "鉱石の肥料".into(),
+                description: "Mine1台→Farm+3%".into(),
+                cost: 60_000.0,
+                purchased: false,
+                effect: UpgradeEffect::CrossSynergy {
+                    source: ProducerKind::Mine,
+                    target: ProducerKind::Farm,
+                    bonus_per_unit: 0.03,
+                },
+                unlock_condition: Some((ProducerKind::Mine, 5)),
+            },
+            Upgrade {
+                name: "工場の掘削機".into(),
+                description: "Factory1台→Mine+5%".into(),
+                cost: 650_000.0,
+                purchased: false,
+                effect: UpgradeEffect::CrossSynergy {
+                    source: ProducerKind::Factory,
+                    target: ProducerKind::Mine,
+                    bonus_per_unit: 0.05,
+                },
+                unlock_condition: Some((ProducerKind::Factory, 5)),
+            },
+            Upgrade {
+                name: "自動制御システム".into(),
+                description: "Cursor10台毎→Factory+1%".into(),
+                cost: 500_000.0,
+                purchased: false,
+                effect: UpgradeEffect::CrossSynergy {
+                    source: ProducerKind::Cursor,
+                    target: ProducerKind::Factory,
+                    bonus_per_unit: 0.001,
+                },
+                unlock_condition: Some((ProducerKind::Cursor, 25)),
+            },
+            // === Phase 3: Advanced multipliers (unlocked by count milestones) ===
+            Upgrade {
+                name: "Cursor x3".into(),
+                description: "Cursor の生産 3倍".into(),
+                cost: 5_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Cursor,
+                    multiplier: 3.0,
+                },
+                unlock_condition: Some((ProducerKind::Cursor, 25)),
+            },
+            Upgrade {
+                name: "Grandma x3".into(),
+                description: "Grandma の生産 3倍".into(),
+                cost: 25_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Grandma,
+                    multiplier: 3.0,
+                },
+                unlock_condition: Some((ProducerKind::Grandma, 25)),
+            },
+            Upgrade {
+                name: "Farm x3".into(),
+                description: "Farm の生産 3倍".into(),
+                cost: 275_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Farm,
+                    multiplier: 3.0,
+                },
+                unlock_condition: Some((ProducerKind::Farm, 25)),
+            },
+            Upgrade {
+                name: "シナジー倍化".into(),
+                description: "全シナジー効果 2倍".into(),
+                cost: 2_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::SynergyBoost {
+                    target: ProducerKind::Factory,
+                },
+                unlock_condition: Some((ProducerKind::Factory, 10)),
+            },
+            Upgrade {
+                name: "超強化クリック".into(),
+                description: "クリック +5".into(),
+                cost: 50_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ClickPower(5.0),
+                unlock_condition: Some((ProducerKind::Cursor, 50)),
+            },
+        ]
+    }
+
+    /// Calculate the synergy bonus for a specific producer kind.
+    /// Returns the total bonus as a fraction (e.g. 0.10 = +10%).
+    pub fn synergy_bonus(&self, target: &ProducerKind) -> f64 {
+        let mut bonus = 0.0;
+
+        // Built-in synergies (always active, part of game design)
+        let base_synergies: &[(ProducerKind, ProducerKind, f64)] = &[
+            // (source, target, bonus_per_source_unit)
+            (ProducerKind::Grandma, ProducerKind::Cursor, 0.01),   // +1% per Grandma
+            (ProducerKind::Farm, ProducerKind::Grandma, 0.02),     // +2% per Farm
+            (ProducerKind::Mine, ProducerKind::Farm, 0.03),        // +3% per Mine
+            (ProducerKind::Factory, ProducerKind::Mine, 0.05),     // +5% per Factory
+            (ProducerKind::Cursor, ProducerKind::Factory, 0.001),  // +0.1% per Cursor
+        ];
+
+        for (source, tgt, rate) in base_synergies {
+            if tgt == target {
+                let source_count = self.producers[source.index()].count as f64;
+                bonus += source_count * rate;
+            }
+        }
+
+        // Cross-synergies from upgrades
+        for (source, tgt, rate) in &self.cross_synergies {
+            if tgt == target {
+                let source_count = self.producers[source.index()].count as f64;
+                bonus += source_count * rate;
+            }
+        }
+
+        bonus * self.synergy_multiplier
+    }
+
+    /// Total CPS including synergies and active buffs.
     pub fn total_cps(&self) -> f64 {
-        self.producers.iter().map(|p| p.cps()).sum()
+        let base: f64 = self.producers.iter().map(|p| {
+            let syn = self.synergy_bonus(&p.kind);
+            p.cps_with_synergy(syn)
+        }).sum();
+
+        // Apply production frenzy buff
+        let mut multiplier = 1.0;
+        for buff in &self.active_buffs {
+            if let GoldenEffect::ProductionFrenzy { multiplier: m } = &buff.effect {
+                multiplier *= m;
+            }
+        }
+
+        base * multiplier
+    }
+
+    /// Effective cookies per click (with buffs).
+    pub fn effective_click_power(&self) -> f64 {
+        let mut power = self.cookies_per_click;
+        for buff in &self.active_buffs {
+            if let GoldenEffect::ClickFrenzy { multiplier } = &buff.effect {
+                power *= multiplier;
+            }
+        }
+        power
+    }
+
+    /// Check if an upgrade's unlock condition is met.
+    pub fn is_upgrade_unlocked(&self, upgrade: &Upgrade) -> bool {
+        match &upgrade.unlock_condition {
+            None => true,
+            Some((kind, required_count)) => {
+                self.producers[kind.index()].count >= *required_count
+            }
+        }
     }
 
     pub fn add_log(&mut self, text: &str, is_important: bool) {
@@ -244,6 +562,16 @@ impl CookieState {
         if self.log.len() > 50 {
             self.log.remove(0);
         }
+    }
+
+    /// Simple pseudo-random number generator (xorshift32).
+    pub fn next_random(&mut self) -> u32 {
+        let mut x = self.rng_state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng_state = x;
+        x
     }
 }
 
@@ -295,8 +623,10 @@ mod tests {
         let mut state = CookieState::new();
         state.producers[0].count = 10; // 10 cursors = 1.0 cps
         state.producers[1].count = 3;  // 3 grandmas = 3.0 cps
-        let expected = 10.0 * 0.1 + 3.0 * 1.0;
-        assert!((state.total_cps() - expected).abs() < 0.001);
+        // With synergies: cursor gets +1% per grandma (3%) = 1.0 * 1.03 = 1.03
+        // Grandma gets no synergy yet (0 farms) = 3.0
+        let expected = 1.0 * 1.03 + 3.0;
+        assert!((state.total_cps() - expected).abs() < 0.01);
     }
 
     #[test]
@@ -331,5 +661,67 @@ mod tests {
             state.add_log(&format!("msg {}", i), false);
         }
         assert!(state.log.len() <= 50);
+    }
+
+    #[test]
+    fn synergy_bonus_grandma_to_cursor() {
+        let mut state = CookieState::new();
+        state.producers[1].count = 10; // 10 grandmas
+        let bonus = state.synergy_bonus(&ProducerKind::Cursor);
+        assert!((bonus - 0.10).abs() < 0.001); // 10 * 1% = 10%
+    }
+
+    #[test]
+    fn synergy_circular_all_producers() {
+        let mut state = CookieState::new();
+        state.producers[0].count = 100; // 100 cursors → Factory +0.1% each = +10%
+        state.producers[4].count = 5;   // 5 factories → Mine +5% each = +25%
+        let factory_bonus = state.synergy_bonus(&ProducerKind::Factory);
+        assert!((factory_bonus - 0.10).abs() < 0.01); // 100 * 0.001 = 0.10
+        let mine_bonus = state.synergy_bonus(&ProducerKind::Mine);
+        assert!((mine_bonus - 0.25).abs() < 0.01); // 5 * 0.05 = 0.25
+    }
+
+    #[test]
+    fn synergy_multiplier_doubles() {
+        let mut state = CookieState::new();
+        state.producers[1].count = 10;
+        state.synergy_multiplier = 2.0;
+        let bonus = state.synergy_bonus(&ProducerKind::Cursor);
+        assert!((bonus - 0.20).abs() < 0.001); // 10% * 2 = 20%
+    }
+
+    #[test]
+    fn upgrade_unlock_condition() {
+        let mut state = CookieState::new();
+        // "おばあちゃんの知恵" requires Grandma >= 5
+        let synergy_upgrade = &state.upgrades[6];
+        assert!(!state.is_upgrade_unlocked(synergy_upgrade));
+        state.producers[1].count = 5;
+        assert!(state.is_upgrade_unlocked(synergy_upgrade));
+    }
+
+    #[test]
+    fn effective_click_with_buff() {
+        let mut state = CookieState::new();
+        state.cookies_per_click = 2.0;
+        state.active_buffs.push(ActiveBuff {
+            effect: GoldenEffect::ClickFrenzy { multiplier: 10.0 },
+            ticks_left: 100,
+        });
+        assert!((state.effective_click_power() - 20.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn production_frenzy_buff() {
+        let mut state = CookieState::new();
+        state.producers[1].count = 5; // 5 grandmas = 5.0 cps base
+        let base = state.total_cps();
+        state.active_buffs.push(ActiveBuff {
+            effect: GoldenEffect::ProductionFrenzy { multiplier: 7.0 },
+            ticks_left: 70,
+        });
+        let buffed = state.total_cps();
+        assert!((buffed - base * 7.0).abs() < 0.01);
     }
 }

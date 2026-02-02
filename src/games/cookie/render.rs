@@ -1,4 +1,4 @@
-/// Cookie Factory rendering with animations and help.
+//! Cookie Factory rendering with animations, synergies, golden cookies, and buffs.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -46,22 +46,31 @@ fn render_wide(
         .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(area);
 
+    // Calculate left panel height based on active buffs
+    let buff_height = if state.active_buffs.is_empty() { 0 } else { 2 + state.active_buffs.len() as u16 };
+    let golden_height = if state.golden_event.is_some() { 3 } else { 0 };
+    let extra_height = buff_height + golden_height;
+
     let left_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5),  // Cookie display + click
+            Constraint::Length(extra_height), // Buffs + Golden
             Constraint::Min(5),    // Producers or Upgrades
             Constraint::Length(5), // Controls/help
         ])
         .split(h_chunks[0]);
 
     render_cookie_display(state, f, left_chunks[0], false, click_state);
-    if state.show_upgrades {
-        render_upgrades(state, f, left_chunks[1], click_state);
-    } else {
-        render_producers(state, f, left_chunks[1], click_state);
+    if extra_height > 0 {
+        render_buffs_and_golden(state, f, left_chunks[1], click_state);
     }
-    render_help(state, f, left_chunks[2], click_state);
+    if state.show_upgrades {
+        render_upgrades(state, f, left_chunks[2], click_state);
+    } else {
+        render_producers(state, f, left_chunks[2], click_state);
+    }
+    render_help(state, f, left_chunks[3], click_state);
     render_log(state, f, h_chunks[1]);
 }
 
@@ -71,22 +80,28 @@ fn render_narrow(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let buff_height = if state.active_buffs.is_empty() && state.golden_event.is_none() { 0 } else { 3 };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Cookie display compact
+            Constraint::Length(buff_height),
             Constraint::Min(5),   // Producers or Upgrades
             Constraint::Length(5), // Controls/help
         ])
         .split(area);
 
     render_cookie_display(state, f, chunks[0], true, click_state);
-    if state.show_upgrades {
-        render_upgrades(state, f, chunks[1], click_state);
-    } else {
-        render_producers(state, f, chunks[1], click_state);
+    if buff_height > 0 {
+        render_buffs_and_golden(state, f, chunks[1], click_state);
     }
-    render_help(state, f, chunks[2], click_state);
+    if state.show_upgrades {
+        render_upgrades(state, f, chunks[2], click_state);
+    } else {
+        render_producers(state, f, chunks[2], click_state);
+    }
+    render_help(state, f, chunks[3], click_state);
 }
 
 fn render_cookie_display(
@@ -105,6 +120,7 @@ fn render_cookie_display(
         ' '
     };
 
+    let click_power = state.effective_click_power();
     let click_style = if state.click_flash > 0 {
         Style::default()
             .fg(Color::Yellow)
@@ -121,7 +137,19 @@ fn render_cookie_display(
         Borders::ALL
     };
 
+    // Show buff indicator in title if any buff is active
+    let title = if !state.active_buffs.is_empty() {
+        " Cookie Factory ⚡ "
+    } else {
+        " Cookie Factory "
+    };
+
     if is_narrow {
+        let click_label = if click_power > 1.0 {
+            format!(" [C]+{} ", format_number(click_power))
+        } else {
+            " [C]CLICK ".to_string()
+        };
         let line = Line::from(vec![
             Span::styled(
                 format!("🍪 {} ", cookies_str),
@@ -133,14 +161,14 @@ fn render_cookie_display(
                 format!("{} {}/s ", spinner, cps_str),
                 Style::default().fg(Color::White),
             ),
-            Span::styled(" [C]CLICK ", click_style),
+            Span::styled(click_label, click_style),
         ]);
         let widget = Paragraph::new(line)
             .block(
                 Block::default()
                     .borders(borders)
                     .border_style(Style::default().fg(Color::Yellow))
-                    .title(" Cookie Factory "),
+                    .title(title),
             )
             .alignment(Alignment::Center);
         f.render_widget(widget, area);
@@ -148,6 +176,12 @@ fn render_cookie_display(
         // Animated cookie + stats
         let cookie_frame_idx = (state.anim_frame / 5) as usize % COOKIE_FRAMES.len();
         let cookie_art = COOKIE_FRAMES[cookie_frame_idx];
+
+        let click_label = if click_power > 1.0 {
+            format!(">>> [C] +{} <<< ", format_number(click_power))
+        } else {
+            ">>> [C] CLICK! <<< ".to_string()
+        };
 
         let lines = vec![
             Line::from(vec![
@@ -169,7 +203,7 @@ fn render_cookie_display(
             Line::from(vec![
                 Span::styled(cookie_art[2], Style::default().fg(Color::Yellow)),
                 Span::styled("  ", Style::default()),
-                Span::styled(">>> [C] CLICK! <<< ", click_style),
+                Span::styled(click_label, click_style),
             ]),
         ];
 
@@ -177,7 +211,7 @@ fn render_cookie_display(
             Block::default()
                 .borders(borders)
                 .border_style(Style::default().fg(Color::Yellow))
-                .title(" Cookie Factory "),
+                .title(title),
         );
         f.render_widget(widget, area);
     }
@@ -189,18 +223,99 @@ fn render_cookie_display(
     }
 }
 
+/// Render active buffs and golden cookie indicator.
+fn render_buffs_and_golden(
+    state: &CookieState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Golden cookie indicator
+    if let Some(ref event) = state.golden_event {
+        let secs_left = event.appear_ticks_left as f64 / 10.0;
+        let blink = (state.anim_frame / 2).is_multiple_of(2);
+        let golden_style = if blink {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(" 🍪 ゴールデンクッキー！ ", golden_style),
+            Span::styled(
+                format!("[G]で取得 (残り{:.0}秒)", secs_left),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+
+        // Register golden cookie click target
+        let mut cs = click_state.borrow_mut();
+        cs.add_target(area.y, 'g');
+        if area.height > 1 {
+            cs.add_target(area.y + 1, 'g');
+        }
+    }
+
+    // Active buffs
+    for buff in &state.active_buffs {
+        let secs_left = buff.ticks_left as f64 / 10.0;
+        let bar_len = 10;
+        let max_ticks = match &buff.effect {
+            super::state::GoldenEffect::ProductionFrenzy { .. } => 70,
+            super::state::GoldenEffect::ClickFrenzy { .. } => 100,
+            _ => 70,
+        };
+        let filled = ((buff.ticks_left as f64 / max_ticks as f64) * bar_len as f64).ceil() as usize;
+        let bar: String = "█".repeat(filled.min(bar_len)) + &"░".repeat(bar_len - filled.min(bar_len));
+
+        let buff_color = match &buff.effect {
+            super::state::GoldenEffect::ProductionFrenzy { .. } => Color::Magenta,
+            super::state::GoldenEffect::ClickFrenzy { .. } => Color::Cyan,
+            _ => Color::Yellow,
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" ⚡ {} ", buff.effect.detail()),
+                Style::default().fg(buff_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} {:.0}s", bar, secs_left),
+                Style::default().fg(buff_color),
+            ),
+        ]));
+    }
+
+    if !lines.is_empty() {
+        let widget = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::LEFT | Borders::RIGHT)
+                .border_style(Style::default().fg(Color::Yellow)),
+        );
+        f.render_widget(widget, area);
+    }
+}
+
 fn render_producers(
     state: &CookieState,
     f: &mut Frame,
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    // Find the best ROI (lowest payback time) among affordable producers
+    // Find the best ROI (lowest payback time) among affordable producers, using synergy
     let best_payback = state
         .producers
         .iter()
         .filter(|p| state.cookies >= p.cost())
-        .filter_map(|p| p.payback_seconds())
+        .filter_map(|p| {
+            let syn = state.synergy_bonus(&p.kind);
+            p.payback_seconds_with_synergy(syn)
+        })
         .fold(f64::MAX, f64::min);
 
     let items: Vec<ListItem> = state
@@ -209,9 +324,11 @@ fn render_producers(
         .map(|p| {
             let can_afford = state.cookies >= p.cost();
             let cost_str = format_number(p.cost().floor());
-            let cps_str = format_number(p.cps());
-            let next_cps = p.next_unit_cps();
-            let payback = p.payback_seconds();
+            let syn_bonus = state.synergy_bonus(&p.kind);
+            let cps = p.cps_with_synergy(syn_bonus);
+            let cps_str = format_number(cps);
+            let next_cps = p.next_unit_cps_with_synergy(syn_bonus);
+            let payback = p.payback_seconds_with_synergy(syn_bonus);
 
             // Check if this is the best ROI among affordable options
             let is_best_roi = can_afford
@@ -233,6 +350,13 @@ fn render_producers(
                 Some(s) if s < 3600.0 => format!("{}m", (s / 60.0).round() as u32),
                 Some(s) => format!("{}h", (s / 3600.0).round() as u32),
                 None => "---".to_string(),
+            };
+
+            // Synergy indicator
+            let syn_str = if syn_bonus > 0.001 {
+                format!("+{:.0}%", syn_bonus * 100.0)
+            } else {
+                String::new()
             };
 
             let key_style = if is_best_roi {
@@ -265,10 +389,11 @@ fn render_producers(
             } else {
                 Style::default().fg(Color::DarkGray)
             };
+            let syn_style = Style::default().fg(Color::Magenta);
 
             let best_marker = if is_best_roi { "★" } else { " " };
 
-            ListItem::new(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(format!("{}[{}] ", best_marker, p.kind.key()), key_style),
                 Span::styled(
                     format!("{:<8} {:>2}x ", p.kind.name(), p.count),
@@ -282,7 +407,13 @@ fn render_producers(
                     roi_style,
                 ),
                 Span::styled(format!("回収{}", payback_str), roi_style),
-            ]))
+            ];
+
+            if !syn_str.is_empty() {
+                spans.push(Span::styled(format!(" {}", syn_str), syn_style));
+            }
+
+            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -306,41 +437,63 @@ fn render_upgrades(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let available: Vec<(usize, &super::state::Upgrade)> = state
+    // Show unpurchased upgrades, distinguishing unlocked vs locked
+    let available: Vec<(usize, &super::state::Upgrade, bool)> = state
         .upgrades
         .iter()
         .enumerate()
         .filter(|(_, u)| !u.purchased)
+        .map(|(i, u)| (i, u, state.is_upgrade_unlocked(u)))
         .collect();
 
     let items: Vec<ListItem> = available
         .iter()
         .enumerate()
-        .map(|(display_idx, (_, upgrade))| {
-            let can_afford = state.cookies >= upgrade.cost;
+        .map(|(display_idx, (_, upgrade, unlocked))| {
+            let can_afford = state.cookies >= upgrade.cost && *unlocked;
             let key = (b'a' + display_idx as u8) as char;
             let cost_str = format_number(upgrade.cost);
 
-            let key_style = if can_afford {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            let text_style = if can_afford {
-                Style::default().fg(Color::White)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
+            if *unlocked {
+                let key_style = if can_afford {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                let text_style = if can_afford {
+                    Style::default().fg(Color::White)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
 
-            ListItem::new(Line::from(vec![
-                Span::styled(format!(" [{}] ", key), key_style),
-                Span::styled(
-                    format!("{} - {} ({})", upgrade.name, upgrade.description, cost_str),
-                    text_style,
-                ),
-            ]))
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" [{}] ", key), key_style),
+                    Span::styled(
+                        format!("{} - {} ({})", upgrade.name, upgrade.description, cost_str),
+                        text_style,
+                    ),
+                ]))
+            } else {
+                // Locked upgrade — show hint about unlock condition
+                let hint = match &upgrade.unlock_condition {
+                    Some((kind, count)) => {
+                        let current = state.producers[kind.index()].count;
+                        format!("🔒 {} {}台必要(現在{}台)", kind.name(), count, current)
+                    }
+                    None => "🔒".to_string(),
+                };
+
+                ListItem::new(Line::from(vec![
+                    Span::styled(format!(" [{}] ", key), Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{} - {} ", upgrade.name, upgrade.description),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(hint, Style::default().fg(Color::Red)),
+                ]))
+            }
         })
         .collect();
 
@@ -356,7 +509,7 @@ fn render_upgrades(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Magenta))
-            .title(" Upgrades [A-F]で購入 "),
+            .title(" Upgrades [A-Z]で購入 "),
     );
     f.render_widget(widget, area);
 
@@ -379,6 +532,17 @@ fn render_help(
         "[U] Upgradeを見る"
     };
 
+    let golden_hint = if state.golden_event.is_some() {
+        Span::styled(
+            " [G] ゴールデン取得！",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("", Style::default())
+    };
+
     let lines = vec![
         Line::from(vec![
             Span::styled(
@@ -395,6 +559,7 @@ fn render_help(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("Producer購入", Style::default().fg(Color::White)),
+            golden_hint,
         ]),
         Line::from(vec![
             Span::styled(
