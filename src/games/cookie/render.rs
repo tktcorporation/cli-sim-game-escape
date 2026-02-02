@@ -14,12 +14,18 @@ use crate::input::{is_narrow_layout, ClickState};
 use super::logic::format_number;
 use super::state::CookieState;
 
-/// Animated cookie frames (cycles every ~2 seconds at 10 ticks/sec).
+/// Animated cookie frames — normal state (cycles every ~2 seconds at 10 ticks/sec).
 const COOKIE_FRAMES: &[&[&str]] = &[
-    &["  (@@)  ", " (@@@@) ", "  (@@)  "],
-    &["  (##)  ", " (####) ", "  (##)  "],
-    &["  (**) ", " (****) ", "  (**)  "],
-    &["  (@@)  ", " (@@@@) ", "  (@@)  "],
+    &["   ╭━●━╮  ", "  ━●━━━●━ ", "   ╰━●━╯  "],
+    &["   ╭━○━╮  ", "  ━○━━━○━ ", "   ╰━○━╯  "],
+    &["   ╭━◉━╮  ", "  ━◉━━━◉━ ", "   ╰━◉━╯  "],
+    &["   ╭━○━╮  ", "  ━○━━━○━ ", "   ╰━○━╯  "],
+];
+
+/// Cookie frames — "pressed" state when clicked.
+const COOKIE_CLICK_FRAMES: &[&[&str]] = &[
+    &["  ╭━━●━━╮ ", " ━●━━━━━●━", "  ╰━━●━━╯ "],
+    &["    ╭●╮   ", "   ━●●●━  ", "    ╰●╯   "],
 ];
 
 /// Spinner characters for production indicator.
@@ -139,8 +145,29 @@ fn render_cookie_display(
         Borders::ALL
     };
 
-    // Show buff indicator in title if any buff is active
-    let title = if !state.active_buffs.is_empty() {
+    // Cookie color changes with click flash
+    let cookie_color = if state.click_flash > 0 {
+        Color::White
+    } else {
+        Color::Yellow
+    };
+
+    // Border style changes on purchase
+    let border_color = if state.purchase_flash > 0 {
+        let phase = state.purchase_flash % 3;
+        match phase {
+            0 => Color::Magenta,
+            1 => Color::Cyan,
+            _ => Color::Green,
+        }
+    } else {
+        Color::Yellow
+    };
+
+    // Show buff/purchase indicator in title
+    let title = if state.purchase_flash > 0 {
+        " ✨ Cookie Factory ✨ "
+    } else if !state.active_buffs.is_empty() {
         " Cookie Factory ⚡ "
     } else {
         " Cookie Factory "
@@ -156,7 +183,7 @@ fn render_cookie_display(
             Span::styled(
                 format!("🍪 {} ", cookies_str),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(cookie_color)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -169,15 +196,20 @@ fn render_cookie_display(
             .block(
                 Block::default()
                     .borders(borders)
-                    .border_style(Style::default().fg(Color::Yellow))
+                    .border_style(Style::default().fg(border_color))
                     .title(title),
             )
             .alignment(Alignment::Center);
         f.render_widget(widget, area);
     } else {
-        // Animated cookie + stats
-        let cookie_frame_idx = (state.anim_frame / 5) as usize % COOKIE_FRAMES.len();
-        let cookie_art = COOKIE_FRAMES[cookie_frame_idx];
+        // Animated cookie + stats (pressed animation on click)
+        let cookie_art = if state.click_flash > 0 {
+            let idx = state.click_flash as usize % COOKIE_CLICK_FRAMES.len();
+            COOKIE_CLICK_FRAMES[idx]
+        } else {
+            let idx = (state.anim_frame / 5) as usize % COOKIE_FRAMES.len();
+            COOKIE_FRAMES[idx]
+        };
 
         let click_label = if click_power > 1.0 {
             format!(">>> [C] +{} <<< ", format_number(click_power))
@@ -187,7 +219,7 @@ fn render_cookie_display(
 
         let lines = vec![
             Line::from(vec![
-                Span::styled(cookie_art[0], Style::default().fg(Color::Yellow)),
+                Span::styled(cookie_art[0], Style::default().fg(cookie_color)),
                 Span::styled(
                     format!(" Cookies: {}", cookies_str),
                     Style::default()
@@ -196,14 +228,14 @@ fn render_cookie_display(
                 ),
             ]),
             Line::from(vec![
-                Span::styled(cookie_art[1], Style::default().fg(Color::Yellow)),
+                Span::styled(cookie_art[1], Style::default().fg(cookie_color)),
                 Span::styled(
                     format!(" {} {}/sec   Clicks: {}", spinner, cps_str, state.total_clicks),
                     Style::default().fg(Color::White),
                 ),
             ]),
             Line::from(vec![
-                Span::styled(cookie_art[2], Style::default().fg(Color::Yellow)),
+                Span::styled(cookie_art[2], Style::default().fg(cookie_color)),
                 Span::styled("  ", Style::default()),
                 Span::styled(click_label, click_style),
             ]),
@@ -212,16 +244,53 @@ fn render_cookie_display(
         let widget = Paragraph::new(lines).block(
             Block::default()
                 .borders(borders)
-                .border_style(Style::default().fg(Color::Yellow))
+                .border_style(Style::default().fg(border_color))
                 .title(title),
         );
         f.render_widget(widget, area);
+
+        // Render floating particles over the cookie area
+        render_particles(state, f, area);
     }
 
     // Register the whole cookie display area as a click target for 'c'
     let mut cs = click_state.borrow_mut();
     for row in area.y..area.y + area.height {
         cs.add_target(row, 'c');
+    }
+}
+
+/// Render floating particles as overlays on the cookie display area.
+fn render_particles(state: &CookieState, f: &mut Frame, area: Rect) {
+    let center_x = area.x + area.width / 2;
+    let base_y = area.y + area.height;
+
+    for particle in &state.particles {
+        let progress = 1.0 - (particle.life as f32 / particle.max_life as f32);
+        let rise = (progress * 4.0) as u16;
+        let y = base_y.saturating_sub(1 + rise);
+        let x = (center_x as i16 + particle.col_offset).max(area.x as i16) as u16;
+
+        if y >= area.y && y < area.y + area.height && x < area.x + area.width {
+            let color = if particle.life > particle.max_life * 2 / 3 {
+                Color::White
+            } else if particle.life > particle.max_life / 3 {
+                Color::Yellow
+            } else {
+                Color::DarkGray
+            };
+            let style = Style::default()
+                .fg(color)
+                .add_modifier(Modifier::BOLD);
+
+            let text_len = particle.text.len() as u16;
+            let available = area.x + area.width - x;
+            if text_len <= available {
+                let particle_area = Rect::new(x, y, text_len, 1);
+                let widget = Paragraph::new(Span::styled(&particle.text, style));
+                f.render_widget(widget, particle_area);
+            }
+        }
     }
 }
 
@@ -441,10 +510,15 @@ fn render_producers(
         })
         .collect();
 
+    let producer_border_color = if state.purchase_flash > 0 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
     let widget = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Green))
+            .border_style(Style::default().fg(producer_border_color))
             .title(" Producers [1-5]で購入 ★=最高効率 "),
     );
     f.render_widget(widget, area);
