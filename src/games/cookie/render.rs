@@ -130,7 +130,7 @@ fn render_tab_bar(
 
     // Tab labels with tracked positions for click targets
     let tab0 = " [1-5] Producers ";
-    let sep = " │ ";
+    let sep = " | ";  // ASCII pipe — 1 byte = 1 column (avoids UTF-8 width mismatch)
     let tab1 = " [U] Upgrades ";
     let tab2 = &milestone_label;
 
@@ -142,7 +142,7 @@ fn render_tab_bar(
         Span::styled(tab2.as_str(), tab_style(2, milestone_color)),
     ];
 
-    // Calculate column positions for each tab (accounting for area.x offset)
+    // Calculate column positions for each tab (all ASCII, so len() == display width)
     let col0_start = area.x;
     let col0_end = col0_start + tab0.len() as u16;
     let col1_start = col0_end + sep.len() as u16;
