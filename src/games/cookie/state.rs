@@ -166,6 +166,8 @@ pub enum UpgradeEffect {
     CountScaling { target: ProducerKind, bonus_per_unit: f64 },
     /// Each unit of `target` adds `percentage` of total CPS as bonus production.
     CpsPercentBonus { target: ProducerKind, percentage: f64 },
+    /// Kitten upgrade: multiplies CPS by (1 + milk * multiplier).
+    KittenBoost { multiplier: f64 },
 }
 
 /// An available upgrade.
@@ -259,6 +261,30 @@ impl MiniEventKind {
     }
 }
 
+/// Milestone condition types.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MilestoneCondition {
+    /// Total cookies baked all-time >= threshold.
+    TotalCookies(f64),
+    /// A specific producer count >= threshold.
+    ProducerCount(ProducerKind, u32),
+    /// Total CPS >= threshold.
+    CpsReached(f64),
+    /// Total manual clicks >= threshold.
+    TotalClicks(u64),
+    /// Golden cookies claimed >= threshold.
+    GoldenClaimed(u32),
+}
+
+/// A milestone (achievement) definition.
+#[derive(Clone, Debug)]
+pub struct Milestone {
+    pub name: String,
+    pub description: String,
+    pub condition: MilestoneCondition,
+    pub achieved: bool,
+}
+
 /// A floating text particle (e.g. "+1" rising from click area).
 #[derive(Clone, Debug)]
 pub struct Particle {
@@ -327,6 +353,16 @@ pub struct CookieState {
     pub mini_event_next: u32,
     /// Active discount (0.0 = no discount, 0.25 = 25% off next purchase).
     pub active_discount: f64,
+    /// Milestones (achievements).
+    pub milestones: Vec<Milestone>,
+    /// Milk level: achieved milestones / total milestones (0.0 to 1.0+).
+    pub milk: f64,
+    /// Whether showing milestones panel.
+    pub show_milestones: bool,
+    /// Flash timer for milestone achievement notification.
+    pub milestone_flash: u32,
+    /// Kitten multiplier applied to CPS (computed from milk × kitten upgrades).
+    pub kitten_multiplier: f64,
 }
 
 impl CookieState {
@@ -337,6 +373,8 @@ impl CookieState {
             .collect();
 
         let upgrades = Self::create_upgrades();
+
+        let milestones = Self::create_milestones();
 
         Self {
             cookies: 0.0,
@@ -365,6 +403,11 @@ impl CookieState {
             cps_percent_bonuses: Vec::new(),
             mini_event_next: 150, // First mini-event after 15 seconds
             active_discount: 0.0,
+            milestones,
+            milk: 0.0,
+            show_milestones: false,
+            milestone_flash: 0,
+            kitten_multiplier: 1.0,
         }
     }
 
@@ -737,7 +780,229 @@ impl CookieState {
                 },
                 unlock_condition: Some((ProducerKind::Factory, 15)),
             },
+            // === Kitten upgrades (scale with milk from milestones) ===
+            Upgrade {
+                name: "子猫の手伝い".into(),
+                description: "ミルク×5%のCPSボーナス".into(),
+                cost: 9_000.0,
+                purchased: false,
+                effect: UpgradeEffect::KittenBoost { multiplier: 0.05 },
+                unlock_condition: None, // unlocked by milk check in logic
+            },
+            Upgrade {
+                name: "子猫の労働者".into(),
+                description: "ミルク×10%のCPSボーナス".into(),
+                cost: 900_000.0,
+                purchased: false,
+                effect: UpgradeEffect::KittenBoost { multiplier: 0.10 },
+                unlock_condition: None,
+            },
+            Upgrade {
+                name: "子猫のエンジニア".into(),
+                description: "ミルク×20%のCPSボーナス".into(),
+                cost: 90_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::KittenBoost { multiplier: 0.20 },
+                unlock_condition: None,
+            },
+            Upgrade {
+                name: "子猫のマネージャー".into(),
+                description: "ミルク×30%のCPSボーナス".into(),
+                cost: 9_000_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::KittenBoost { multiplier: 0.30 },
+                unlock_condition: None,
+            },
         ]
+    }
+
+    fn create_milestones() -> Vec<Milestone> {
+        vec![
+            // === Cookie milestones ===
+            Milestone {
+                name: "はじめの一歩".into(),
+                description: "クッキーを100枚焼く".into(),
+                condition: MilestoneCondition::TotalCookies(100.0),
+                achieved: false,
+            },
+            Milestone {
+                name: "駆け出しベイカー".into(),
+                description: "クッキーを1,000枚焼く".into(),
+                condition: MilestoneCondition::TotalCookies(1_000.0),
+                achieved: false,
+            },
+            Milestone {
+                name: "パン屋の朝".into(),
+                description: "クッキーを10,000枚焼く".into(),
+                condition: MilestoneCondition::TotalCookies(10_000.0),
+                achieved: false,
+            },
+            Milestone {
+                name: "繁盛店".into(),
+                description: "クッキーを100,000枚焼く".into(),
+                condition: MilestoneCondition::TotalCookies(100_000.0),
+                achieved: false,
+            },
+            Milestone {
+                name: "クッキー長者".into(),
+                description: "クッキーを1,000,000枚焼く".into(),
+                condition: MilestoneCondition::TotalCookies(1_000_000.0),
+                achieved: false,
+            },
+            Milestone {
+                name: "クッキー財閥".into(),
+                description: "クッキーを100,000,000枚焼く".into(),
+                condition: MilestoneCondition::TotalCookies(100_000_000.0),
+                achieved: false,
+            },
+            Milestone {
+                name: "クッキー帝国".into(),
+                description: "クッキーを10,000,000,000枚焼く".into(),
+                condition: MilestoneCondition::TotalCookies(10_000_000_000.0),
+                achieved: false,
+            },
+            // === Click milestones ===
+            Milestone {
+                name: "クリッカー".into(),
+                description: "100回クリック".into(),
+                condition: MilestoneCondition::TotalClicks(100),
+                achieved: false,
+            },
+            Milestone {
+                name: "連打の達人".into(),
+                description: "1,000回クリック".into(),
+                condition: MilestoneCondition::TotalClicks(1_000),
+                achieved: false,
+            },
+            Milestone {
+                name: "指が止まらない".into(),
+                description: "10,000回クリック".into(),
+                condition: MilestoneCondition::TotalClicks(10_000),
+                achieved: false,
+            },
+            // === CPS milestones ===
+            Milestone {
+                name: "自動化の兆し".into(),
+                description: "CPS 10 達成".into(),
+                condition: MilestoneCondition::CpsReached(10.0),
+                achieved: false,
+            },
+            Milestone {
+                name: "小さな工場".into(),
+                description: "CPS 100 達成".into(),
+                condition: MilestoneCondition::CpsReached(100.0),
+                achieved: false,
+            },
+            Milestone {
+                name: "産業革命".into(),
+                description: "CPS 1,000 達成".into(),
+                condition: MilestoneCondition::CpsReached(1_000.0),
+                achieved: false,
+            },
+            Milestone {
+                name: "クッキー王国".into(),
+                description: "CPS 10,000 達成".into(),
+                condition: MilestoneCondition::CpsReached(10_000.0),
+                achieved: false,
+            },
+            Milestone {
+                name: "無限の生産力".into(),
+                description: "CPS 100,000 達成".into(),
+                condition: MilestoneCondition::CpsReached(100_000.0),
+                achieved: false,
+            },
+            // === Producer milestones ===
+            Milestone {
+                name: "Cursorコレクター".into(),
+                description: "Cursor 10台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::Cursor, 10),
+                achieved: false,
+            },
+            Milestone {
+                name: "Cursor軍団".into(),
+                description: "Cursor 50台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::Cursor, 50),
+                achieved: false,
+            },
+            Milestone {
+                name: "Cursorの海".into(),
+                description: "Cursor 100台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::Cursor, 100),
+                achieved: false,
+            },
+            Milestone {
+                name: "おばあちゃんの集い".into(),
+                description: "Grandma 10台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::Grandma, 10),
+                achieved: false,
+            },
+            Milestone {
+                name: "おばあちゃんの楽園".into(),
+                description: "Grandma 50台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::Grandma, 50),
+                achieved: false,
+            },
+            Milestone {
+                name: "農場主".into(),
+                description: "Farm 10台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::Farm, 10),
+                achieved: false,
+            },
+            Milestone {
+                name: "大農場経営".into(),
+                description: "Farm 50台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::Farm, 50),
+                achieved: false,
+            },
+            Milestone {
+                name: "鉱山王".into(),
+                description: "Mine 10台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::Mine, 10),
+                achieved: false,
+            },
+            Milestone {
+                name: "深層採掘".into(),
+                description: "Mine 50台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::Mine, 50),
+                achieved: false,
+            },
+            Milestone {
+                name: "工場長".into(),
+                description: "Factory 10台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::Factory, 10),
+                achieved: false,
+            },
+            Milestone {
+                name: "産業コンツェルン".into(),
+                description: "Factory 50台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::Factory, 50),
+                achieved: false,
+            },
+            // === Golden cookie milestones ===
+            Milestone {
+                name: "幸運の始まり".into(),
+                description: "ゴールデンクッキーを5回取得".into(),
+                condition: MilestoneCondition::GoldenClaimed(5),
+                achieved: false,
+            },
+            Milestone {
+                name: "ゴールドハンター".into(),
+                description: "ゴールデンクッキーを25回取得".into(),
+                condition: MilestoneCondition::GoldenClaimed(25),
+                achieved: false,
+            },
+            Milestone {
+                name: "ゴールデンマスター".into(),
+                description: "ゴールデンクッキーを77回取得".into(),
+                condition: MilestoneCondition::GoldenClaimed(77),
+                achieved: false,
+            },
+        ]
+    }
+
+    /// Count of achieved milestones.
+    pub fn achieved_milestone_count(&self) -> usize {
+        self.milestones.iter().filter(|m| m.achieved).count()
     }
 
     /// Calculate the synergy bonus for a specific producer kind.
@@ -809,7 +1074,10 @@ impl CookieState {
         let extra = self.cps_percent_extra(base);
         let total = base + extra;
 
-        // Step 3: Apply production frenzy buff
+        // Step 3: Apply kitten (milk) multiplier
+        let after_kitten = total * self.kitten_multiplier;
+
+        // Step 4: Apply production frenzy buff
         let mut multiplier = 1.0;
         for buff in &self.active_buffs {
             if let GoldenEffect::ProductionFrenzy { multiplier: m } = &buff.effect {
@@ -817,7 +1085,7 @@ impl CookieState {
             }
         }
 
-        total * multiplier
+        after_kitten * multiplier
     }
 
     /// Effective cookies per click (with buffs).
@@ -833,6 +1101,18 @@ impl CookieState {
 
     /// Check if an upgrade's unlock condition is met.
     pub fn is_upgrade_unlocked(&self, upgrade: &Upgrade) -> bool {
+        // Kitten upgrades require minimum milk level
+        if let UpgradeEffect::KittenBoost { multiplier } = &upgrade.effect {
+            let required_milk = match *multiplier as u32 {
+                0 => 0.10,  // 5% → 10% milk (≈3 milestones)
+                _ => *multiplier * 2.0, // 10%→20% milk, 20%→40%, 30%→60%
+            };
+            // First kitten is always available if milk > 0
+            let req = if *multiplier <= 0.05 { 0.0 } else { required_milk };
+            if self.milk < req {
+                return false;
+            }
+        }
         match &upgrade.unlock_condition {
             None => true,
             Some((kind, required_count)) => {

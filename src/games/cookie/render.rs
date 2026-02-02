@@ -77,7 +77,9 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
     if buff_height > 0 {
         render_buffs_and_golden(state, f, chunks[1], click_state);
     }
-    if state.show_upgrades {
+    if state.show_milestones {
+        render_milestones(state, f, chunks[2], click_state);
+    } else if state.show_upgrades {
         render_upgrades(state, f, chunks[2], click_state);
     } else {
         render_producers(state, f, chunks[2], click_state);
@@ -178,13 +180,28 @@ fn render_cookie_display(
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
-            Line::from(vec![
-                Span::styled(cookie_art[1], Style::default().fg(cookie_color)),
-                Span::styled(
-                    format!(" {} {}/sec   Clicks: {}", spinner, cps_str, state.total_clicks),
-                    Style::default().fg(Color::White),
-                ),
-            ]),
+            Line::from({
+                let mut spans = vec![
+                    Span::styled(cookie_art[1], Style::default().fg(cookie_color)),
+                    Span::styled(
+                        format!(" {} {}/sec   Clicks: {}", spinner, cps_str, state.total_clicks),
+                        Style::default().fg(Color::White),
+                    ),
+                ];
+                if state.milk > 0.0 {
+                    spans.push(Span::styled(
+                        format!("  🥛{:.0}%", state.milk * 100.0),
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ));
+                    if state.kitten_multiplier > 1.001 {
+                        spans.push(Span::styled(
+                            format!(" 🐱×{:.2}", state.kitten_multiplier),
+                            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                }
+                spans
+            }),
             Line::from(vec![
                 Span::styled(cookie_art[2], Style::default().fg(cookie_color)),
                 Span::styled("  ", Style::default()),
@@ -604,10 +621,16 @@ fn render_help(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let toggle_label = if state.show_upgrades {
+    let toggle_label = if state.show_upgrades || state.show_milestones {
         "[U] Producersに戻る"
     } else {
         "[U] Upgradeを見る"
+    };
+
+    let milestone_label = if state.show_milestones {
+        "[M] Producersに戻る"
+    } else {
+        "[M] マイルストーン"
     };
 
     let golden_hint = if state.golden_event.is_some() {
@@ -648,6 +671,14 @@ fn render_help(
                 format!("{}  ", toggle_label.trim_start_matches("[U] ")),
                 Style::default().fg(Color::DarkGray),
             ),
+            Span::styled(
+                "[M] ",
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(
+                format!("{}  ", milestone_label.trim_start_matches("[M] ")),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled("[Q/Esc] ", Style::default().fg(Color::DarkGray)),
             Span::styled("メニューに戻る", Style::default().fg(Color::DarkGray)),
         ]),
@@ -668,6 +699,97 @@ fn render_help(
     // 'U' toggle click target
     let mut cs = click_state.borrow_mut();
     cs.add_target(area.y + 2, 'u');
+}
+
+fn render_milestones(
+    state: &CookieState,
+    f: &mut Frame,
+    area: Rect,
+    _click_state: &Rc<RefCell<ClickState>>,
+) {
+    let achieved = state.achieved_milestone_count();
+    let total = state.milestones.len();
+
+    // Milk bar
+    let milk_pct = state.milk * 100.0;
+    let bar_width = 20usize;
+    let filled = ((state.milk * bar_width as f64).round() as usize).min(bar_width);
+    let milk_bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Header: milk gauge
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" 🥛 ミルク: {:.0}% ", milk_pct),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            milk_bar,
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(
+            format!("  🐱×{:.2}  ", state.kitten_multiplier),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" ({}/{})", achieved, total),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+
+    lines.push(Line::from(Span::styled(
+        " ─────────────────────────────────",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    // List milestones
+    for milestone in &state.milestones {
+        let (icon, name_style, desc_style) = if milestone.achieved {
+            (
+                "🏆",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::White),
+            )
+        } else {
+            (
+                "  ",
+                Style::default().fg(Color::DarkGray),
+                Style::default().fg(Color::DarkGray),
+            )
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!(" {} ", icon), name_style),
+            Span::styled(format!("{} ", milestone.name), name_style),
+            Span::styled(format!("- {}", milestone.description), desc_style),
+        ]));
+    }
+
+    let border_color = if state.milestone_flash > 0 {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    };
+
+    let widget = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+                .title(format!(
+                    " マイルストーン ({}/{}) ",
+                    achieved, total
+                )),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(widget, area);
 }
 
 fn render_log(state: &CookieState, f: &mut Frame, area: Rect) {

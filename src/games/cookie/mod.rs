@@ -46,6 +46,12 @@ impl Game for CookieGame {
             }
             'u' => {
                 self.state.show_upgrades = !self.state.show_upgrades;
+                self.state.show_milestones = false;
+                true
+            }
+            'm' => {
+                self.state.show_milestones = !self.state.show_milestones;
+                self.state.show_upgrades = false;
                 true
             }
             '1' | '2' | '3' | '4' | '5' if !self.state.show_upgrades => {
@@ -156,5 +162,29 @@ mod tests {
         game.handle_input(&InputEvent::Key('g'));
         assert!(game.state.golden_event.is_none());
         assert_eq!(game.state.golden_cookies_claimed, 1);
+    }
+
+    #[test]
+    fn toggle_milestones() {
+        let mut game = CookieGame::new();
+        assert!(!game.state.show_milestones);
+        game.handle_input(&InputEvent::Key('m'));
+        assert!(game.state.show_milestones);
+        assert!(!game.state.show_upgrades);
+        game.handle_input(&InputEvent::Key('m'));
+        assert!(!game.state.show_milestones);
+    }
+
+    #[test]
+    fn milestones_and_upgrades_mutually_exclusive() {
+        let mut game = CookieGame::new();
+        game.handle_input(&InputEvent::Key('u'));
+        assert!(game.state.show_upgrades);
+        game.handle_input(&InputEvent::Key('m'));
+        assert!(game.state.show_milestones);
+        assert!(!game.state.show_upgrades);
+        game.handle_input(&InputEvent::Key('u'));
+        assert!(game.state.show_upgrades);
+        assert!(!game.state.show_milestones);
     }
 }

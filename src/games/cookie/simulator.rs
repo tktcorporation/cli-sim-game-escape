@@ -111,6 +111,10 @@ mod tests {
                 let count = p.count as f64;
                 state.total_cps() * count * percentage
             }
+            UpgradeEffect::KittenBoost { multiplier } => {
+                // CPS gain = current_cps * milk * multiplier
+                state.total_cps() * state.milk * multiplier
+            }
         }
     }
 
