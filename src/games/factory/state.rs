@@ -175,3 +175,81 @@ mod tests {
         assert!(s.log.len() <= 30);
     }
 }
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn prop_cursor_always_within_bounds(
+            moves in proptest::collection::vec(
+                prop_oneof![
+                    Just((0i32, -1i32)),
+                    Just((0, 1)),
+                    Just((-1, 0)),
+                    Just((1, 0)),
+                ],
+                1..50,
+            ),
+        ) {
+            let mut state = FactoryState::new();
+            for (dx, dy) in moves {
+                state.move_cursor(dx, dy);
+                prop_assert!(state.cursor_x < GRID_W, "cursor_x out of bounds: {}", state.cursor_x);
+                prop_assert!(state.cursor_y < GRID_H, "cursor_y out of bounds: {}", state.cursor_y);
+            }
+        }
+
+        #[test]
+        fn prop_viewport_always_valid_after_scroll(
+            moves in proptest::collection::vec(
+                prop_oneof![
+                    Just((0i32, -1i32)),
+                    Just((0, 1)),
+                    Just((-1, 0)),
+                    Just((1, 0)),
+                ],
+                1..50,
+            ),
+        ) {
+            let mut state = FactoryState::new();
+            for (dx, dy) in moves {
+                state.move_cursor(dx, dy);
+                state.scroll_to_cursor();
+                prop_assert!(state.viewport_x + VIEW_W <= GRID_W,
+                    "viewport_x overflow: {} + {} > {}", state.viewport_x, VIEW_W, GRID_W);
+                prop_assert!(state.viewport_y + VIEW_H <= GRID_H,
+                    "viewport_y overflow: {} + {} > {}", state.viewport_y, VIEW_H, GRID_H);
+            }
+        }
+
+        #[test]
+        fn prop_cursor_visible_in_viewport(
+            moves in proptest::collection::vec(
+                prop_oneof![
+                    Just((0i32, -1i32)),
+                    Just((0, 1)),
+                    Just((-1, 0)),
+                    Just((1, 0)),
+                ],
+                1..50,
+            ),
+        ) {
+            let mut state = FactoryState::new();
+            for (dx, dy) in moves {
+                state.move_cursor(dx, dy);
+                state.scroll_to_cursor();
+                prop_assert!(state.cursor_x >= state.viewport_x,
+                    "cursor_x {} < viewport_x {}", state.cursor_x, state.viewport_x);
+                prop_assert!(state.cursor_x < state.viewport_x + VIEW_W,
+                    "cursor_x {} >= viewport_x + VIEW_W {}", state.cursor_x, state.viewport_x + VIEW_W);
+                prop_assert!(state.cursor_y >= state.viewport_y,
+                    "cursor_y {} < viewport_y {}", state.cursor_y, state.viewport_y);
+                prop_assert!(state.cursor_y < state.viewport_y + VIEW_H,
+                    "cursor_y {} >= viewport_y + VIEW_H {}", state.cursor_y, state.viewport_y + VIEW_H);
+            }
+        }
+    }
+}
