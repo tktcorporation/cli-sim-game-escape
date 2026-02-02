@@ -80,6 +80,7 @@ impl ClickState {
 /// `terminal_rows` is the number of rows in the terminal.
 ///
 /// Returns `None` if the click is outside the grid or inputs are invalid.
+#[cfg(test)]
 pub fn pixel_y_to_row(click_y: f64, grid_height: f64, terminal_rows: u16) -> Option<u16> {
     if grid_height <= 0.0 || terminal_rows == 0 || click_y < 0.0 {
         return None;
@@ -108,6 +109,7 @@ pub fn resolve_tap(row: u16, click_state: &ClickState) -> Option<InputEvent> {
 }
 
 /// Convert a pixel X coordinate to a terminal column index.
+#[cfg(test)]
 pub fn pixel_x_to_col(click_x: f64, grid_width: f64, terminal_cols: u16) -> Option<u16> {
     if grid_width <= 0.0 || terminal_cols == 0 || click_x < 0.0 {
         return None;
