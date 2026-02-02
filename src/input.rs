@@ -14,6 +14,9 @@ pub enum InputEvent {
 pub struct ClickTarget {
     pub row: u16,
     pub key: char,
+    /// Optional column range for horizontal targeting within a row.
+    /// If None, the target matches the entire row.
+    pub col_range: Option<(u16, u16)>,
 }
 
 /// Shared state between the render loop and click handler.
@@ -37,12 +40,35 @@ impl ClickState {
     }
 
     pub fn add_target(&mut self, row: u16, key: char) {
-        self.targets.push(ClickTarget { row, key });
+        self.targets.push(ClickTarget { row, key, col_range: None });
     }
 
-    /// Find the action key for a given terminal row.
+    /// Add a target with a specific column range (col_start..col_end, exclusive).
+    pub fn add_target_col(&mut self, row: u16, col_start: u16, col_end: u16, key: char) {
+        self.targets.push(ClickTarget { row, key, col_range: Some((col_start, col_end)) });
+    }
+
+    /// Find the action key for a given terminal row (row-wide only, ignores column targets).
+    #[cfg(test)]
     pub fn find_target_key(&self, row: u16) -> Option<char> {
-        self.targets.iter().find(|t| t.row == row).map(|t| t.key)
+        self.find_target_key_at(row, None)
+    }
+
+    /// Find the action key for a given terminal row and column.
+    /// Column-specific targets are checked first, then row-wide targets.
+    pub fn find_target_key_at(&self, row: u16, col: Option<u16>) -> Option<char> {
+        // First, try column-specific targets
+        if let Some(c) = col {
+            if let Some(t) = self.targets.iter().find(|t| {
+                t.row == row && t.col_range.map_or(false, |(start, end)| c >= start && c < end)
+            }) {
+                return Some(t.key);
+            }
+        }
+        // Fall back to row-wide targets (col_range == None)
+        self.targets.iter()
+            .find(|t| t.row == row && t.col_range.is_none())
+            .map(|t| t.key)
     }
 }
 
@@ -75,8 +101,24 @@ pub fn is_narrow_layout(width: u16) -> bool {
 
 /// Resolve a tap row to a key using click targets, then wrap as a Key event.
 /// Returns None if the tap didn't hit any target.
+#[cfg(test)]
 pub fn resolve_tap(row: u16, click_state: &ClickState) -> Option<InputEvent> {
     click_state.find_target_key(row).map(InputEvent::Key)
+}
+
+/// Convert a pixel X coordinate to a terminal column index.
+pub fn pixel_x_to_col(click_x: f64, grid_width: f64, terminal_cols: u16) -> Option<u16> {
+    if grid_width <= 0.0 || terminal_cols == 0 || click_x < 0.0 {
+        return None;
+    }
+    let cell_width = grid_width / terminal_cols as f64;
+    let col = (click_x / cell_width) as u16;
+    if col >= terminal_cols { None } else { Some(col) }
+}
+
+/// Resolve a tap at (row, col) to a key, checking column-specific targets first.
+pub fn resolve_tap_at(row: u16, col: u16, click_state: &ClickState) -> Option<InputEvent> {
+    click_state.find_target_key_at(row, Some(col)).map(InputEvent::Key)
 }
 
 #[cfg(test)]
@@ -253,6 +295,71 @@ mod tests {
             let result = pixel_y_to_row(center_y, grid_height, terminal_rows);
             assert_eq!(result, Some(target_row));
         }
+    }
+
+    // ── Column-specific click target tests ──────────────────────────────
+
+    #[test]
+    fn col_target_matches_within_range() {
+        let mut cs = ClickState::new();
+        cs.add_target_col(5, 0, 10, 'a');
+        cs.add_target_col(5, 10, 20, 'b');
+        assert_eq!(cs.find_target_key_at(5, Some(3)), Some('a'));
+        assert_eq!(cs.find_target_key_at(5, Some(15)), Some('b'));
+    }
+
+    #[test]
+    fn col_target_exclusive_end() {
+        let mut cs = ClickState::new();
+        cs.add_target_col(5, 0, 10, 'a');
+        cs.add_target_col(5, 10, 20, 'b');
+        // col 10 should match 'b' (start inclusive), not 'a' (end exclusive)
+        assert_eq!(cs.find_target_key_at(5, Some(10)), Some('b'));
+        // col 9 should match 'a'
+        assert_eq!(cs.find_target_key_at(5, Some(9)), Some('a'));
+    }
+
+    #[test]
+    fn col_target_falls_back_to_row_wide() {
+        let mut cs = ClickState::new();
+        cs.add_target_col(5, 0, 10, 'a');
+        cs.add_target(5, 'z'); // row-wide fallback
+        // Click in col range → col target
+        assert_eq!(cs.find_target_key_at(5, Some(5)), Some('a'));
+        // Click outside col range → row-wide fallback
+        assert_eq!(cs.find_target_key_at(5, Some(30)), Some('z'));
+    }
+
+    #[test]
+    fn col_target_no_col_uses_row_wide() {
+        let mut cs = ClickState::new();
+        cs.add_target_col(5, 0, 10, 'a');
+        cs.add_target(5, 'z');
+        // No column → row-wide only
+        assert_eq!(cs.find_target_key_at(5, None), Some('z'));
+    }
+
+    #[test]
+    fn pixel_x_to_col_basic() {
+        assert_eq!(pixel_x_to_col(0.0, 800.0, 80), Some(0));
+        assert_eq!(pixel_x_to_col(10.0, 800.0, 80), Some(1));
+        assert_eq!(pixel_x_to_col(799.0, 800.0, 80), Some(79));
+    }
+
+    #[test]
+    fn pixel_x_to_col_out_of_bounds() {
+        assert_eq!(pixel_x_to_col(800.0, 800.0, 80), None);
+        assert_eq!(pixel_x_to_col(-1.0, 800.0, 80), None);
+    }
+
+    #[test]
+    fn resolve_tap_at_uses_col() {
+        let mut cs = ClickState::new();
+        cs.add_target_col(5, 0, 10, 'a');
+        cs.add_target_col(5, 10, 20, 'b');
+        assert_eq!(resolve_tap_at(5, 3, &cs), Some(InputEvent::Key('a')));
+        assert_eq!(resolve_tap_at(5, 15, &cs), Some(InputEvent::Key('b')));
+        assert_eq!(resolve_tap_at(5, 25, &cs), None); // no match
     }
 
     #[test]

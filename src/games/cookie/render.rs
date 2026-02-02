@@ -67,7 +67,8 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
         .constraints([
             Constraint::Length(cookie_height),
             Constraint::Length(buff_height),
-            Constraint::Min(5),
+            Constraint::Length(1), // tab bar
+            Constraint::Min(5),   // content
         ])
         .split(main_area);
 
@@ -76,17 +77,103 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
     if buff_height > 0 {
         render_buffs_and_golden(state, f, chunks[1], click_state);
     }
+    render_tab_bar(state, f, chunks[2], click_state);
     if state.show_milestones {
-        render_milestones(state, f, chunks[2], click_state);
+        render_milestones(state, f, chunks[3], click_state);
     } else if state.show_upgrades {
-        render_upgrades(state, f, chunks[2], click_state);
+        render_upgrades(state, f, chunks[3], click_state);
     } else {
-        render_producers(state, f, chunks[2], click_state);
+        render_producers(state, f, chunks[3], click_state);
     }
 
     if let Some(log_area) = log_area {
         render_log(state, f, log_area);
     }
+}
+
+/// Render tab bar for switching between Producers / Upgrades / Milestones.
+fn render_tab_bar(
+    state: &CookieState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let ready_count = state.ready_milestone_count();
+
+    // Determine active tab
+    let active = if state.show_milestones {
+        2
+    } else if state.show_upgrades {
+        1
+    } else {
+        0
+    };
+
+    let tab_style = |idx: usize, base_color: Color| -> Style {
+        if idx == active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(base_color)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(base_color)
+        }
+    };
+
+    let milestone_label = if ready_count > 0 {
+        format!(" [M] Milestones({}) ", ready_count)
+    } else {
+        " [M] Milestones ".to_string()
+    };
+
+    let milestone_color = if ready_count > 0 { Color::Green } else { Color::Cyan };
+
+    // Tab labels with tracked positions for click targets
+    let tab0 = " [1-5] Producers ";
+    let sep = " │ ";
+    let tab1 = " [U] Upgrades ";
+    let tab2 = &milestone_label;
+
+    let spans = vec![
+        Span::styled(tab0, tab_style(0, Color::Green)),
+        Span::styled(sep, Style::default().fg(Color::DarkGray)),
+        Span::styled(tab1, tab_style(1, Color::Magenta)),
+        Span::styled(sep, Style::default().fg(Color::DarkGray)),
+        Span::styled(tab2.as_str(), tab_style(2, milestone_color)),
+    ];
+
+    // Calculate column positions for each tab (accounting for area.x offset)
+    let col0_start = area.x;
+    let col0_end = col0_start + tab0.len() as u16;
+    let col1_start = col0_end + sep.len() as u16;
+    let col1_end = col1_start + tab1.len() as u16;
+    let col2_start = col1_end + sep.len() as u16;
+    let col2_end = col2_start + tab2.len() as u16;
+
+    let widget = Paragraph::new(Line::from(spans));
+    f.render_widget(widget, area);
+
+    // Register column-specific click targets for each tab
+    let mut cs = click_state.borrow_mut();
+    // Producers tab: pressing any number key works, but 'u' toggles off upgrades
+    // We use a special convention: clicking Producers tab sends 'u' when on upgrades,
+    // 'm' when on milestones, or nothing when already on producers.
+    // Simpler: always register the tab's toggle key.
+    // 'u' toggles upgrade view, 'm' toggles milestone view.
+    // Clicking Producers tab when NOT on producers: need to go back.
+    // Since 'u' and 'm' are toggles, clicking the active tab's key turns it off (back to producers).
+    // So: register 'u' on upgrades tab, 'm' on milestones tab.
+    // For producers tab: if on upgrades, send 'u' to toggle off; if on milestones, send 'm' to toggle off.
+    let producers_key = if state.show_upgrades {
+        'u'
+    } else if state.show_milestones {
+        'm'
+    } else {
+        'c' // already on producers, clicking = cookie click (harmless)
+    };
+    cs.add_target_col(area.y, col0_start, col0_end, producers_key);
+    cs.add_target_col(area.y, col1_start, col1_end, 'u');
+    cs.add_target_col(area.y, col2_start, col2_end, 'm');
 }
 
 fn render_cookie_display(
@@ -406,7 +493,7 @@ fn render_producers(
 
     let has_discount = state.active_discount > 0.0;
 
-    let mut items: Vec<ListItem> = state
+    let items: Vec<ListItem> = state
         .producers
         .iter()
         .map(|p| {
@@ -512,40 +599,6 @@ fn render_producers(
         })
         .collect();
 
-    // Help hints integrated into producer panel
-    let ready_count = state.ready_milestone_count();
-    let golden_hint = if state.golden_event.is_some() {
-        " [G]ゴールデン!"
-    } else {
-        ""
-    };
-    let milestone_hint = if ready_count > 0 {
-        format!(" [M]マイルストーン({}個!)", ready_count)
-    } else {
-        " [M]マイルストーン".to_string()
-    };
-    let milestone_color = if ready_count > 0 { Color::Green } else { Color::DarkGray };
-
-    items.push(ListItem::new(Line::from(Span::styled(
-        "─────────────────────────────────────",
-        Style::default().fg(Color::DarkGray),
-    ))));
-    // Each action on its own row for click/tap support
-    items.push(ListItem::new(Line::from(Span::styled(
-        " [U] Upgradeを見る",
-        Style::default().fg(Color::Magenta),
-    ))));
-    items.push(ListItem::new(Line::from(Span::styled(
-        format!(" [M]{}", milestone_hint.trim()),
-        Style::default().fg(milestone_color),
-    ))));
-    if state.golden_event.is_some() {
-        items.push(ListItem::new(Line::from(Span::styled(
-            " [G] ゴールデン取得！",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ))));
-    }
-
     let producer_border_color = if state.purchase_flash > 0 {
         Color::Yellow
     } else {
@@ -562,13 +615,6 @@ fn render_producers(
     let mut cs = click_state.borrow_mut();
     for (i, p) in state.producers.iter().enumerate() {
         cs.add_target(area.y + 1 + i as u16, p.kind.key());
-    }
-    // Click targets for help hints (each on its own row)
-    let sep_row = area.y + 1 + state.producers.len() as u16; // separator
-    cs.add_target(sep_row + 1, 'u'); // [U] Upgrade
-    cs.add_target(sep_row + 2, 'm'); // [M] マイルストーン
-    if state.golden_event.is_some() {
-        cs.add_target(sep_row + 3, 'g'); // [G] ゴールデン
     }
 }
 
@@ -587,7 +633,7 @@ fn render_upgrades(
         .map(|(i, u)| (i, u, state.is_upgrade_unlocked(u)))
         .collect();
 
-    let mut items: Vec<ListItem> = available
+    let items: Vec<ListItem> = available
         .iter()
         .enumerate()
         .map(|(display_idx, (_, upgrade, unlocked))| {
@@ -638,28 +684,11 @@ fn render_upgrades(
         })
         .collect();
 
-    // Help hints integrated into upgrade panel (each on its own row for click/tap)
-    let hint_start = items.len();
-    items.push(ListItem::new(Line::from(Span::styled(
-        "─────────────────────────────────────",
-        Style::default().fg(Color::DarkGray),
-    ))));
-    items.push(ListItem::new(Line::from(Span::styled(
-        " [U] Producersに戻る",
-        Style::default().fg(Color::Magenta),
-    ))));
-    items.push(ListItem::new(Line::from(Span::styled(
-        " [M] マイルストーン",
-        Style::default().fg(Color::Cyan),
-    ))));
-
-    let widget = if available.is_empty() {
-        let mut empty_items = vec![ListItem::new(Span::styled(
+    let widget = if items.is_empty() {
+        List::new(vec![ListItem::new(Span::styled(
             " (全て購入済み)",
             Style::default().fg(Color::DarkGray),
-        ))];
-        empty_items.extend(items);
-        List::new(empty_items)
+        ))])
     } else {
         List::new(items)
     }
@@ -672,15 +701,10 @@ fn render_upgrades(
     f.render_widget(widget, area);
 
     let mut cs = click_state.borrow_mut();
-    let base_row = if available.is_empty() { 1u16 } else { 0 }; // offset for "(全て購入済み)" line
     for (display_idx, _) in available.iter().enumerate() {
         let key = (b'a' + display_idx as u8) as char;
-        cs.add_target(area.y + 1 + base_row + display_idx as u16, key);
+        cs.add_target(area.y + 1 + display_idx as u16, key);
     }
-    // Click targets for help hints
-    let sep_row = area.y + 1 + base_row + available.len() as u16; // separator
-    cs.add_target(sep_row + 1, 'u'); // [U] Producers
-    cs.add_target(sep_row + 2, 'm'); // [M] マイルストーン
 }
 
 fn render_milestones(
@@ -909,20 +933,6 @@ fn render_milestones(
         Style::default().fg(Color::DarkGray),
     )));
 
-    // Help hints (each on its own row for click/tap)
-    lines.push(Line::from(Span::styled(
-        " ─────────────────────────────────",
-        Style::default().fg(Color::DarkGray),
-    )));
-    lines.push(Line::from(Span::styled(
-        " [M] Producersに戻る",
-        Style::default().fg(Color::Cyan),
-    )));
-    lines.push(Line::from(Span::styled(
-        " [U] Upgradeを見る",
-        Style::default().fg(Color::Magenta),
-    )));
-
     let border_color = if ready > 0 {
         Color::Green
     } else if state.milestone_flash > 0 {
@@ -930,8 +940,6 @@ fn render_milestones(
     } else {
         Color::Cyan
     };
-
-    let total_lines = lines.len() as u16;
 
     let widget = Paragraph::new(lines)
         .block(
@@ -954,11 +962,6 @@ fn render_milestones(
         let key = (b'a' + i) as char;
         cs.add_target(first_ready_row + i as u16, key);
     }
-    // Click targets for help hints (last 2 content lines: [M], [U])
-    let m_row = area.y + 1 + total_lines.saturating_sub(2); // [M] Producersに戻る
-    let u_row = area.y + 1 + total_lines.saturating_sub(1); // [U] Upgradeを見る
-    cs.add_target(m_row, 'm');
-    cs.add_target(u_row, 'u');
 }
 
 fn render_log(state: &CookieState, f: &mut Frame, area: Rect) {

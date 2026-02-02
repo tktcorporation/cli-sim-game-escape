@@ -5,7 +5,7 @@ mod time;
 use std::{cell::RefCell, io, rc::Rc};
 
 use games::{create_game, AppState, GameChoice};
-use input::{is_narrow_layout, pixel_y_to_row, resolve_tap, ClickState, InputEvent};
+use input::{is_narrow_layout, pixel_x_to_col, pixel_y_to_row, resolve_tap_at, ClickState, InputEvent};
 use time::GameTime;
 
 use ratzilla::event::{KeyCode, MouseButton, MouseEventKind};
@@ -16,8 +16,8 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
 use ratzilla::ratatui::Terminal;
 use ratzilla::{DomBackend, WebRenderer};
 
-/// Query the grid container's bounding rect and convert pixel coordinates to a row.
-fn dom_pixel_to_row(client_x: f64, client_y: f64, cs: &ClickState) -> Option<u16> {
+/// Query the grid container's bounding rect and convert pixel coordinates to a (row, col).
+fn dom_pixel_to_row_col(client_x: f64, client_y: f64, cs: &ClickState) -> Option<(u16, u16)> {
     let window = web_sys::window()?;
     let document = window.document()?;
     let grid = document.query_selector("body > div").ok()??;
@@ -30,7 +30,9 @@ fn dom_pixel_to_row(client_x: f64, client_y: f64, cs: &ClickState) -> Option<u16
         return None;
     }
 
-    pixel_y_to_row(click_y, rect.height(), cs.terminal_rows)
+    let row = pixel_y_to_row(click_y, rect.height(), cs.terminal_rows)?;
+    let col = pixel_x_to_col(click_x, rect.width(), cs.terminal_cols).unwrap_or(0);
+    Some((row, col))
 }
 
 /// Process a tap/click at the given client coordinates.
@@ -45,12 +47,12 @@ fn handle_tap(
         return;
     }
 
-    let row = match dom_pixel_to_row(client_x, client_y, &cs) {
-        Some(r) => r,
+    let (row, col) = match dom_pixel_to_row_col(client_x, client_y, &cs) {
+        Some(rc) => rc,
         None => return,
     };
 
-    if let Some(event) = resolve_tap(row, &cs) {
+    if let Some(event) = resolve_tap_at(row, col, &cs) {
         drop(cs);
         dispatch_event(&event, app_state);
     }
