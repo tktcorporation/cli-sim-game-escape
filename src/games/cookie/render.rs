@@ -68,7 +68,6 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
             Constraint::Length(cookie_height),
             Constraint::Length(buff_height),
             Constraint::Min(5),
-            Constraint::Length(5),
         ])
         .split(main_area);
 
@@ -84,7 +83,6 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
     } else {
         render_producers(state, f, chunks[2], click_state);
     }
-    render_help(state, f, chunks[3], click_state);
 
     if let Some(log_area) = log_area {
         render_log(state, f, log_area);
@@ -170,6 +168,7 @@ fn render_cookie_display(
             ">>> [C] CLICK! <<< ".to_string()
         };
 
+        let ready_count = state.ready_milestone_count();
         let lines = vec![
             Line::from(vec![
                 Span::styled(cookie_art[0], Style::default().fg(cookie_color)),
@@ -199,6 +198,12 @@ fn render_cookie_display(
                             Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
                         ));
                     }
+                }
+                if ready_count > 0 {
+                    spans.push(Span::styled(
+                        format!("  ✨[M]{}個解放可!", ready_count),
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    ));
                 }
                 spans
             }),
@@ -401,7 +406,7 @@ fn render_producers(
 
     let has_discount = state.active_discount > 0.0;
 
-    let items: Vec<ListItem> = state
+    let mut items: Vec<ListItem> = state
         .producers
         .iter()
         .map(|p| {
@@ -507,6 +512,47 @@ fn render_producers(
         })
         .collect();
 
+    // Help hints integrated into producer panel
+    let ready_count = state.ready_milestone_count();
+    let golden_hint = if state.golden_event.is_some() {
+        " [G]ゴールデン!"
+    } else {
+        ""
+    };
+    let milestone_hint = if ready_count > 0 {
+        format!(" [M]マイルストーン({}個!)", ready_count)
+    } else {
+        " [M]マイルストーン".to_string()
+    };
+    let milestone_color = if ready_count > 0 { Color::Green } else { Color::DarkGray };
+
+    items.push(ListItem::new(Line::from(Span::styled(
+        "─────────────────────────────────────",
+        Style::default().fg(Color::DarkGray),
+    ))));
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(
+            " [C]クリック ",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "[U]Upgrade ",
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::styled(
+            &milestone_hint,
+            Style::default().fg(milestone_color),
+        ),
+        Span::styled(
+            golden_hint,
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ),
+    ])));
+    items.push(ListItem::new(Line::from(Span::styled(
+        " [Q/Esc]メニューに戻る  タップ/クリックでも操作可",
+        Style::default().fg(Color::DarkGray),
+    ))));
+
     let producer_border_color = if state.purchase_flash > 0 {
         Color::Yellow
     } else {
@@ -524,6 +570,10 @@ fn render_producers(
     for (i, p) in state.producers.iter().enumerate() {
         cs.add_target(area.y + 1 + i as u16, p.kind.key());
     }
+    // Click targets for help hints
+    let help_row = area.y + 1 + state.producers.len() as u16 + 1;
+    cs.add_target(help_row, 'u');
+    cs.add_target(help_row, 'm');
 }
 
 fn render_upgrades(
@@ -541,7 +591,7 @@ fn render_upgrades(
         .map(|(i, u)| (i, u, state.is_upgrade_unlocked(u)))
         .collect();
 
-    let items: Vec<ListItem> = available
+    let mut items: Vec<ListItem> = available
         .iter()
         .enumerate()
         .map(|(display_idx, (_, upgrade, unlocked))| {
@@ -592,11 +642,33 @@ fn render_upgrades(
         })
         .collect();
 
-    let widget = if items.is_empty() {
-        List::new(vec![ListItem::new(Span::styled(
+    // Help hints integrated into upgrade panel
+    items.push(ListItem::new(Line::from(Span::styled(
+        "─────────────────────────────────────",
+        Style::default().fg(Color::DarkGray),
+    ))));
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(
+            " [U]Producersに戻る ",
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::styled(
+            "[M]マイルストーン ",
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(
+            "[Q/Esc]メニュー",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])));
+
+    let widget = if available.is_empty() {
+        let mut empty_items = vec![ListItem::new(Span::styled(
             " (全て購入済み)",
             Style::default().fg(Color::DarkGray),
-        ))])
+        ))];
+        empty_items.extend(items);
+        List::new(empty_items)
     } else {
         List::new(items)
     }
@@ -613,95 +685,6 @@ fn render_upgrades(
         let key = (b'a' + display_idx as u8) as char;
         cs.add_target(area.y + 1 + display_idx as u16, key);
     }
-}
-
-fn render_help(
-    state: &CookieState,
-    f: &mut Frame,
-    area: Rect,
-    click_state: &Rc<RefCell<ClickState>>,
-) {
-    let toggle_label = if state.show_upgrades || state.show_milestones {
-        "[U] Producersに戻る"
-    } else {
-        "[U] Upgradeを見る"
-    };
-
-    let ready_count = state.ready_milestone_count();
-    let milestone_label = if state.show_milestones {
-        "[M] Producersに戻る".to_string()
-    } else if ready_count > 0 {
-        format!("[M] マイルストーン({}個解放可！)", ready_count)
-    } else {
-        "[M] マイルストーン".to_string()
-    };
-
-    let golden_hint = if state.golden_event.is_some() {
-        Span::styled(
-            " [G] ゴールデン取得！",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::styled("", Style::default())
-    };
-
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(
-                " [C] ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("クリックで+1  ", Style::default().fg(Color::White)),
-            Span::styled(
-                "[1-5] ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Producer購入", Style::default().fg(Color::White)),
-            golden_hint,
-        ]),
-        Line::from(vec![
-            Span::styled(
-                " [U] ",
-                Style::default().fg(Color::Magenta),
-            ),
-            Span::styled(
-                format!("{}  ", toggle_label.trim_start_matches("[U] ")),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                "[M] ",
-                Style::default().fg(if ready_count > 0 { Color::Green } else { Color::Cyan }),
-            ),
-            Span::styled(
-                format!("{}  ", milestone_label.trim_start_matches("[M] ")),
-                Style::default().fg(if ready_count > 0 { Color::Green } else { Color::DarkGray }),
-            ),
-            Span::styled("[Q/Esc] ", Style::default().fg(Color::DarkGray)),
-            Span::styled("メニューに戻る", Style::default().fg(Color::DarkGray)),
-        ]),
-        Line::from(Span::styled(
-            " タップ/クリックでも操作できます",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
-
-    let widget = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" 操作方法 "),
-    );
-    f.render_widget(widget, area);
-
-    // 'U' toggle click target
-    let mut cs = click_state.borrow_mut();
-    cs.add_target(area.y + 2, 'u');
 }
 
 fn render_milestones(
@@ -929,6 +912,26 @@ fn render_milestones(
         format!(" 📦 アップグレード: {}/{}", purchased_count, total_upgrades),
         Style::default().fg(Color::DarkGray),
     )));
+
+    // Help hints
+    lines.push(Line::from(Span::styled(
+        " ─────────────────────────────────",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(vec![
+        Span::styled(
+            " [M]Producersに戻る ",
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(
+            "[U]Upgrade ",
+            Style::default().fg(Color::Magenta),
+        ),
+        Span::styled(
+            "[Q/Esc]メニュー",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
 
     let border_color = if ready > 0 {
         Color::Green
