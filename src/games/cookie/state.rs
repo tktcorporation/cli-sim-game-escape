@@ -276,13 +276,24 @@ pub enum MilestoneCondition {
     GoldenClaimed(u32),
 }
 
+/// Milestone status: locked → ready (condition met) → claimed (player collected).
+#[derive(Clone, Debug, PartialEq)]
+pub enum MilestoneStatus {
+    /// Condition not yet met.
+    Locked,
+    /// Condition met, waiting for player to claim.
+    Ready,
+    /// Player has claimed the milestone (milk applied).
+    Claimed,
+}
+
 /// A milestone (achievement) definition.
 #[derive(Clone, Debug)]
 pub struct Milestone {
     pub name: String,
     pub description: String,
     pub condition: MilestoneCondition,
-    pub achieved: bool,
+    pub status: MilestoneStatus,
 }
 
 /// A floating text particle (e.g. "+1" rising from click area).
@@ -823,186 +834,191 @@ impl CookieState {
                 name: "はじめの一歩".into(),
                 description: "クッキーを100枚焼く".into(),
                 condition: MilestoneCondition::TotalCookies(100.0),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "駆け出しベイカー".into(),
                 description: "クッキーを1,000枚焼く".into(),
                 condition: MilestoneCondition::TotalCookies(1_000.0),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "パン屋の朝".into(),
                 description: "クッキーを10,000枚焼く".into(),
                 condition: MilestoneCondition::TotalCookies(10_000.0),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "繁盛店".into(),
                 description: "クッキーを100,000枚焼く".into(),
                 condition: MilestoneCondition::TotalCookies(100_000.0),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "クッキー長者".into(),
                 description: "クッキーを1,000,000枚焼く".into(),
                 condition: MilestoneCondition::TotalCookies(1_000_000.0),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "クッキー財閥".into(),
                 description: "クッキーを100,000,000枚焼く".into(),
                 condition: MilestoneCondition::TotalCookies(100_000_000.0),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "クッキー帝国".into(),
                 description: "クッキーを10,000,000,000枚焼く".into(),
                 condition: MilestoneCondition::TotalCookies(10_000_000_000.0),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             // === Click milestones ===
             Milestone {
                 name: "クリッカー".into(),
                 description: "100回クリック".into(),
                 condition: MilestoneCondition::TotalClicks(100),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "連打の達人".into(),
                 description: "1,000回クリック".into(),
                 condition: MilestoneCondition::TotalClicks(1_000),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "指が止まらない".into(),
                 description: "10,000回クリック".into(),
                 condition: MilestoneCondition::TotalClicks(10_000),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             // === CPS milestones ===
             Milestone {
                 name: "自動化の兆し".into(),
                 description: "CPS 10 達成".into(),
                 condition: MilestoneCondition::CpsReached(10.0),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "小さな工場".into(),
                 description: "CPS 100 達成".into(),
                 condition: MilestoneCondition::CpsReached(100.0),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "産業革命".into(),
                 description: "CPS 1,000 達成".into(),
                 condition: MilestoneCondition::CpsReached(1_000.0),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "クッキー王国".into(),
                 description: "CPS 10,000 達成".into(),
                 condition: MilestoneCondition::CpsReached(10_000.0),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "無限の生産力".into(),
                 description: "CPS 100,000 達成".into(),
                 condition: MilestoneCondition::CpsReached(100_000.0),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             // === Producer milestones ===
             Milestone {
                 name: "Cursorコレクター".into(),
                 description: "Cursor 10台".into(),
                 condition: MilestoneCondition::ProducerCount(ProducerKind::Cursor, 10),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "Cursor軍団".into(),
                 description: "Cursor 50台".into(),
                 condition: MilestoneCondition::ProducerCount(ProducerKind::Cursor, 50),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "Cursorの海".into(),
                 description: "Cursor 100台".into(),
                 condition: MilestoneCondition::ProducerCount(ProducerKind::Cursor, 100),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "おばあちゃんの集い".into(),
                 description: "Grandma 10台".into(),
                 condition: MilestoneCondition::ProducerCount(ProducerKind::Grandma, 10),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "おばあちゃんの楽園".into(),
                 description: "Grandma 50台".into(),
                 condition: MilestoneCondition::ProducerCount(ProducerKind::Grandma, 50),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "農場主".into(),
                 description: "Farm 10台".into(),
                 condition: MilestoneCondition::ProducerCount(ProducerKind::Farm, 10),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "大農場経営".into(),
                 description: "Farm 50台".into(),
                 condition: MilestoneCondition::ProducerCount(ProducerKind::Farm, 50),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "鉱山王".into(),
                 description: "Mine 10台".into(),
                 condition: MilestoneCondition::ProducerCount(ProducerKind::Mine, 10),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "深層採掘".into(),
                 description: "Mine 50台".into(),
                 condition: MilestoneCondition::ProducerCount(ProducerKind::Mine, 50),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "工場長".into(),
                 description: "Factory 10台".into(),
                 condition: MilestoneCondition::ProducerCount(ProducerKind::Factory, 10),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "産業コンツェルン".into(),
                 description: "Factory 50台".into(),
                 condition: MilestoneCondition::ProducerCount(ProducerKind::Factory, 50),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             // === Golden cookie milestones ===
             Milestone {
                 name: "幸運の始まり".into(),
                 description: "ゴールデンクッキーを5回取得".into(),
                 condition: MilestoneCondition::GoldenClaimed(5),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "ゴールドハンター".into(),
                 description: "ゴールデンクッキーを25回取得".into(),
                 condition: MilestoneCondition::GoldenClaimed(25),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
             Milestone {
                 name: "ゴールデンマスター".into(),
                 description: "ゴールデンクッキーを77回取得".into(),
                 condition: MilestoneCondition::GoldenClaimed(77),
-                achieved: false,
+                status: MilestoneStatus::Locked,
             },
         ]
     }
 
-    /// Count of achieved milestones.
+    /// Count of claimed milestones (milk applied).
     pub fn achieved_milestone_count(&self) -> usize {
-        self.milestones.iter().filter(|m| m.achieved).count()
+        self.milestones.iter().filter(|m| m.status == MilestoneStatus::Claimed).count()
+    }
+
+    /// Count of ready-to-claim milestones.
+    pub fn ready_milestone_count(&self) -> usize {
+        self.milestones.iter().filter(|m| m.status == MilestoneStatus::Ready).count()
     }
 
     /// Calculate the synergy bonus for a specific producer kind.

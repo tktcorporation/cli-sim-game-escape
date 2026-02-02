@@ -182,7 +182,7 @@ mod tests {
         let recent: Vec<&str> = state
             .milestones
             .iter()
-            .filter(|m| m.achieved)
+            .filter(|m| m.status == MilestoneStatus::Claimed)
             .map(|m| m.name.as_str())
             .collect();
         if !recent.is_empty() {
@@ -258,6 +258,9 @@ mod tests {
 
             // Claim golden cookies
             logic::claim_golden(&mut state);
+
+            // Claim all ready milestones (optimal play: claim immediately)
+            logic::claim_all_milestones(&mut state);
 
             // Try to buy things (greedy: buy best ROI until can't afford anything)
             let mut bought_this_second = false;

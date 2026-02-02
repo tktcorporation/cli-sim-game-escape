@@ -627,10 +627,13 @@ fn render_help(
         "[U] Upgradeを見る"
     };
 
+    let ready_count = state.ready_milestone_count();
     let milestone_label = if state.show_milestones {
-        "[M] Producersに戻る"
+        "[M] Producersに戻る".to_string()
+    } else if ready_count > 0 {
+        format!("[M] マイルストーン({}個解放可！)", ready_count)
     } else {
-        "[M] マイルストーン"
+        "[M] マイルストーン".to_string()
     };
 
     let golden_hint = if state.golden_event.is_some() {
@@ -673,11 +676,11 @@ fn render_help(
             ),
             Span::styled(
                 "[M] ",
-                Style::default().fg(Color::Cyan),
+                Style::default().fg(if ready_count > 0 { Color::Green } else { Color::Cyan }),
             ),
             Span::styled(
                 format!("{}  ", milestone_label.trim_start_matches("[M] ")),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(if ready_count > 0 { Color::Green } else { Color::DarkGray }),
             ),
             Span::styled("[Q/Esc] ", Style::default().fg(Color::DarkGray)),
             Span::styled("メニューに戻る", Style::default().fg(Color::DarkGray)),
@@ -705,9 +708,12 @@ fn render_milestones(
     state: &CookieState,
     f: &mut Frame,
     area: Rect,
-    _click_state: &Rc<RefCell<ClickState>>,
+    click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let achieved = state.achieved_milestone_count();
+    use super::state::MilestoneStatus;
+
+    let claimed = state.achieved_milestone_count();
+    let ready = state.ready_milestone_count();
     let total = state.milestones.len();
 
     // Milk bar
@@ -731,48 +737,184 @@ fn render_milestones(
             Style::default().fg(Color::White),
         ),
         Span::styled(
-            format!("  🐱×{:.2}  ", state.kitten_multiplier),
+            format!("  🐱×{:.2}", state.kitten_multiplier),
             Style::default()
                 .fg(Color::Magenta)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            format!(" ({}/{})", achieved, total),
-            Style::default().fg(Color::DarkGray),
-        ),
     ]));
+
+    // Ready count hint
+    if ready > 0 {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" ✨ {}個が解放可能！", ready),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " [a-z]個別  [!]一括解放",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
 
     lines.push(Line::from(Span::styled(
         " ─────────────────────────────────",
         Style::default().fg(Color::DarkGray),
     )));
 
-    // List milestones
+    // List milestones, with key labels for ready ones
+    let mut ready_key_idx: u8 = 0;
     for milestone in &state.milestones {
-        let (icon, name_style, desc_style) = if milestone.achieved {
-            (
-                "🏆",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-                Style::default().fg(Color::White),
-            )
-        } else {
-            (
-                "  ",
-                Style::default().fg(Color::DarkGray),
-                Style::default().fg(Color::DarkGray),
-            )
-        };
+        match &milestone.status {
+            MilestoneStatus::Claimed => {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        " 🏆 ",
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        milestone.name.to_string(),
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" - {}", milestone.description),
+                        Style::default().fg(Color::White),
+                    ),
+                ]));
+            }
+            MilestoneStatus::Ready => {
+                let key = (b'a' + ready_key_idx) as char;
+                ready_key_idx += 1;
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!(" [{}] ", key),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("✨ {}", milestone.name),
+                        Style::default()
+                            .fg(Color::Green)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!(" - {}", milestone.description),
+                        Style::default()
+                            .fg(Color::Green),
+                    ),
+                ]));
+            }
+            MilestoneStatus::Locked => {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        "     ",
+                        Style::default(),
+                    ),
+                    Span::styled(
+                        format!("🔒 {}", milestone.name),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!(" - {}", milestone.description),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            }
+        }
+    }
 
+    // === Active effects summary ===
+    lines.push(Line::from(Span::styled(
+        " ─── 発動中の効果 ────────────────",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    // Milk + kitten
+    if state.milk > 0.0 {
+        let kitten_bonus = (state.kitten_multiplier - 1.0) * 100.0;
         lines.push(Line::from(vec![
-            Span::styled(format!(" {} ", icon), name_style),
-            Span::styled(format!("{} ", milestone.name), name_style),
-            Span::styled(format!("- {}", milestone.description), desc_style),
+            Span::styled(
+                format!(" 🥛 ミルク {:.0}%", state.milk * 100.0),
+                Style::default().fg(Color::White),
+            ),
+            if kitten_bonus > 0.01 {
+                Span::styled(
+                    format!("  → 🐱 CPS +{:.1}%", kitten_bonus),
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(
+                    "  (子猫UP購入でCPSに反映)",
+                    Style::default().fg(Color::DarkGray),
+                )
+            },
         ]));
     }
 
-    let border_color = if state.milestone_flash > 0 {
+    // Synergy multiplier
+    if state.synergy_multiplier > 1.0 {
+        lines.push(Line::from(Span::styled(
+            format!(" 🔗 シナジー倍率: ×{:.0}", state.synergy_multiplier),
+            Style::default().fg(Color::Cyan),
+        )));
+    }
+
+    // Producer multipliers summary
+    let multi_parts: Vec<String> = state.producers.iter()
+        .filter(|p| p.multiplier > 1.0)
+        .map(|p| format!("{}:×{:.0}", p.kind.name(), p.multiplier))
+        .collect();
+    if !multi_parts.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(" ⚡ 生産倍率: {}", multi_parts.join("  ")),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    // Active buffs
+    for buff in &state.active_buffs {
+        let (label, color) = match &buff.effect {
+            super::state::GoldenEffect::ProductionFrenzy { multiplier } => {
+                (format!("🌟 生産フレンジー ×{:.0} (残{}t)", multiplier, buff.ticks_left), Color::Magenta)
+            }
+            super::state::GoldenEffect::ClickFrenzy { multiplier } => {
+                (format!("👆 クリックフレンジー ×{:.0} (残{}t)", multiplier, buff.ticks_left), Color::Cyan)
+            }
+            super::state::GoldenEffect::InstantBonus { .. } => continue,
+        };
+        lines.push(Line::from(Span::styled(
+            format!(" {}", label),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    // Discount
+    if state.active_discount > 0.0 {
+        lines.push(Line::from(Span::styled(
+            format!(" 💰 割引ウェーブ: {:.0}%OFF", state.active_discount * 100.0),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    // Upgrade count summary
+    let purchased_count = state.upgrades.iter().filter(|u| u.purchased).count();
+    let total_upgrades = state.upgrades.len();
+    lines.push(Line::from(Span::styled(
+        format!(" 📦 アップグレード: {}/{}", purchased_count, total_upgrades),
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let border_color = if ready > 0 {
+        Color::Green
+    } else if state.milestone_flash > 0 {
         Color::Yellow
     } else {
         Color::Cyan
@@ -785,11 +927,31 @@ fn render_milestones(
                 .border_style(Style::default().fg(border_color))
                 .title(format!(
                     " マイルストーン ({}/{}) ",
-                    achieved, total
+                    claimed, total
                 )),
         )
         .wrap(Wrap { trim: false });
     f.render_widget(widget, area);
+
+    // Click targets for ready milestones
+    let mut cs = click_state.borrow_mut();
+    let header_lines = if ready > 0 { 4 } else { 3 }; // milk + hint? + separator + border
+    for i in 0..ready_key_idx {
+        let key = (b'a' + i) as char;
+        // Find the row of this ready milestone in the display
+        let mut display_row = 0u16;
+        let mut ready_seen = 0u8;
+        for milestone in &state.milestones {
+            if milestone.status == MilestoneStatus::Ready {
+                if ready_seen == i {
+                    break;
+                }
+                ready_seen += 1;
+            }
+            display_row += 1;
+        }
+        cs.add_target(area.y + header_lines as u16 + display_row, key);
+    }
 }
 
 fn render_log(state: &CookieState, f: &mut Frame, area: Rect) {
