@@ -530,28 +530,21 @@ fn render_producers(
         "─────────────────────────────────────",
         Style::default().fg(Color::DarkGray),
     ))));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(
-            " [C]クリック ",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "[U]Upgrade ",
-            Style::default().fg(Color::Magenta),
-        ),
-        Span::styled(
-            &milestone_hint,
-            Style::default().fg(milestone_color),
-        ),
-        Span::styled(
-            golden_hint,
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ),
-    ])));
+    // Each action on its own row for click/tap support
     items.push(ListItem::new(Line::from(Span::styled(
-        " [Q/Esc]メニューに戻る  タップ/クリックでも操作可",
-        Style::default().fg(Color::DarkGray),
+        " [U] Upgradeを見る",
+        Style::default().fg(Color::Magenta),
     ))));
+    items.push(ListItem::new(Line::from(Span::styled(
+        format!(" [M]{}", milestone_hint.trim()),
+        Style::default().fg(milestone_color),
+    ))));
+    if state.golden_event.is_some() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            " [G] ゴールデン取得！",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ))));
+    }
 
     let producer_border_color = if state.purchase_flash > 0 {
         Color::Yellow
@@ -570,10 +563,13 @@ fn render_producers(
     for (i, p) in state.producers.iter().enumerate() {
         cs.add_target(area.y + 1 + i as u16, p.kind.key());
     }
-    // Click targets for help hints
-    let help_row = area.y + 1 + state.producers.len() as u16 + 1;
-    cs.add_target(help_row, 'u');
-    cs.add_target(help_row, 'm');
+    // Click targets for help hints (each on its own row)
+    let sep_row = area.y + 1 + state.producers.len() as u16; // separator
+    cs.add_target(sep_row + 1, 'u'); // [U] Upgrade
+    cs.add_target(sep_row + 2, 'm'); // [M] マイルストーン
+    if state.golden_event.is_some() {
+        cs.add_target(sep_row + 3, 'g'); // [G] ゴールデン
+    }
 }
 
 fn render_upgrades(
@@ -642,25 +638,20 @@ fn render_upgrades(
         })
         .collect();
 
-    // Help hints integrated into upgrade panel
+    // Help hints integrated into upgrade panel (each on its own row for click/tap)
+    let hint_start = items.len();
     items.push(ListItem::new(Line::from(Span::styled(
         "─────────────────────────────────────",
         Style::default().fg(Color::DarkGray),
     ))));
-    items.push(ListItem::new(Line::from(vec![
-        Span::styled(
-            " [U]Producersに戻る ",
-            Style::default().fg(Color::Magenta),
-        ),
-        Span::styled(
-            "[M]マイルストーン ",
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::styled(
-            "[Q/Esc]メニュー",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ])));
+    items.push(ListItem::new(Line::from(Span::styled(
+        " [U] Producersに戻る",
+        Style::default().fg(Color::Magenta),
+    ))));
+    items.push(ListItem::new(Line::from(Span::styled(
+        " [M] マイルストーン",
+        Style::default().fg(Color::Cyan),
+    ))));
 
     let widget = if available.is_empty() {
         let mut empty_items = vec![ListItem::new(Span::styled(
@@ -681,10 +672,15 @@ fn render_upgrades(
     f.render_widget(widget, area);
 
     let mut cs = click_state.borrow_mut();
+    let base_row = if available.is_empty() { 1u16 } else { 0 }; // offset for "(全て購入済み)" line
     for (display_idx, _) in available.iter().enumerate() {
         let key = (b'a' + display_idx as u8) as char;
-        cs.add_target(area.y + 1 + display_idx as u16, key);
+        cs.add_target(area.y + 1 + base_row + display_idx as u16, key);
     }
+    // Click targets for help hints
+    let sep_row = area.y + 1 + base_row + available.len() as u16; // separator
+    cs.add_target(sep_row + 1, 'u'); // [U] Producers
+    cs.add_target(sep_row + 2, 'm'); // [M] マイルストーン
 }
 
 fn render_milestones(
@@ -913,25 +909,19 @@ fn render_milestones(
         Style::default().fg(Color::DarkGray),
     )));
 
-    // Help hints
+    // Help hints (each on its own row for click/tap)
     lines.push(Line::from(Span::styled(
         " ─────────────────────────────────",
         Style::default().fg(Color::DarkGray),
     )));
-    lines.push(Line::from(vec![
-        Span::styled(
-            " [M]Producersに戻る ",
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::styled(
-            "[U]Upgrade ",
-            Style::default().fg(Color::Magenta),
-        ),
-        Span::styled(
-            "[Q/Esc]メニュー",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]));
+    lines.push(Line::from(Span::styled(
+        " [M] Producersに戻る",
+        Style::default().fg(Color::Cyan),
+    )));
+    lines.push(Line::from(Span::styled(
+        " [U] Upgradeを見る",
+        Style::default().fg(Color::Magenta),
+    )));
 
     let border_color = if ready > 0 {
         Color::Green
@@ -940,6 +930,8 @@ fn render_milestones(
     } else {
         Color::Cyan
     };
+
+    let total_lines = lines.len() as u16;
 
     let widget = Paragraph::new(lines)
         .block(
@@ -962,6 +954,11 @@ fn render_milestones(
         let key = (b'a' + i) as char;
         cs.add_target(first_ready_row + i as u16, key);
     }
+    // Click targets for help hints (last 2 content lines: [M], [U])
+    let m_row = area.y + 1 + total_lines.saturating_sub(2); // [M] Producersに戻る
+    let u_row = area.y + 1 + total_lines.saturating_sub(1); // [U] Upgradeを見る
+    cs.add_target(m_row, 'm');
+    cs.add_target(u_row, 'u');
 }
 
 fn render_log(state: &CookieState, f: &mut Frame, area: Rect) {
