@@ -32,75 +32,48 @@ const COOKIE_CLICK_FRAMES: &[&[&str]] = &[
 const SPINNER: &[char] = &['◐', '◓', '◑', '◒'];
 
 pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
-    let is_narrow = is_narrow_layout(area.width);
+    let width = area.width;
+    let is_narrow = is_narrow_layout(width);
 
-    if is_narrow {
-        render_narrow(state, f, area, click_state);
+    // Horizontal split: show log panel on the right when wide enough (>= 80 cols)
+    let (main_area, log_area) = if width >= 80 {
+        let h_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(area);
+        (h_chunks[0], Some(h_chunks[1]))
     } else {
-        render_wide(state, f, area, click_state);
-    }
-}
+        (area, None)
+    };
 
-fn render_wide(
-    state: &CookieState,
-    f: &mut Frame,
-    area: Rect,
-    click_state: &Rc<RefCell<ClickState>>,
-) {
-    let h_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(area);
-
-    // Calculate left panel height based on active buffs
-    let buff_height = if state.active_buffs.is_empty() { 0 } else { 2 + state.active_buffs.len() as u16 };
-    let golden_height = if state.golden_event.is_some() { 3 } else { 0 };
-    let discount_height: u16 = if state.active_discount > 0.0 { 1 } else { 0 };
-    let extra_height = buff_height + golden_height + discount_height;
-
-    let left_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(5),  // Cookie display + click
-            Constraint::Length(extra_height), // Buffs + Golden
-            Constraint::Min(5),    // Producers or Upgrades
-            Constraint::Length(5), // Controls/help
-        ])
-        .split(h_chunks[0]);
-
-    render_cookie_display(state, f, left_chunks[0], false, click_state);
-    if extra_height > 0 {
-        render_buffs_and_golden(state, f, left_chunks[1], click_state);
-    }
-    if state.show_upgrades {
-        render_upgrades(state, f, left_chunks[2], click_state);
+    // Calculate dynamic heights for buffs/golden/discount section
+    let buff_height = if is_narrow {
+        let has_anything = !state.active_buffs.is_empty()
+            || state.golden_event.is_some()
+            || state.active_discount > 0.0;
+        if has_anything { 3 } else { 0 }
     } else {
-        render_producers(state, f, left_chunks[2], click_state);
-    }
-    render_help(state, f, left_chunks[3], click_state);
-    render_log(state, f, h_chunks[1]);
-}
+        let bh = if state.active_buffs.is_empty() { 0 } else { 2 + state.active_buffs.len() as u16 };
+        let gh = if state.golden_event.is_some() { 3 } else { 0 };
+        let dh: u16 = if state.active_discount > 0.0 { 1 } else { 0 };
+        bh + gh + dh
+    };
 
-fn render_narrow(
-    state: &CookieState,
-    f: &mut Frame,
-    area: Rect,
-    click_state: &Rc<RefCell<ClickState>>,
-) {
-    let has_anything = !state.active_buffs.is_empty() || state.golden_event.is_some() || state.active_discount > 0.0;
-    let buff_height = if has_anything { 3 } else { 0 };
+    // Cookie display height adapts to available space
+    let cookie_height: u16 = if is_narrow { 3 } else { 5 };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Cookie display compact
+            Constraint::Length(cookie_height),
             Constraint::Length(buff_height),
-            Constraint::Min(5),   // Producers or Upgrades
-            Constraint::Length(5), // Controls/help
+            Constraint::Min(5),
+            Constraint::Length(5),
         ])
-        .split(area);
+        .split(main_area);
 
-    render_cookie_display(state, f, chunks[0], true, click_state);
+    // Same components for every width — each adapts internally
+    render_cookie_display(state, f, chunks[0], click_state);
     if buff_height > 0 {
         render_buffs_and_golden(state, f, chunks[1], click_state);
     }
@@ -110,15 +83,21 @@ fn render_narrow(
         render_producers(state, f, chunks[2], click_state);
     }
     render_help(state, f, chunks[3], click_state);
+
+    if let Some(log_area) = log_area {
+        render_log(state, f, log_area);
+    }
 }
 
 fn render_cookie_display(
     state: &CookieState,
     f: &mut Frame,
     area: Rect,
-    is_narrow: bool,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let w = area.width;
+    let h = area.height;
+
     let cookies_str = format_number(state.cookies.floor());
     let cps_str = format_number(state.total_cps());
     let spinner_idx = (state.anim_frame / 3) as usize % SPINNER.len();
@@ -139,11 +118,8 @@ fn render_cookie_display(
             .add_modifier(Modifier::BOLD)
     };
 
-    let borders = if is_narrow {
-        Borders::TOP | Borders::BOTTOM
-    } else {
-        Borders::ALL
-    };
+    // Borders adapt to width: full borders when wide, horizontal-only when narrow
+    let borders = if w >= 60 { Borders::ALL } else { Borders::TOP | Borders::BOTTOM };
 
     // Cookie color changes with click flash
     let cookie_color = if state.click_flash > 0 {
@@ -173,35 +149,10 @@ fn render_cookie_display(
         " Cookie Factory "
     };
 
-    if is_narrow {
-        let click_label = if click_power > 1.0 {
-            format!(" [C]+{} ", format_number(click_power))
-        } else {
-            " [C]CLICK ".to_string()
-        };
-        let line = Line::from(vec![
-            Span::styled(
-                format!("🍪 {} ", cookies_str),
-                Style::default()
-                    .fg(cookie_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("{} {}/s ", spinner, cps_str),
-                Style::default().fg(Color::White),
-            ),
-            Span::styled(click_label, click_style),
-        ]);
-        let widget = Paragraph::new(line)
-            .block(
-                Block::default()
-                    .borders(borders)
-                    .border_style(Style::default().fg(border_color))
-                    .title(title),
-            )
-            .alignment(Alignment::Center);
-        f.render_widget(widget, area);
-    } else {
+    // Decide whether to show ASCII art based on available space
+    let show_art = w >= 40 && h >= 5;
+
+    if show_art {
         // Animated cookie + stats (pressed animation on click)
         let cookie_art = if state.click_flash > 0 {
             let idx = state.click_flash as usize % COOKIE_CLICK_FRAMES.len();
@@ -248,10 +199,39 @@ fn render_cookie_display(
                 .title(title),
         );
         f.render_widget(widget, area);
-
-        // Render floating particles over the cookie area
-        render_particles(state, f, area);
+    } else {
+        // Compact single-line display for narrow/short screens
+        let click_label = if click_power > 1.0 {
+            format!(" [C]+{} ", format_number(click_power))
+        } else {
+            " [C]CLICK ".to_string()
+        };
+        let line = Line::from(vec![
+            Span::styled(
+                format!("🍪 {} ", cookies_str),
+                Style::default()
+                    .fg(cookie_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{} {}/s ", spinner, cps_str),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(click_label, click_style),
+        ]);
+        let widget = Paragraph::new(line)
+            .block(
+                Block::default()
+                    .borders(borders)
+                    .border_style(Style::default().fg(border_color))
+                    .title(title),
+            )
+            .alignment(Alignment::Center);
+        f.render_widget(widget, area);
     }
+
+    // Particles render on ALL screen sizes
+    render_particles(state, f, area);
 
     // Register the whole cookie display area as a click target for 'c'
     let mut cs = click_state.borrow_mut();
