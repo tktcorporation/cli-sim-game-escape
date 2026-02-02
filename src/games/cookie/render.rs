@@ -67,8 +67,8 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
         .constraints([
             Constraint::Length(cookie_height),
             Constraint::Length(buff_height),
-            Constraint::Min(5),
-            Constraint::Length(5),
+            Constraint::Length(3), // tab bar (3 rows, one per tab)
+            Constraint::Min(5),   // content
         ])
         .split(main_area);
 
@@ -77,15 +77,76 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
     if buff_height > 0 {
         render_buffs_and_golden(state, f, chunks[1], click_state);
     }
-    if state.show_upgrades {
-        render_upgrades(state, f, chunks[2], click_state);
+    render_tab_bar(state, f, chunks[2], click_state);
+    if state.show_milestones {
+        render_milestones(state, f, chunks[3], click_state);
+    } else if state.show_upgrades {
+        render_upgrades(state, f, chunks[3], click_state);
     } else {
-        render_producers(state, f, chunks[2], click_state);
+        render_producers(state, f, chunks[3], click_state);
     }
-    render_help(state, f, chunks[3], click_state);
 
     if let Some(log_area) = log_area {
         render_log(state, f, log_area);
+    }
+}
+
+/// Render tab bar for switching between Producers / Upgrades / Milestones.
+/// Each tab occupies one row; click targets are row-wide for reliability.
+fn render_tab_bar(
+    state: &CookieState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let ready_count = state.ready_milestone_count();
+
+    // Determine active tab index
+    let active = if state.show_milestones {
+        2
+    } else if state.show_upgrades {
+        1
+    } else {
+        0
+    };
+
+    let tab_style = |idx: usize, base_color: Color| -> Style {
+        if idx == active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(base_color)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(base_color)
+        }
+    };
+
+    let milestone_color = if ready_count > 0 { Color::Green } else { Color::Cyan };
+
+    // Build labels
+    let milestone_label = if ready_count > 0 {
+        format!(" ▸ Milestones ({}) ", ready_count)
+    } else {
+        " ▸ Milestones ".to_string()
+    };
+
+    let tabs: [(String, Style, char); 3] = [
+        (" ▸ Producers ".to_string(), tab_style(0, Color::Green), '{'),
+        (" ▸ Upgrades ".to_string(), tab_style(1, Color::Magenta), '|'),
+        (milestone_label, tab_style(2, milestone_color), '}'),
+    ];
+
+    // Render each tab on its own row
+    let mut cs = click_state.borrow_mut();
+    for (i, (label, style, key)) in tabs.iter().enumerate() {
+        let row_y = area.y + i as u16;
+        if row_y >= area.y + area.height {
+            break;
+        }
+        let row_area = Rect::new(area.x, row_y, area.width, 1);
+        let widget = Paragraph::new(Line::from(Span::styled(label.as_str(), *style)));
+        f.render_widget(widget, row_area);
+        cs.add_target(row_y, *key);
     }
 }
 
@@ -168,6 +229,7 @@ fn render_cookie_display(
             ">>> [C] CLICK! <<< ".to_string()
         };
 
+        let ready_count = state.ready_milestone_count();
         let lines = vec![
             Line::from(vec![
                 Span::styled(cookie_art[0], Style::default().fg(cookie_color)),
@@ -178,13 +240,34 @@ fn render_cookie_display(
                         .add_modifier(Modifier::BOLD),
                 ),
             ]),
-            Line::from(vec![
-                Span::styled(cookie_art[1], Style::default().fg(cookie_color)),
-                Span::styled(
-                    format!(" {} {}/sec   Clicks: {}", spinner, cps_str, state.total_clicks),
-                    Style::default().fg(Color::White),
-                ),
-            ]),
+            Line::from({
+                let mut spans = vec![
+                    Span::styled(cookie_art[1], Style::default().fg(cookie_color)),
+                    Span::styled(
+                        format!(" {} {}/sec   Clicks: {}", spinner, cps_str, state.total_clicks),
+                        Style::default().fg(Color::White),
+                    ),
+                ];
+                if state.milk > 0.0 {
+                    spans.push(Span::styled(
+                        format!("  🥛{:.0}%", state.milk * 100.0),
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ));
+                    if state.kitten_multiplier > 1.001 {
+                        spans.push(Span::styled(
+                            format!(" 🐱×{:.2}", state.kitten_multiplier),
+                            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                }
+                if ready_count > 0 {
+                    spans.push(Span::styled(
+                        format!("  ✨[M]{}個解放可!", ready_count),
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    ));
+                }
+                spans
+            }),
             Line::from(vec![
                 Span::styled(cookie_art[2], Style::default().fg(cookie_color)),
                 Span::styled("  ", Style::default()),
@@ -598,93 +681,274 @@ fn render_upgrades(
     }
 }
 
-fn render_help(
+fn render_milestones(
     state: &CookieState,
     f: &mut Frame,
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let toggle_label = if state.show_upgrades {
-        "[U] Producersに戻る"
-    } else {
-        "[U] Upgradeを見る"
-    };
+    use super::state::MilestoneStatus;
 
-    let golden_hint = if state.golden_event.is_some() {
+    let claimed = state.achieved_milestone_count();
+    let ready = state.ready_milestone_count();
+    let total = state.milestones.len();
+
+    // Milk bar
+    let milk_pct = state.milk * 100.0;
+    let bar_width = 20usize;
+    let filled = ((state.milk * bar_width as f64).round() as usize).min(bar_width);
+    let milk_bar: String = "█".repeat(filled) + &"░".repeat(bar_width - filled);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Header: milk gauge
+    lines.push(Line::from(vec![
         Span::styled(
-            " [G] ゴールデン取得！",
+            format!(" 🥛 ミルク: {:.0}% ", milk_pct),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
-        )
-    } else {
-        Span::styled("", Style::default())
-    };
+        ),
+        Span::styled(
+            milk_bar,
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(
+            format!("  🐱×{:.2}", state.kitten_multiplier),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
 
-    let lines = vec![
-        Line::from(vec![
+    // Ready count hint
+    if ready > 0 {
+        lines.push(Line::from(vec![
             Span::styled(
-                " [C] ",
+                format!(" ✨ {}個が解放可能！", ready),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("クリックで+1  ", Style::default().fg(Color::White)),
             Span::styled(
-                "[1-5] ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Producer購入", Style::default().fg(Color::White)),
-            golden_hint,
-        ]),
-        Line::from(vec![
-            Span::styled(
-                " [U] ",
-                Style::default().fg(Color::Magenta),
-            ),
-            Span::styled(
-                format!("{}  ", toggle_label.trim_start_matches("[U] ")),
+                " [a-z]個別  [!]一括解放",
                 Style::default().fg(Color::DarkGray),
             ),
-            Span::styled("[Q/Esc] ", Style::default().fg(Color::DarkGray)),
-            Span::styled("メニューに戻る", Style::default().fg(Color::DarkGray)),
-        ]),
-        Line::from(Span::styled(
-            " タップ/クリックでも操作できます",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+        ]));
+    }
 
-    let widget = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" 操作方法 "),
-    );
+    // Available height for milestone list (area minus border + header lines + effects section)
+    let header_used = if ready > 0 { 3 } else { 2 }; // milk bar + hint? + border
+    let effects_lines = 4u16; // effects section estimate
+    let avail = area.height.saturating_sub(2 + header_used + effects_lines) as usize;
+
+    // === Ready milestones (show all, top priority) ===
+    let mut ready_key_idx: u8 = 0;
+    let ready_milestones: Vec<&super::state::Milestone> = state.milestones.iter()
+        .filter(|m| m.status == MilestoneStatus::Ready)
+        .collect();
+    for milestone in &ready_milestones {
+        let key = (b'a' + ready_key_idx) as char;
+        ready_key_idx += 1;
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" [{}] ", key),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("✨ {}", milestone.name),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" - {}", milestone.description),
+                Style::default().fg(Color::Green),
+            ),
+        ]));
+    }
+
+    // === Locked milestones (show next few goals) ===
+    let locked_milestones: Vec<&super::state::Milestone> = state.milestones.iter()
+        .filter(|m| m.status == MilestoneStatus::Locked)
+        .collect();
+    let locked_budget = avail.saturating_sub(ready_milestones.len()).saturating_sub(if claimed > 0 { 1 } else { 0 });
+    let locked_show = locked_milestones.len().min(locked_budget.max(2));
+    for milestone in locked_milestones.iter().take(locked_show) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "     🔒 ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                milestone.name.to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!(" - {}", milestone.description),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    let locked_remaining = locked_milestones.len().saturating_sub(locked_show);
+    if locked_remaining > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("     ...他{}個", locked_remaining),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    // === Claimed milestones (compact summary) ===
+    if claimed > 0 {
+        let claimed_names: Vec<&str> = state.milestones.iter()
+            .filter(|m| m.status == MilestoneStatus::Claimed)
+            .map(|m| m.name.as_str())
+            .collect();
+        let summary = if claimed_names.len() <= 3 {
+            claimed_names.join(", ")
+        } else {
+            format!("{}, {} ...他{}個",
+                claimed_names[claimed_names.len()-2],
+                claimed_names[claimed_names.len()-1],
+                claimed_names.len() - 2)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" 🏆 解放済({}): ", claimed),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                summary,
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
+    }
+
+    // === Active effects summary ===
+    lines.push(Line::from(Span::styled(
+        " ─── 発動中の効果 ────────────────",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    // Milk + kitten
+    if state.milk > 0.0 {
+        let kitten_bonus = (state.kitten_multiplier - 1.0) * 100.0;
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" 🥛 ミルク {:.0}%", state.milk * 100.0),
+                Style::default().fg(Color::White),
+            ),
+            if kitten_bonus > 0.01 {
+                Span::styled(
+                    format!("  → 🐱 CPS +{:.1}%", kitten_bonus),
+                    Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled(
+                    "  (子猫UP購入でCPSに反映)",
+                    Style::default().fg(Color::DarkGray),
+                )
+            },
+        ]));
+    }
+
+    // Synergy multiplier
+    if state.synergy_multiplier > 1.0 {
+        lines.push(Line::from(Span::styled(
+            format!(" 🔗 シナジー倍率: ×{:.0}", state.synergy_multiplier),
+            Style::default().fg(Color::Cyan),
+        )));
+    }
+
+    // Producer multipliers summary
+    let multi_parts: Vec<String> = state.producers.iter()
+        .filter(|p| p.multiplier > 1.0)
+        .map(|p| format!("{}:×{:.0}", p.kind.name(), p.multiplier))
+        .collect();
+    if !multi_parts.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(" ⚡ 生産倍率: {}", multi_parts.join("  ")),
+            Style::default().fg(Color::Yellow),
+        )));
+    }
+
+    // Active buffs
+    for buff in &state.active_buffs {
+        let (label, color) = match &buff.effect {
+            super::state::GoldenEffect::ProductionFrenzy { multiplier } => {
+                (format!("🌟 生産フレンジー ×{:.0} (残{}t)", multiplier, buff.ticks_left), Color::Magenta)
+            }
+            super::state::GoldenEffect::ClickFrenzy { multiplier } => {
+                (format!("👆 クリックフレンジー ×{:.0} (残{}t)", multiplier, buff.ticks_left), Color::Cyan)
+            }
+            super::state::GoldenEffect::InstantBonus { .. } => continue,
+        };
+        lines.push(Line::from(Span::styled(
+            format!(" {}", label),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    // Discount
+    if state.active_discount > 0.0 {
+        lines.push(Line::from(Span::styled(
+            format!(" 💰 割引ウェーブ: {:.0}%OFF", state.active_discount * 100.0),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    // Upgrade count summary
+    let purchased_count = state.upgrades.iter().filter(|u| u.purchased).count();
+    let total_upgrades = state.upgrades.len();
+    lines.push(Line::from(Span::styled(
+        format!(" 📦 アップグレード: {}/{}", purchased_count, total_upgrades),
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let border_color = if ready > 0 {
+        Color::Green
+    } else if state.milestone_flash > 0 {
+        Color::Yellow
+    } else {
+        Color::Cyan
+    };
+
+    let widget = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+                .title(format!(
+                    " マイルストーン ({}/{}) ",
+                    claimed, total
+                )),
+        )
+        .wrap(Wrap { trim: false });
     f.render_widget(widget, area);
 
-    // 'U' toggle click target
+    // Click targets for ready milestones (they are at the top of the list)
     let mut cs = click_state.borrow_mut();
-    cs.add_target(area.y + 2, 'u');
+    // header_used + 1 for border top
+    let first_ready_row = area.y + 1 + header_used;
+    for i in 0..ready_key_idx {
+        let key = (b'a' + i) as char;
+        cs.add_target(first_ready_row + i as u16, key);
+    }
 }
 
 fn render_log(state: &CookieState, f: &mut Frame, area: Rect) {
     let visible_height = area.height.saturating_sub(2) as usize;
-    let start = if state.log.len() > visible_height {
-        state.log.len() - visible_height
-    } else {
-        0
-    };
-
     let total = state.log.len();
-    let log_lines: Vec<Line> = state.log[start..]
-        .iter()
+
+    // Show newest entries first (reverse order), limited to visible area
+    let log_lines: Vec<Line> = state.log.iter()
+        .rev()
+        .take(visible_height)
         .enumerate()
         .map(|(i, entry)| {
-            let global_idx = start + i;
-            let is_recent = total > 0 && global_idx >= total.saturating_sub(3);
+            let is_recent = i < 3;
 
             if entry.is_important {
                 let style = if is_recent {
@@ -710,6 +974,8 @@ fn render_log(state: &CookieState, f: &mut Frame, area: Rect) {
             }
         })
         .collect();
+
+    let _ = total;
 
     let widget = Paragraph::new(log_lines)
         .block(

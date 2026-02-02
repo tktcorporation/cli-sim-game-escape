@@ -5,7 +5,7 @@ mod time;
 use std::{cell::RefCell, io, rc::Rc};
 
 use games::{create_game, AppState, GameChoice};
-use input::{is_narrow_layout, pixel_y_to_row, resolve_tap, ClickState, InputEvent};
+use input::{is_narrow_layout, resolve_tap_at, ClickState, InputEvent};
 use time::GameTime;
 
 use ratzilla::event::{KeyCode, MouseButton, MouseEventKind};
@@ -16,21 +16,44 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
 use ratzilla::ratatui::Terminal;
 use ratzilla::{DomBackend, WebRenderer};
 
-/// Query the grid container's bounding rect and convert pixel coordinates to a row.
-fn dom_pixel_to_row(client_x: f64, client_y: f64, cs: &ClickState) -> Option<u16> {
+/// Use `elementFromPoint` to find which grid row was clicked.
+///
+/// Ratzilla renders each terminal row as a `<pre>` child of `div#grid`.
+/// Instead of pixel-math (fragile under zoom / scroll / CSS transforms),
+/// we ask the browser which element sits at the click coordinates,
+/// then walk up to the `<pre>` and find its index among siblings.
+fn dom_element_to_row(client_x: f64, client_y: f64) -> Option<u16> {
     let window = web_sys::window()?;
     let document = window.document()?;
-    let grid = document.query_selector("body > div").ok()??;
-    let rect = grid.get_bounding_client_rect();
+    let element = document.element_from_point(client_x as f32, client_y as f32)?;
 
-    let click_y = client_y - rect.top();
-    let click_x = client_x - rect.left();
+    // Walk up to the <pre> row element (ratzilla may nest <span>s inside <pre>)
+    let pre = find_ancestor_pre(&element)?;
 
-    if click_x < 0.0 {
-        return None;
+    // The parent of the <pre> is the grid container
+    let grid = pre.parent_element()?;
+    let children = grid.children();
+    let len = children.length();
+    for i in 0..len {
+        if let Some(child) = children.item(i) {
+            if child == pre {
+                return Some(i as u16);
+            }
+        }
     }
+    None
+}
 
-    pixel_y_to_row(click_y, rect.height(), cs.terminal_rows)
+/// Walk up the DOM from `el` to find the nearest `<pre>` ancestor (or self).
+fn find_ancestor_pre(el: &web_sys::Element) -> Option<web_sys::Element> {
+    let mut current = Some(el.clone());
+    while let Some(e) = current {
+        if e.tag_name().eq_ignore_ascii_case("PRE") {
+            return Some(e);
+        }
+        current = e.parent_element();
+    }
+    None
 }
 
 /// Process a tap/click at the given client coordinates.
@@ -40,17 +63,13 @@ fn handle_tap(
     app_state: &Rc<RefCell<AppState>>,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let cs = click_state.borrow();
-    if cs.terminal_rows == 0 || cs.terminal_cols == 0 {
-        return;
-    }
-
-    let row = match dom_pixel_to_row(client_x, client_y, &cs) {
+    let row = match dom_element_to_row(client_x, client_y) {
         Some(r) => r,
         None => return,
     };
 
-    if let Some(event) = resolve_tap(row, &cs) {
+    let cs = click_state.borrow();
+    if let Some(event) = resolve_tap_at(row, 0, &cs) {
         drop(cs);
         dispatch_event(&event, app_state);
     }

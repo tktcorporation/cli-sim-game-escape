@@ -111,6 +111,10 @@ mod tests {
                 let count = p.count as f64;
                 state.total_cps() * count * percentage
             }
+            UpgradeEffect::KittenBoost { multiplier } => {
+                // CPS gain = current_cps * milk * multiplier
+                state.total_cps() * state.milk * multiplier
+            }
         }
     }
 
@@ -167,6 +171,23 @@ mod tests {
             .map(|u| u.name.as_str())
             .collect();
         eprintln!("│ 購入済UP: {:?}", purchased);
+
+        // Milestone & milk stats
+        let achieved = state.achieved_milestone_count();
+        let total_milestones = state.milestones.len();
+        eprintln!(
+            "│ マイルストーン: {}/{} ミルク: {:.0}% 子猫倍率: x{:.3}",
+            achieved, total_milestones, state.milk * 100.0, state.kitten_multiplier
+        );
+        let recent: Vec<&str> = state
+            .milestones
+            .iter()
+            .filter(|m| m.status == MilestoneStatus::Claimed)
+            .map(|m| m.name.as_str())
+            .collect();
+        if !recent.is_empty() {
+            eprintln!("│ 達成済: {:?}", recent);
+        }
 
         // Next affordable purchase
         if let Some(purchase) = find_best_purchase(state) {
@@ -237,6 +258,9 @@ mod tests {
 
             // Claim golden cookies
             logic::claim_golden(&mut state);
+
+            // Claim all ready milestones (optimal play: claim immediately)
+            logic::claim_all_milestones(&mut state);
 
             // Try to buy things (greedy: buy best ROI until can't afford anything)
             let mut bought_this_second = false;

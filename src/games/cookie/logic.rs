@@ -1,8 +1,8 @@
 //! Cookie Factory game logic — pure functions, fully testable.
 
 use super::state::{
-    ActiveBuff, CookieState, GoldenCookieEvent, GoldenEffect, MiniEventKind, Particle,
-    ProducerKind, UpgradeEffect,
+    ActiveBuff, CookieState, GoldenCookieEvent, GoldenEffect, MilestoneCondition,
+    MilestoneStatus, MiniEventKind, Particle, ProducerKind, UpgradeEffect,
 };
 
 /// Advance the game by `delta_ticks` ticks (at 10 ticks/sec).
@@ -35,6 +35,14 @@ pub fn tick(state: &mut CookieState, delta_ticks: u32) {
 
     // Tick mini-events
     tick_mini_event(state, delta_ticks);
+
+    // Check milestones
+    check_milestones(state);
+
+    // Tick milestone flash
+    if state.milestone_flash > 0 {
+        state.milestone_flash = state.milestone_flash.saturating_sub(delta_ticks);
+    }
 }
 
 /// Tick down active buffs and remove expired ones.
@@ -388,7 +396,123 @@ fn apply_upgrade_effect(state: &mut CookieState, effect: &UpgradeEffect, name: &
                 true,
             );
         }
+        UpgradeEffect::KittenBoost { multiplier } => {
+            // Recalculate kitten multiplier with the newly purchased upgrade
+            recalculate_kitten_multiplier(state);
+            state.add_log(
+                &format!(
+                    "🐱 {} 適用！ミルク{:.0}%×{:.0}%=CPS+{:.1}%",
+                    name,
+                    state.milk * 100.0,
+                    multiplier * 100.0,
+                    state.milk * multiplier * 100.0,
+                ),
+                true,
+            );
+        }
     }
+}
+
+/// Check all milestones and award newly achieved ones.
+/// Check all milestones and mark newly met conditions as Ready (claimable).
+pub fn check_milestones(state: &mut CookieState) {
+    let cps = state.total_cps();
+    let mut newly_ready = false;
+
+    for milestone in &mut state.milestones {
+        if milestone.status != MilestoneStatus::Locked {
+            continue;
+        }
+        let met = match &milestone.condition {
+            MilestoneCondition::TotalCookies(threshold) => state.cookies_all_time >= *threshold,
+            MilestoneCondition::ProducerCount(kind, count) => {
+                state.producers[kind.index()].count >= *count
+            }
+            MilestoneCondition::CpsReached(threshold) => cps >= *threshold,
+            MilestoneCondition::TotalClicks(threshold) => state.total_clicks >= *threshold,
+            MilestoneCondition::GoldenClaimed(threshold) => {
+                state.golden_cookies_claimed >= *threshold
+            }
+        };
+        if met {
+            milestone.status = MilestoneStatus::Ready;
+            newly_ready = true;
+        }
+    }
+
+    if newly_ready {
+        state.milestone_flash = 15; // 1.5 seconds flash to draw attention
+    }
+}
+
+/// Player claims a specific ready milestone by index. Returns true if successful.
+pub fn claim_milestone(state: &mut CookieState, index: usize) -> bool {
+    if index >= state.milestones.len() {
+        return false;
+    }
+    if state.milestones[index].status != MilestoneStatus::Ready {
+        return false;
+    }
+
+    state.milestones[index].status = MilestoneStatus::Claimed;
+
+    // Recalculate milk
+    let achieved = state.achieved_milestone_count() as f64;
+    state.milk = achieved * 0.04; // 4% milk per achievement
+
+    // Recalculate kitten multiplier
+    recalculate_kitten_multiplier(state);
+
+    let name = state.milestones[index].name.clone();
+    state.add_log(
+        &format!("🏆 解放！「{}」 (ミルク: {:.0}%)", name, state.milk * 100.0),
+        true,
+    );
+    state.milestone_flash = 15;
+    true
+}
+
+/// Claim all ready milestones at once. Returns count of claimed milestones.
+pub fn claim_all_milestones(state: &mut CookieState) -> usize {
+    let ready_indices: Vec<usize> = state.milestones.iter().enumerate()
+        .filter(|(_, m)| m.status == MilestoneStatus::Ready)
+        .map(|(i, _)| i)
+        .collect();
+    let count = ready_indices.len();
+    if count == 0 {
+        return 0;
+    }
+    for idx in &ready_indices {
+        state.milestones[*idx].status = MilestoneStatus::Claimed;
+    }
+
+    let achieved = state.achieved_milestone_count() as f64;
+    state.milk = achieved * 0.04;
+    recalculate_kitten_multiplier(state);
+
+    let names: Vec<String> = ready_indices.iter()
+        .map(|i| state.milestones[*i].name.clone())
+        .collect();
+    state.add_log(
+        &format!("🏆 {}個解放！「{}」 (ミルク: {:.0}%)", count, names.join("」「"), state.milk * 100.0),
+        true,
+    );
+    state.milestone_flash = 15;
+    count
+}
+
+/// Recalculate kitten_multiplier from milk and purchased kitten upgrades.
+pub fn recalculate_kitten_multiplier(state: &mut CookieState) {
+    let mut multiplier = 1.0;
+    for upgrade in &state.upgrades {
+        if upgrade.purchased {
+            if let UpgradeEffect::KittenBoost { multiplier: m } = &upgrade.effect {
+                // Each kitten upgrade multiplies CPS by (1 + milk * m)
+                multiplier *= 1.0 + state.milk * m;
+            }
+        }
+    }
+    state.kitten_multiplier = multiplier;
 }
 
 /// Format a number with commas (e.g. 1234567 → "1,234,567").
@@ -730,6 +854,109 @@ mod tests {
         assert!(state.upgrades[0].purchased);
         assert!((state.cookies - 5.0).abs() < 0.01); // 80 - 75 = 5
         assert!((state.active_discount - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn milestone_becomes_ready_on_cookie_threshold() {
+        let mut state = CookieState::new();
+        assert_eq!(state.achieved_milestone_count(), 0);
+        state.cookies_all_time = 100.0;
+        check_milestones(&mut state);
+        // "はじめの一歩" should be ready (not yet claimed)
+        assert_eq!(state.milestones[0].status, MilestoneStatus::Ready);
+        assert_eq!(state.achieved_milestone_count(), 0); // not claimed yet
+        assert!((state.milk - 0.0).abs() < 0.001); // milk unchanged until claimed
+    }
+
+    #[test]
+    fn milestone_claim_applies_milk() {
+        let mut state = CookieState::new();
+        state.cookies_all_time = 100.0;
+        check_milestones(&mut state);
+        assert!(claim_milestone(&mut state, 0));
+        assert_eq!(state.milestones[0].status, MilestoneStatus::Claimed);
+        assert!(state.milk > 0.0);
+    }
+
+    #[test]
+    fn milestone_claim_all_works() {
+        let mut state = CookieState::new();
+        state.total_clicks = 100;
+        state.cookies_all_time = 100.0;
+        check_milestones(&mut state);
+        let ready = state.ready_milestone_count();
+        assert!(ready >= 2); // at least "はじめの一歩" + "クリッカー"
+        let claimed = claim_all_milestones(&mut state);
+        assert_eq!(claimed, ready);
+        assert_eq!(state.ready_milestone_count(), 0);
+        assert_eq!(state.achieved_milestone_count(), ready);
+    }
+
+    #[test]
+    fn milestone_achieved_on_clicks() {
+        let mut state = CookieState::new();
+        state.total_clicks = 100;
+        check_milestones(&mut state);
+        let click_milestone = state.milestones.iter().find(|m| m.name == "クリッカー").unwrap();
+        assert_eq!(click_milestone.status, MilestoneStatus::Ready);
+    }
+
+    #[test]
+    fn milk_increases_with_claimed_milestones() {
+        let mut state = CookieState::new();
+        state.cookies_all_time = 1_000_000.0;
+        state.total_clicks = 10_000;
+        state.producers[0].count = 100;
+        state.producers[1].count = 50;
+        check_milestones(&mut state);
+        claim_all_milestones(&mut state);
+        let count = state.achieved_milestone_count();
+        assert!(count > 5);
+        // milk = claimed * 0.04
+        assert!((state.milk - count as f64 * 0.04).abs() < 0.001);
+    }
+
+    #[test]
+    fn kitten_upgrade_multiplies_cps() {
+        let mut state = CookieState::new();
+        state.producers[1].count = 10; // 10 CPS base
+        state.milk = 0.60; // 60% milk
+        state.cookies = 100_000.0;
+        let base_cps = state.total_cps();
+        // Find and buy first kitten upgrade
+        let kitten_idx = state.upgrades.iter().position(|u| u.name == "子猫の手伝い").unwrap();
+        buy_upgrade(&mut state, kitten_idx);
+        let new_cps = state.total_cps();
+        // Expected: CPS * (1 + 0.60 * 0.05) = CPS * 1.03
+        assert!(new_cps > base_cps);
+        assert!((new_cps / base_cps - 1.03).abs() < 0.01);
+    }
+
+    #[test]
+    fn multiple_kitten_upgrades_stack_multiplicatively() {
+        let mut state = CookieState::new();
+        state.producers[1].count = 10;
+        state.milk = 1.0; // 100% milk
+        state.cookies = 10_000_000_000.0;
+        // Buy first kitten (5%)
+        let idx1 = state.upgrades.iter().position(|u| u.name == "子猫の手伝い").unwrap();
+        buy_upgrade(&mut state, idx1);
+        // Buy second kitten (10%)
+        let idx2 = state.upgrades.iter().position(|u| u.name == "子猫の労働者").unwrap();
+        buy_upgrade(&mut state, idx2);
+        // Expected: (1 + 1.0*0.05) * (1 + 1.0*0.10) = 1.05 * 1.10 = 1.155
+        assert!((state.kitten_multiplier - 1.155).abs() < 0.01);
+    }
+
+    #[test]
+    fn milestone_flash_decreases_over_ticks() {
+        let mut state = CookieState::new();
+        state.cookies_all_time = 100.0;
+        tick(&mut state, 1); // triggers milestone check
+        assert!(state.milestone_flash > 0);
+        let flash = state.milestone_flash;
+        tick(&mut state, 5);
+        assert!(state.milestone_flash < flash);
     }
 }
 

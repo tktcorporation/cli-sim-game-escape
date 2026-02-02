@@ -46,9 +46,34 @@ impl Game for CookieGame {
             }
             'u' => {
                 self.state.show_upgrades = !self.state.show_upgrades;
+                self.state.show_milestones = false;
                 true
             }
-            '1' | '2' | '3' | '4' | '5' if !self.state.show_upgrades => {
+            'm' => {
+                self.state.show_milestones = !self.state.show_milestones;
+                self.state.show_upgrades = false;
+                true
+            }
+            // Tab direct-set keys (used by click targets, not toggling)
+            '{' => {
+                // Go to Producers tab
+                self.state.show_upgrades = false;
+                self.state.show_milestones = false;
+                true
+            }
+            '|' => {
+                // Go to Upgrades tab
+                self.state.show_upgrades = true;
+                self.state.show_milestones = false;
+                true
+            }
+            '}' => {
+                // Go to Milestones tab
+                self.state.show_milestones = true;
+                self.state.show_upgrades = false;
+                true
+            }
+            '1' | '2' | '3' | '4' | '5' if !self.state.show_upgrades && !self.state.show_milestones => {
                 let kind = match key {
                     '1' => ProducerKind::Cursor,
                     '2' => ProducerKind::Grandma,
@@ -58,6 +83,27 @@ impl Game for CookieGame {
                     _ => unreachable!(),
                 };
                 logic::buy_producer(&mut self.state, &kind);
+                true
+            }
+            'a'..='z' if self.state.show_milestones => {
+                // Map 'a'..'z' to ready milestone indices
+                let display_idx = (key as u8 - b'a') as usize;
+                let ready: Vec<usize> = self
+                    .state
+                    .milestones
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| m.status == state::MilestoneStatus::Ready)
+                    .map(|(i, _)| i)
+                    .collect();
+                if let Some(&real_idx) = ready.get(display_idx) {
+                    logic::claim_milestone(&mut self.state, real_idx);
+                }
+                true
+            }
+            '!' if self.state.show_milestones => {
+                // Claim all ready milestones at once
+                logic::claim_all_milestones(&mut self.state);
                 true
             }
             'a'..='z' if self.state.show_upgrades => {
@@ -156,5 +202,60 @@ mod tests {
         game.handle_input(&InputEvent::Key('g'));
         assert!(game.state.golden_event.is_none());
         assert_eq!(game.state.golden_cookies_claimed, 1);
+    }
+
+    #[test]
+    fn toggle_milestones() {
+        let mut game = CookieGame::new();
+        assert!(!game.state.show_milestones);
+        game.handle_input(&InputEvent::Key('m'));
+        assert!(game.state.show_milestones);
+        assert!(!game.state.show_upgrades);
+        game.handle_input(&InputEvent::Key('m'));
+        assert!(!game.state.show_milestones);
+    }
+
+    #[test]
+    fn milestones_and_upgrades_mutually_exclusive() {
+        let mut game = CookieGame::new();
+        game.handle_input(&InputEvent::Key('u'));
+        assert!(game.state.show_upgrades);
+        game.handle_input(&InputEvent::Key('m'));
+        assert!(game.state.show_milestones);
+        assert!(!game.state.show_upgrades);
+        game.handle_input(&InputEvent::Key('u'));
+        assert!(game.state.show_upgrades);
+        assert!(!game.state.show_milestones);
+    }
+
+    #[test]
+    fn tab_direct_set_producers() {
+        let mut game = CookieGame::new();
+        game.state.show_upgrades = true;
+        game.handle_input(&InputEvent::Key('{'));
+        assert!(!game.state.show_upgrades);
+        assert!(!game.state.show_milestones);
+    }
+
+    #[test]
+    fn tab_direct_set_upgrades() {
+        let mut game = CookieGame::new();
+        game.handle_input(&InputEvent::Key('|'));
+        assert!(game.state.show_upgrades);
+        assert!(!game.state.show_milestones);
+        // Clicking again stays on upgrades (no toggle)
+        game.handle_input(&InputEvent::Key('|'));
+        assert!(game.state.show_upgrades);
+    }
+
+    #[test]
+    fn tab_direct_set_milestones() {
+        let mut game = CookieGame::new();
+        game.handle_input(&InputEvent::Key('}'));
+        assert!(game.state.show_milestones);
+        assert!(!game.state.show_upgrades);
+        // Clicking again stays on milestones
+        game.handle_input(&InputEvent::Key('}'));
+        assert!(game.state.show_milestones);
     }
 }
