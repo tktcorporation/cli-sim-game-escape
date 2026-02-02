@@ -25,6 +25,11 @@ Ratzilla (ratatui wrapper) を使用し、10 ticks/sec の固定タイムステ�
 - **Responsive**: 60列を閾値にワイド/ナローレイアウトを切り替え
 - 日本語 UI
 
+### PR前チェックリスト
+- `cargo test` — 全テスト通過を確認
+- `cargo clippy -- -W clippy::all` — 警告ゼロを確認してからPRを出す
+- dead_code警告が出たら `#[cfg(test)]` やフィールド削除で対応する
+
 ---
 
 ## Game Design Concepts
