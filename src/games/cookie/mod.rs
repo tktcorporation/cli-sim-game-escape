@@ -54,6 +54,25 @@ impl Game for CookieGame {
                 self.state.show_upgrades = false;
                 true
             }
+            // Tab direct-set keys (used by click targets, not toggling)
+            '{' => {
+                // Go to Producers tab
+                self.state.show_upgrades = false;
+                self.state.show_milestones = false;
+                true
+            }
+            '|' => {
+                // Go to Upgrades tab
+                self.state.show_upgrades = true;
+                self.state.show_milestones = false;
+                true
+            }
+            '}' => {
+                // Go to Milestones tab
+                self.state.show_milestones = true;
+                self.state.show_upgrades = false;
+                true
+            }
             '1' | '2' | '3' | '4' | '5' if !self.state.show_upgrades && !self.state.show_milestones => {
                 let kind = match key {
                     '1' => ProducerKind::Cursor,
@@ -207,5 +226,36 @@ mod tests {
         game.handle_input(&InputEvent::Key('u'));
         assert!(game.state.show_upgrades);
         assert!(!game.state.show_milestones);
+    }
+
+    #[test]
+    fn tab_direct_set_producers() {
+        let mut game = CookieGame::new();
+        game.state.show_upgrades = true;
+        game.handle_input(&InputEvent::Key('{'));
+        assert!(!game.state.show_upgrades);
+        assert!(!game.state.show_milestones);
+    }
+
+    #[test]
+    fn tab_direct_set_upgrades() {
+        let mut game = CookieGame::new();
+        game.handle_input(&InputEvent::Key('|'));
+        assert!(game.state.show_upgrades);
+        assert!(!game.state.show_milestones);
+        // Clicking again stays on upgrades (no toggle)
+        game.handle_input(&InputEvent::Key('|'));
+        assert!(game.state.show_upgrades);
+    }
+
+    #[test]
+    fn tab_direct_set_milestones() {
+        let mut game = CookieGame::new();
+        game.handle_input(&InputEvent::Key('}'));
+        assert!(game.state.show_milestones);
+        assert!(!game.state.show_upgrades);
+        // Clicking again stays on milestones
+        game.handle_input(&InputEvent::Key('}'));
+        assert!(game.state.show_milestones);
     }
 }

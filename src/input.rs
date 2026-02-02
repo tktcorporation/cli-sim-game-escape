@@ -44,6 +44,7 @@ impl ClickState {
     }
 
     /// Add a target with a specific column range (col_start..col_end, exclusive).
+    #[cfg(test)]
     pub fn add_target_col(&mut self, row: u16, col_start: u16, col_end: u16, key: char) {
         self.targets.push(ClickTarget { row, key, col_range: Some((col_start, col_end)) });
     }

@@ -67,7 +67,7 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
         .constraints([
             Constraint::Length(cookie_height),
             Constraint::Length(buff_height),
-            Constraint::Length(1), // tab bar
+            Constraint::Length(3), // tab bar (3 rows, one per tab)
             Constraint::Min(5),   // content
         ])
         .split(main_area);
@@ -92,6 +92,7 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
 }
 
 /// Render tab bar for switching between Producers / Upgrades / Milestones.
+/// Each tab occupies one row; click targets are row-wide for reliability.
 fn render_tab_bar(
     state: &CookieState,
     f: &mut Frame,
@@ -100,7 +101,7 @@ fn render_tab_bar(
 ) {
     let ready_count = state.ready_milestone_count();
 
-    // Determine active tab
+    // Determine active tab index
     let active = if state.show_milestones {
         2
     } else if state.show_upgrades {
@@ -122,57 +123,31 @@ fn render_tab_bar(
 
     let milestone_color = if ready_count > 0 { Color::Green } else { Color::Cyan };
 
-    // Build tab labels — adapt length to available width.
-    // Each tab gets roughly 1/3 of the width. Use Layout to split evenly.
-    let tab_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-            Constraint::Ratio(1, 3),
-        ])
-        .split(area);
-
-    // Tab 0: Producers
-    let t0_label = if tab_chunks[0].width >= 12 { " Producers " } else { " Prod " };
-    let t0 = Paragraph::new(Line::from(Span::styled(t0_label, tab_style(0, Color::Green))))
-        .alignment(Alignment::Center);
-    f.render_widget(t0, tab_chunks[0]);
-
-    // Tab 1: Upgrades
-    let t1_label = if tab_chunks[1].width >= 11 { " Upgrades " } else { " Upgr " };
-    let t1 = Paragraph::new(Line::from(Span::styled(t1_label, tab_style(1, Color::Magenta))))
-        .alignment(Alignment::Center);
-    f.render_widget(t1, tab_chunks[1]);
-
-    // Tab 2: Milestones
-    let t2_label = if ready_count > 0 {
-        if tab_chunks[2].width >= 18 {
-            format!(" Miles.({}) ", ready_count)
-        } else {
-            format!(" M({}) ", ready_count)
-        }
-    } else if tab_chunks[2].width >= 14 {
-        " Milestones ".to_string()
+    // Build labels
+    let milestone_label = if ready_count > 0 {
+        format!(" ▸ Milestones ({}) ", ready_count)
     } else {
-        " Miles. ".to_string()
+        " ▸ Milestones ".to_string()
     };
-    let t2 = Paragraph::new(Line::from(Span::styled(&t2_label, tab_style(2, milestone_color))))
-        .alignment(Alignment::Center);
-    f.render_widget(t2, tab_chunks[2]);
 
-    // Register click targets for each tab zone
+    let tabs: [(String, Style, char); 3] = [
+        (" ▸ Producers ".to_string(), tab_style(0, Color::Green), '{'),
+        (" ▸ Upgrades ".to_string(), tab_style(1, Color::Magenta), '|'),
+        (milestone_label, tab_style(2, milestone_color), '}'),
+    ];
+
+    // Render each tab on its own row
     let mut cs = click_state.borrow_mut();
-    let producers_key = if state.show_upgrades {
-        'u'
-    } else if state.show_milestones {
-        'm'
-    } else {
-        'c' // already on producers
-    };
-    cs.add_target_col(area.y, tab_chunks[0].x, tab_chunks[0].x + tab_chunks[0].width, producers_key);
-    cs.add_target_col(area.y, tab_chunks[1].x, tab_chunks[1].x + tab_chunks[1].width, 'u');
-    cs.add_target_col(area.y, tab_chunks[2].x, tab_chunks[2].x + tab_chunks[2].width, 'm');
+    for (i, (label, style, key)) in tabs.iter().enumerate() {
+        let row_y = area.y + i as u16;
+        if row_y >= area.y + area.height {
+            break;
+        }
+        let row_area = Rect::new(area.x, row_y, area.width, 1);
+        let widget = Paragraph::new(Line::from(Span::styled(label.as_str(), *style)));
+        f.render_widget(widget, row_area);
+        cs.add_target(row_y, *key);
+    }
 }
 
 fn render_cookie_display(
