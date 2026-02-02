@@ -172,6 +172,23 @@ mod tests {
             .collect();
         eprintln!("│ 購入済UP: {:?}", purchased);
 
+        // Milestone & milk stats
+        let achieved = state.achieved_milestone_count();
+        let total_milestones = state.milestones.len();
+        eprintln!(
+            "│ マイルストーン: {}/{} ミルク: {:.0}% 子猫倍率: x{:.3}",
+            achieved, total_milestones, state.milk * 100.0, state.kitten_multiplier
+        );
+        let recent: Vec<&str> = state
+            .milestones
+            .iter()
+            .filter(|m| m.achieved)
+            .map(|m| m.name.as_str())
+            .collect();
+        if !recent.is_empty() {
+            eprintln!("│ 達成済: {:?}", recent);
+        }
+
         // Next affordable purchase
         if let Some(purchase) = find_best_purchase(state) {
             match purchase {
