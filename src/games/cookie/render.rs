@@ -760,75 +760,93 @@ fn render_milestones(
         ]));
     }
 
-    lines.push(Line::from(Span::styled(
-        " ─────────────────────────────────",
-        Style::default().fg(Color::DarkGray),
-    )));
+    // Available height for milestone list (area minus border + header lines + effects section)
+    let header_used = if ready > 0 { 3 } else { 2 }; // milk bar + hint? + border
+    let effects_lines = 4u16; // effects section estimate
+    let avail = area.height.saturating_sub(2 + header_used + effects_lines) as usize;
 
-    // List milestones, with key labels for ready ones
+    // === Ready milestones (show all, top priority) ===
     let mut ready_key_idx: u8 = 0;
-    for milestone in &state.milestones {
-        match &milestone.status {
-            MilestoneStatus::Claimed => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        " 🏆 ",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        milestone.name.to_string(),
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!(" - {}", milestone.description),
-                        Style::default().fg(Color::White),
-                    ),
-                ]));
-            }
-            MilestoneStatus::Ready => {
-                let key = (b'a' + ready_key_idx) as char;
-                ready_key_idx += 1;
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!(" [{}] ", key),
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!("✨ {}", milestone.name),
-                        Style::default()
-                            .fg(Color::Green)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        format!(" - {}", milestone.description),
-                        Style::default()
-                            .fg(Color::Green),
-                    ),
-                ]));
-            }
-            MilestoneStatus::Locked => {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        "     ",
-                        Style::default(),
-                    ),
-                    Span::styled(
-                        format!("🔒 {}", milestone.name),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        format!(" - {}", milestone.description),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]));
-            }
-        }
+    let ready_milestones: Vec<&super::state::Milestone> = state.milestones.iter()
+        .filter(|m| m.status == MilestoneStatus::Ready)
+        .collect();
+    for milestone in &ready_milestones {
+        let key = (b'a' + ready_key_idx) as char;
+        ready_key_idx += 1;
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" [{}] ", key),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("✨ {}", milestone.name),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" - {}", milestone.description),
+                Style::default().fg(Color::Green),
+            ),
+        ]));
+    }
+
+    // === Locked milestones (show next few goals) ===
+    let locked_milestones: Vec<&super::state::Milestone> = state.milestones.iter()
+        .filter(|m| m.status == MilestoneStatus::Locked)
+        .collect();
+    let locked_budget = avail.saturating_sub(ready_milestones.len()).saturating_sub(if claimed > 0 { 1 } else { 0 });
+    let locked_show = locked_milestones.len().min(locked_budget.max(2));
+    for milestone in locked_milestones.iter().take(locked_show) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "     🔒 ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                milestone.name.to_string(),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!(" - {}", milestone.description),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    let locked_remaining = locked_milestones.len().saturating_sub(locked_show);
+    if locked_remaining > 0 {
+        lines.push(Line::from(Span::styled(
+            format!("     ...他{}個", locked_remaining),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    // === Claimed milestones (compact summary) ===
+    if claimed > 0 {
+        let claimed_names: Vec<&str> = state.milestones.iter()
+            .filter(|m| m.status == MilestoneStatus::Claimed)
+            .map(|m| m.name.as_str())
+            .collect();
+        let summary = if claimed_names.len() <= 3 {
+            claimed_names.join(", ")
+        } else {
+            format!("{}, {} ...他{}個",
+                claimed_names[claimed_names.len()-2],
+                claimed_names[claimed_names.len()-1],
+                claimed_names.len() - 2)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" 🏆 解放済({}): ", claimed),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                summary,
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
     }
 
     // === Active effects summary ===
@@ -933,42 +951,27 @@ fn render_milestones(
         .wrap(Wrap { trim: false });
     f.render_widget(widget, area);
 
-    // Click targets for ready milestones
+    // Click targets for ready milestones (they are at the top of the list)
     let mut cs = click_state.borrow_mut();
-    let header_lines = if ready > 0 { 4 } else { 3 }; // milk + hint? + separator + border
+    // header_used + 1 for border top
+    let first_ready_row = area.y + 1 + header_used;
     for i in 0..ready_key_idx {
         let key = (b'a' + i) as char;
-        // Find the row of this ready milestone in the display
-        let mut display_row = 0u16;
-        let mut ready_seen = 0u8;
-        for milestone in &state.milestones {
-            if milestone.status == MilestoneStatus::Ready {
-                if ready_seen == i {
-                    break;
-                }
-                ready_seen += 1;
-            }
-            display_row += 1;
-        }
-        cs.add_target(area.y + header_lines as u16 + display_row, key);
+        cs.add_target(first_ready_row + i as u16, key);
     }
 }
 
 fn render_log(state: &CookieState, f: &mut Frame, area: Rect) {
     let visible_height = area.height.saturating_sub(2) as usize;
-    let start = if state.log.len() > visible_height {
-        state.log.len() - visible_height
-    } else {
-        0
-    };
-
     let total = state.log.len();
-    let log_lines: Vec<Line> = state.log[start..]
-        .iter()
+
+    // Show newest entries first (reverse order), limited to visible area
+    let log_lines: Vec<Line> = state.log.iter()
+        .rev()
+        .take(visible_height)
         .enumerate()
         .map(|(i, entry)| {
-            let global_idx = start + i;
-            let is_recent = total > 0 && global_idx >= total.saturating_sub(3);
+            let is_recent = i < 3;
 
             if entry.is_important {
                 let style = if is_recent {
@@ -994,6 +997,8 @@ fn render_log(state: &CookieState, f: &mut Frame, area: Rect) {
             }
         })
         .collect();
+
+    let _ = total;
 
     let widget = Paragraph::new(log_lines)
         .block(
