@@ -6,7 +6,9 @@ edition = "2021"
 [dependencies]
 ratzilla = "0.3"
 console_error_panic_hook = "0.1"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "DomRect", "HtmlCollection", "Performance", "console"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "DomRect", "HtmlCollection", "Performance", "Storage", "console"] }
 
 [dev-dependencies]
 proptest = "1.4"
