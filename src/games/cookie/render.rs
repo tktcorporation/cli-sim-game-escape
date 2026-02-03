@@ -207,27 +207,18 @@ fn render_cookie_display(
     };
 
     let border_color = if state.purchase_flash > 0 {
-        let phase = state.purchase_flash % 3;
-        match phase {
-            0 => Color::Magenta,
-            1 => Color::Cyan,
-            _ => Color::Green,
-        }
-    } else if state.combo_count >= 10 {
-        // Rainbow border during high combos
-        cycling_color(state.anim_frame, 2)
-    } else if state.combo_count >= 5 {
+        Color::White
+    } else if state.combo_count >= 20 {
+        // Warm gold pulse at high combos
+        if state.anim_frame % 4 < 2 { Color::Yellow } else { Color::White }
+    } else if !state.active_buffs.is_empty() {
         Color::Cyan
     } else {
         Color::Yellow
     };
 
     let title = if state.purchase_flash > 0 {
-        " ✨ Cookie Factory ✨ "
-    } else if state.combo_count >= 20 {
-        " 🔥🔥🔥 Cookie Factory 🔥🔥🔥 "
-    } else if state.combo_count >= 10 {
-        " 🔥 Cookie Factory 🔥 "
+        " ✦ Cookie Factory ✦ "
     } else if !state.active_buffs.is_empty() {
         " Cookie Factory ⚡ "
     } else {
@@ -300,24 +291,13 @@ fn render_cookie_display(
         ]));
 
         // Row 2: Cookie art + click button + combo
-        let combo_span = if state.combo_count >= 3 {
-            let combo_color = match state.combo_count {
-                3..=5 => Color::Green,
-                6..=10 => Color::Yellow,
-                11..=20 => Color::Magenta,
-                _ => Color::Red,
-            };
-            let combo_blink = (state.anim_frame / 2).is_multiple_of(2);
-            let combo_style = if state.combo_count >= 10 && combo_blink {
+        let combo_span = if state.combo_count >= 5 {
+            Span::styled(
+                format!(" ×{}", state.combo_count),
                 Style::default()
-                    .fg(combo_color)
-                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-            } else {
-                Style::default()
-                    .fg(combo_color)
-                    .add_modifier(Modifier::BOLD)
-            };
-            Span::styled(format!(" 🔥{}x", state.combo_count), combo_style)
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )
         } else {
             Span::styled("", Style::default())
         };
@@ -500,9 +480,9 @@ fn render_cookie_display(
 
         let sparkline = build_sparkline(&state.cps_history, 10);
 
-        let combo_span = if state.combo_count >= 3 {
+        let combo_span = if state.combo_count >= 5 {
             Span::styled(
-                format!(" 🔥{}x", state.combo_count),
+                format!(" ×{}", state.combo_count),
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             )
         } else {
@@ -627,40 +607,43 @@ fn render_particles(state: &CookieState, f: &mut Frame, area: Rect) {
                 (x, y, color, Modifier::BOLD)
             }
             ParticleStyle::Emoji => {
-                let rise = (progress * 6.0) as u16;
-                // Drift horizontally as it rises
-                let drift = ((progress * 3.0) as i16).saturating_mul(if particle.col_offset > 0 { 1 } else { -1 });
+                let rise = (progress * 5.0) as u16;
+                let drift = ((progress * 2.0) as i16).saturating_mul(if particle.col_offset > 0 { 1 } else { -1 });
                 let y = base_y.saturating_sub(1 + rise);
                 let x = (center_x as i16 + particle.col_offset + drift).max(area.x as i16) as u16;
-                let color = match (state.anim_frame + particle.life) % 4 {
-                    0 => Color::Yellow,
-                    1 => Color::Cyan,
-                    2 => Color::Magenta,
-                    _ => Color::White,
+                // Gold/white palette
+                let color = if particle.life > particle.max_life / 2 {
+                    Color::Yellow
+                } else {
+                    Color::White
                 };
-                (x, y, color, Modifier::BOLD)
+                (x, y, color, Modifier::empty())
             }
             ParticleStyle::Sparkle => {
                 let y = (center_y as i16 + particle.row_offset).max(area.y as i16) as u16;
                 let x = (center_x as i16 + particle.col_offset).max(area.x as i16) as u16;
-                // Twinkle: alternate between bright and dim
-                let twinkle = particle.life % 2 == 0;
-                let color = if twinkle { Color::White } else { Color::DarkGray };
+                // Soft twinkle: gold ↔ dim
+                let color = if particle.life % 3 == 0 {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                };
                 (x, y, color, Modifier::empty())
             }
             ParticleStyle::Celebration => {
-                // Explode outward from center
-                let expand = (progress * 4.0) as i16;
+                // Gently expand outward from center
+                let expand = (progress * 3.0) as i16;
                 let dir_x = if particle.col_offset > 0 { expand } else { -expand };
                 let dir_y = if particle.row_offset > 0 { expand / 2 } else { -expand / 2 };
                 let y = (center_y as i16 + particle.row_offset + dir_y).max(area.y as i16) as u16;
                 let x = (center_x as i16 + particle.col_offset + dir_x).max(area.x as i16) as u16;
-                let color = match (particle.col_offset.unsigned_abs() + particle.row_offset.unsigned_abs()) % 5 {
-                    0 => Color::Yellow,
-                    1 => Color::Magenta,
-                    2 => Color::Cyan,
-                    3 => Color::Green,
-                    _ => Color::White,
+                // Fade from bright gold to dim
+                let color = if particle.life > particle.max_life * 2 / 3 {
+                    Color::White
+                } else if particle.life > particle.max_life / 3 {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
                 };
                 (x, y, color, Modifier::BOLD)
             }
@@ -669,16 +652,9 @@ fn render_particles(state: &CookieState, f: &mut Frame, area: Rect) {
                 let x = (center_x as i16 + particle.col_offset
                     - (particle.text.len() as i16 / 2))
                     .max(area.x as i16) as u16;
-                // Rainbow cycling for combo text
-                let color = match (state.anim_frame / 2 + particle.life) % 6 {
-                    0 => Color::Red,
-                    1 => Color::Yellow,
-                    2 => Color::Green,
-                    3 => Color::Cyan,
-                    4 => Color::Blue,
-                    _ => Color::Magenta,
-                };
-                (x, y, color, Modifier::BOLD | Modifier::REVERSED)
+                // Steady gold — no rainbow cycling
+                let color = Color::Yellow;
+                (x, y, color, Modifier::BOLD)
             }
         };
 

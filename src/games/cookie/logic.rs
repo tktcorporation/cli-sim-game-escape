@@ -201,7 +201,7 @@ pub fn claim_golden(state: &mut CookieState) -> bool {
 
     state.golden_event = None;
     state.golden_cookies_claimed += 1;
-    spawn_celebration(state, 10); // big celebration for golden cookie
+    spawn_celebration(state, 5); // golden cookie celebration
 
     // Schedule next golden cookie
     let delay = random_spawn_delay(state);
@@ -307,14 +307,14 @@ fn apply_mini_event(state: &mut CookieState, event: &MiniEventKind) {
     }
 }
 
-/// Emoji pool for click particle bursts.
-const CLICK_EMOJIS: &[&str] = &["🍪", "✨", "⭐", "💫", "🌟", "💥", "🔥", "💎", "🎉", "🍩"];
+/// Click particle accents — golden theme only.
+const CLICK_ACCENTS: &[&str] = &["✦", "✧", "·"];
 
-/// Emoji pool for celebration bursts.
-const CELEBRATION_EMOJIS: &[&str] = &["🎉", "🎊", "✨", "🌟", "💫", "⭐", "🔥", "💎", "🏆", "👑"];
+/// Celebration accents — reserved for big moments.
+const CELEBRATION_ACCENTS: &[&str] = &["✦", "✧", "🍪", "·"];
 
-/// Sparkle characters for ambient particles.
-const SPARKLE_CHARS: &[&str] = &["·", "∗", "✦", "✧", "⋆", "˚", "°", "•"];
+/// Sparkle characters for ambient particles — subtle, small.
+const SPARKLE_CHARS: &[&str] = &["·", "✧", "˚", "°"];
 
 /// Manual click: add cookies_per_click to cookies (with buffs) + spawn particles.
 pub fn click(state: &mut CookieState) {
@@ -350,20 +350,13 @@ pub fn click(state: &mut CookieState) {
         row_offset: 0,
     });
 
-    // Extra emoji particles based on combo level
-    let emoji_count = match combo {
-        0..=2 => 0,
-        3..=5 => 1,
-        6..=10 => 2,
-        11..=20 => 3,
-        _ => 4,
-    };
-    for _ in 0..emoji_count {
-        let idx = state.next_random() as usize % CLICK_EMOJIS.len();
-        let col = (state.next_random() % 17) as i16 - 8;
-        let life = 6 + (state.next_random() % 8);
+    // Subtle accent particle on higher combos (1 at most)
+    if combo >= 5 {
+        let idx = state.next_random() as usize % CLICK_ACCENTS.len();
+        let col = (state.next_random() % 11) as i16 - 5;
+        let life = 6 + (state.next_random() % 4);
         state.particles.push(Particle {
-            text: CLICK_EMOJIS[idx].to_string(),
+            text: CLICK_ACCENTS[idx].to_string(),
             col_offset: col,
             life,
             max_life: life,
@@ -372,51 +365,37 @@ pub fn click(state: &mut CookieState) {
         });
     }
 
-    // Combo indicator particle at milestones
-    if combo >= 5 && combo.is_multiple_of(5) {
-        let combo_text = match combo {
-            5 => "NICE!".to_string(),
-            10 => "GREAT!".to_string(),
-            15 => "AMAZING!".to_string(),
-            20 => "INCREDIBLE!".to_string(),
-            25 => "UNBELIEVABLE!".to_string(),
-            _ => format!("{}x COMBO!", combo),
-        };
+    // Combo milestone indicator — concise, elegant
+    if combo >= 10 && combo.is_multiple_of(10) {
+        let combo_text = format!("── {}連打 ──", combo);
         state.particles.push(Particle {
             text: combo_text,
             col_offset: 0,
-            life: 15,
-            max_life: 15,
+            life: 12,
+            max_life: 12,
             style: ParticleStyle::Combo,
             row_offset: -2,
         });
     }
 
-    // Bigger flash for high combos
-    if combo >= 10 {
-        state.click_flash = 5;
-    }
-
     // Cap particles to avoid memory issues
-    while state.particles.len() > 50 {
+    while state.particles.len() > 30 {
         state.particles.remove(0);
     }
 }
 
 /// Spawn ambient sparkle particles during production.
 fn spawn_ambient_particles(state: &mut CookieState, _delta_ticks: u32) {
-    // Spawn rate scales with CPS: roughly 1 sparkle per 5-20 ticks
+    // Spawn rate: subtle, scales with CPS but never overwhelming
     let cps = state.total_cps();
     let spawn_chance = if cps > 10000.0 {
-        3 // every ~3 ticks
-    } else if cps > 1000.0 {
-        5
-    } else if cps > 100.0 {
         8
-    } else if cps > 10.0 {
+    } else if cps > 1000.0 {
         12
+    } else if cps > 100.0 {
+        18
     } else {
-        20
+        30
     };
 
     if state.anim_frame.is_multiple_of(spawn_chance) {
@@ -435,20 +414,20 @@ fn spawn_ambient_particles(state: &mut CookieState, _delta_ticks: u32) {
     }
 
     // Cap particles
-    while state.particles.len() > 50 {
+    while state.particles.len() > 30 {
         state.particles.remove(0);
     }
 }
 
-/// Spawn a burst of celebration particles (for purchases, golden cookies, etc.).
+/// Spawn a burst of celebration particles (golden cookies, upgrades, milestones).
 pub fn spawn_celebration(state: &mut CookieState, count: u32) {
     for _ in 0..count {
-        let idx = state.next_random() as usize % CELEBRATION_EMOJIS.len();
-        let col = (state.next_random() % 21) as i16 - 10;
-        let row = (state.next_random() % 9) as i16 - 4;
-        let life = 8 + (state.next_random() % 8);
+        let idx = state.next_random() as usize % CELEBRATION_ACCENTS.len();
+        let col = (state.next_random() % 15) as i16 - 7;
+        let row = (state.next_random() % 5) as i16 - 2;
+        let life = 8 + (state.next_random() % 6);
         state.particles.push(Particle {
-            text: CELEBRATION_EMOJIS[idx].to_string(),
+            text: CELEBRATION_ACCENTS[idx].to_string(),
             col_offset: col,
             life,
             max_life: life,
@@ -456,7 +435,7 @@ pub fn spawn_celebration(state: &mut CookieState, count: u32) {
             row_offset: row,
         });
     }
-    while state.particles.len() > 50 {
+    while state.particles.len() > 30 {
         state.particles.remove(0);
     }
 }
@@ -474,8 +453,7 @@ pub fn buy_producer(state: &mut CookieState, kind: &ProducerKind) -> bool {
     if state.cookies >= cost {
         state.cookies -= cost;
         state.producers[idx].count += 1;
-        state.purchase_flash = 8; // flash for 8 ticks (0.8s)
-        spawn_celebration(state, 5); // celebration burst
+        state.purchase_flash = 5; // flash for 5 ticks (0.5s)
         let had_discount = state.active_discount > 0.0;
         if had_discount {
             state.add_log(
@@ -528,8 +506,8 @@ pub fn buy_upgrade(state: &mut CookieState, upgrade_idx: usize) -> bool {
         state.active_discount = 0.0;
     }
     state.upgrades[upgrade_idx].purchased = true;
-    state.purchase_flash = 10; // longer flash for upgrades (1.0s)
-    spawn_celebration(state, 8); // celebration burst
+    state.purchase_flash = 8; // longer flash for upgrades (0.8s)
+    spawn_celebration(state, 3); // subtle celebration
 
     let effect = state.upgrades[upgrade_idx].effect.clone();
     let name = state.upgrades[upgrade_idx].name.clone();
@@ -658,7 +636,7 @@ pub fn claim_milestone(state: &mut CookieState, index: usize) -> bool {
         true,
     );
     state.milestone_flash = 15;
-    spawn_celebration(state, 8);
+    spawn_celebration(state, 4);
     true
 }
 
@@ -830,7 +808,7 @@ pub fn perform_prestige(state: &mut CookieState) -> u64 {
         true,
     );
     state.add_log("新たな旅が始まる…", true);
-    spawn_celebration(state, 15); // big prestige celebration
+    spawn_celebration(state, 6); // prestige celebration
 
     new_chips
 }
