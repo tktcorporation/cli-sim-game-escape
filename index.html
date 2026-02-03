@@ -23,6 +23,10 @@
       pre {
         font-family: "Fira Code", "Courier New", monospace;
         font-size: 14px;
+        /* Ratzilla sets inline height:15px which clips text when font is
+           scaled up.  Let the row height follow the actual font size. */
+        height: auto !important;
+        line-height: 1.15;
         margin: 0;
         padding: 0;
         touch-action: manipulation;
@@ -50,10 +54,10 @@
         }
       }
 
+      // Only override width — height stays original so Ratzilla keeps
+      // the correct number of rows and row spacing isn't compressed.
       override(window, Window.prototype, 'innerWidth');
-      override(window, Window.prototype, 'innerHeight');
       override(screen, Screen.prototype, 'width');
-      override(screen, Screen.prototype, 'height');
     })();
   </script>
   <script>
