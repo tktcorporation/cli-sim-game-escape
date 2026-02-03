@@ -17,28 +17,78 @@
         -webkit-tap-highlight-color: transparent;
       }
       body > div {
-        margin: 0 auto;
+        margin: 0;
+        width: 100%;
       }
       pre {
         font-family: "Fira Code", "Courier New", monospace;
         font-size: 14px;
+        margin: 0;
+        padding: 0;
         touch-action: manipulation;
         cursor: default;
-      }
-      @media (max-width: 600px) {
-        pre {
-          font-size: 11px;
-        }
-      }
-      @media (max-width: 400px) {
-        pre {
-          font-size: 9px;
-        }
       }
     </style>
   </head>
   <body></body>
   <script>
+    // Ratzilla calculates terminal columns as screen_width/10 (mobile) or
+    // window.innerWidth/10 (desktop), assuming ~10px per character. When the
+    // actual rendered character width differs from 10px the grid becomes
+    // narrower than the viewport. This observer waits for Ratzilla to mount
+    // its grid, measures the real content width, and scales the font so the
+    // grid fills the viewport exactly.
+    (function() {
+      var applied = false;
+      var lastViewportWidth = 0;
+
+      function fitGridToViewport() {
+        var grid = document.getElementById('grid') || document.querySelector('body > div');
+        if (!grid) return false;
+        var pre = grid.querySelector('pre');
+        if (!pre) return false;
+
+        var viewportWidth = document.documentElement.clientWidth;
+        var contentWidth = pre.scrollWidth;
+        if (contentWidth <= 0 || contentWidth >= viewportWidth) return true;
+
+        var currentFontSize = parseFloat(getComputedStyle(pre).fontSize);
+        var scaledFontSize = Math.floor(currentFontSize * (viewportWidth / contentWidth) * 100) / 100;
+        var preElements = document.querySelectorAll('pre');
+        for (var i = 0; i < preElements.length; i++) {
+          preElements[i].style.fontSize = scaledFontSize + 'px';
+        }
+        applied = true;
+        lastViewportWidth = viewportWidth;
+        return true;
+      }
+
+      // Observe DOM for Ratzilla grid mount, then fit once.
+      var observer = new MutationObserver(function() {
+        if (fitGridToViewport()) observer.disconnect();
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+
+      // Re-fit on orientation change or resize (debounced).
+      var resizeTimer;
+      window.addEventListener('resize', function() {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(function() {
+          var vw = document.documentElement.clientWidth;
+          if (vw !== lastViewportWidth) {
+            // Reset to CSS default so measurement is from a clean state.
+            var preElements = document.querySelectorAll('pre');
+            for (var i = 0; i < preElements.length; i++) {
+              preElements[i].style.fontSize = '';
+            }
+            applied = false;
+            // Allow one frame for layout, then re-measure.
+            requestAnimationFrame(function() { fitGridToViewport(); });
+          }
+        }, 150);
+      });
+    })();
+
     // Standard click handler: parse action keys from clicked <pre> text content
     // and dispatch corresponding keyboard events for ratzilla's on_key_event handler.
     function handleClickOrTap(clientX, clientY) {
