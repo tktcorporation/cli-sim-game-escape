@@ -8,6 +8,9 @@ pub enum ProducerKind {
     Farm,
     Mine,
     Factory,
+    Temple,
+    WizardTower,
+    Shipment,
 }
 
 impl ProducerKind {
@@ -19,6 +22,9 @@ impl ProducerKind {
             ProducerKind::Farm,
             ProducerKind::Mine,
             ProducerKind::Factory,
+            ProducerKind::Temple,
+            ProducerKind::WizardTower,
+            ProducerKind::Shipment,
         ]
     }
 
@@ -30,6 +36,9 @@ impl ProducerKind {
             ProducerKind::Farm => "Farm",
             ProducerKind::Mine => "Mine",
             ProducerKind::Factory => "Factory",
+            ProducerKind::Temple => "Temple",
+            ProducerKind::WizardTower => "WzTower",
+            ProducerKind::Shipment => "Shipment",
         }
     }
 
@@ -41,6 +50,9 @@ impl ProducerKind {
             ProducerKind::Farm => 1_100.0,
             ProducerKind::Mine => 12_000.0,
             ProducerKind::Factory => 130_000.0,
+            ProducerKind::Temple => 1_400_000.0,
+            ProducerKind::WizardTower => 20_000_000.0,
+            ProducerKind::Shipment => 330_000_000.0,
         }
     }
 
@@ -52,6 +64,9 @@ impl ProducerKind {
             ProducerKind::Farm => 8.0,
             ProducerKind::Mine => 47.0,
             ProducerKind::Factory => 260.0,
+            ProducerKind::Temple => 1_400.0,
+            ProducerKind::WizardTower => 7_800.0,
+            ProducerKind::Shipment => 44_000.0,
         }
     }
 
@@ -63,6 +78,9 @@ impl ProducerKind {
             ProducerKind::Farm => '3',
             ProducerKind::Mine => '4',
             ProducerKind::Factory => '5',
+            ProducerKind::Temple => '6',
+            ProducerKind::WizardTower => '7',
+            ProducerKind::Shipment => '8',
         }
     }
 
@@ -74,6 +92,9 @@ impl ProducerKind {
             ProducerKind::Farm => 2,
             ProducerKind::Mine => 3,
             ProducerKind::Factory => 4,
+            ProducerKind::Temple => 5,
+            ProducerKind::WizardTower => 6,
+            ProducerKind::Shipment => 7,
         }
     }
 }
@@ -316,6 +337,32 @@ pub struct CookieLogEntry {
     pub is_important: bool,
 }
 
+/// Prestige upgrade definition.
+#[derive(Clone, Debug)]
+pub struct PrestigeUpgrade {
+    pub name: String,
+    pub description: String,
+    /// Cost in heavenly chips.
+    pub cost: u64,
+    pub purchased: bool,
+    pub effect: PrestigeEffect,
+}
+
+/// Prestige upgrade effects.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PrestigeEffect {
+    /// Start each run with N cookies.
+    StartingCookies(f64),
+    /// Multiply CPS permanently (stacks multiplicatively).
+    CpsMultiplier(f64),
+    /// Multiply click power permanently.
+    ClickMultiplier(f64),
+    /// Golden cookies appear faster (multiply spawn delay by this factor, < 1.0).
+    GoldenCookieSpeed(f64),
+    /// Retain a percentage of milk across resets.
+    MilkRetention(f64),
+}
+
 /// Full state of a Cookie Factory game.
 pub struct CookieState {
     /// Total cookies accumulated.
@@ -374,6 +421,32 @@ pub struct CookieState {
     pub milestone_flash: u32,
     /// Kitten multiplier applied to CPS (computed from milk × kitten upgrades).
     pub kitten_multiplier: f64,
+
+    // === Prestige (転生) system — survives reset ===
+    /// Total prestige resets performed.
+    pub prestige_count: u32,
+    /// Heavenly chips earned (permanent currency).
+    pub heavenly_chips: u64,
+    /// Heavenly chips spent on prestige upgrades.
+    pub heavenly_chips_spent: u64,
+    /// CPS multiplier from heavenly chips (1.0 + chips * 0.01).
+    pub prestige_multiplier: f64,
+    /// Total cookies baked across all runs (for prestige calculation).
+    pub cookies_all_runs: f64,
+    /// Whether showing the prestige/stats panel.
+    pub show_prestige: bool,
+    /// Prestige upgrades purchased.
+    pub prestige_upgrades: Vec<PrestigeUpgrade>,
+    /// Flash timer for prestige action.
+    pub prestige_flash: u32,
+
+    // === Statistics — survives reset ===
+    /// Total ticks played across all runs.
+    pub total_ticks: u64,
+    /// Highest CPS ever achieved.
+    pub best_cps: f64,
+    /// Highest cookies in a single run.
+    pub best_cookies_single_run: f64,
 }
 
 impl CookieState {
@@ -419,10 +492,23 @@ impl CookieState {
             show_milestones: false,
             milestone_flash: 0,
             kitten_multiplier: 1.0,
+            // Prestige fields
+            prestige_count: 0,
+            heavenly_chips: 0,
+            heavenly_chips_spent: 0,
+            prestige_multiplier: 1.0,
+            cookies_all_runs: 0.0,
+            show_prestige: false,
+            prestige_upgrades: Self::create_prestige_upgrades(),
+            prestige_flash: 0,
+            // Statistics
+            total_ticks: 0,
+            best_cps: 0.0,
+            best_cookies_single_run: 0.0,
         }
     }
 
-    fn create_upgrades() -> Vec<Upgrade> {
+    pub fn create_upgrades() -> Vec<Upgrade> {
         vec![
             // === Phase 1: Basic upgrades (original) ===
             Upgrade {
@@ -792,6 +878,145 @@ impl CookieState {
                 unlock_condition: Some((ProducerKind::Factory, 15)),
             },
             // === Kitten upgrades (scale with milk from milestones) ===
+            // === Phase 4.5: New producer base multipliers ===
+            Upgrade {
+                name: "Temple x2".into(),
+                description: "Temple の生産 2倍".into(),
+                cost: 14_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Temple,
+                    multiplier: 2.0,
+                },
+                unlock_condition: Some((ProducerKind::Temple, 1)),
+            },
+            Upgrade {
+                name: "WzTower x2".into(),
+                description: "WzTower の生産 2倍".into(),
+                cost: 200_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::WizardTower,
+                    multiplier: 2.0,
+                },
+                unlock_condition: Some((ProducerKind::WizardTower, 1)),
+            },
+            Upgrade {
+                name: "Shipment x2".into(),
+                description: "Shipment の生産 2倍".into(),
+                cost: 3_300_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Shipment,
+                    multiplier: 2.0,
+                },
+                unlock_condition: Some((ProducerKind::Shipment, 1)),
+            },
+            Upgrade {
+                name: "Temple x3".into(),
+                description: "Temple の生産 3倍".into(),
+                cost: 140_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Temple,
+                    multiplier: 3.0,
+                },
+                unlock_condition: Some((ProducerKind::Temple, 10)),
+            },
+            Upgrade {
+                name: "WzTower x3".into(),
+                description: "WzTower の生産 3倍".into(),
+                cost: 2_000_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::WizardTower,
+                    multiplier: 3.0,
+                },
+                unlock_condition: Some((ProducerKind::WizardTower, 10)),
+            },
+            Upgrade {
+                name: "Shipment x3".into(),
+                description: "Shipment の生産 3倍".into(),
+                cost: 33_000_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Shipment,
+                    multiplier: 3.0,
+                },
+                unlock_condition: Some((ProducerKind::Shipment, 10)),
+            },
+            // === New producer synergy upgrades ===
+            Upgrade {
+                name: "神殿の祝福".into(),
+                description: "Temple1台→Factory+4%".into(),
+                cost: 7_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::CrossSynergy {
+                    source: ProducerKind::Temple,
+                    target: ProducerKind::Factory,
+                    bonus_per_unit: 0.04,
+                },
+                unlock_condition: Some((ProducerKind::Temple, 5)),
+            },
+            Upgrade {
+                name: "魔法の加速".into(),
+                description: "WzTower1台→Temple+3%".into(),
+                cost: 100_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::CrossSynergy {
+                    source: ProducerKind::WizardTower,
+                    target: ProducerKind::Temple,
+                    bonus_per_unit: 0.03,
+                },
+                unlock_condition: Some((ProducerKind::WizardTower, 5)),
+            },
+            Upgrade {
+                name: "星間輸送網".into(),
+                description: "Shipment1台→WzTower+2%".into(),
+                cost: 1_650_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::CrossSynergy {
+                    source: ProducerKind::Shipment,
+                    target: ProducerKind::WizardTower,
+                    bonus_per_unit: 0.02,
+                },
+                unlock_condition: Some((ProducerKind::Shipment, 5)),
+            },
+            // === New producer count scaling ===
+            Upgrade {
+                name: "Templeの結束".into(),
+                description: "各Temple毎に全Temple+2%".into(),
+                cost: 500_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::CountScaling {
+                    target: ProducerKind::Temple,
+                    bonus_per_unit: 0.02,
+                },
+                unlock_condition: Some((ProducerKind::Temple, 15)),
+            },
+            Upgrade {
+                name: "WzTowerの結束".into(),
+                description: "各WzTower毎に全WzTower+2.5%".into(),
+                cost: 5_000_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::CountScaling {
+                    target: ProducerKind::WizardTower,
+                    bonus_per_unit: 0.025,
+                },
+                unlock_condition: Some((ProducerKind::WizardTower, 15)),
+            },
+            Upgrade {
+                name: "Shipmentの結束".into(),
+                description: "各Shipment毎に全Shipment+3%".into(),
+                cost: 50_000_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::CountScaling {
+                    target: ProducerKind::Shipment,
+                    bonus_per_unit: 0.03,
+                },
+                unlock_condition: Some((ProducerKind::Shipment, 15)),
+            },
+            // === Kitten upgrades (scale with milk from milestones) ===
             Upgrade {
                 name: "子猫の手伝い".into(),
                 description: "ミルク×5%のCPSボーナス".into(),
@@ -827,7 +1052,7 @@ impl CookieState {
         ]
     }
 
-    fn create_milestones() -> Vec<Milestone> {
+    pub fn create_milestones() -> Vec<Milestone> {
         vec![
             // === Cookie milestones ===
             Milestone {
@@ -989,6 +1214,63 @@ impl CookieState {
                 condition: MilestoneCondition::ProducerCount(ProducerKind::Factory, 50),
                 status: MilestoneStatus::Locked,
             },
+            // === New producer milestones ===
+            Milestone {
+                name: "神官".into(),
+                description: "Temple 10台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::Temple, 10),
+                status: MilestoneStatus::Locked,
+            },
+            Milestone {
+                name: "大神殿".into(),
+                description: "Temple 50台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::Temple, 50),
+                status: MilestoneStatus::Locked,
+            },
+            Milestone {
+                name: "魔法使い".into(),
+                description: "WzTower 10台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::WizardTower, 10),
+                status: MilestoneStatus::Locked,
+            },
+            Milestone {
+                name: "大魔導師".into(),
+                description: "WzTower 50台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::WizardTower, 50),
+                status: MilestoneStatus::Locked,
+            },
+            Milestone {
+                name: "宇宙輸送".into(),
+                description: "Shipment 10台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::Shipment, 10),
+                status: MilestoneStatus::Locked,
+            },
+            Milestone {
+                name: "銀河帝国".into(),
+                description: "Shipment 50台".into(),
+                condition: MilestoneCondition::ProducerCount(ProducerKind::Shipment, 50),
+                status: MilestoneStatus::Locked,
+            },
+            // === Higher CPS milestones ===
+            Milestone {
+                name: "クッキー銀河".into(),
+                description: "CPS 1,000,000 達成".into(),
+                condition: MilestoneCondition::CpsReached(1_000_000.0),
+                status: MilestoneStatus::Locked,
+            },
+            Milestone {
+                name: "クッキー宇宙".into(),
+                description: "CPS 100,000,000 達成".into(),
+                condition: MilestoneCondition::CpsReached(100_000_000.0),
+                status: MilestoneStatus::Locked,
+            },
+            // === Higher cookie milestones ===
+            Milestone {
+                name: "兆の壁".into(),
+                description: "クッキーを1,000,000,000,000枚焼く".into(),
+                condition: MilestoneCondition::TotalCookies(1_000_000_000_000.0),
+                status: MilestoneStatus::Locked,
+            },
             // === Golden cookie milestones ===
             Milestone {
                 name: "幸運の始まり".into(),
@@ -1011,6 +1293,79 @@ impl CookieState {
         ]
     }
 
+    fn create_prestige_upgrades() -> Vec<PrestigeUpgrade> {
+        vec![
+            PrestigeUpgrade {
+                name: "天使の贈り物".into(),
+                description: "転生後 1,000 クッキーで開始".into(),
+                cost: 1,
+                purchased: false,
+                effect: PrestigeEffect::StartingCookies(1_000.0),
+            },
+            PrestigeUpgrade {
+                name: "天界の力".into(),
+                description: "CPS 永続 ×1.5".into(),
+                cost: 3,
+                purchased: false,
+                effect: PrestigeEffect::CpsMultiplier(1.5),
+            },
+            PrestigeUpgrade {
+                name: "天使のクリック".into(),
+                description: "クリック力 永続 ×2".into(),
+                cost: 5,
+                purchased: false,
+                effect: PrestigeEffect::ClickMultiplier(2.0),
+            },
+            PrestigeUpgrade {
+                name: "ゴールデンラッシュ".into(),
+                description: "ゴールデンクッキー出現速度 1.5倍".into(),
+                cost: 10,
+                purchased: false,
+                effect: PrestigeEffect::GoldenCookieSpeed(0.67),
+            },
+            PrestigeUpgrade {
+                name: "天使のオーラ".into(),
+                description: "CPS 永続 ×2".into(),
+                cost: 25,
+                purchased: false,
+                effect: PrestigeEffect::CpsMultiplier(2.0),
+            },
+            PrestigeUpgrade {
+                name: "ミルクの記憶".into(),
+                description: "転生後にミルクを50%保持".into(),
+                cost: 50,
+                purchased: false,
+                effect: PrestigeEffect::MilkRetention(0.5),
+            },
+            PrestigeUpgrade {
+                name: "天界の富".into(),
+                description: "転生後 1,000,000 クッキーで開始".into(),
+                cost: 100,
+                purchased: false,
+                effect: PrestigeEffect::StartingCookies(1_000_000.0),
+            },
+            PrestigeUpgrade {
+                name: "神のクリック".into(),
+                description: "クリック力 永続 ×5".into(),
+                cost: 200,
+                purchased: false,
+                effect: PrestigeEffect::ClickMultiplier(5.0),
+            },
+        ]
+    }
+
+    /// Available heavenly chips (earned - spent).
+    pub fn available_chips(&self) -> u64 {
+        self.heavenly_chips.saturating_sub(self.heavenly_chips_spent)
+    }
+
+    /// Calculate how many new heavenly chips would be earned from current run.
+    pub fn pending_heavenly_chips(&self) -> u64 {
+        let total = self.cookies_all_runs + self.cookies_all_time;
+        let total_chips = (total / 1e12).sqrt().floor() as u64;
+        total_chips.saturating_sub(self.heavenly_chips)
+    }
+
     /// Count of claimed milestones (milk applied).
     pub fn achieved_milestone_count(&self) -> usize {
         self.milestones.iter().filter(|m| m.status == MilestoneStatus::Claimed).count()
@@ -1029,11 +1384,14 @@ impl CookieState {
         // Built-in synergies (always active, part of game design)
         let base_synergies: &[(ProducerKind, ProducerKind, f64)] = &[
             // (source, target, bonus_per_source_unit)
-            (ProducerKind::Grandma, ProducerKind::Cursor, 0.01),   // +1% per Grandma
-            (ProducerKind::Farm, ProducerKind::Grandma, 0.02),     // +2% per Farm
-            (ProducerKind::Mine, ProducerKind::Farm, 0.03),        // +3% per Mine
-            (ProducerKind::Factory, ProducerKind::Mine, 0.05),     // +5% per Factory
-            (ProducerKind::Cursor, ProducerKind::Factory, 0.001),  // +0.1% per Cursor
+            (ProducerKind::Grandma, ProducerKind::Cursor, 0.01),      // +1% per Grandma
+            (ProducerKind::Farm, ProducerKind::Grandma, 0.02),        // +2% per Farm
+            (ProducerKind::Mine, ProducerKind::Farm, 0.03),           // +3% per Mine
+            (ProducerKind::Factory, ProducerKind::Mine, 0.05),        // +5% per Factory
+            (ProducerKind::Temple, ProducerKind::Factory, 0.04),      // +4% per Temple
+            (ProducerKind::WizardTower, ProducerKind::Temple, 0.03),  // +3% per WzTower
+            (ProducerKind::Shipment, ProducerKind::WizardTower, 0.02),// +2% per Shipment
+            (ProducerKind::Cursor, ProducerKind::Shipment, 0.001),    // +0.1% per Cursor
         ];
 
         for (source, tgt, rate) in base_synergies {
@@ -1093,6 +1451,9 @@ impl CookieState {
         // Step 3: Apply kitten (milk) multiplier
         let after_kitten = total * self.kitten_multiplier;
 
+        // Step 3.5: Apply prestige multiplier
+        let after_prestige = after_kitten * self.prestige_multiplier;
+
         // Step 4: Apply production frenzy buff
         let mut multiplier = 1.0;
         for buff in &self.active_buffs {
@@ -1101,7 +1462,7 @@ impl CookieState {
             }
         }
 
-        after_kitten * multiplier
+        after_prestige * multiplier
     }
 
     /// Effective cookies per click (with buffs).
@@ -1257,12 +1618,15 @@ mod tests {
     #[test]
     fn synergy_circular_all_producers() {
         let mut state = CookieState::new();
-        state.producers[0].count = 100; // 100 cursors → Factory +0.1% each = +10%
+        state.producers[5].count = 10;  // 10 temples → Factory +4% each = +40%
         state.producers[4].count = 5;   // 5 factories → Mine +5% each = +25%
+        state.producers[0].count = 100; // 100 cursors → Shipment +0.1% each = +10%
         let factory_bonus = state.synergy_bonus(&ProducerKind::Factory);
-        assert!((factory_bonus - 0.10).abs() < 0.01); // 100 * 0.001 = 0.10
+        assert!((factory_bonus - 0.40).abs() < 0.01); // 10 * 0.04 = 0.40
         let mine_bonus = state.synergy_bonus(&ProducerKind::Mine);
         assert!((mine_bonus - 0.25).abs() < 0.01); // 5 * 0.05 = 0.25
+        let shipment_bonus = state.synergy_bonus(&ProducerKind::Shipment);
+        assert!((shipment_bonus - 0.10).abs() < 0.01); // 100 * 0.001 = 0.10
     }
 
     #[test]

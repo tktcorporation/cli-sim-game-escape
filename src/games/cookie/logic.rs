@@ -15,6 +15,14 @@ pub fn tick(state: &mut CookieState, delta_ticks: u32) {
     state.cookies += production;
     state.cookies_all_time += production;
     state.anim_frame = state.anim_frame.wrapping_add(delta_ticks);
+    state.total_ticks += delta_ticks as u64;
+
+    // Update statistics
+    let current_cps = state.total_cps();
+    if current_cps > state.best_cps {
+        state.best_cps = current_cps;
+    }
+
     if state.click_flash > 0 {
         state.click_flash = state.click_flash.saturating_sub(delta_ticks);
     }
@@ -42,6 +50,11 @@ pub fn tick(state: &mut CookieState, delta_ticks: u32) {
     // Tick milestone flash
     if state.milestone_flash > 0 {
         state.milestone_flash = state.milestone_flash.saturating_sub(delta_ticks);
+    }
+
+    // Tick prestige flash
+    if state.prestige_flash > 0 {
+        state.prestige_flash = state.prestige_flash.saturating_sub(delta_ticks);
     }
 }
 
@@ -96,9 +109,24 @@ fn tick_golden(state: &mut CookieState, delta_ticks: u32) {
 }
 
 /// Generate a random spawn delay between 30-90 seconds (300-900 ticks).
+/// Prestige upgrades (GoldenCookieSpeed) can reduce this.
 fn random_spawn_delay(state: &mut CookieState) -> u32 {
     let r = state.next_random();
-    300 + (r % 600) // 300..900 ticks = 30..90 seconds
+    let base = 300 + (r % 600); // 300..900 ticks = 30..90 seconds
+    let speed_factor: f64 = state
+        .prestige_upgrades
+        .iter()
+        .filter(|u| u.purchased)
+        .filter_map(|u| {
+            if let super::state::PrestigeEffect::GoldenCookieSpeed(f) = &u.effect {
+                Some(*f)
+            } else {
+                None
+            }
+        })
+        .product();
+    let speed_factor = if speed_factor > 0.0 { speed_factor } else { 1.0 };
+    (base as f64 * speed_factor).max(100.0) as u32 // minimum 10 seconds
 }
 
 /// Claim a golden cookie event. Returns true if successful.
@@ -513,6 +541,154 @@ pub fn recalculate_kitten_multiplier(state: &mut CookieState) {
         }
     }
     state.kitten_multiplier = multiplier;
+}
+
+/// Perform a prestige reset. Returns the number of new heavenly chips earned.
+pub fn perform_prestige(state: &mut CookieState) -> u64 {
+    let new_chips = state.pending_heavenly_chips();
+    if new_chips == 0 {
+        state.add_log("⚠ 転生に必要なクッキーが足りません (1兆枚以上)", true);
+        return 0;
+    }
+
+    // Record statistics
+    state.cookies_all_runs += state.cookies_all_time;
+    state.heavenly_chips += new_chips;
+    state.prestige_count += 1;
+    if state.cookies_all_time > state.best_cookies_single_run {
+        state.best_cookies_single_run = state.cookies_all_time;
+    }
+
+    // Calculate milk retention from prestige upgrades
+    let milk_retention: f64 = state
+        .prestige_upgrades
+        .iter()
+        .filter(|u| u.purchased)
+        .filter_map(|u| {
+            if let super::state::PrestigeEffect::MilkRetention(pct) = &u.effect {
+                Some(*pct)
+            } else {
+                None
+            }
+        })
+        .sum();
+    let retained_milk = state.milk * milk_retention.min(1.0);
+
+    // Calculate starting cookies from prestige upgrades
+    let starting_cookies: f64 = state
+        .prestige_upgrades
+        .iter()
+        .filter(|u| u.purchased)
+        .filter_map(|u| {
+            if let super::state::PrestigeEffect::StartingCookies(amount) = &u.effect {
+                Some(*amount)
+            } else {
+                None
+            }
+        })
+        .sum();
+
+    // Recalculate prestige multiplier from chips + prestige upgrades
+    let chip_bonus = 1.0 + state.heavenly_chips as f64 * 0.01;
+    let upgrade_cps_mult: f64 = state
+        .prestige_upgrades
+        .iter()
+        .filter(|u| u.purchased)
+        .filter_map(|u| {
+            if let super::state::PrestigeEffect::CpsMultiplier(m) = &u.effect {
+                Some(*m)
+            } else {
+                None
+            }
+        })
+        .product();
+    state.prestige_multiplier = chip_bonus * upgrade_cps_mult;
+
+    // Calculate click multiplier from prestige upgrades
+    let click_mult: f64 = state
+        .prestige_upgrades
+        .iter()
+        .filter(|u| u.purchased)
+        .filter_map(|u| {
+            if let super::state::PrestigeEffect::ClickMultiplier(m) = &u.effect {
+                Some(*m)
+            } else {
+                None
+            }
+        })
+        .product();
+
+    // Reset game state (keep prestige fields)
+    state.cookies = starting_cookies;
+    state.cookies_all_time = starting_cookies;
+    state.total_clicks = 0;
+    state.cookies_per_click = 1.0 * click_mult;
+    state.producers = super::state::ProducerKind::all()
+        .iter()
+        .map(|k| super::state::Producer::new(k.clone()))
+        .collect();
+    state.upgrades = CookieState::create_upgrades();
+    state.log.clear();
+    state.show_upgrades = false;
+    state.show_milestones = false;
+    state.show_prestige = false;
+    state.anim_frame = 0;
+    state.click_flash = 0;
+    state.purchase_flash = 0;
+    state.particles.clear();
+    state.synergy_multiplier = 1.0;
+    state.cross_synergies.clear();
+    state.golden_next_spawn = 300;
+    state.golden_event = None;
+    state.active_buffs.clear();
+    state.golden_cookies_claimed = 0;
+    state.count_scalings.clear();
+    state.cps_percent_bonuses.clear();
+    state.mini_event_next = 150;
+    state.active_discount = 0.0;
+    state.milestones = CookieState::create_milestones();
+    state.milk = retained_milk;
+    state.milestone_flash = 0;
+    state.kitten_multiplier = 1.0;
+    state.prestige_flash = 30; // 3 second celebration
+
+    state.add_log(
+        &format!(
+            "🌟 転生！ 天国チップ+{} (合計{}) CPS×{:.2}",
+            new_chips, state.heavenly_chips, state.prestige_multiplier
+        ),
+        true,
+    );
+    state.add_log("新たな旅が始まる…", true);
+
+    new_chips
+}
+
+/// Buy a prestige upgrade by index. Returns true if successful.
+pub fn buy_prestige_upgrade(state: &mut CookieState, index: usize) -> bool {
+    if index >= state.prestige_upgrades.len() {
+        return false;
+    }
+    if state.prestige_upgrades[index].purchased {
+        return false;
+    }
+    let cost = state.prestige_upgrades[index].cost;
+    if state.available_chips() < cost {
+        return false;
+    }
+
+    state.heavenly_chips_spent += cost;
+    state.prestige_upgrades[index].purchased = true;
+
+    let name = state.prestige_upgrades[index].name.clone();
+    let desc = state.prestige_upgrades[index].description.clone();
+    state.add_log(
+        &format!("👼 {} 購入！({})", name, desc),
+        true,
+    );
+    state.purchase_flash = 10;
+
+    true
 }
 
 /// Format a number with commas (e.g. 1234567 → "1,234,567").
@@ -957,6 +1133,115 @@ mod tests {
         let flash = state.milestone_flash;
         tick(&mut state, 5);
         assert!(state.milestone_flash < flash);
+    }
+
+    #[test]
+    fn prestige_requires_trillion_cookies() {
+        let mut state = CookieState::new();
+        state.cookies_all_time = 1e11; // 100 billion — not enough
+        let chips = perform_prestige(&mut state);
+        assert_eq!(chips, 0);
+        assert_eq!(state.prestige_count, 0);
+    }
+
+    #[test]
+    fn prestige_earns_chips_from_trillion() {
+        let mut state = CookieState::new();
+        state.cookies_all_time = 1e12; // 1 trillion → sqrt(1) = 1 chip
+        let chips = perform_prestige(&mut state);
+        assert_eq!(chips, 1);
+        assert_eq!(state.heavenly_chips, 1);
+        assert_eq!(state.prestige_count, 1);
+    }
+
+    #[test]
+    fn prestige_resets_cookies_and_producers() {
+        let mut state = CookieState::new();
+        state.cookies = 5e12;
+        state.cookies_all_time = 5e12;
+        state.producers[0].count = 100;
+        state.producers[4].count = 50;
+        perform_prestige(&mut state);
+        // Producers should be reset
+        assert_eq!(state.producers[0].count, 0);
+        assert_eq!(state.producers[4].count, 0);
+        // cookies_all_runs should track total
+        assert!(state.cookies_all_runs > 0.0);
+    }
+
+    #[test]
+    fn prestige_multiplier_scales_with_chips() {
+        let mut state = CookieState::new();
+        state.cookies_all_time = 100e12; // sqrt(100) = 10 chips
+        perform_prestige(&mut state);
+        assert_eq!(state.heavenly_chips, 10);
+        // prestige_multiplier = 1.0 + 10 * 0.01 = 1.10
+        assert!((state.prestige_multiplier - 1.10).abs() < 0.001);
+    }
+
+    #[test]
+    fn prestige_chips_accumulate_across_runs() {
+        let mut state = CookieState::new();
+        state.cookies_all_time = 1e12;
+        perform_prestige(&mut state); // +1 chip
+        assert_eq!(state.heavenly_chips, 1);
+        state.cookies_all_time = 3e12; // total across runs: 4e12, sqrt(4) = 2 chips, already have 1
+        perform_prestige(&mut state); // +1 chip
+        assert_eq!(state.heavenly_chips, 2);
+        assert_eq!(state.prestige_count, 2);
+    }
+
+    #[test]
+    fn buy_prestige_upgrade_success() {
+        let mut state = CookieState::new();
+        state.heavenly_chips = 10;
+        assert!(buy_prestige_upgrade(&mut state, 0)); // cost: 1 chip
+        assert!(state.prestige_upgrades[0].purchased);
+        assert_eq!(state.heavenly_chips_spent, 1);
+        assert_eq!(state.available_chips(), 9);
+    }
+
+    #[test]
+    fn buy_prestige_upgrade_insufficient_chips() {
+        let mut state = CookieState::new();
+        state.heavenly_chips = 0;
+        assert!(!buy_prestige_upgrade(&mut state, 0));
+        assert!(!state.prestige_upgrades[0].purchased);
+    }
+
+    #[test]
+    fn prestige_starting_cookies_from_upgrade() {
+        let mut state = CookieState::new();
+        // Give enough chips directly, then buy upgrade
+        state.heavenly_chips = 10;
+        buy_prestige_upgrade(&mut state, 0); // "天使の贈り物": start with 1000
+        assert!(state.prestige_upgrades[0].purchased);
+        // Now set up cookies for prestige (need pending > 0)
+        // cookies_all_runs=0, cookies_all_time=4e12 → total 4e12 → sqrt(4)=2 chips
+        // Already have 10, so pending = max(0, 2-10) = 0. Need more cookies.
+        state.cookies_all_time = 200e12; // sqrt(200) ≈ 14 > 10
+        let pending = state.pending_heavenly_chips();
+        assert!(pending > 0, "pending should be > 0, got {}", pending);
+        perform_prestige(&mut state);
+        // Starting cookies = 1000 from upgrade
+        assert!((state.cookies - 1000.0).abs() < 0.01,
+            "expected 1000 cookies, got {}", state.cookies);
+    }
+
+    #[test]
+    fn statistics_track_best_cps() {
+        let mut state = CookieState::new();
+        state.producers[1].count = 10; // 10 CPS
+        tick(&mut state, 1);
+        assert!(state.best_cps >= 10.0);
+    }
+
+    #[test]
+    fn total_ticks_accumulates() {
+        let mut state = CookieState::new();
+        tick(&mut state, 50);
+        tick(&mut state, 30);
+        assert_eq!(state.total_ticks, 80);
     }
 }
 
