@@ -32,6 +32,31 @@
   </head>
   <body></body>
   <script>
+    // Reduce the viewport dimensions reported to Ratzilla so it calculates
+    // fewer terminal columns/rows, resulting in larger text that fills the
+    // real viewport via the fitGridToViewport scaler below.
+    // SCALE < 1 → bigger text.  0.85 ≈ 18 % larger characters.
+    (function() {
+      var SCALE = 0.85;
+
+      function override(obj, proto, prop) {
+        var desc = Object.getOwnPropertyDescriptor(proto, prop);
+        if (desc && desc.get) {
+          var orig = desc.get;
+          Object.defineProperty(obj, prop, {
+            get: function() { return Math.floor(orig.call(obj) * SCALE); },
+            configurable: true
+          });
+        }
+      }
+
+      override(window, Window.prototype, 'innerWidth');
+      override(window, Window.prototype, 'innerHeight');
+      override(screen, Screen.prototype, 'width');
+      override(screen, Screen.prototype, 'height');
+    })();
+  </script>
+  <script>
     // Ratzilla calculates terminal columns as screen_width/10 (mobile) or
     // window.innerWidth/10 (desktop), assuming ~10px per character. When the
     // actual rendered character width differs from 10px the grid becomes
