@@ -2,6 +2,7 @@
 
 pub mod logic;
 pub mod render;
+pub mod save;
 #[cfg(test)]
 mod simulator;
 pub mod state;
@@ -19,12 +20,26 @@ use state::{CookieState, ProducerKind};
 
 pub struct CookieGame {
     pub state: CookieState,
+    /// オートセーブまでの残り tick 数。
+    save_countdown: u32,
 }
 
 impl CookieGame {
     pub fn new() -> Self {
+        let state = CookieState::new();
+
+        #[cfg(target_arch = "wasm32")]
+        let state = {
+            let mut s = state;
+            if save::load_game(&mut s) {
+                s.add_log("セーブデータをロードしました", true);
+            }
+            s
+        };
+
         Self {
-            state: CookieState::new(),
+            state,
+            save_countdown: save::AUTOSAVE_INTERVAL,
         }
     }
 }
@@ -153,6 +168,14 @@ impl Game for CookieGame {
 
     fn tick(&mut self, delta_ticks: u32) {
         logic::tick(&mut self.state, delta_ticks);
+
+        // オートセーブ (WASM環境のみ)
+        self.save_countdown = self.save_countdown.saturating_sub(delta_ticks);
+        if self.save_countdown == 0 {
+            #[cfg(target_arch = "wasm32")]
+            save::save_game(&self.state);
+            self.save_countdown = save::AUTOSAVE_INTERVAL;
+        }
     }
 
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
