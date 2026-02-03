@@ -74,7 +74,15 @@
         if (!pre) return false;
 
         var viewportWidth = document.documentElement.clientWidth;
-        var contentWidth = pre.scrollWidth;
+
+        // <pre> is a block element so scrollWidth always equals the
+        // container width, not the actual text width.  Temporarily switch
+        // to inline-block so the element shrink-wraps to its content,
+        // then measure with getBoundingClientRect for sub-pixel accuracy.
+        pre.style.display = 'inline-block';
+        var contentWidth = pre.getBoundingClientRect().width;
+        pre.style.display = '';
+
         if (contentWidth <= 0 || contentWidth >= viewportWidth) return true;
 
         var currentFontSize = parseFloat(getComputedStyle(pre).fontSize);
