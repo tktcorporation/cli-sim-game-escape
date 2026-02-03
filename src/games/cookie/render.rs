@@ -12,7 +12,7 @@ use ratzilla::ratatui::Frame;
 use crate::input::{is_narrow_layout, ClickState};
 
 use super::logic::format_number;
-use super::state::CookieState;
+use super::state::{CookieState, ParticleStyle};
 
 /// Animated cookie frames — normal state (cycles every ~2 seconds at 10 ticks/sec).
 const COOKIE_FRAMES: &[&[&str]] = &[
@@ -213,12 +213,21 @@ fn render_cookie_display(
             1 => Color::Cyan,
             _ => Color::Green,
         }
+    } else if state.combo_count >= 10 {
+        // Rainbow border during high combos
+        cycling_color(state.anim_frame, 2)
+    } else if state.combo_count >= 5 {
+        Color::Cyan
     } else {
         Color::Yellow
     };
 
     let title = if state.purchase_flash > 0 {
         " ✨ Cookie Factory ✨ "
+    } else if state.combo_count >= 20 {
+        " 🔥🔥🔥 Cookie Factory 🔥🔥🔥 "
+    } else if state.combo_count >= 10 {
+        " 🔥 Cookie Factory 🔥 "
     } else if !state.active_buffs.is_empty() {
         " Cookie Factory ⚡ "
     } else {
@@ -290,11 +299,33 @@ fn render_cookie_display(
             delta_indicator,
         ]));
 
-        // Row 2: Cookie art + click button
+        // Row 2: Cookie art + click button + combo
+        let combo_span = if state.combo_count >= 3 {
+            let combo_color = match state.combo_count {
+                3..=5 => Color::Green,
+                6..=10 => Color::Yellow,
+                11..=20 => Color::Magenta,
+                _ => Color::Red,
+            };
+            let combo_blink = (state.anim_frame / 2).is_multiple_of(2);
+            let combo_style = if state.combo_count >= 10 && combo_blink {
+                Style::default()
+                    .fg(combo_color)
+                    .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default()
+                    .fg(combo_color)
+                    .add_modifier(Modifier::BOLD)
+            };
+            Span::styled(format!(" 🔥{}x", state.combo_count), combo_style)
+        } else {
+            Span::styled("", Style::default())
+        };
         lines.push(Line::from(vec![
             Span::styled(cookie_art[2], Style::default().fg(cookie_color)),
             Span::styled("  ", Style::default()),
             Span::styled(click_label, click_style),
+            combo_span,
         ]));
 
         // Row 3: Cookie art + clicks / milk / milestones
@@ -469,6 +500,14 @@ fn render_cookie_display(
 
         let sparkline = build_sparkline(&state.cps_history, 10);
 
+        let combo_span = if state.combo_count >= 3 {
+            Span::styled(
+                format!(" 🔥{}x", state.combo_count),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled("", Style::default())
+        };
         let mut lines = vec![
             Line::from(vec![
                 Span::styled(
@@ -478,6 +517,7 @@ fn render_cookie_display(
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(click_label, click_style),
+                combo_span,
             ]),
             Line::from(vec![
                 Span::styled(
@@ -566,30 +606,89 @@ fn cycling_color(anim_frame: u32, speed: u32) -> Color {
 /// Render floating particles as overlays on the cookie display area.
 fn render_particles(state: &CookieState, f: &mut Frame, area: Rect) {
     let center_x = area.x + area.width / 2;
+    let center_y = area.y + area.height / 2;
     let base_y = area.y + area.height;
 
     for particle in &state.particles {
         let progress = 1.0 - (particle.life as f32 / particle.max_life as f32);
-        let rise = (progress * 4.0) as u16;
-        let y = base_y.saturating_sub(1 + rise);
-        let x = (center_x as i16 + particle.col_offset).max(area.x as i16) as u16;
+
+        let (x, y, color, modifier) = match &particle.style {
+            ParticleStyle::Click => {
+                let rise = (progress * 5.0) as u16;
+                let y = base_y.saturating_sub(1 + rise);
+                let x = (center_x as i16 + particle.col_offset).max(area.x as i16) as u16;
+                let color = if particle.life > particle.max_life * 2 / 3 {
+                    Color::White
+                } else if particle.life > particle.max_life / 3 {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                };
+                (x, y, color, Modifier::BOLD)
+            }
+            ParticleStyle::Emoji => {
+                let rise = (progress * 6.0) as u16;
+                // Drift horizontally as it rises
+                let drift = ((progress * 3.0) as i16).saturating_mul(if particle.col_offset > 0 { 1 } else { -1 });
+                let y = base_y.saturating_sub(1 + rise);
+                let x = (center_x as i16 + particle.col_offset + drift).max(area.x as i16) as u16;
+                let color = match (state.anim_frame + particle.life) % 4 {
+                    0 => Color::Yellow,
+                    1 => Color::Cyan,
+                    2 => Color::Magenta,
+                    _ => Color::White,
+                };
+                (x, y, color, Modifier::BOLD)
+            }
+            ParticleStyle::Sparkle => {
+                let y = (center_y as i16 + particle.row_offset).max(area.y as i16) as u16;
+                let x = (center_x as i16 + particle.col_offset).max(area.x as i16) as u16;
+                // Twinkle: alternate between bright and dim
+                let twinkle = particle.life % 2 == 0;
+                let color = if twinkle { Color::White } else { Color::DarkGray };
+                (x, y, color, Modifier::empty())
+            }
+            ParticleStyle::Celebration => {
+                // Explode outward from center
+                let expand = (progress * 4.0) as i16;
+                let dir_x = if particle.col_offset > 0 { expand } else { -expand };
+                let dir_y = if particle.row_offset > 0 { expand / 2 } else { -expand / 2 };
+                let y = (center_y as i16 + particle.row_offset + dir_y).max(area.y as i16) as u16;
+                let x = (center_x as i16 + particle.col_offset + dir_x).max(area.x as i16) as u16;
+                let color = match (particle.col_offset.unsigned_abs() + particle.row_offset.unsigned_abs()) % 5 {
+                    0 => Color::Yellow,
+                    1 => Color::Magenta,
+                    2 => Color::Cyan,
+                    3 => Color::Green,
+                    _ => Color::White,
+                };
+                (x, y, color, Modifier::BOLD)
+            }
+            ParticleStyle::Combo => {
+                let y = (center_y as i16 + particle.row_offset).max(area.y as i16) as u16;
+                let x = (center_x as i16 + particle.col_offset
+                    - (particle.text.len() as i16 / 2))
+                    .max(area.x as i16) as u16;
+                // Rainbow cycling for combo text
+                let color = match (state.anim_frame / 2 + particle.life) % 6 {
+                    0 => Color::Red,
+                    1 => Color::Yellow,
+                    2 => Color::Green,
+                    3 => Color::Cyan,
+                    4 => Color::Blue,
+                    _ => Color::Magenta,
+                };
+                (x, y, color, Modifier::BOLD | Modifier::REVERSED)
+            }
+        };
 
         if y >= area.y && y < area.y + area.height && x < area.x + area.width {
-            let color = if particle.life > particle.max_life * 2 / 3 {
-                Color::White
-            } else if particle.life > particle.max_life / 3 {
-                Color::Yellow
-            } else {
-                Color::DarkGray
-            };
-            let style = Style::default()
-                .fg(color)
-                .add_modifier(Modifier::BOLD);
-
-            let text_len = particle.text.len() as u16;
+            let style = Style::default().fg(color).add_modifier(modifier);
+            let text_len = particle.text.chars().count() as u16;
             let available = area.x + area.width - x;
-            if text_len <= available {
-                let particle_area = Rect::new(x, y, text_len, 1);
+            let display_width = text_len.min(available);
+            if display_width > 0 {
+                let particle_area = Rect::new(x, y, display_width.max(2), 1);
                 let widget = Paragraph::new(Span::styled(&particle.text, style));
                 f.render_widget(widget, particle_area);
             }
