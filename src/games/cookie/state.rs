@@ -317,6 +317,21 @@ pub struct Milestone {
     pub status: MilestoneStatus,
 }
 
+/// Particle style for different visual effects.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ParticleStyle {
+    /// Normal click "+N" particle (rises up).
+    Click,
+    /// Emoji burst particle (rises up with drift).
+    Emoji,
+    /// Sparkle ambient particle (twinkles in place).
+    Sparkle,
+    /// Celebration burst particle (explodes outward from center).
+    Celebration,
+    /// Combo indicator text.
+    Combo,
+}
+
 /// A floating text particle (e.g. "+1" rising from click area).
 #[derive(Clone, Debug)]
 pub struct Particle {
@@ -328,6 +343,10 @@ pub struct Particle {
     pub life: u32,
     /// Maximum lifetime (for computing vertical position).
     pub max_life: u32,
+    /// Visual style of this particle.
+    pub style: ParticleStyle,
+    /// Row offset for celebration particles (signed, from center).
+    pub row_offset: i16,
 }
 
 /// Log entry for the Cookie game.
@@ -448,6 +467,14 @@ pub struct CookieState {
     /// Highest cookies in a single run.
     pub best_cookies_single_run: f64,
 
+    // === Combo system ===
+    /// Ticks since last click (resets on click, increments on tick).
+    pub click_cooldown: u32,
+    /// Current combo count (consecutive clicks within the combo window).
+    pub combo_count: u32,
+    /// Peak combo in current session.
+    pub best_combo: u32,
+
     // === Analytics (not saved) ===
     /// CPS history for sparkline graph (sampled every 10 ticks = 1 second).
     /// Stores the last 40 samples.
@@ -520,6 +547,10 @@ impl CookieState {
             total_ticks: 0,
             best_cps: 0.0,
             best_cookies_single_run: 0.0,
+            // Combo system
+            click_cooldown: 0,
+            combo_count: 0,
+            best_combo: 0,
             // Analytics
             cps_history: Vec::new(),
             cps_sample_counter: 0,
