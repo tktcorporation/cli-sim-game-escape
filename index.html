@@ -23,6 +23,10 @@
       pre {
         font-family: "Fira Code", "Courier New", monospace;
         font-size: 14px;
+        /* Ratzilla sets inline height:15px which clips text when font is
+           scaled up.  Let the row height follow the actual font size. */
+        height: auto !important;
+        line-height: 1.15;
         margin: 0;
         padding: 0;
         touch-action: manipulation;
@@ -31,6 +35,31 @@
     </style>
   </head>
   <body></body>
+  <script>
+    // Reduce the viewport dimensions reported to Ratzilla so it calculates
+    // fewer terminal columns/rows, resulting in larger text that fills the
+    // real viewport via the fitGridToViewport scaler below.
+    // SCALE < 1 → bigger text.  0.85 ≈ 18 % larger characters.
+    (function() {
+      var SCALE = 0.85;
+
+      function override(obj, proto, prop) {
+        var desc = Object.getOwnPropertyDescriptor(proto, prop);
+        if (desc && desc.get) {
+          var orig = desc.get;
+          Object.defineProperty(obj, prop, {
+            get: function() { return Math.floor(orig.call(obj) * SCALE); },
+            configurable: true
+          });
+        }
+      }
+
+      // Only override width — height stays original so Ratzilla keeps
+      // the correct number of rows and row spacing isn't compressed.
+      override(window, Window.prototype, 'innerWidth');
+      override(screen, Screen.prototype, 'width');
+    })();
+  </script>
   <script>
     // Ratzilla calculates terminal columns as screen_width/10 (mobile) or
     // window.innerWidth/10 (desktop), assuming ~10px per character. When the
@@ -49,7 +78,15 @@
         if (!pre) return false;
 
         var viewportWidth = document.documentElement.clientWidth;
-        var contentWidth = pre.scrollWidth;
+
+        // <pre> is a block element so scrollWidth always equals the
+        // container width, not the actual text width.  Temporarily switch
+        // to inline-block so the element shrink-wraps to its content,
+        // then measure with getBoundingClientRect for sub-pixel accuracy.
+        pre.style.display = 'inline-block';
+        var contentWidth = pre.getBoundingClientRect().width;
+        pre.style.display = '';
+
         if (contentWidth <= 0 || contentWidth >= viewportWidth) return true;
 
         var currentFontSize = parseFloat(getComputedStyle(pre).fontSize);
