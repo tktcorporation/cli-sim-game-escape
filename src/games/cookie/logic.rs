@@ -23,6 +23,26 @@ pub fn tick(state: &mut CookieState, delta_ticks: u32) {
         state.best_cps = current_cps;
     }
 
+    // Track cookies earned in this window
+    state.cookies_earned_window += production;
+
+    // Sample CPS history every 10 ticks (1 second)
+    state.cps_sample_counter += delta_ticks;
+    if state.cps_sample_counter >= 10 {
+        state.cps_sample_counter = 0;
+        state.cps_delta = current_cps - state.prev_cps;
+        state.prev_cps = current_cps;
+        state.cps_history.push(current_cps);
+        if state.cps_history.len() > 40 {
+            state.cps_history.remove(0);
+        }
+        // Track peak per-second
+        if state.cookies_earned_window > state.peak_cookies_per_sec {
+            state.peak_cookies_per_sec = state.cookies_earned_window;
+        }
+        state.cookies_earned_window = 0.0;
+    }
+
     if state.click_flash > 0 {
         state.click_flash = state.click_flash.saturating_sub(delta_ticks);
     }
@@ -651,6 +671,12 @@ pub fn perform_prestige(state: &mut CookieState) -> u64 {
     state.milestone_flash = 0;
     state.kitten_multiplier = 1.0;
     state.prestige_flash = 30; // 3 second celebration
+    state.cps_history.clear();
+    state.cps_sample_counter = 0;
+    state.cps_delta = 0.0;
+    state.prev_cps = 0.0;
+    state.cookies_earned_window = 0.0;
+    state.peak_cookies_per_sec = 0.0;
 
     state.add_log(
         &format!(

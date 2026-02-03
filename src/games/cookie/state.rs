@@ -447,6 +447,21 @@ pub struct CookieState {
     pub best_cps: f64,
     /// Highest cookies in a single run.
     pub best_cookies_single_run: f64,
+
+    // === Analytics (not saved) ===
+    /// CPS history for sparkline graph (sampled every 10 ticks = 1 second).
+    /// Stores the last 40 samples.
+    pub cps_history: Vec<f64>,
+    /// Tick counter for CPS sampling interval.
+    pub cps_sample_counter: u32,
+    /// Cookies per second delta (change from last sample).
+    pub cps_delta: f64,
+    /// Previous CPS for delta calculation.
+    pub prev_cps: f64,
+    /// Cookies earned in the last 10 ticks (for "per second" display).
+    pub cookies_earned_window: f64,
+    /// Peak cookies earned in a single tick window.
+    pub peak_cookies_per_sec: f64,
 }
 
 impl CookieState {
@@ -505,6 +520,13 @@ impl CookieState {
             total_ticks: 0,
             best_cps: 0.0,
             best_cookies_single_run: 0.0,
+            // Analytics
+            cps_history: Vec::new(),
+            cps_sample_counter: 0,
+            cps_delta: 0.0,
+            prev_cps: 0.0,
+            cookies_earned_window: 0.0,
+            peak_cookies_per_sec: 0.0,
         }
     }
 
@@ -1496,6 +1518,21 @@ impl CookieState {
                 self.producers[kind.index()].count >= *required_count
             }
         }
+    }
+
+    /// Get CPS contribution of each producer as (name, cps, fraction_of_total).
+    pub fn producer_contributions(&self) -> Vec<(&str, f64, f64)> {
+        let total = self.total_cps().max(0.001);
+        self.producers
+            .iter()
+            .filter(|p| p.count > 0)
+            .map(|p| {
+                let syn = self.synergy_bonus(&p.kind);
+                let cs = self.count_scaling_bonus(&p.kind);
+                let cps = p.cps_with_synergy(syn + cs);
+                (p.kind.name(), cps, cps / total)
+            })
+            .collect()
     }
 
     pub fn add_log(&mut self, text: &str, is_important: bool) {
