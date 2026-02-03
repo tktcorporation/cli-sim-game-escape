@@ -47,11 +47,13 @@ impl Game for CookieGame {
             'u' => {
                 self.state.show_upgrades = !self.state.show_upgrades;
                 self.state.show_milestones = false;
+                self.state.show_prestige = false;
                 true
             }
             'm' => {
                 self.state.show_milestones = !self.state.show_milestones;
                 self.state.show_upgrades = false;
+                self.state.show_prestige = false;
                 true
             }
             // Tab direct-set keys (used by click targets, not toggling)
@@ -59,30 +61,53 @@ impl Game for CookieGame {
                 // Go to Producers tab
                 self.state.show_upgrades = false;
                 self.state.show_milestones = false;
+                self.state.show_prestige = false;
                 true
             }
             '|' => {
                 // Go to Upgrades tab
                 self.state.show_upgrades = true;
                 self.state.show_milestones = false;
+                self.state.show_prestige = false;
                 true
             }
             '}' => {
                 // Go to Milestones tab
                 self.state.show_milestones = true;
                 self.state.show_upgrades = false;
+                self.state.show_prestige = false;
                 true
             }
-            '1' | '2' | '3' | '4' | '5' if !self.state.show_upgrades && !self.state.show_milestones => {
+            '~' => {
+                // Go to Prestige tab
+                self.state.show_prestige = true;
+                self.state.show_upgrades = false;
+                self.state.show_milestones = false;
+                true
+            }
+            'p' if self.state.show_prestige => {
+                // Perform prestige reset
+                logic::perform_prestige(&mut self.state);
+                true
+            }
+            '1'..='8' if !self.state.show_upgrades && !self.state.show_milestones && !self.state.show_prestige => {
                 let kind = match key {
                     '1' => ProducerKind::Cursor,
                     '2' => ProducerKind::Grandma,
                     '3' => ProducerKind::Farm,
                     '4' => ProducerKind::Mine,
                     '5' => ProducerKind::Factory,
+                    '6' => ProducerKind::Temple,
+                    '7' => ProducerKind::WizardTower,
+                    '8' => ProducerKind::Shipment,
                     _ => unreachable!(),
                 };
                 logic::buy_producer(&mut self.state, &kind);
+                true
+            }
+            'a'..='z' if self.state.show_prestige => {
+                let idx = (key as u8 - b'a') as usize;
+                logic::buy_prestige_upgrade(&mut self.state, idx);
                 true
             }
             'a'..='z' if self.state.show_milestones => {
@@ -257,5 +282,57 @@ mod tests {
         // Clicking again stays on milestones
         game.handle_input(&InputEvent::Key('}'));
         assert!(game.state.show_milestones);
+    }
+
+    #[test]
+    fn tab_direct_set_prestige() {
+        let mut game = CookieGame::new();
+        game.handle_input(&InputEvent::Key('~'));
+        assert!(game.state.show_prestige);
+        assert!(!game.state.show_upgrades);
+        assert!(!game.state.show_milestones);
+    }
+
+    #[test]
+    fn prestige_tab_mutually_exclusive() {
+        let mut game = CookieGame::new();
+        game.handle_input(&InputEvent::Key('~'));
+        assert!(game.state.show_prestige);
+        game.handle_input(&InputEvent::Key('{'));
+        assert!(!game.state.show_prestige);
+        game.handle_input(&InputEvent::Key('~'));
+        game.handle_input(&InputEvent::Key('|'));
+        assert!(!game.state.show_prestige);
+        assert!(game.state.show_upgrades);
+    }
+
+    #[test]
+    fn prestige_upgrade_via_input() {
+        let mut game = CookieGame::new();
+        game.state.heavenly_chips = 10;
+        game.handle_input(&InputEvent::Key('~')); // go to prestige tab
+        game.handle_input(&InputEvent::Key('a')); // buy first prestige upgrade
+        assert!(game.state.prestige_upgrades[0].purchased);
+    }
+
+    #[test]
+    fn producer_keys_ignored_in_prestige_mode() {
+        let mut game = CookieGame::new();
+        game.state.cookies = 1000.0;
+        game.state.show_prestige = true;
+        game.handle_input(&InputEvent::Key('1'));
+        assert_eq!(game.state.producers[0].count, 0);
+    }
+
+    #[test]
+    fn new_producers_buyable() {
+        let mut game = CookieGame::new();
+        game.state.cookies = 1e12;
+        game.handle_input(&InputEvent::Key('6')); // Temple
+        assert_eq!(game.state.producers[5].count, 1);
+        game.handle_input(&InputEvent::Key('7')); // WizardTower
+        assert_eq!(game.state.producers[6].count, 1);
+        game.handle_input(&InputEvent::Key('8')); // Shipment
+        assert_eq!(game.state.producers[7].count, 1);
     }
 }

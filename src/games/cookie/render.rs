@@ -62,13 +62,14 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
     // Cookie display height adapts to available space
     let cookie_height: u16 = if is_narrow { 3 } else { 5 };
 
+    let tab_rows = 4; // Producers | Upgrades | Milestones | Prestige
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(cookie_height),
             Constraint::Length(buff_height),
-            Constraint::Length(3), // tab bar (3 rows, one per tab)
-            Constraint::Min(5),   // content
+            Constraint::Length(tab_rows), // tab bar
+            Constraint::Min(5),          // content
         ])
         .split(main_area);
 
@@ -78,7 +79,9 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
         render_buffs_and_golden(state, f, chunks[1], click_state);
     }
     render_tab_bar(state, f, chunks[2], click_state);
-    if state.show_milestones {
+    if state.show_prestige {
+        render_prestige(state, f, chunks[3], click_state);
+    } else if state.show_milestones {
         render_milestones(state, f, chunks[3], click_state);
     } else if state.show_upgrades {
         render_upgrades(state, f, chunks[3], click_state);
@@ -102,7 +105,9 @@ fn render_tab_bar(
     let ready_count = state.ready_milestone_count();
 
     // Determine active tab index
-    let active = if state.show_milestones {
+    let active = if state.show_prestige {
+        3
+    } else if state.show_milestones {
         2
     } else if state.show_upgrades {
         1
@@ -130,10 +135,19 @@ fn render_tab_bar(
         " ▸ Milestones ".to_string()
     };
 
-    let tabs: [(String, Style, char); 3] = [
+    let pending_chips = state.pending_heavenly_chips();
+    let prestige_label = if pending_chips > 0 {
+        format!(" ▸ Prestige (+{}) ", pending_chips)
+    } else {
+        " ▸ Prestige ".to_string()
+    };
+    let prestige_color = if pending_chips > 0 { Color::Yellow } else { Color::Blue };
+
+    let tabs: [(String, Style, char); 4] = [
         (" ▸ Producers ".to_string(), tab_style(0, Color::Green), '{'),
         (" ▸ Upgrades ".to_string(), tab_style(1, Color::Magenta), '|'),
         (milestone_label, tab_style(2, milestone_color), '}'),
+        (prestige_label, tab_style(3, prestige_color), '~'),
     ];
 
     // Render each tab on its own row
@@ -582,7 +596,7 @@ fn render_producers(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(producer_border_color))
-            .title(" Producers [1-5]で購入 ★=最高効率 "),
+            .title(" Producers [1-8]で購入 ★=最高効率 "),
     );
     f.render_widget(widget, area);
 
@@ -935,6 +949,199 @@ fn render_milestones(
     for i in 0..ready_key_idx {
         let key = (b'a' + i) as char;
         cs.add_target(first_ready_row + i as u16, key);
+    }
+}
+
+fn render_prestige(
+    state: &CookieState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let mut lines: Vec<Line> = Vec::new();
+    let pending = state.pending_heavenly_chips();
+    let available = state.available_chips();
+
+    // Header: prestige info
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" 👼 天国チップ: {} ", available),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("(合計{}) ", state.heavenly_chips),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            format!("転生{}回目 ", state.prestige_count),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::styled(
+            format!("CPS×{:.2}", state.prestige_multiplier),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Pending chips preview
+    if pending > 0 {
+        let blink = (state.anim_frame / 3).is_multiple_of(2);
+        let style = if blink {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" 🌟 [P] 転生で +{} チップ獲得！", pending),
+                style,
+            ),
+        ]));
+    } else {
+        lines.push(Line::from(Span::styled(
+            " (1兆クッキーで転生可能になります)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    // Separator
+    lines.push(Line::from(Span::styled(
+        " ─── 転生アップグレード ─────────────",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    // Prestige upgrades
+    for (i, upgrade) in state.prestige_upgrades.iter().enumerate() {
+        let key = (b'a' + i as u8) as char;
+        if upgrade.purchased {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" [{}] ", key),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("✅ {} ", upgrade.name),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::styled(
+                    format!("- {}", upgrade.description),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        } else {
+            let can_afford = available >= upgrade.cost;
+            let key_style = if can_afford {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let text_style = if can_afford {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!(" [{}] ", key), key_style),
+                Span::styled(format!("{} ", upgrade.name), text_style),
+                Span::styled(
+                    format!("- {} ", upgrade.description),
+                    text_style,
+                ),
+                Span::styled(
+                    format!("({}チップ)", upgrade.cost),
+                    if can_afford {
+                        Style::default().fg(Color::Cyan)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                ),
+            ]));
+        }
+    }
+
+    // Separator
+    lines.push(Line::from(Span::styled(
+        " ─── 統計 ──────────────────────────",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    // Statistics
+    let play_seconds = state.total_ticks / 10;
+    let hours = play_seconds / 3600;
+    let minutes = (play_seconds % 3600) / 60;
+    let secs = play_seconds % 60;
+    lines.push(Line::from(Span::styled(
+        format!(" ⏱ プレイ時間: {}h {}m {}s", hours, minutes, secs),
+        Style::default().fg(Color::White),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(" 🍪 全ラン合計: {}", format_number(state.cookies_all_runs + state.cookies_all_time)),
+        Style::default().fg(Color::White),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(" 📈 最高CPS: {}/s", format_number(state.best_cps)),
+        Style::default().fg(Color::White),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(" 🏅 単一ラン最高: {}", format_number(state.best_cookies_single_run)),
+        Style::default().fg(Color::White),
+    )));
+    lines.push(Line::from(Span::styled(
+        format!(" 👆 今回のクリック: {}", state.total_clicks),
+        Style::default().fg(Color::White),
+    )));
+
+    let border_color = if state.prestige_flash > 0 {
+        let phase = state.prestige_flash % 4;
+        match phase {
+            0 => Color::Yellow,
+            1 => Color::Magenta,
+            2 => Color::Cyan,
+            _ => Color::White,
+        }
+    } else if pending > 0 {
+        Color::Yellow
+    } else {
+        Color::Blue
+    };
+
+    let widget = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border_color))
+                .title(format!(
+                    " Prestige — 転生{} ",
+                    if state.prestige_count > 0 {
+                        format!("({}回目)", state.prestige_count)
+                    } else {
+                        String::new()
+                    }
+                )),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(widget, area);
+
+    // Click targets
+    let mut cs = click_state.borrow_mut();
+    // P for prestige action (on pending chips line)
+    if pending > 0 {
+        cs.add_target(area.y + 2, 'p'); // the "転生で +N チップ" line
+    }
+    // a-z for prestige upgrade purchase
+    let first_upgrade_row = area.y + 4; // after header + pending + separator
+    for (i, _) in state.prestige_upgrades.iter().enumerate() {
+        let key = (b'a' + i as u8) as char;
+        cs.add_target(first_upgrade_row + i as u16, key);
     }
 }
 
