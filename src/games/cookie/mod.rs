@@ -61,6 +61,14 @@ impl Game for CookieGame {
             }
             'u' => {
                 self.state.show_upgrades = !self.state.show_upgrades;
+                self.state.show_research = false;
+                self.state.show_milestones = false;
+                self.state.show_prestige = false;
+                true
+            }
+            'r' => {
+                self.state.show_research = !self.state.show_research;
+                self.state.show_upgrades = false;
                 self.state.show_milestones = false;
                 self.state.show_prestige = false;
                 true
@@ -68,6 +76,7 @@ impl Game for CookieGame {
             'm' => {
                 self.state.show_milestones = !self.state.show_milestones;
                 self.state.show_upgrades = false;
+                self.state.show_research = false;
                 self.state.show_prestige = false;
                 true
             }
@@ -75,6 +84,7 @@ impl Game for CookieGame {
             '{' => {
                 // Go to Producers tab
                 self.state.show_upgrades = false;
+                self.state.show_research = false;
                 self.state.show_milestones = false;
                 self.state.show_prestige = false;
                 true
@@ -82,6 +92,15 @@ impl Game for CookieGame {
             '|' => {
                 // Go to Upgrades tab
                 self.state.show_upgrades = true;
+                self.state.show_research = false;
+                self.state.show_milestones = false;
+                self.state.show_prestige = false;
+                true
+            }
+            '\\' => {
+                // Go to Research tab
+                self.state.show_research = true;
+                self.state.show_upgrades = false;
                 self.state.show_milestones = false;
                 self.state.show_prestige = false;
                 true
@@ -90,6 +109,7 @@ impl Game for CookieGame {
                 // Go to Milestones tab
                 self.state.show_milestones = true;
                 self.state.show_upgrades = false;
+                self.state.show_research = false;
                 self.state.show_prestige = false;
                 true
             }
@@ -97,6 +117,7 @@ impl Game for CookieGame {
                 // Go to Prestige tab
                 self.state.show_prestige = true;
                 self.state.show_upgrades = false;
+                self.state.show_research = false;
                 self.state.show_milestones = false;
                 true
             }
@@ -132,7 +153,7 @@ impl Game for CookieGame {
                 logic::set_dragon_aura(&mut self.state, next);
                 true
             }
-            '1'..='8' if !self.state.show_upgrades && !self.state.show_milestones && !self.state.show_prestige => {
+            '1'..='8' if !self.state.show_upgrades && !self.state.show_research && !self.state.show_milestones && !self.state.show_prestige => {
                 let kind = match key {
                     '1' => ProducerKind::Cursor,
                     '2' => ProducerKind::Grandma,
@@ -174,8 +195,6 @@ impl Game for CookieGame {
                 true
             }
             'a'..='z' if self.state.show_upgrades => {
-                // Map 'a'..'z' to available upgrade indices, then research
-                // Layout matches render_upgrades: upgrades first, separator, research
                 let display_idx = (key as u8 - b'a') as usize;
                 let available_upgrades: Vec<usize> = self
                     .state
@@ -186,35 +205,31 @@ impl Game for CookieGame {
                     .map(|(i, _)| i)
                     .collect();
 
-                let upgrade_count = available_upgrades.len();
-                if display_idx < upgrade_count {
-                    // It's an upgrade
-                    if let Some(&real_idx) = available_upgrades.get(display_idx) {
-                        logic::buy_upgrade(&mut self.state, real_idx);
-                    }
-                } else {
-                    // It's a research node (skip separator = +1 offset)
-                    let research_display = display_idx - upgrade_count - 1; // -1 for separator
-                    // Build the same filtered list as render
-                    let visible_research: Vec<usize> = self
-                        .state
-                        .research_nodes
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, n)| {
-                            if self.state.research_path != state::ResearchPath::None
-                                && n.path != self.state.research_path
-                            {
-                                return false;
-                            }
-                            !n.purchased
-                        })
-                        .map(|(i, _)| i)
-                        .collect();
+                if let Some(&real_idx) = available_upgrades.get(display_idx) {
+                    logic::buy_upgrade(&mut self.state, real_idx);
+                }
+                true
+            }
+            'a'..='z' if self.state.show_research => {
+                let display_idx = (key as u8 - b'a') as usize;
+                let visible_research: Vec<usize> = self
+                    .state
+                    .research_nodes
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, n)| {
+                        if self.state.research_path != state::ResearchPath::None
+                            && n.path != self.state.research_path
+                        {
+                            return false;
+                        }
+                        !n.purchased
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
 
-                    if let Some(&real_idx) = visible_research.get(research_display) {
-                        logic::buy_research(&mut self.state, real_idx);
-                    }
+                if let Some(&real_idx) = visible_research.get(display_idx) {
+                    logic::buy_research(&mut self.state, real_idx);
                 }
                 true
             }
@@ -401,6 +416,54 @@ mod tests {
         game.state.show_prestige = true;
         game.handle_input(&InputEvent::Key('1'));
         assert_eq!(game.state.producers[0].count, 0);
+    }
+
+    #[test]
+    fn toggle_research() {
+        let mut game = CookieGame::new();
+        assert!(!game.state.show_research);
+        game.handle_input(&InputEvent::Key('r'));
+        assert!(game.state.show_research);
+        assert!(!game.state.show_upgrades);
+        assert!(!game.state.show_milestones);
+        assert!(!game.state.show_prestige);
+        game.handle_input(&InputEvent::Key('r'));
+        assert!(!game.state.show_research);
+    }
+
+    #[test]
+    fn tab_direct_set_research() {
+        let mut game = CookieGame::new();
+        game.handle_input(&InputEvent::Key('\\'));
+        assert!(game.state.show_research);
+        assert!(!game.state.show_upgrades);
+        assert!(!game.state.show_milestones);
+        assert!(!game.state.show_prestige);
+    }
+
+    #[test]
+    fn research_tab_mutually_exclusive() {
+        let mut game = CookieGame::new();
+        game.handle_input(&InputEvent::Key('r'));
+        assert!(game.state.show_research);
+        game.handle_input(&InputEvent::Key('u'));
+        assert!(game.state.show_upgrades);
+        assert!(!game.state.show_research);
+        game.handle_input(&InputEvent::Key('r'));
+        assert!(game.state.show_research);
+        game.handle_input(&InputEvent::Key('m'));
+        assert!(game.state.show_milestones);
+        assert!(!game.state.show_research);
+    }
+
+    #[test]
+    fn research_purchase_via_input() {
+        let mut game = CookieGame::new();
+        game.state.cookies = 1e12;
+        game.handle_input(&InputEvent::Key('r'));
+        game.handle_input(&InputEvent::Key('a'));
+        let purchased_count = game.state.research_nodes.iter().filter(|n| n.purchased).count();
+        assert!(purchased_count > 0);
     }
 
     #[test]

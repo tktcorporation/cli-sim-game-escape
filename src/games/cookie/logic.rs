@@ -782,6 +782,7 @@ pub fn perform_prestige(state: &mut CookieState) -> u64 {
     state.upgrades = CookieState::create_upgrades();
     state.log.clear();
     state.show_upgrades = false;
+    state.show_research = false;
     state.show_milestones = false;
     state.show_prestige = false;
     state.anim_frame = 0;

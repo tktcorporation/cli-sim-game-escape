@@ -555,6 +555,8 @@ pub struct CookieState {
     pub log: Vec<CookieLogEntry>,
     /// Whether showing upgrades panel.
     pub show_upgrades: bool,
+    /// Whether showing research panel.
+    pub show_research: bool,
     /// Animation frame counter (incremented every tick).
     pub anim_frame: u32,
     /// Recent click flash timer (ticks remaining for visual feedback).
@@ -689,6 +691,7 @@ impl CookieState {
                 is_important: true,
             }],
             show_upgrades: false,
+            show_research: false,
             anim_frame: 0,
             click_flash: 0,
             purchase_flash: 0,
