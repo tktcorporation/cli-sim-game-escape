@@ -65,7 +65,7 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
     // Cookie display height adapts to available space — larger for analytics dashboard
     let cookie_height: u16 = if is_narrow { 5 } else { 14 };
 
-    let tab_rows = 4; // Producers | Upgrades | Milestones | Prestige
+    let tab_rows = 5; // Producers | Upgrades | Research | Milestones | Prestige
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -86,6 +86,8 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
         render_prestige(state, f, chunks[3], click_state);
     } else if state.show_milestones {
         render_milestones(state, f, chunks[3], click_state);
+    } else if state.show_research {
+        render_research(state, f, chunks[3], click_state);
     } else if state.show_upgrades {
         render_upgrades(state, f, chunks[3], click_state);
     } else {
@@ -109,8 +111,10 @@ fn render_tab_bar(
 
     // Determine active tab index
     let active = if state.show_prestige {
-        3
+        4
     } else if state.show_milestones {
+        3
+    } else if state.show_research {
         2
     } else if state.show_upgrades {
         1
@@ -146,11 +150,12 @@ fn render_tab_bar(
     };
     let prestige_color = if pending_chips > 0 { Color::Yellow } else { Color::Blue };
 
-    let tabs: [(String, Style, char); 4] = [
+    let tabs: [(String, Style, char); 5] = [
         (" ▸ Producers ".to_string(), tab_style(0, Color::Green), '{'),
         (" ▸ Upgrades ".to_string(), tab_style(1, Color::Magenta), '|'),
-        (milestone_label, tab_style(2, milestone_color), '}'),
-        (prestige_label, tab_style(3, prestige_color), '~'),
+        (" ▸ Research ".to_string(), tab_style(2, Color::Cyan), '\\'),
+        (milestone_label, tab_style(3, milestone_color), '}'),
+        (prestige_label, tab_style(4, prestige_color), '~'),
     ];
 
     // Render each tab on its own row
@@ -939,8 +944,6 @@ fn render_upgrades(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    use super::state::ResearchPath;
-
     // Show unpurchased upgrades, distinguishing unlocked vs locked
     let available: Vec<(usize, &super::state::Upgrade, bool)> = state
         .upgrades
@@ -1001,21 +1004,55 @@ fn render_upgrades(
         }
     }
 
-    // === Research Tree separator ===
+    let widget = if all_items.is_empty() {
+        List::new(vec![ListItem::new(Span::styled(
+            " (全て購入済み)",
+            Style::default().fg(Color::DarkGray),
+        ))])
+    } else {
+        List::new(all_items.clone())
+    }
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Magenta))
+            .title(" Upgrades [A-Z]で購入 "),
+    );
+    f.render_widget(widget, area);
+
+    // Click targets for all items
+    let mut cs = click_state.borrow_mut();
+    for i in 0..all_items.len() {
+        let key = (b'a' + i as u8) as char;
+        cs.add_target(area.y + 1 + i as u16, key);
+    }
+}
+
+fn render_research(
+    state: &CookieState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    use super::state::ResearchPath;
+
     let path_name = match &state.research_path {
         ResearchPath::None => "未選択",
         ResearchPath::MassProduction => "量産路線",
         ResearchPath::Quality => "品質路線",
     };
+
+    let mut all_items: Vec<ListItem> = Vec::new();
+    let mut key_idx: u8 = 0;
+
+    // Header showing current path
     all_items.push(ListItem::new(Line::from(Span::styled(
-        format!(" ─── 🔬 研究ツリー [{}] ───────────", path_name),
+        format!(" 🔬 研究パス: {}", path_name),
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     ))));
-    key_idx += 1; // skip the separator row for key mapping
 
-    // === Research nodes ===
     let max_tier = state.research_max_tier();
     for node in &state.research_nodes {
         // Skip nodes from the wrong path (if path already chosen)
@@ -1023,7 +1060,6 @@ fn render_upgrades(
             continue;
         }
         if node.purchased {
-            // Show purchased as completed
             all_items.push(ListItem::new(Line::from(vec![
                 Span::styled("     ", Style::default()),
                 Span::styled(
@@ -1087,27 +1123,20 @@ fn render_upgrades(
         }
     }
 
-    let widget = if all_items.is_empty() {
-        List::new(vec![ListItem::new(Span::styled(
-            " (全て購入済み)",
-            Style::default().fg(Color::DarkGray),
-        ))])
-    } else {
-        List::new(all_items.clone())
-    }
-    .block(
+    let widget = List::new(all_items.clone()).block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Magenta))
-            .title(" Upgrades & Research [A-Z]で購入 "),
+            .border_style(Style::default().fg(Color::Cyan))
+            .title(" Research [A-Z]で購入 "),
     );
     f.render_widget(widget, area);
 
-    // Click targets for all items
+    // Click targets for purchasable items (skip header)
     let mut cs = click_state.borrow_mut();
-    for i in 0..all_items.len() {
+    for i in 0..key_idx as usize {
         let key = (b'a' + i as u8) as char;
-        cs.add_target(area.y + 1 + i as u16, key);
+        // +1 for border, +1 for header line
+        cs.add_target(area.y + 2 + i as u16, key);
     }
 }
 
