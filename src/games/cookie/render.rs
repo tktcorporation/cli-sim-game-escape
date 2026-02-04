@@ -450,6 +450,32 @@ fn render_cookie_display(
                 Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
             ));
         }
+        // Market phase indicator
+        {
+            use super::state::MarketPhase;
+            let (market_color, market_blink) = match &state.market_phase {
+                MarketPhase::Bull => (Color::Red, true),
+                MarketPhase::Bear => (Color::Blue, true),
+                MarketPhase::Normal => (Color::DarkGray, false),
+            };
+            let secs_left = state.market_ticks_left / 10;
+            let style = if market_blink && (state.anim_frame / 4).is_multiple_of(2) {
+                Style::default().fg(market_color).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(market_color)
+            };
+            status_spans.push(Span::styled(
+                format!("  {}{}({}s)", state.market_phase.symbol(), state.market_phase.name(), secs_left),
+                style,
+            ));
+        }
+        // Dragon level indicator
+        if state.dragon_level > 0 {
+            status_spans.push(Span::styled(
+                format!("  🐉Lv.{}", state.dragon_level),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
         lines.push(Line::from(status_spans));
 
         let widget = Paragraph::new(lines).block(
@@ -913,6 +939,8 @@ fn render_upgrades(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    use super::state::ResearchPath;
+
     // Show unpurchased upgrades, distinguishing unlocked vs locked
     let available: Vec<(usize, &super::state::Upgrade, bool)> = state
         .upgrades
@@ -922,77 +950,164 @@ fn render_upgrades(
         .map(|(i, u)| (i, u, state.is_upgrade_unlocked(u)))
         .collect();
 
-    let items: Vec<ListItem> = available
-        .iter()
-        .enumerate()
-        .map(|(display_idx, (_, upgrade, unlocked))| {
-            let can_afford = state.cookies >= upgrade.cost && *unlocked;
-            let key = (b'a' + display_idx as u8) as char;
-            let cost_str = format_number(upgrade.cost);
+    let mut all_items: Vec<ListItem> = Vec::new();
+    let mut key_idx: u8 = 0;
 
-            if *unlocked {
-                let key_style = if can_afford {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                let text_style = if can_afford {
-                    Style::default().fg(Color::White)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
+    // === Upgrade items ===
+    for (_, upgrade, unlocked) in &available {
+        let can_afford = state.cookies >= upgrade.cost && *unlocked;
+        let key = (b'a' + key_idx) as char;
+        key_idx += 1;
+        let cost_str = format_number(upgrade.cost);
 
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!(" [{}] ", key), key_style),
-                    Span::styled(
-                        format!("{} - {} ({})", upgrade.name, upgrade.description, cost_str),
-                        text_style,
-                    ),
-                ]))
+        if *unlocked {
+            let key_style = if can_afford {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                // Locked upgrade — show hint about unlock condition
-                let hint = match &upgrade.unlock_condition {
-                    Some((kind, count)) => {
-                        let current = state.producers[kind.index()].count;
-                        format!("🔒 {} {}台必要(現在{}台)", kind.name(), count, current)
-                    }
-                    None => "🔒".to_string(),
-                };
+                Style::default().fg(Color::DarkGray)
+            };
+            let text_style = if can_afford {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
 
-                ListItem::new(Line::from(vec![
-                    Span::styled(format!(" [{}] ", key), Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        format!("{} - {} ", upgrade.name, upgrade.description),
-                        Style::default().fg(Color::DarkGray),
+            all_items.push(ListItem::new(Line::from(vec![
+                Span::styled(format!(" [{}] ", key), key_style),
+                Span::styled(
+                    format!("{} - {} ({})", upgrade.name, upgrade.description, cost_str),
+                    text_style,
+                ),
+            ])));
+        } else {
+            let hint = match &upgrade.unlock_condition {
+                Some((kind, count)) => {
+                    let current = state.producers[kind.index()].count;
+                    format!("🔒 {} {}台必要(現在{}台)", kind.name(), count, current)
+                }
+                None => "🔒".to_string(),
+            };
+
+            all_items.push(ListItem::new(Line::from(vec![
+                Span::styled(format!(" [{}] ", key), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{} - {} ", upgrade.name, upgrade.description),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(hint, Style::default().fg(Color::Red)),
+            ])));
+        }
+    }
+
+    // === Research Tree separator ===
+    let path_name = match &state.research_path {
+        ResearchPath::None => "未選択",
+        ResearchPath::MassProduction => "量産路線",
+        ResearchPath::Quality => "品質路線",
+    };
+    all_items.push(ListItem::new(Line::from(Span::styled(
+        format!(" ─── 🔬 研究ツリー [{}] ───────────", path_name),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))));
+    key_idx += 1; // skip the separator row for key mapping
+
+    // === Research nodes ===
+    let max_tier = state.research_max_tier();
+    for node in &state.research_nodes {
+        // Skip nodes from the wrong path (if path already chosen)
+        if state.research_path != ResearchPath::None && node.path != state.research_path {
+            continue;
+        }
+        if node.purchased {
+            // Show purchased as completed
+            all_items.push(ListItem::new(Line::from(vec![
+                Span::styled("     ", Style::default()),
+                Span::styled(
+                    format!("✅ {} - {}", node.name, node.description),
+                    Style::default().fg(Color::Green),
+                ),
+            ])));
+            continue;
+        }
+
+        let can_buy_tier = node.tier <= max_tier + 1;
+        let can_afford = state.cookies >= node.cost && can_buy_tier;
+        let key = (b'a' + key_idx) as char;
+        key_idx += 1;
+
+        let path_icon = match &node.path {
+            ResearchPath::MassProduction => "⚙",
+            ResearchPath::Quality => "💎",
+            ResearchPath::None => "",
+        };
+
+        if can_buy_tier {
+            let key_style = if can_afford {
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let text_style = if can_afford {
+                Style::default().fg(Color::White)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+
+            all_items.push(ListItem::new(Line::from(vec![
+                Span::styled(format!(" [{}] ", key), key_style),
+                Span::styled(
+                    format!(
+                        "{} T{}: {} - {} ({})",
+                        path_icon,
+                        node.tier,
+                        node.name,
+                        node.description,
+                        format_number(node.cost)
                     ),
-                    Span::styled(hint, Style::default().fg(Color::Red)),
-                ]))
-            }
-        })
-        .collect();
+                    text_style,
+                ),
+            ])));
+        } else {
+            all_items.push(ListItem::new(Line::from(vec![
+                Span::styled(format!(" [{}] ", key), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!(
+                        "{} T{}: {} 🔒 前段階の研究が必要",
+                        path_icon, node.tier, node.name
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ])));
+        }
+    }
 
-    let widget = if items.is_empty() {
+    let widget = if all_items.is_empty() {
         List::new(vec![ListItem::new(Span::styled(
             " (全て購入済み)",
             Style::default().fg(Color::DarkGray),
         ))])
     } else {
-        List::new(items)
+        List::new(all_items.clone())
     }
     .block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Magenta))
-            .title(" Upgrades [A-Z]で購入 "),
+            .title(" Upgrades & Research [A-Z]で購入 "),
     );
     f.render_widget(widget, area);
 
+    // Click targets for all items
     let mut cs = click_state.borrow_mut();
-    for (display_idx, _) in available.iter().enumerate() {
-        let key = (b'a' + display_idx as u8) as char;
-        cs.add_target(area.y + 1 + display_idx as u16, key);
+    for i in 0..all_items.len() {
+        let key = (b'a' + i as u8) as char;
+        cs.add_target(area.y + 1 + i as u16, key);
     }
 }
 
@@ -1367,6 +1482,83 @@ fn render_prestige(
                 ),
             ]));
         }
+    }
+
+    // === Dragon section ===
+    lines.push(Line::from(Span::styled(
+        " ─── 🐉 ドラゴン ──────────────────",
+        Style::default()
+            .fg(Color::Red)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    if state.dragon_level >= 7 {
+        lines.push(Line::from(Span::styled(
+            " 🐉 ドラゴン Lv.MAX！",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        let feed_cost = state.dragon_feed_cost();
+        let fed = state.dragon_fed_toward_next();
+        let bar_w = 15usize;
+        let filled = if feed_cost > 0 {
+            ((fed as f64 / feed_cost as f64) * bar_w as f64).round() as usize
+        } else {
+            0
+        };
+        let bar: String =
+            "█".repeat(filled.min(bar_w)) + &"░".repeat(bar_w - filled.min(bar_w));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" 🐉 Lv.{} ", state.dragon_level),
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(bar, Style::default().fg(Color::Red)),
+            Span::styled(
+                format!(" {}/{} ", fed, feed_cost),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                "[1-8]で生産者を捧げる",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+
+    // Dragon aura selection
+    if state.dragon_level >= 1 {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" 🔮 オーラ: {} ", state.dragon_aura.name()),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("({}) ", state.dragon_aura.description()),
+                Style::default().fg(Color::Magenta),
+            ),
+            Span::styled(
+                "[9]で切替",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+        // Show all aura options compactly
+        let mut aura_spans: Vec<Span> = vec![Span::styled("   ", Style::default())];
+        for aura in super::state::DragonAura::all().iter() {
+            let is_active = *aura == state.dragon_aura;
+            let marker = if is_active { "●" } else { "○" };
+            let color = if is_active { Color::Magenta } else { Color::DarkGray };
+            aura_spans.push(Span::styled(
+                format!("{}{} ", marker, aura.name()),
+                Style::default().fg(color),
+            ));
+        }
+        lines.push(Line::from(aura_spans));
     }
 
     // Separator

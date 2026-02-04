@@ -9,13 +9,13 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
 use super::state::{
-    CookieState, MilestoneStatus, ProducerKind,
+    CookieState, DragonAura, MarketPhase, MilestoneStatus, ProducerKind, ResearchPath,
 };
 
 /// セーブデータのフォーマットバージョン。
 /// 構造体の変更時にインクリメントすること。旧バージョンのデータは破棄される。
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 1;
+const SAVE_VERSION: u32 = 2;
 
 /// localStorage のキー。
 #[cfg(target_arch = "wasm32")]
@@ -76,6 +76,21 @@ struct GameSave {
     total_ticks: u64,
     best_cps: f64,
     best_cookies_single_run: f64,
+
+    // 研究ツリー
+    /// 選択した研究パス (0=None, 1=MassProduction, 2=Quality)
+    research_path: u8,
+    /// 各研究ノードの購入状態
+    research_purchased: Vec<bool>,
+
+    // マーケット
+    market_phase: u8, // 0=Bull, 1=Bear, 2=Normal
+    market_ticks_left: u32,
+
+    // ドラゴン
+    dragon_level: u32,
+    dragon_aura: u8, // 0=None, 1=BreathOfRiches, 2=DragonCursor, 3=ElderPact, 4=DragonHarvest
+    dragon_fed_total: u32,
 }
 
 /// CookieState からセーブ用データを抽出する。
@@ -136,6 +151,24 @@ fn extract_save(state: &CookieState) -> SaveData {
             total_ticks: state.total_ticks,
             best_cps: state.best_cps,
             best_cookies_single_run: state.best_cookies_single_run,
+            // Research
+            research_path: match &state.research_path {
+                ResearchPath::None => 0,
+                ResearchPath::MassProduction => 1,
+                ResearchPath::Quality => 2,
+            },
+            research_purchased: state.research_nodes.iter().map(|n| n.purchased).collect(),
+            // Market
+            market_phase: match &state.market_phase {
+                MarketPhase::Bull => 0,
+                MarketPhase::Bear => 1,
+                MarketPhase::Normal => 2,
+            },
+            market_ticks_left: state.market_ticks_left,
+            // Dragon
+            dragon_level: state.dragon_level,
+            dragon_aura: state.dragon_aura.index() as u8,
+            dragon_fed_total: state.dragon_fed_total,
         },
     }
 }
@@ -229,6 +262,37 @@ fn apply_save(state: &mut CookieState, save: &GameSave) {
     state.total_ticks = save.total_ticks;
     state.best_cps = save.best_cps;
     state.best_cookies_single_run = save.best_cookies_single_run;
+
+    // 研究ツリー復元
+    state.research_path = match save.research_path {
+        1 => ResearchPath::MassProduction,
+        2 => ResearchPath::Quality,
+        _ => ResearchPath::None,
+    };
+    for (i, &purchased) in save.research_purchased.iter().enumerate() {
+        if let Some(n) = state.research_nodes.get_mut(i) {
+            n.purchased = purchased;
+        }
+    }
+
+    // マーケット復元
+    state.market_phase = match save.market_phase {
+        0 => MarketPhase::Bull,
+        1 => MarketPhase::Bear,
+        _ => MarketPhase::Normal,
+    };
+    state.market_ticks_left = save.market_ticks_left;
+
+    // ドラゴン復元
+    state.dragon_level = save.dragon_level;
+    state.dragon_aura = match save.dragon_aura {
+        1 => DragonAura::BreathOfRiches,
+        2 => DragonAura::DragonCursor,
+        3 => DragonAura::ElderPact,
+        4 => DragonAura::DragonHarvest,
+        _ => DragonAura::None,
+    };
+    state.dragon_fed_total = save.dragon_fed_total;
 }
 
 /// localStorage にアクセスする。WASM 環境でのみ動作。
@@ -354,6 +418,16 @@ mod tests {
         original.total_ticks = 50000;
         original.best_cps = 999.0;
         original.best_cookies_single_run = 88888.0;
+        // Research
+        original.research_path = ResearchPath::MassProduction;
+        original.research_nodes[0].purchased = true;
+        // Market
+        original.market_phase = MarketPhase::Bear;
+        original.market_ticks_left = 200;
+        // Dragon
+        original.dragon_level = 3;
+        original.dragon_aura = DragonAura::BreathOfRiches;
+        original.dragon_fed_total = 85;
 
         let save = extract_save(&original);
         let json = serde_json::to_string(&save).unwrap();
@@ -393,6 +467,17 @@ mod tests {
         assert_eq!(restored.total_ticks, 50000);
         assert!((restored.best_cps - 999.0).abs() < 0.001);
         assert!((restored.best_cookies_single_run - 88888.0).abs() < 0.001);
+        // Research
+        assert_eq!(restored.research_path, ResearchPath::MassProduction);
+        assert!(restored.research_nodes[0].purchased);
+        assert!(!restored.research_nodes[1].purchased);
+        // Market
+        assert_eq!(restored.market_phase, MarketPhase::Bear);
+        assert_eq!(restored.market_ticks_left, 200);
+        // Dragon
+        assert_eq!(restored.dragon_level, 3);
+        assert_eq!(restored.dragon_aura, DragonAura::BreathOfRiches);
+        assert_eq!(restored.dragon_fed_total, 85);
     }
 
     #[test]

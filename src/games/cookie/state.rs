@@ -382,6 +382,161 @@ pub enum PrestigeEffect {
     MilkRetention(f64),
 }
 
+// ═══════════════════════════════════════════════════════
+// Research Tree — 2つの研究パス（転生でリセット）
+// ═══════════════════════════════════════════════════════
+
+/// Research path — exclusive choice, resets on prestige.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResearchPath {
+    None,
+    /// 量産路線: cheaper producers, more scaling.
+    MassProduction,
+    /// 品質路線: stronger clicks, buffs, synergies.
+    Quality,
+}
+
+/// Research node effect.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResearchEffect {
+    /// Reduce all producer costs by this fraction (e.g. 0.15 = 15% off).
+    CostReduction(f64),
+    /// Multiply all producer CPS.
+    CpsMultiplier(f64),
+    /// Click power gets bonus = total_CPS × percentage.
+    ClickCpsPercent(f64),
+    /// Golden cookie buff duration multiplied.
+    BuffDuration(f64),
+    /// Additional synergy multiplier (stacks multiplicatively).
+    SynergyMultiplier(f64),
+    /// Count scaling bonuses multiplied.
+    CountScalingMultiplier(f64),
+    /// All buff multiplier values boosted (production frenzy, click frenzy).
+    BuffEffectMultiplier(f64),
+}
+
+/// A research node in the tech tree.
+#[derive(Clone, Debug)]
+pub struct ResearchNode {
+    pub name: String,
+    pub description: String,
+    pub cost: f64,
+    pub tier: u8,
+    pub path: ResearchPath,
+    pub purchased: bool,
+    pub effect: ResearchEffect,
+}
+
+// ═══════════════════════════════════════════════════════
+// Market — 相場変動システム
+// ═══════════════════════════════════════════════════════
+
+/// Market phase — cycles periodically, affects CPS and costs.
+#[derive(Clone, Debug, PartialEq)]
+pub enum MarketPhase {
+    /// 好景気: CPS↑, costs↑
+    Bull,
+    /// 不景気: CPS↓, costs↓
+    Bear,
+    /// 通常
+    Normal,
+}
+
+impl MarketPhase {
+    pub fn cps_multiplier(&self) -> f64 {
+        match self {
+            MarketPhase::Bull => 1.3,
+            MarketPhase::Bear => 0.8,
+            MarketPhase::Normal => 1.0,
+        }
+    }
+
+    pub fn cost_multiplier(&self) -> f64 {
+        match self {
+            MarketPhase::Bull => 1.4,
+            MarketPhase::Bear => 0.6,
+            MarketPhase::Normal => 1.0,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            MarketPhase::Bull => "好景気",
+            MarketPhase::Bear => "不景気",
+            MarketPhase::Normal => "通常",
+        }
+    }
+
+    pub fn symbol(&self) -> &str {
+        match self {
+            MarketPhase::Bull => "📈",
+            MarketPhase::Bear => "📉",
+            MarketPhase::Normal => "📊",
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+// Dragon — 育成 & オーラシステム
+// ═══════════════════════════════════════════════════════
+
+/// Dragon aura — passive bonus, choose one at a time.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DragonAura {
+    /// No aura selected.
+    None,
+    /// 富の吐息: CPS ×1.15 per dragon level.
+    BreathOfRiches,
+    /// ドラゴンカーソル: Click power ×1.2 per dragon level.
+    DragonCursor,
+    /// 倹約の翼: Producer costs -5% per dragon level.
+    ElderPact,
+    /// ドラゴンの収穫: Golden cookie spawn 10% faster per level.
+    DragonHarvest,
+}
+
+impl DragonAura {
+    pub fn name(&self) -> &str {
+        match self {
+            DragonAura::None => "なし",
+            DragonAura::BreathOfRiches => "富の吐息",
+            DragonAura::DragonCursor => "ドラゴンカーソル",
+            DragonAura::ElderPact => "倹約の翼",
+            DragonAura::DragonHarvest => "ドラゴンの収穫",
+        }
+    }
+
+    pub fn description(&self) -> &str {
+        match self {
+            DragonAura::None => "オーラ未選択",
+            DragonAura::BreathOfRiches => "レベル毎にCPS+15%",
+            DragonAura::DragonCursor => "レベル毎にクリック力+20%",
+            DragonAura::ElderPact => "レベル毎に生産者コスト-5%",
+            DragonAura::DragonHarvest => "レベル毎にゴールデン出現+10%速",
+        }
+    }
+
+    pub fn all() -> &'static [DragonAura] {
+        &[
+            DragonAura::BreathOfRiches,
+            DragonAura::DragonCursor,
+            DragonAura::ElderPact,
+            DragonAura::DragonHarvest,
+        ]
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub fn index(&self) -> usize {
+        match self {
+            DragonAura::None => 0,
+            DragonAura::BreathOfRiches => 1,
+            DragonAura::DragonCursor => 2,
+            DragonAura::ElderPact => 3,
+            DragonAura::DragonHarvest => 4,
+        }
+    }
+}
+
 /// Full state of a Cookie Factory game.
 pub struct CookieState {
     /// Total cookies accumulated.
@@ -489,6 +644,26 @@ pub struct CookieState {
     pub cookies_earned_window: f64,
     /// Peak cookies earned in a single tick window.
     pub peak_cookies_per_sec: f64,
+
+    // === Research Tree (転生でリセット) ===
+    /// Selected research path (None until first research purchased).
+    pub research_path: ResearchPath,
+    /// Research nodes (tech tree).
+    pub research_nodes: Vec<ResearchNode>,
+
+    // === Market (相場変動) ===
+    /// Current market phase.
+    pub market_phase: MarketPhase,
+    /// Ticks until next phase change.
+    pub market_ticks_left: u32,
+
+    // === Dragon (転生後も保持) ===
+    /// Dragon level (0 = egg, max 7).
+    pub dragon_level: u32,
+    /// Selected dragon aura.
+    pub dragon_aura: DragonAura,
+    /// Total producers fed to dragon (across all feeding).
+    pub dragon_fed_total: u32,
 }
 
 impl CookieState {
@@ -558,6 +733,16 @@ impl CookieState {
             prev_cps: 0.0,
             cookies_earned_window: 0.0,
             peak_cookies_per_sec: 0.0,
+            // Research
+            research_path: ResearchPath::None,
+            research_nodes: Self::create_research_nodes(),
+            // Market
+            market_phase: MarketPhase::Normal,
+            market_ticks_left: 450, // First phase change after ~45 seconds
+            // Dragon
+            dragon_level: 0,
+            dragon_aura: DragonAura::None,
+            dragon_fed_total: 0,
         }
     }
 
@@ -1407,6 +1592,287 @@ impl CookieState {
         ]
     }
 
+    pub fn create_research_nodes() -> Vec<ResearchNode> {
+        vec![
+            // === Path A: 量産路線 (Mass Production) ===
+            ResearchNode {
+                name: "効率生産".into(),
+                description: "全生産者コスト -15%".into(),
+                cost: 10_000.0,
+                tier: 1,
+                path: ResearchPath::MassProduction,
+                purchased: false,
+                effect: ResearchEffect::CostReduction(0.15),
+            },
+            ResearchNode {
+                name: "大量発注".into(),
+                description: "全生産者 CPS ×2".into(),
+                cost: 500_000.0,
+                tier: 2,
+                path: ResearchPath::MassProduction,
+                purchased: false,
+                effect: ResearchEffect::CpsMultiplier(2.0),
+            },
+            ResearchNode {
+                name: "規模の経済".into(),
+                description: "台数ボーナス効果 ×2".into(),
+                cost: 5_000_000.0,
+                tier: 3,
+                path: ResearchPath::MassProduction,
+                purchased: false,
+                effect: ResearchEffect::CountScalingMultiplier(2.0),
+            },
+            ResearchNode {
+                name: "産業帝国".into(),
+                description: "コスト -30%, CPS ×3".into(),
+                cost: 50_000_000.0,
+                tier: 4,
+                path: ResearchPath::MassProduction,
+                purchased: false,
+                effect: ResearchEffect::CpsMultiplier(3.0),
+            },
+            // === Path B: 品質路線 (Quality) ===
+            ResearchNode {
+                name: "熟練の技".into(),
+                description: "クリック力 += CPS×1%".into(),
+                cost: 10_000.0,
+                tier: 1,
+                path: ResearchPath::Quality,
+                purchased: false,
+                effect: ResearchEffect::ClickCpsPercent(0.01),
+            },
+            ResearchNode {
+                name: "黄金の時".into(),
+                description: "ゴールデンバフ時間 ×2".into(),
+                cost: 500_000.0,
+                tier: 2,
+                path: ResearchPath::Quality,
+                purchased: false,
+                effect: ResearchEffect::BuffDuration(2.0),
+            },
+            ResearchNode {
+                name: "共鳴増幅".into(),
+                description: "シナジー効果 ×2".into(),
+                cost: 5_000_000.0,
+                tier: 3,
+                path: ResearchPath::Quality,
+                purchased: false,
+                effect: ResearchEffect::SynergyMultiplier(2.0),
+            },
+            ResearchNode {
+                name: "極致の道".into(),
+                description: "クリック += CPS×5%, バフ ×1.5".into(),
+                cost: 50_000_000.0,
+                tier: 4,
+                path: ResearchPath::Quality,
+                purchased: false,
+                effect: ResearchEffect::BuffEffectMultiplier(1.5),
+            },
+        ]
+    }
+
+    // === Research helper methods ===
+
+    /// Total cost reduction from research (multiplicative, e.g. 0.85 = 15% off).
+    pub fn research_cost_modifier(&self) -> f64 {
+        let mut modifier = 1.0;
+        for node in &self.research_nodes {
+            if node.purchased {
+                if let ResearchEffect::CostReduction(reduction) = &node.effect {
+                    modifier *= 1.0 - reduction;
+                }
+            }
+        }
+        // Tier 4 of mass production also has cost reduction (-30%)
+        if self.research_path == ResearchPath::MassProduction {
+            if let Some(node) = self.research_nodes.iter().find(|n| n.name == "産業帝国") {
+                if node.purchased {
+                    modifier *= 0.7; // additional -30%
+                }
+            }
+        }
+        modifier
+    }
+
+    /// Total CPS multiplier from research.
+    pub fn research_cps_modifier(&self) -> f64 {
+        let mut mult = 1.0;
+        for node in &self.research_nodes {
+            if node.purchased {
+                if let ResearchEffect::CpsMultiplier(m) = &node.effect {
+                    mult *= m;
+                }
+            }
+        }
+        mult
+    }
+
+    /// Click bonus from research: adds CPS × percentage to click power.
+    pub fn research_click_cps_bonus(&self) -> f64 {
+        let mut pct = 0.0;
+        for node in &self.research_nodes {
+            if node.purchased {
+                if let ResearchEffect::ClickCpsPercent(p) = &node.effect {
+                    pct += p;
+                }
+            }
+        }
+        pct
+    }
+
+    /// Buff duration multiplier from research.
+    pub fn research_buff_duration(&self) -> f64 {
+        let mut mult = 1.0;
+        for node in &self.research_nodes {
+            if node.purchased {
+                if let ResearchEffect::BuffDuration(m) = &node.effect {
+                    mult *= m;
+                }
+            }
+        }
+        mult
+    }
+
+    /// Synergy multiplier from research.
+    pub fn research_synergy_modifier(&self) -> f64 {
+        let mut mult = 1.0;
+        for node in &self.research_nodes {
+            if node.purchased {
+                if let ResearchEffect::SynergyMultiplier(m) = &node.effect {
+                    mult *= m;
+                }
+            }
+        }
+        mult
+    }
+
+    /// Count scaling multiplier from research.
+    pub fn research_count_scaling_modifier(&self) -> f64 {
+        let mut mult = 1.0;
+        for node in &self.research_nodes {
+            if node.purchased {
+                if let ResearchEffect::CountScalingMultiplier(m) = &node.effect {
+                    mult *= m;
+                }
+            }
+        }
+        mult
+    }
+
+    /// Buff effect multiplier from research (multiplies buff values).
+    pub fn research_buff_effect_modifier(&self) -> f64 {
+        let mut mult = 1.0;
+        for node in &self.research_nodes {
+            if node.purchased {
+                if let ResearchEffect::BuffEffectMultiplier(m) = &node.effect {
+                    mult *= m;
+                }
+            }
+        }
+        mult
+    }
+
+    /// Max research tier purchased on current path.
+    pub fn research_max_tier(&self) -> u8 {
+        self.research_nodes
+            .iter()
+            .filter(|n| n.purchased)
+            .map(|n| n.tier)
+            .max()
+            .unwrap_or(0)
+    }
+
+    // === Dragon helper methods ===
+
+    /// Producers needed to reach next dragon level.
+    pub fn dragon_feed_cost(&self) -> u32 {
+        if self.dragon_level >= 7 {
+            return 0; // max level
+        }
+        match self.dragon_level {
+            0 => 10,
+            1 => 25,
+            2 => 50,
+            3 => 100,
+            4 => 200,
+            5 => 400,
+            6 => 800,
+            _ => 0,
+        }
+    }
+
+    /// Total producers already fed toward next level.
+    pub fn dragon_fed_toward_next(&self) -> u32 {
+        let total_needed_for_current: u32 = (0..self.dragon_level)
+            .map(|l| match l {
+                0 => 10,
+                1 => 25,
+                2 => 50,
+                3 => 100,
+                4 => 200,
+                5 => 400,
+                6 => 800,
+                _ => 0,
+            })
+            .sum();
+        self.dragon_fed_total.saturating_sub(total_needed_for_current)
+    }
+
+    /// CPS multiplier from dragon aura.
+    pub fn dragon_cps_modifier(&self) -> f64 {
+        if self.dragon_level == 0 {
+            return 1.0;
+        }
+        match self.dragon_aura {
+            DragonAura::BreathOfRiches => 1.0 + 0.15 * self.dragon_level as f64,
+            _ => 1.0,
+        }
+    }
+
+    /// Click power multiplier from dragon aura.
+    pub fn dragon_click_modifier(&self) -> f64 {
+        if self.dragon_level == 0 {
+            return 1.0;
+        }
+        match self.dragon_aura {
+            DragonAura::DragonCursor => 1.0 + 0.20 * self.dragon_level as f64,
+            _ => 1.0,
+        }
+    }
+
+    /// Cost reduction from dragon aura (multiplicative).
+    pub fn dragon_cost_modifier(&self) -> f64 {
+        if self.dragon_level == 0 {
+            return 1.0;
+        }
+        match self.dragon_aura {
+            DragonAura::ElderPact => (1.0 - 0.05 * self.dragon_level as f64).max(0.3),
+            _ => 1.0,
+        }
+    }
+
+    /// Golden cookie spawn speed modifier from dragon aura (< 1.0 = faster).
+    pub fn dragon_golden_speed(&self) -> f64 {
+        if self.dragon_level == 0 {
+            return 1.0;
+        }
+        match self.dragon_aura {
+            DragonAura::DragonHarvest => (1.0 - 0.10 * self.dragon_level as f64).max(0.3),
+            _ => 1.0,
+        }
+    }
+
+    // === Market helper ===
+
+    /// Combined cost modifier from market, research, dragon, and discount.
+    pub fn total_cost_modifier(&self) -> f64 {
+        let market = self.market_phase.cost_multiplier();
+        let research = self.research_cost_modifier();
+        let dragon = self.dragon_cost_modifier();
+        let discount = 1.0 - self.active_discount;
+        market * research * dragon * discount
+    }
+
     /// Available heavenly chips (earned - spent).
     pub fn available_chips(&self) -> u64 {
         self.heavenly_chips.saturating_sub(self.heavenly_chips_spent)
@@ -1490,10 +1956,13 @@ impl CookieState {
 
     /// Total CPS including synergies, count scaling, CPS% bonuses, and active buffs.
     pub fn total_cps(&self) -> f64 {
+        let research_syn = self.research_synergy_modifier();
+        let research_cs = self.research_count_scaling_modifier();
+
         // Step 1: base CPS with synergies + count scaling
         let base: f64 = self.producers.iter().map(|p| {
-            let syn = self.synergy_bonus(&p.kind);
-            let cs = self.count_scaling_bonus(&p.kind);
+            let syn = self.synergy_bonus(&p.kind) * research_syn;
+            let cs = self.count_scaling_bonus(&p.kind) * research_cs;
             p.cps_with_synergy(syn + cs)
         }).sum();
 
@@ -1507,23 +1976,47 @@ impl CookieState {
         // Step 3.5: Apply prestige multiplier
         let after_prestige = after_kitten * self.prestige_multiplier;
 
-        // Step 4: Apply production frenzy buff
+        // Step 4: Apply research CPS multiplier
+        let after_research = after_prestige * self.research_cps_modifier();
+
+        // Step 5: Apply dragon CPS aura
+        let after_dragon = after_research * self.dragon_cps_modifier();
+
+        // Step 6: Apply market phase
+        let after_market = after_dragon * self.market_phase.cps_multiplier();
+
+        // Step 7: Apply production frenzy buff (with research buff effect modifier)
+        let buff_effect_mult = self.research_buff_effect_modifier();
         let mut multiplier = 1.0;
         for buff in &self.active_buffs {
             if let GoldenEffect::ProductionFrenzy { multiplier: m } = &buff.effect {
-                multiplier *= m;
+                let effective_m = 1.0 + (m - 1.0) * buff_effect_mult;
+                multiplier *= effective_m;
             }
         }
 
-        after_prestige * multiplier
+        after_market * multiplier
     }
 
-    /// Effective cookies per click (with buffs).
+    /// Effective cookies per click (with buffs, research, dragon).
     pub fn effective_click_power(&self) -> f64 {
         let mut power = self.cookies_per_click;
+
+        // Research: add CPS-based click bonus
+        let click_cps_pct = self.research_click_cps_bonus();
+        if click_cps_pct > 0.0 {
+            power += self.total_cps() * click_cps_pct;
+        }
+
+        // Dragon: click multiplier
+        power *= self.dragon_click_modifier();
+
+        // Buffs: click frenzy (with research buff effect modifier)
+        let buff_effect_mult = self.research_buff_effect_modifier();
         for buff in &self.active_buffs {
             if let GoldenEffect::ClickFrenzy { multiplier } = &buff.effect {
-                power *= multiplier;
+                let effective_m = 1.0 + (multiplier - 1.0) * buff_effect_mult;
+                power *= effective_m;
             }
         }
         power

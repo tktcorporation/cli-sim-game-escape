@@ -1,8 +1,9 @@
 //! Cookie Factory game logic — pure functions, fully testable.
 
 use super::state::{
-    ActiveBuff, CookieState, GoldenCookieEvent, GoldenEffect, MilestoneCondition,
-    MilestoneStatus, MiniEventKind, Particle, ParticleStyle, ProducerKind, UpgradeEffect,
+    ActiveBuff, CookieState, DragonAura, GoldenCookieEvent, GoldenEffect, MarketPhase,
+    MilestoneCondition, MilestoneStatus, MiniEventKind, Particle, ParticleStyle, ProducerKind,
+    ResearchPath, UpgradeEffect,
 };
 
 /// Advance the game by `delta_ticks` ticks (at 10 ticks/sec).
@@ -75,6 +76,9 @@ pub fn tick(state: &mut CookieState, delta_ticks: u32) {
 
     // Tick mini-events
     tick_mini_event(state, delta_ticks);
+
+    // Tick market phase
+    tick_market(state, delta_ticks);
 
     // Check milestones
     check_milestones(state);
@@ -158,7 +162,9 @@ fn random_spawn_delay(state: &mut CookieState) -> u32 {
         })
         .product();
     let speed_factor = if speed_factor > 0.0 { speed_factor } else { 1.0 };
-    (base as f64 * speed_factor).max(100.0) as u32 // minimum 10 seconds
+    // Dragon aura can also speed up golden cookie spawning
+    let dragon_speed = state.dragon_golden_speed();
+    (base as f64 * speed_factor * dragon_speed).max(100.0) as u32 // minimum 10 seconds
 }
 
 /// Claim a golden cookie event. Returns true if successful.
@@ -172,21 +178,24 @@ pub fn claim_golden(state: &mut CookieState) -> bool {
     // Pick a random effect
     let effect = pick_golden_effect(state);
 
-    // Apply the effect
+    // Apply the effect (research can extend buff duration)
+    let buff_dur_mult = state.research_buff_duration();
     match &effect {
         GoldenEffect::ProductionFrenzy { .. } => {
+            let ticks = (70.0 * buff_dur_mult) as u32;
             state.active_buffs.push(ActiveBuff {
                 effect: effect.clone(),
-                ticks_left: 70, // 7 seconds
+                ticks_left: ticks,
             });
-            state.add_log(&format!("🍪 {} (7秒)", effect.detail()), true);
+            state.add_log(&format!("🍪 {} ({:.0}秒)", effect.detail(), ticks as f64 / 10.0), true);
         }
         GoldenEffect::ClickFrenzy { .. } => {
+            let ticks = (100.0 * buff_dur_mult) as u32;
             state.active_buffs.push(ActiveBuff {
                 effect: effect.clone(),
-                ticks_left: 100, // 10 seconds
+                ticks_left: ticks,
             });
-            state.add_log(&format!("🍪 {} (10秒)", effect.detail()), true);
+            state.add_log(&format!("🍪 {} ({:.0}秒)", effect.detail(), ticks as f64 / 10.0), true);
         }
         GoldenEffect::InstantBonus { cps_seconds } => {
             let bonus = state.total_cps() * cps_seconds;
@@ -449,13 +458,13 @@ pub fn buy_producer(state: &mut CookieState, kind: &ProducerKind) -> bool {
     };
 
     let base_cost = state.producers[idx].cost();
-    let cost = base_cost * (1.0 - state.active_discount);
+    let cost = base_cost * state.total_cost_modifier();
     if state.cookies >= cost {
         state.cookies -= cost;
         state.producers[idx].count += 1;
         state.purchase_flash = 5; // flash for 5 ticks (0.5s)
-        let had_discount = state.active_discount > 0.0;
-        if had_discount {
+        let modifier = state.total_cost_modifier();
+        if modifier < 0.99 {
             state.add_log(
                 &format!(
                     "{} を購入！ ({}台) 💰割引適用！",
@@ -464,7 +473,6 @@ pub fn buy_producer(state: &mut CookieState, kind: &ProducerKind) -> bool {
                 ),
                 false,
             );
-            state.active_discount = 0.0;
         } else {
             state.add_log(
                 &format!(
@@ -474,6 +482,10 @@ pub fn buy_producer(state: &mut CookieState, kind: &ProducerKind) -> bool {
                 ),
                 false,
             );
+        }
+        // Consume active discount after purchase
+        if state.active_discount > 0.0 {
+            state.active_discount = 0.0;
         }
         true
     } else {
@@ -490,7 +502,7 @@ pub fn buy_upgrade(state: &mut CookieState, upgrade_idx: usize) -> bool {
         return false;
     }
     let base_cost = state.upgrades[upgrade_idx].cost;
-    let cost = base_cost * (1.0 - state.active_discount);
+    let cost = base_cost * state.total_cost_modifier();
     if state.cookies < cost {
         return false;
     }
@@ -800,6 +812,13 @@ pub fn perform_prestige(state: &mut CookieState) -> u64 {
     state.cookies_earned_window = 0.0;
     state.peak_cookies_per_sec = 0.0;
 
+    // Reset research (player can choose a different path next run)
+    state.research_path = ResearchPath::None;
+    state.research_nodes = CookieState::create_research_nodes();
+
+    // Market continues (not reset)
+    // Dragon persists (not reset)
+
     state.add_log(
         &format!(
             "🌟 転生！ 天国チップ+{} (合計{}) CPS×{:.2}",
@@ -837,6 +856,167 @@ pub fn buy_prestige_upgrade(state: &mut CookieState, index: usize) -> bool {
     );
     state.purchase_flash = 10;
 
+    true
+}
+
+// ═══════════════════════════════════════════════════════
+// Market phase cycling
+// ═══════════════════════════════════════════════════════
+
+/// Tick the market phase timer and transition when expired.
+fn tick_market(state: &mut CookieState, delta_ticks: u32) {
+    state.market_ticks_left = state.market_ticks_left.saturating_sub(delta_ticks);
+    if state.market_ticks_left == 0 {
+        // Pick next phase (never same as current)
+        let r = state.next_random() % 3;
+        let next = match (&state.market_phase, r) {
+            (MarketPhase::Normal, 0) => MarketPhase::Bull,
+            (MarketPhase::Normal, _) => MarketPhase::Bear,
+            (MarketPhase::Bull, 0) => MarketPhase::Normal,
+            (MarketPhase::Bull, _) => MarketPhase::Bear,
+            (MarketPhase::Bear, 0) => MarketPhase::Normal,
+            (MarketPhase::Bear, _) => MarketPhase::Bull,
+        };
+
+        // Duration: 45-90 seconds (450-900 ticks)
+        let duration = 450 + (state.next_random() % 450);
+        state.market_phase = next.clone();
+        state.market_ticks_left = duration;
+
+        let msg = match &next {
+            MarketPhase::Bull => "📈 好景気到来！CPS↑ コスト↑",
+            MarketPhase::Bear => "📉 不景気…CPS↓ コスト↓",
+            MarketPhase::Normal => "📊 市場安定",
+        };
+        state.add_log(msg, true);
+    }
+}
+
+// ═══════════════════════════════════════════════════════
+// Research Tree
+// ═══════════════════════════════════════════════════════
+
+/// Buy a research node by index. Returns true if successful.
+/// The first purchase locks the player into that research path.
+pub fn buy_research(state: &mut CookieState, index: usize) -> bool {
+    if index >= state.research_nodes.len() {
+        return false;
+    }
+    if state.research_nodes[index].purchased {
+        return false;
+    }
+
+    let node_path = state.research_nodes[index].path.clone();
+    let node_tier = state.research_nodes[index].tier;
+
+    // Check if path is compatible
+    if state.research_path != ResearchPath::None && state.research_path != node_path {
+        return false; // locked into a different path
+    }
+
+    // Check tier prerequisite: must have purchased previous tier
+    if node_tier > 1 {
+        let has_prev = state
+            .research_nodes
+            .iter()
+            .any(|n| n.path == node_path && n.tier == node_tier - 1 && n.purchased);
+        if !has_prev {
+            return false;
+        }
+    }
+
+    let cost = state.research_nodes[index].cost;
+    if state.cookies < cost {
+        return false;
+    }
+
+    state.cookies -= cost;
+    state.research_nodes[index].purchased = true;
+
+    // Lock into this path on first purchase
+    if state.research_path == ResearchPath::None {
+        state.research_path = node_path.clone();
+        let path_name = match &node_path {
+            ResearchPath::MassProduction => "量産路線",
+            ResearchPath::Quality => "品質路線",
+            ResearchPath::None => "なし",
+        };
+        state.add_log(
+            &format!("🔬 研究パス選択: {}！", path_name),
+            true,
+        );
+    }
+
+    let name = state.research_nodes[index].name.clone();
+    state.add_log(
+        &format!("🔬 研究完了！「{}」", name),
+        true,
+    );
+    state.purchase_flash = 8;
+    spawn_celebration(state, 4);
+
+    true
+}
+
+// ═══════════════════════════════════════════════════════
+// Dragon
+// ═══════════════════════════════════════════════════════
+
+/// Feed producers to the dragon. Sacrifices `count` units of the given producer kind.
+/// Returns true if the dragon leveled up.
+pub fn feed_dragon(state: &mut CookieState, kind: &ProducerKind, count: u32) -> bool {
+    if state.dragon_level >= 7 {
+        return false; // max level
+    }
+
+    let idx = kind.index();
+    if state.producers[idx].count < count {
+        return false; // not enough producers
+    }
+
+    let feed_cost = state.dragon_feed_cost();
+    if feed_cost == 0 {
+        return false;
+    }
+
+    state.producers[idx].count -= count;
+    state.dragon_fed_total += count;
+
+    state.add_log(
+        &format!(
+            "🐉 {} {}台をドラゴンに捧げた！({}/{})",
+            kind.name(),
+            count,
+            state.dragon_fed_toward_next(),
+            feed_cost,
+        ),
+        true,
+    );
+
+    // Check if dragon leveled up
+    if state.dragon_fed_toward_next() >= feed_cost {
+        state.dragon_level += 1;
+        state.add_log(
+            &format!("🐉 ドラゴンLv.{}に成長！", state.dragon_level),
+            true,
+        );
+        spawn_celebration(state, 6);
+        true
+    } else {
+        false
+    }
+}
+
+/// Set the dragon's active aura. Requires dragon_level >= 1.
+pub fn set_dragon_aura(state: &mut CookieState, aura: DragonAura) -> bool {
+    if state.dragon_level == 0 {
+        return false;
+    }
+    state.dragon_aura = aura.clone();
+    state.add_log(
+        &format!("🐉 オーラ変更: {}", aura.name()),
+        true,
+    );
     true
 }
 
