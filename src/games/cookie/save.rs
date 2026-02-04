@@ -1,8 +1,14 @@
 //! Cookie Factory セーブ/ロード機能。
 //!
-//! **注意: セーブ形式は安定版ではありません。**
-//! ゲームの仕様変更に伴い、保存形式は予告なく破壊的変更が入ります。
-//! バージョンが合わない場合、セーブデータは自動的に破棄されます。
+//! ## バージョニング方針
+//!
+//! - `SAVE_VERSION`: 現在のセーブ形式バージョン。フィールド追加時にインクリメントする。
+//! - `MIN_COMPATIBLE_VERSION`: 互換性を維持できる最小バージョン。
+//!   新フィールドの追加のみの場合はこの値を変えない（旧データを維持できる）。
+//!   既存フィールドの意味変更や削除など破壊的変更を行った場合のみインクリメントする。
+//!
+//! 旧バージョンのセーブデータは、`MIN_COMPATIBLE_VERSION` 以上であれば
+//! 不足フィールドにデフォルト値を補完して読み込む。
 
 #[cfg(any(target_arch = "wasm32", test))]
 use serde::{Deserialize, Serialize};
@@ -13,9 +19,15 @@ use super::state::{
 };
 
 /// セーブデータのフォーマットバージョン。
-/// 構造体の変更時にインクリメントすること。旧バージョンのデータは破棄される。
+/// フィールド追加時にインクリメントすること。
 #[cfg(any(target_arch = "wasm32", test))]
 const SAVE_VERSION: u32 = 2;
+
+/// 互換性を維持できる最小バージョン。
+/// 既存フィールドの意味変更や削除など破壊的変更を行った場合のみインクリメントする。
+/// この値以上のセーブデータは、不足フィールドをデフォルト値で補完して読み込む。
+#[cfg(any(target_arch = "wasm32", test))]
+const MIN_COMPATIBLE_VERSION: u32 = 1;
 
 /// localStorage のキー。
 #[cfg(target_arch = "wasm32")]
@@ -34,7 +46,8 @@ struct SaveData {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
 struct GameSave {
     cookies: f64,
     cookies_all_time: f64,
@@ -354,16 +367,26 @@ pub fn load_game(state: &mut CookieState) -> bool {
         }
     };
 
-    if save_data.version != SAVE_VERSION {
+    if save_data.version < MIN_COMPATIBLE_VERSION {
         web_sys::console::log_1(
             &format!(
-                "Cookie Factory: セーブバージョン不一致 (saved={}, current={})。新規ゲームを開始します。",
-                save_data.version, SAVE_VERSION
+                "Cookie Factory: セーブバージョンが古すぎます (saved={}, min_compatible={})。新規ゲームを開始します。",
+                save_data.version, MIN_COMPATIBLE_VERSION
             )
             .into(),
         );
         let _ = storage.remove_item(STORAGE_KEY);
         return false;
+    }
+
+    if save_data.version < SAVE_VERSION {
+        web_sys::console::log_1(
+            &format!(
+                "Cookie Factory: 旧バージョンのセーブデータをマイグレーション (saved={}, current={})。",
+                save_data.version, SAVE_VERSION
+            )
+            .into(),
+        );
     }
 
     apply_save(state, &save_data.game);
@@ -489,6 +512,125 @@ mod tests {
         let json = serde_json::to_string(&save).unwrap();
         let loaded: SaveData = serde_json::from_str(&json).unwrap();
         assert_ne!(loaded.version, SAVE_VERSION);
+    }
+
+    /// 旧バージョン（フィールドが少ない）のJSONから互換フィールドが復元されることを検証。
+    #[test]
+    fn migrate_old_version_preserves_compatible_fields() {
+        // v1 相当の最小限のJSON（研究・マーケット・ドラゴンのフィールドが無い）
+        let old_json = r#"{
+            "version": 1,
+            "game": {
+                "cookies": 5000.0,
+                "cookies_all_time": 10000.0,
+                "total_clicks": 200,
+                "cookies_per_click": 5.0,
+                "producers": [[10, 2.0], [3, 1.0]],
+                "upgrade_purchased": [true, false, true],
+                "synergy_multiplier": 1.5,
+                "cross_synergies": [],
+                "count_scalings": [],
+                "cps_percent_bonuses": [],
+                "golden_cookies_claimed": 3,
+                "rng_state": 42,
+                "milestone_statuses": [2, 1, 0],
+                "milk": 0.3,
+                "kitten_multiplier": 1.01,
+                "prestige_count": 1,
+                "heavenly_chips": 50,
+                "heavenly_chips_spent": 5,
+                "prestige_multiplier": 1.5,
+                "cookies_all_runs": 50000.0,
+                "prestige_upgrade_purchased": [true],
+                "total_ticks": 10000,
+                "best_cps": 100.0,
+                "best_cookies_single_run": 8000.0
+            }
+        }"#;
+
+        let loaded: SaveData = serde_json::from_str(old_json).unwrap();
+        assert_eq!(loaded.version, 1);
+        assert!(loaded.version >= MIN_COMPATIBLE_VERSION);
+
+        let mut state = CookieState::new();
+        apply_save(&mut state, &loaded.game);
+
+        // 互換フィールドが復元されている
+        assert!((state.cookies - 5000.0).abs() < 0.001);
+        assert!((state.cookies_all_time - 10000.0).abs() < 0.001);
+        assert_eq!(state.total_clicks, 200);
+        assert!((state.cookies_per_click - 5.0).abs() < 0.001);
+        assert_eq!(state.producers[0].count, 10);
+        assert!((state.producers[0].multiplier - 2.0).abs() < 0.001);
+        assert_eq!(state.producers[1].count, 3);
+        assert!(state.upgrades[0].purchased);
+        assert!(!state.upgrades[1].purchased);
+        assert!(state.upgrades[2].purchased);
+        assert_eq!(state.golden_cookies_claimed, 3);
+        assert_eq!(state.prestige_count, 1);
+        assert_eq!(state.heavenly_chips, 50);
+        assert_eq!(state.total_ticks, 10000);
+
+        // 旧セーブに存在しないフィールドはデフォルト値
+        assert_eq!(state.research_path, ResearchPath::None);
+        assert_eq!(state.dragon_level, 0);
+        assert_eq!(state.market_phase, MarketPhase::Bull); // default u8=0 → Bull
+    }
+
+    /// MIN_COMPATIBLE_VERSION 未満のバージョンは互換性なしと判定される。
+    #[test]
+    fn version_below_min_compatible_is_rejected() {
+        let save_data = SaveData {
+            version: 0, // MIN_COMPATIBLE_VERSION(1) 未満
+            game: GameSave::default(),
+        };
+        assert!(save_data.version < MIN_COMPATIBLE_VERSION);
+    }
+
+    /// 同一バージョン内での互換性は維持される（未知の追加フィールドは無視される）。
+    #[test]
+    fn unknown_fields_in_json_are_ignored() {
+        let json_with_extra = r#"{
+            "version": 2,
+            "game": {
+                "cookies": 100.0,
+                "cookies_all_time": 200.0,
+                "total_clicks": 10,
+                "cookies_per_click": 1.0,
+                "producers": [],
+                "upgrade_purchased": [],
+                "synergy_multiplier": 1.0,
+                "cross_synergies": [],
+                "count_scalings": [],
+                "cps_percent_bonuses": [],
+                "golden_cookies_claimed": 0,
+                "rng_state": 0,
+                "milestone_statuses": [],
+                "milk": 0.0,
+                "kitten_multiplier": 1.0,
+                "prestige_count": 0,
+                "heavenly_chips": 0,
+                "heavenly_chips_spent": 0,
+                "prestige_multiplier": 1.0,
+                "cookies_all_runs": 0.0,
+                "prestige_upgrade_purchased": [],
+                "total_ticks": 0,
+                "best_cps": 0.0,
+                "best_cookies_single_run": 0.0,
+                "research_path": 0,
+                "research_purchased": [],
+                "market_phase": 2,
+                "market_ticks_left": 0,
+                "dragon_level": 0,
+                "dragon_aura": 0,
+                "dragon_fed_total": 0,
+                "future_unknown_field": "should be ignored"
+            }
+        }"#;
+
+        let loaded: SaveData = serde_json::from_str(json_with_extra).unwrap();
+        assert_eq!(loaded.version, 2);
+        assert!((loaded.game.cookies - 100.0).abs() < 0.001);
     }
 
     #[test]
