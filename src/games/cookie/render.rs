@@ -63,7 +63,7 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
     };
 
     // Cookie display height adapts to available space — larger for analytics dashboard
-    let cookie_height: u16 = if is_narrow { 5 } else { 14 };
+    let cookie_height: u16 = if is_narrow { 12 } else { 14 };
 
     let tab_rows = 5; // Producers | Upgrades | Research | Milestones | Prestige
     let chunks = Layout::default()
@@ -180,6 +180,7 @@ fn render_cookie_display(
 ) {
     let w = area.width;
     let h = area.height;
+    let is_narrow = is_narrow_layout(w);
 
     let cookies_str = format_number(state.cookies.floor());
     let cps = state.total_cps();
@@ -234,14 +235,6 @@ fn render_cookie_display(
     let show_dashboard = w >= 40 && h >= 12;
 
     if show_dashboard {
-        let cookie_art = if state.click_flash > 0 {
-            let idx = state.click_flash as usize % COOKIE_CLICK_FRAMES.len();
-            COOKIE_CLICK_FRAMES[idx]
-        } else {
-            let idx = (state.anim_frame / 5) as usize % COOKIE_FRAMES.len();
-            COOKIE_FRAMES[idx]
-        };
-
         let click_label = if click_power > 1.0 {
             format!(">>> [C] +{} <<< ", format_number(click_power))
         } else {
@@ -266,7 +259,8 @@ fn render_cookie_display(
         };
 
         // Build sparkline string from CPS history
-        let sparkline = build_sparkline(&state.cps_history, 20);
+        let sparkline_width = if is_narrow { 14 } else { 20 };
+        let sparkline = build_sparkline(&state.cps_history, sparkline_width);
         let sparkline_color = cycling_color(state.anim_frame, 30);
 
         // Production breakdown bars
@@ -274,94 +268,204 @@ fn render_cookie_display(
 
         let mut lines: Vec<Line> = Vec::new();
 
-        // Row 0: Cookie art + big cookie count
-        lines.push(Line::from(vec![
-            Span::styled(cookie_art[0], Style::default().fg(cookie_color)),
-            Span::styled(
-                format!("  🍪 {}", cookies_str),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
+        // Wide layout: cookie art alongside info; Narrow: info only (no art)
+        if !is_narrow {
+            let cookie_art = if state.click_flash > 0 {
+                let idx = state.click_flash as usize % COOKIE_CLICK_FRAMES.len();
+                COOKIE_CLICK_FRAMES[idx]
+            } else {
+                let idx = (state.anim_frame / 5) as usize % COOKIE_FRAMES.len();
+                COOKIE_FRAMES[idx]
+            };
 
-        // Row 1: Cookie art + CPS with delta
-        lines.push(Line::from(vec![
-            Span::styled(cookie_art[1], Style::default().fg(cookie_color)),
-            Span::styled(
-                format!("  {} {}/sec", spinner, cps_str),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-            ),
-            delta_indicator,
-        ]));
-
-        // Row 2: Cookie art + click button + combo
-        let combo_span = if state.combo_count >= 5 {
-            Span::styled(
-                format!(" ×{}", state.combo_count),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::styled("", Style::default())
-        };
-        lines.push(Line::from(vec![
-            Span::styled(cookie_art[2], Style::default().fg(cookie_color)),
-            Span::styled("  ", Style::default()),
-            Span::styled(click_label, click_style),
-            combo_span,
-        ]));
-
-        // Row 3: Cookie art + clicks / milk / milestones
-        lines.push(Line::from({
-            let mut spans = vec![
-                Span::styled(cookie_art[3], Style::default().fg(cookie_color)),
+            // Row 0: Cookie art + big cookie count
+            lines.push(Line::from(vec![
+                Span::styled(cookie_art[0], Style::default().fg(cookie_color)),
                 Span::styled(
-                    format!("  👆{}", state.total_clicks),
-                    Style::default().fg(Color::Cyan),
+                    format!("  🍪 {}", cookies_str),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
                 ),
-            ];
-            if state.milk > 0.0 {
-                spans.push(Span::styled(
-                    format!("  🥛{:.0}%", state.milk * 100.0),
+            ]));
+
+            // Row 1: Cookie art + CPS with delta
+            lines.push(Line::from(vec![
+                Span::styled(cookie_art[1], Style::default().fg(cookie_color)),
+                Span::styled(
+                    format!("  {} {}/sec", spinner, cps_str),
                     Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                ));
-                if state.kitten_multiplier > 1.001 {
+                ),
+                delta_indicator,
+            ]));
+
+            // Row 2: Cookie art + click button + combo
+            let combo_span = if state.combo_count >= 5 {
+                Span::styled(
+                    format!(" ×{}", state.combo_count),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled("", Style::default())
+            };
+            lines.push(Line::from(vec![
+                Span::styled(cookie_art[2], Style::default().fg(cookie_color)),
+                Span::styled("  ", Style::default()),
+                Span::styled(click_label, click_style),
+                combo_span,
+            ]));
+
+            // Row 3: Cookie art + clicks / milk / milestones
+            lines.push(Line::from({
+                let mut spans = vec![
+                    Span::styled(cookie_art[3], Style::default().fg(cookie_color)),
+                    Span::styled(
+                        format!("  👆{}", state.total_clicks),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                ];
+                if state.milk > 0.0 {
                     spans.push(Span::styled(
-                        format!(" 🐱×{:.2}", state.kitten_multiplier),
-                        Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                        format!("  🥛{:.0}%", state.milk * 100.0),
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ));
+                    if state.kitten_multiplier > 1.001 {
+                        spans.push(Span::styled(
+                            format!(" 🐱×{:.2}", state.kitten_multiplier),
+                            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                }
+                if ready_count > 0 {
+                    spans.push(Span::styled(
+                        format!("  ✨{}個解放可!", ready_count),
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
                     ));
                 }
-            }
-            if ready_count > 0 {
-                spans.push(Span::styled(
-                    format!("  ✨{}個解放可!", ready_count),
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                ));
-            }
-            spans
-        }));
+                spans
+            }));
 
-        // Row 4: Cookie art bottom + prestige info
-        lines.push(Line::from({
-            let mut spans = vec![
-                Span::styled(cookie_art[4], Style::default().fg(cookie_color)),
-            ];
-            if state.prestige_count > 0 {
-                spans.push(Span::styled(
-                    format!("  👼×{:.2}", state.prestige_multiplier),
-                    Style::default().fg(Color::Magenta),
-                ));
-            }
-            if state.best_cps > 0.0 {
-                spans.push(Span::styled(
-                    format!("  最高CPS:{}/s", format_number(state.best_cps)),
-                    Style::default().fg(Color::DarkGray),
-                ));
-            }
-            spans
-        }));
+            // Row 4: Cookie art bottom + prestige info
+            lines.push(Line::from({
+                let mut spans = vec![
+                    Span::styled(cookie_art[4], Style::default().fg(cookie_color)),
+                ];
+                if state.prestige_count > 0 {
+                    spans.push(Span::styled(
+                        format!("  👼×{:.2}", state.prestige_multiplier),
+                        Style::default().fg(Color::Magenta),
+                    ));
+                }
+                if state.best_cps > 0.0 {
+                    spans.push(Span::styled(
+                        format!("  最高CPS:{}/s", format_number(state.best_cps)),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                spans
+            }));
+        } else {
+            // Narrow layout: stacked vertically without side-by-side art
+            let cookie_art_small = if state.click_flash > 0 {
+                "◉"
+            } else {
+                let idx = (state.anim_frame / 5) as usize % 4;
+                match idx {
+                    0 => "●",
+                    1 => "○",
+                    2 => "◉",
+                    _ => "○",
+                }
+            };
+
+            // Row 0: Cookie icon + big cookie count
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("{} 🍪 {}", cookie_art_small, cookies_str),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+
+            // Row 1: CPS with delta
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" {} {}/sec", spinner, cps_str),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+                delta_indicator,
+            ]));
+
+            // Row 2: Click button + combo
+            let combo_span = if state.combo_count >= 5 {
+                Span::styled(
+                    format!(" ×{}", state.combo_count),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::styled("", Style::default())
+            };
+            lines.push(Line::from(vec![
+                Span::styled(" ", Style::default()),
+                Span::styled(click_label, click_style),
+                combo_span,
+            ]));
+
+            // Row 3: Clicks / milk / milestones
+            lines.push(Line::from({
+                let mut spans = vec![
+                    Span::styled(
+                        format!(" 👆{}", state.total_clicks),
+                        Style::default().fg(Color::Cyan),
+                    ),
+                ];
+                if state.milk > 0.0 {
+                    spans.push(Span::styled(
+                        format!("  🥛{:.0}%", state.milk * 100.0),
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                    ));
+                    if state.kitten_multiplier > 1.001 {
+                        spans.push(Span::styled(
+                            format!(" 🐱×{:.2}", state.kitten_multiplier),
+                            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+                        ));
+                    }
+                }
+                if ready_count > 0 {
+                    spans.push(Span::styled(
+                        format!("  ✨{}個!", ready_count),
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    ));
+                }
+                spans
+            }));
+
+            // Row 4: Prestige info
+            lines.push(Line::from({
+                let mut spans: Vec<Span> = Vec::new();
+                if state.prestige_count > 0 {
+                    spans.push(Span::styled(
+                        format!(" 👼×{:.2}", state.prestige_multiplier),
+                        Style::default().fg(Color::Magenta),
+                    ));
+                }
+                if state.best_cps > 0.0 {
+                    spans.push(Span::styled(
+                        format!(" 最高:{}/s", format_number(state.best_cps)),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                if spans.is_empty() {
+                    spans.push(Span::styled("", Style::default()));
+                }
+                spans
+            }));
+        }
 
         // Row 5: Separator + CPS graph header
         lines.push(Line::from(vec![
@@ -393,7 +497,7 @@ fn render_cookie_display(
             )));
         } else {
             // Show up to 4 rows of producer bars
-            let bar_width = 10usize;
+            let bar_width = if is_narrow { 6 } else { 10 };
             let colors = [Color::Cyan, Color::Green, Color::Magenta, Color::Yellow,
                          Color::Blue, Color::Red, Color::White, Color::LightCyan];
             let anim_offset = (state.anim_frame / 2) as usize;
