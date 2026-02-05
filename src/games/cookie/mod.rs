@@ -153,7 +153,7 @@ impl Game for CookieGame {
                 logic::set_dragon_aura(&mut self.state, next);
                 true
             }
-            '1'..='8' if !self.state.show_upgrades && !self.state.show_research && !self.state.show_milestones && !self.state.show_prestige => {
+            '1'..='9' | '0' | '-' | '=' if !self.state.show_upgrades && !self.state.show_research && !self.state.show_milestones && !self.state.show_prestige => {
                 let kind = match key {
                     '1' => ProducerKind::Cursor,
                     '2' => ProducerKind::Grandma,
@@ -163,6 +163,10 @@ impl Game for CookieGame {
                     '6' => ProducerKind::Temple,
                     '7' => ProducerKind::WizardTower,
                     '8' => ProducerKind::Shipment,
+                    '9' => ProducerKind::AlchemyLab,
+                    '0' => ProducerKind::Portal,
+                    '-' => ProducerKind::TimeMachine,
+                    '=' => ProducerKind::AntimatterCondenser,
                     _ => unreachable!(),
                 };
                 logic::buy_producer(&mut self.state, &kind);
@@ -476,5 +480,19 @@ mod tests {
         assert_eq!(game.state.producers[6].count, 1);
         game.handle_input(&InputEvent::Key('8')); // Shipment
         assert_eq!(game.state.producers[7].count, 1);
+    }
+
+    #[test]
+    fn late_producers_buyable() {
+        let mut game = CookieGame::new();
+        game.state.cookies = 1e18;
+        game.handle_input(&InputEvent::Key('9')); // AlchemyLab
+        assert_eq!(game.state.producers[8].count, 1);
+        game.handle_input(&InputEvent::Key('0')); // Portal
+        assert_eq!(game.state.producers[9].count, 1);
+        game.handle_input(&InputEvent::Key('-')); // TimeMachine
+        assert_eq!(game.state.producers[10].count, 1);
+        game.handle_input(&InputEvent::Key('=')); // AntimatterCondenser
+        assert_eq!(game.state.producers[11].count, 1);
     }
 }
