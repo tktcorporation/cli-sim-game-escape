@@ -252,24 +252,21 @@ fn compute_io_hints(state: &FactoryState) -> Vec<(usize, usize, char, Color)> {
 
     let mut hints = Vec::new();
     for (px, py) in perimeter_2x2(ax, ay) {
-        match &state.grid[py][px] {
-            Cell::Empty => {
-                // Pick an arrow based on relative position to the 2×2 block
-                let arrow = if px < ax { '←' }
-                    else if px > ax + 1 { '→' }
-                    else if py < ay { '↑' }
-                    else if py > ay + 1 { '↓' }
-                    else { '·' };
+        if let Cell::Empty = &state.grid[py][px] {
+            // Pick an arrow based on relative position to the 2×2 block
+            let arrow = if px < ax { '←' }
+                else if px > ax + 1 { '→' }
+                else if py < ay { '↑' }
+                else if py > ay + 1 { '↓' }
+                else { '·' };
 
-                if has_output && has_input {
-                    hints.push((px, py, arrow, Color::DarkGray));
-                } else if has_output {
-                    hints.push((px, py, arrow, Color::Green));
-                } else if has_input {
-                    hints.push((px, py, arrow, Color::Yellow));
-                }
+            if has_output && has_input {
+                hints.push((px, py, arrow, Color::DarkGray));
+            } else if has_output {
+                hints.push((px, py, arrow, Color::Green));
+            } else if has_input {
+                hints.push((px, py, arrow, Color::Yellow));
             }
-            _ => {}
         }
     }
     hints
@@ -414,7 +411,7 @@ fn render_grid(state: &FactoryState, f: &mut Frame, area: Rect) {
                     };
                     let m = match machine_at(&state.grid, ax, ay) {
                         Some(m) => m,
-                        None => { ("  ".to_string(), Style::default()); continue; }
+                        None => { "  ".to_string(); Style::default(); continue; }
                     };
                     let blocked = is_output_blocked(&state.grid, ax, ay, m);
                     let color = if m.kind == MachineKind::Miner {

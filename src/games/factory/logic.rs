@@ -120,8 +120,8 @@ fn tick_machines(state: &mut FactoryState) {
                             continue;
                         }
                         // Need both IronPlate and CopperPlate in buffer
-                        let has_iron = m.input_buffer.iter().any(|i| *i == ItemKind::IronPlate);
-                        let has_copper = m.input_buffer.iter().any(|i| *i == ItemKind::CopperPlate);
+                        let has_iron = m.input_buffer.contains(&ItemKind::IronPlate);
+                        let has_copper = m.input_buffer.contains(&ItemKind::CopperPlate);
                         if !has_iron || !has_copper {
                             if let Cell::Machine(m) = &mut state.grid[y][x] {
                                 m.progress = 0;

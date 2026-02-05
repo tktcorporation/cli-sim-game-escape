@@ -137,8 +137,8 @@
       }
       if (!el) return;
       var text = el.textContent || '';
-      // Match action keys like [1], [2], [N], [S], [I], [R], [H]
-      var match = text.match(/\[([1-9A-Za-z])\]/);
+      // Match action keys like [1], [2], [0], [-], [=], [N], [S], [I], [R], [H], tab keys ({|}~\)
+      var match = text.match(/\[([0-9A-Za-z\-=!~{}|\\])\]/);
       if (!match) return;
       var key = match[1].toLowerCase();
       document.dispatchEvent(new KeyboardEvent('keydown', {
