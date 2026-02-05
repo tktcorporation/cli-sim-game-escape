@@ -61,7 +61,7 @@ impl ClickState {
         // First, try column-specific targets
         if let Some(c) = col {
             if let Some(t) = self.targets.iter().find(|t| {
-                t.row == row && t.col_range.map_or(false, |(start, end)| c >= start && c < end)
+                t.row == row && t.col_range.is_some_and(|(start, end)| c >= start && c < end)
             }) {
                 return Some(t.key);
             }
