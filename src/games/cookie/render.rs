@@ -830,9 +830,14 @@ fn render_producers(
     );
     f.render_widget(widget, area);
 
+    // クリックターゲットはコンテンツ領域内（ボーダー除く）のみ登録
     let mut cs = click_state.borrow_mut();
+    let content_end = area.y + area.height.saturating_sub(1);
     for (i, p) in state.producers.iter().enumerate() {
-        cs.add_target(area.y + 1 + i as u16, p.kind.key());
+        let row = area.y + 1 + i as u16;
+        if row < content_end {
+            cs.add_target(row, p.kind.key());
+        }
     }
 }
 
@@ -918,11 +923,15 @@ fn render_upgrades(
     );
     f.render_widget(widget, area);
 
-    // Click targets for all items
+    // Click targets for items within content area only
     let mut cs = click_state.borrow_mut();
+    let content_end = area.y + area.height.saturating_sub(1);
     for i in 0..all_items.len() {
-        let key = (b'a' + i as u8) as char;
-        cs.add_target(area.y + 1 + i as u16, key);
+        let row = area.y + 1 + i as u16;
+        if row < content_end {
+            let key = (b'a' + i as u8) as char;
+            cs.add_target(row, key);
+        }
     }
 }
 
@@ -1029,12 +1038,16 @@ fn render_research(
     );
     f.render_widget(widget, area);
 
-    // Click targets for purchasable items (skip header)
+    // Click targets for purchasable items (skip header), within content area only
     let mut cs = click_state.borrow_mut();
+    let content_end = area.y + area.height.saturating_sub(1);
     for i in 0..key_idx as usize {
-        let key = (b'a' + i as u8) as char;
         // +1 for border, +1 for header line
-        cs.add_target(area.y + 2 + i as u16, key);
+        let row = area.y + 2 + i as u16;
+        if row < content_end {
+            let key = (b'a' + i as u8) as char;
+            cs.add_target(row, key);
+        }
     }
 }
 
@@ -1289,9 +1302,13 @@ fn render_milestones(
     let mut cs = click_state.borrow_mut();
     // header_used + 1 for border top
     let first_ready_row = area.y + 1 + header_used;
+    let content_end = area.y + area.height.saturating_sub(1);
     for i in 0..ready_key_idx {
-        let key = (b'a' + i) as char;
-        cs.add_target(first_ready_row + i as u16, key);
+        let row = first_ready_row + i as u16;
+        if row < content_end {
+            let key = (b'a' + i) as char;
+            cs.add_target(row, key);
+        }
     }
 }
 
@@ -1553,15 +1570,19 @@ fn render_prestige(
 
     // Click targets
     let mut cs = click_state.borrow_mut();
+    let content_end = area.y + area.height.saturating_sub(1);
     // P for prestige action (on pending chips line)
-    if pending > 0 {
+    if pending > 0 && area.y + 2 < content_end {
         cs.add_target(area.y + 2, 'p'); // the "転生で +N チップ" line
     }
     // a-z for prestige upgrade purchase
     let first_upgrade_row = area.y + 4; // after header + pending + separator
     for (i, _) in state.prestige_upgrades.iter().enumerate() {
-        let key = (b'a' + i as u8) as char;
-        cs.add_target(first_upgrade_row + i as u16, key);
+        let row = first_upgrade_row + i as u16;
+        if row < content_end {
+            let key = (b'a' + i as u8) as char;
+            cs.add_target(row, key);
+        }
     }
 }
 
