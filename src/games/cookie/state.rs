@@ -11,6 +11,10 @@ pub enum ProducerKind {
     Temple,
     WizardTower,
     Shipment,
+    AlchemyLab,
+    Portal,
+    TimeMachine,
+    AntimatterCondenser,
 }
 
 impl ProducerKind {
@@ -25,6 +29,10 @@ impl ProducerKind {
             ProducerKind::Temple,
             ProducerKind::WizardTower,
             ProducerKind::Shipment,
+            ProducerKind::AlchemyLab,
+            ProducerKind::Portal,
+            ProducerKind::TimeMachine,
+            ProducerKind::AntimatterCondenser,
         ]
     }
 
@@ -39,6 +47,10 @@ impl ProducerKind {
             ProducerKind::Temple => "Temple",
             ProducerKind::WizardTower => "WzTower",
             ProducerKind::Shipment => "Shipment",
+            ProducerKind::AlchemyLab => "Alchemy",
+            ProducerKind::Portal => "Portal",
+            ProducerKind::TimeMachine => "TimeMchn",
+            ProducerKind::AntimatterCondenser => "Antimtr",
         }
     }
 
@@ -53,6 +65,10 @@ impl ProducerKind {
             ProducerKind::Temple => 1_400_000.0,
             ProducerKind::WizardTower => 20_000_000.0,
             ProducerKind::Shipment => 330_000_000.0,
+            ProducerKind::AlchemyLab => 5_100_000_000.0,
+            ProducerKind::Portal => 75_000_000_000.0,
+            ProducerKind::TimeMachine => 1_100_000_000_000.0,
+            ProducerKind::AntimatterCondenser => 17_000_000_000_000.0,
         }
     }
 
@@ -67,10 +83,14 @@ impl ProducerKind {
             ProducerKind::Temple => 1_400.0,
             ProducerKind::WizardTower => 7_800.0,
             ProducerKind::Shipment => 44_000.0,
+            ProducerKind::AlchemyLab => 260_000.0,
+            ProducerKind::Portal => 1_600_000.0,
+            ProducerKind::TimeMachine => 9_800_000.0,
+            ProducerKind::AntimatterCondenser => 64_000_000.0,
         }
     }
 
-    /// Key to buy (1-5 mapped to producer index).
+    /// Key to buy (1-8, 9, 0, -, = mapped to producer index).
     pub fn key(&self) -> char {
         match self {
             ProducerKind::Cursor => '1',
@@ -81,6 +101,10 @@ impl ProducerKind {
             ProducerKind::Temple => '6',
             ProducerKind::WizardTower => '7',
             ProducerKind::Shipment => '8',
+            ProducerKind::AlchemyLab => '9',
+            ProducerKind::Portal => '0',
+            ProducerKind::TimeMachine => '-',
+            ProducerKind::AntimatterCondenser => '=',
         }
     }
 
@@ -95,8 +119,26 @@ impl ProducerKind {
             ProducerKind::Temple => 5,
             ProducerKind::WizardTower => 6,
             ProducerKind::Shipment => 7,
+            ProducerKind::AlchemyLab => 8,
+            ProducerKind::Portal => 9,
+            ProducerKind::TimeMachine => 10,
+            ProducerKind::AntimatterCondenser => 11,
         }
     }
+}
+
+/// ROI (Return on Investment) information for a producer.
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub struct RoiInfo {
+    /// CPS gained per cookie spent (higher = more efficient).
+    pub efficiency: f64,
+    /// Seconds to recoup the investment (lower = faster payback).
+    pub payback_seconds: f64,
+    /// Star rating (0-3).
+    pub rating: u8,
+    /// Whether the producer is affordable.
+    pub affordable: bool,
 }
 
 /// A single type of producer.
@@ -1186,6 +1228,98 @@ impl CookieState {
                 },
                 unlock_condition: Some((ProducerKind::Shipment, 10)),
             },
+            // === Alchemy Lab upgrades ===
+            Upgrade {
+                name: "Alchemy x2".into(),
+                description: "Alchemy の生産 2倍".into(),
+                cost: 51_000_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::AlchemyLab,
+                    multiplier: 2.0,
+                },
+                unlock_condition: Some((ProducerKind::AlchemyLab, 1)),
+            },
+            Upgrade {
+                name: "Alchemy x3".into(),
+                description: "Alchemy の生産 3倍".into(),
+                cost: 510_000_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::AlchemyLab,
+                    multiplier: 3.0,
+                },
+                unlock_condition: Some((ProducerKind::AlchemyLab, 10)),
+            },
+            // === Portal upgrades ===
+            Upgrade {
+                name: "Portal x2".into(),
+                description: "Portal の生産 2倍".into(),
+                cost: 750_000_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Portal,
+                    multiplier: 2.0,
+                },
+                unlock_condition: Some((ProducerKind::Portal, 1)),
+            },
+            Upgrade {
+                name: "Portal x3".into(),
+                description: "Portal の生産 3倍".into(),
+                cost: 7_500_000_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Portal,
+                    multiplier: 3.0,
+                },
+                unlock_condition: Some((ProducerKind::Portal, 10)),
+            },
+            // === Time Machine upgrades ===
+            Upgrade {
+                name: "TimeMchn x2".into(),
+                description: "TimeMachine の生産 2倍".into(),
+                cost: 11_000_000_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::TimeMachine,
+                    multiplier: 2.0,
+                },
+                unlock_condition: Some((ProducerKind::TimeMachine, 1)),
+            },
+            Upgrade {
+                name: "TimeMchn x3".into(),
+                description: "TimeMachine の生産 3倍".into(),
+                cost: 110_000_000_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::TimeMachine,
+                    multiplier: 3.0,
+                },
+                unlock_condition: Some((ProducerKind::TimeMachine, 10)),
+            },
+            // === Antimatter Condenser upgrades ===
+            Upgrade {
+                name: "Antimtr x2".into(),
+                description: "Antimatter の生産 2倍".into(),
+                cost: 170_000_000_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::AntimatterCondenser,
+                    multiplier: 2.0,
+                },
+                unlock_condition: Some((ProducerKind::AntimatterCondenser, 1)),
+            },
+            Upgrade {
+                name: "Antimtr x3".into(),
+                description: "Antimatter の生産 3倍".into(),
+                cost: 1_700_000_000_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::AntimatterCondenser,
+                    multiplier: 3.0,
+                },
+                unlock_condition: Some((ProducerKind::AntimatterCondenser, 10)),
+            },
             // === New producer synergy upgrades ===
             Upgrade {
                 name: "神殿の祝福".into(),
@@ -1904,16 +2038,31 @@ impl CookieState {
         let mut bonus = 0.0;
 
         // Built-in synergies (always active, part of game design)
+        // Circular synergy: each producer boosts the next in the chain
         let base_synergies: &[(ProducerKind, ProducerKind, f64)] = &[
             // (source, target, bonus_per_source_unit)
-            (ProducerKind::Grandma, ProducerKind::Cursor, 0.01),      // +1% per Grandma
-            (ProducerKind::Farm, ProducerKind::Grandma, 0.02),        // +2% per Farm
-            (ProducerKind::Mine, ProducerKind::Farm, 0.03),           // +3% per Mine
-            (ProducerKind::Factory, ProducerKind::Mine, 0.05),        // +5% per Factory
-            (ProducerKind::Temple, ProducerKind::Factory, 0.04),      // +4% per Temple
-            (ProducerKind::WizardTower, ProducerKind::Temple, 0.03),  // +3% per WzTower
-            (ProducerKind::Shipment, ProducerKind::WizardTower, 0.02),// +2% per Shipment
-            (ProducerKind::Cursor, ProducerKind::Shipment, 0.001),    // +0.1% per Cursor
+            (ProducerKind::Grandma, ProducerKind::Cursor, 0.01),               // +1% per Grandma
+            (ProducerKind::Farm, ProducerKind::Grandma, 0.02),                 // +2% per Farm
+            (ProducerKind::Mine, ProducerKind::Farm, 0.03),                    // +3% per Mine
+            (ProducerKind::Factory, ProducerKind::Mine, 0.05),                 // +5% per Factory
+            (ProducerKind::Temple, ProducerKind::Factory, 0.04),               // +4% per Temple
+            (ProducerKind::WizardTower, ProducerKind::Temple, 0.03),           // +3% per WzTower
+            (ProducerKind::Shipment, ProducerKind::WizardTower, 0.02),         // +2% per Shipment
+            (ProducerKind::AlchemyLab, ProducerKind::Shipment, 0.015),         // +1.5% per Alchemy
+            (ProducerKind::Portal, ProducerKind::AlchemyLab, 0.02),            // +2% per Portal
+            (ProducerKind::TimeMachine, ProducerKind::Portal, 0.025),          // +2.5% per TimeMachine
+            (ProducerKind::AntimatterCondenser, ProducerKind::TimeMachine, 0.03), // +3% per Antimatter
+            (ProducerKind::Cursor, ProducerKind::AntimatterCondenser, 0.0005), // +0.05% per Cursor (closes loop)
+            // Tree synergies: upper-tier producers boost specific lower-tier producers
+            (ProducerKind::AlchemyLab, ProducerKind::Mine, 0.015),             // Alchemy → Mine +1.5%
+            (ProducerKind::AlchemyLab, ProducerKind::Farm, 0.015),             // Alchemy → Farm +1.5%
+            (ProducerKind::Portal, ProducerKind::Temple, 0.02),                // Portal → Temple +2%
+            (ProducerKind::Portal, ProducerKind::WizardTower, 0.02),           // Portal → WzTower +2%
+            (ProducerKind::TimeMachine, ProducerKind::Cursor, 0.01),           // TimeMachine → Cursor +1%
+            (ProducerKind::TimeMachine, ProducerKind::Grandma, 0.01),          // TimeMachine → Grandma +1%
+            (ProducerKind::TimeMachine, ProducerKind::Farm, 0.01),             // TimeMachine → Farm +1%
+            (ProducerKind::AntimatterCondenser, ProducerKind::Factory, 0.025), // Antimatter → Factory +2.5%
+            (ProducerKind::AntimatterCondenser, ProducerKind::Shipment, 0.025),// Antimatter → Shipment +2.5%
         ];
 
         for (source, tgt, rate) in base_synergies {
@@ -2184,13 +2333,17 @@ mod tests {
         let mut state = CookieState::new();
         state.producers[5].count = 10;  // 10 temples → Factory +4% each = +40%
         state.producers[4].count = 5;   // 5 factories → Mine +5% each = +25%
-        state.producers[0].count = 100; // 100 cursors → Shipment +0.1% each = +10%
+        state.producers[8].count = 10;  // 10 alchemy labs → Shipment +1.5% each = +15%
+        state.producers[0].count = 100; // 100 cursors → Antimatter +0.05% each = +5%
         let factory_bonus = state.synergy_bonus(&ProducerKind::Factory);
         assert!((factory_bonus - 0.40).abs() < 0.01); // 10 * 0.04 = 0.40
         let mine_bonus = state.synergy_bonus(&ProducerKind::Mine);
-        assert!((mine_bonus - 0.25).abs() < 0.01); // 5 * 0.05 = 0.25
+        // Mine gets +25% from Factory (circular) + 15% from AlchemyLab (tree) = +40%
+        assert!((mine_bonus - 0.40).abs() < 0.01);
         let shipment_bonus = state.synergy_bonus(&ProducerKind::Shipment);
-        assert!((shipment_bonus - 0.10).abs() < 0.01); // 100 * 0.001 = 0.10
+        assert!((shipment_bonus - 0.15).abs() < 0.01); // 10 * 0.015 = 0.15
+        let antimatter_bonus = state.synergy_bonus(&ProducerKind::AntimatterCondenser);
+        assert!((antimatter_bonus - 0.05).abs() < 0.01); // 100 * 0.0005 = 0.05
     }
 
     #[test]
