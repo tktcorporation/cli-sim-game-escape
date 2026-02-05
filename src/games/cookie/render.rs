@@ -783,10 +783,18 @@ fn render_producers(
             };
             let syn_style = Style::default().fg(Color::Magenta);
 
-            let best_marker = if is_best_roi { "★" } else { " " };
+            // 3-level rating based on payback time
+            let rating = match payback {
+                Some(s) if s <= 60.0 => "★★★",   // Excellent: ≤1 min
+                Some(s) if s <= 300.0 => "★★☆",  // Good: ≤5 min
+                Some(s) if s <= 900.0 => "★☆☆",  // Okay: ≤15 min
+                _ => "☆☆☆",                       // Poor or N/A
+            };
+            let rating_display = if !can_afford { "   " } else { rating };
+            let best_marker = if is_best_roi { "◆" } else { " " };
 
             let mut spans = vec![
-                Span::styled(format!("{}[{}] ", best_marker, p.kind.key()), key_style),
+                Span::styled(format!("{}{} [{}] ", best_marker, rating_display, p.kind.key()), key_style),
                 Span::styled(
                     format!("{:<8} {:>2}x ", p.kind.name(), p.count),
                     text_style,
@@ -818,7 +826,7 @@ fn render_producers(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(producer_border_color))
-            .title(" Producers [1-8]で購入 ★=最高効率 "),
+            .title(" Producers [1-0,-,=]で購入 ◆=最高効率 ★=回収速度 "),
     );
     f.render_widget(widget, area);
 

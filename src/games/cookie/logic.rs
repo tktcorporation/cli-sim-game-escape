@@ -3,7 +3,7 @@
 use super::state::{
     ActiveBuff, CookieState, DragonAura, GoldenCookieEvent, GoldenEffect, MarketPhase,
     MilestoneCondition, MilestoneStatus, MiniEventKind, Particle, ParticleStyle, ProducerKind,
-    ResearchPath, UpgradeEffect,
+    ResearchPath, RoiInfo, UpgradeEffect,
 };
 
 /// Advance the game by `delta_ticks` ticks (at 10 ticks/sec).
@@ -1019,6 +1019,90 @@ pub fn set_dragon_aura(state: &mut CookieState, aura: DragonAura) -> bool {
         true,
     );
     true
+}
+
+/// Calculate ROI info for a specific producer.
+#[allow(dead_code)]
+pub fn calculate_producer_roi(state: &CookieState, kind: &ProducerKind) -> RoiInfo {
+    let producer = &state.producers[kind.index()];
+    let cost = producer.cost() * state.total_cost_modifier();
+    let synergy_bonus = state.synergy_bonus(kind);
+    let next_cps = producer.next_unit_cps_with_synergy(synergy_bonus);
+
+    let efficiency = if cost > 0.0 { next_cps / cost } else { 0.0 };
+    let payback_seconds = if next_cps > 0.0 { cost / next_cps } else { f64::INFINITY };
+    let affordable = state.cookies >= cost;
+
+    // Rating based on payback time
+    let rating = if !affordable {
+        0
+    } else if payback_seconds <= 60.0 {
+        3 // Excellent: pays back in 1 minute or less
+    } else if payback_seconds <= 300.0 {
+        2 // Good: pays back in 5 minutes or less
+    } else if payback_seconds <= 900.0 {
+        1 // Okay: pays back in 15 minutes or less
+    } else {
+        0 // Poor: takes more than 15 minutes
+    };
+
+    RoiInfo {
+        efficiency,
+        payback_seconds,
+        rating,
+        affordable,
+    }
+}
+
+/// Calculate ROI info for all producers.
+#[allow(dead_code)]
+pub fn calculate_all_roi(state: &CookieState) -> Vec<(ProducerKind, RoiInfo)> {
+    ProducerKind::all()
+        .iter()
+        .map(|kind| (kind.clone(), calculate_producer_roi(state, kind)))
+        .collect()
+}
+
+/// Find the best producer to buy (lowest payback time among affordable ones).
+#[allow(dead_code)]
+pub fn best_producer_to_buy(state: &CookieState) -> Option<ProducerKind> {
+    let all_roi = calculate_all_roi(state);
+    all_roi
+        .into_iter()
+        .filter(|(_, roi)| roi.affordable && roi.payback_seconds.is_finite())
+        .min_by(|(_, a), (_, b)| {
+            a.payback_seconds
+                .partial_cmp(&b.payback_seconds)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(kind, _)| kind)
+}
+
+/// Format payback time as human-readable string.
+#[allow(dead_code)]
+pub fn format_payback_time(seconds: f64) -> String {
+    if !seconds.is_finite() || seconds > 86400.0 * 365.0 {
+        return "---".to_string();
+    }
+    if seconds < 60.0 {
+        format!("{}秒", seconds.round() as u32)
+    } else if seconds < 3600.0 {
+        let mins = (seconds / 60.0).floor() as u32;
+        let secs = (seconds % 60.0).round() as u32;
+        if secs > 0 {
+            format!("{}分{}秒", mins, secs)
+        } else {
+            format!("{}分", mins)
+        }
+    } else {
+        let hours = (seconds / 3600.0).floor() as u32;
+        let mins = ((seconds % 3600.0) / 60.0).round() as u32;
+        if mins > 0 {
+            format!("{}時{}分", hours, mins)
+        } else {
+            format!("{}時間", hours)
+        }
+    }
 }
 
 /// Format a number with commas (e.g. 1234567 → "1,234,567").
