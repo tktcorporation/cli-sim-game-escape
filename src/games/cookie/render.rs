@@ -1377,29 +1377,185 @@ fn render_prestige(
         Style::default().fg(Color::DarkGray),
     )));
 
-    // Prestige upgrades
-    for (i, upgrade) in state.prestige_upgrades.iter().enumerate() {
-        let key = (b'a' + i as u8) as char;
-        if upgrade.purchased {
+    // Prestige upgrades grouped by path
+    use super::state::PrestigePath;
+    let paths = [
+        (PrestigePath::Root, "🌟 共通", Color::Yellow),
+        (PrestigePath::Production, "🏭 生産パス", Color::Green),
+        (PrestigePath::Click, "👆 クリックパス", Color::Cyan),
+        (PrestigePath::Luck, "🍀 幸運パス", Color::Magenta),
+    ];
+
+    for (path, path_name, path_color) in paths.iter() {
+        let path_upgrades: Vec<_> = state
+            .prestige_upgrades
+            .iter()
+            .enumerate()
+            .filter(|(_, u)| &u.path == path)
+            .collect();
+
+        if path_upgrades.is_empty() {
+            continue;
+        }
+
+        // Path header
+        lines.push(Line::from(Span::styled(
+            format!(" {} ", path_name),
+            Style::default()
+                .fg(*path_color)
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        for (i, upgrade) in path_upgrades {
+            let key = (b'a' + i as u8) as char;
+
+            // Check prerequisite
+            let prereq_met = upgrade.requires.is_none()
+                || state
+                    .prestige_upgrades
+                    .iter()
+                    .any(|u| Some(u.id) == upgrade.requires && u.purchased);
+
+            if upgrade.purchased {
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  [{}] ", key),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("✅ {} ", upgrade.name),
+                        Style::default().fg(Color::Green),
+                    ),
+                    Span::styled(
+                        format!("- {}", upgrade.description),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            } else if !prereq_met {
+                // Locked - prerequisite not met
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("  [{}] ", key),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!("🔒 {} ", upgrade.name),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        "(前提アップグレードが必要)",
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+            } else {
+                let can_afford = available >= upgrade.cost;
+                let key_style = if can_afford {
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                let text_style = if can_afford {
+                    Style::default().fg(Color::White)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("  [{}] ", key), key_style),
+                    Span::styled(format!("{} ", upgrade.name), text_style),
+                    Span::styled(format!("- {} ", upgrade.description), text_style),
+                    Span::styled(
+                        format!("({}チップ)", upgrade.cost),
+                        if can_afford {
+                            Style::default().fg(Color::Cyan)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        },
+                    ),
+                ]));
+            }
+        }
+    }
+
+    // === Sugar section ===
+    lines.push(Line::from(Span::styled(
+        " ─── 🍬 砂糖ブースト ─────────────────",
+        Style::default()
+            .fg(Color::Rgb(255, 182, 193))
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    // Sugar amount
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" 🍬 砂糖: {} ", state.sugar),
+            Style::default()
+                .fg(Color::Rgb(255, 182, 193))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("(累計: {})", state.sugar_all_time),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+
+    // Active boost status
+    if let Some(ref boost) = state.active_sugar_boost {
+        let secs_left = boost.ticks_left as f64 / 10.0;
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" ⚡ {} 発動中！ ", boost.kind.name()),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD | Modifier::RAPID_BLINK),
+            ),
+            Span::styled(
+                format!(
+                    "CPS×{:.1} 残り{:.1}秒",
+                    boost.kind.multiplier() * state.prestige_sugar_boost_multiplier(),
+                    secs_left
+                ),
+                Style::default().fg(Color::Yellow),
+            ),
+        ]));
+    }
+
+    // Sugar boost options
+    use super::state::SugarBoostKind;
+    let boosts = [
+        (SugarBoostKind::Rush, "R"),
+        (SugarBoostKind::Fever, "F"),
+        (SugarBoostKind::Frenzy, "Z"),
+    ];
+    for (kind, key) in boosts.iter() {
+        let cost = kind.cost();
+        let mult = kind.multiplier() * state.prestige_sugar_boost_multiplier();
+        let duration = kind.duration_ticks() as f64 / 10.0;
+        let required_prestige = kind.required_prestige();
+
+        let is_unlocked = state.prestige_count >= required_prestige;
+        let can_afford = state.sugar >= cost && state.active_sugar_boost.is_none();
+
+        if !is_unlocked {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!(" [{}] ", key),
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(
-                    format!("✅ {} ", upgrade.name),
-                    Style::default().fg(Color::Green),
+                    format!("🔒 {} ", kind.name()),
+                    Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(
-                    format!("- {}", upgrade.description),
+                    format!("(転生{}回で解放)", required_prestige),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]));
         } else {
-            let can_afford = available >= upgrade.cost;
             let key_style = if can_afford {
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(Color::Rgb(255, 182, 193))
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::DarkGray)
@@ -1411,21 +1567,83 @@ fn render_prestige(
             };
             lines.push(Line::from(vec![
                 Span::styled(format!(" [{}] ", key), key_style),
-                Span::styled(format!("{} ", upgrade.name), text_style),
+                Span::styled(format!("{} ", kind.name()), text_style),
                 Span::styled(
-                    format!("- {} ", upgrade.description),
+                    format!("CPS×{:.1} {:.0}秒 ", mult, duration),
                     text_style,
                 ),
                 Span::styled(
-                    format!("({}チップ)", upgrade.cost),
+                    format!("({}砂糖)", cost),
                     if can_afford {
-                        Style::default().fg(Color::Cyan)
+                        Style::default().fg(Color::Rgb(255, 182, 193))
                     } else {
                         Style::default().fg(Color::DarkGray)
                     },
                 ),
             ]));
         }
+    }
+
+    // === Auto-clicker section ===
+    lines.push(Line::from(Span::styled(
+        " ─── 🤖 オートクリッカー ─────────────",
+        Style::default()
+            .fg(Color::Rgb(100, 149, 237))
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    if state.is_auto_clicker_unlocked() {
+        let rate = state.auto_clicker_rate();
+        let status = if state.auto_clicker_enabled {
+            "ON"
+        } else {
+            "OFF"
+        };
+        let status_color = if state.auto_clicker_enabled {
+            Color::Green
+        } else {
+            Color::Red
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                " [A] オートクリッカー ",
+                Style::default()
+                    .fg(Color::Rgb(100, 149, 237))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("[{}] ", status),
+                Style::default()
+                    .fg(status_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("({}回/秒)", rate),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+        if state.prestige_count >= 10 {
+            lines.push(Line::from(Span::styled(
+                "   ⚡ 強化済み！ (5回/秒)",
+                Style::default().fg(Color::Yellow),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!("   転生10回で強化 (5回/秒) [現在: {}回]", state.prestige_count),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(
+                " 🔒 オートクリッカー ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                "(転生1回で解放)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
     }
 
     // === Dragon section ===
