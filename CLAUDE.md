@@ -30,6 +30,26 @@ Ratzilla (ratatui wrapper) を使用し、10 ticks/sec の固定タイムステ�
 - `cargo clippy -- -W clippy::all` — 警告ゼロを確認してからPRを出す
 - dead_code警告が出たら `#[cfg(test)]` やフィールド削除で対応する
 
+### Important: タッチイベント処理
+
+**タッチ処理はJS側（index.html）で行う。Rust/WASMでは処理しない。**
+
+理由: web-sysのTouchEvent/Touch/TouchList機能を使うと、iOS SafariのWebKit WASMエンジンが
+黒画面になる問題がある（コミット 0caf982 で発見・修正）。
+
+現在の実装:
+- `index.html` 内のJavaScriptで `touchstart` イベントをリッスン
+- クリックされた`<pre>`要素のテキストから `[X]` 形式のキーを正規表現で抽出
+- `KeyboardEvent` を `dispatchEvent` してRatzillaの `on_key_event` ハンドラに渡す
+
+正規表現 `/\[([0-9A-Za-z\-=!~{}|\\])\]/` がサポートするキー:
+- 生産者: `[1]`〜`[9]`, `[0]`, `[-]`, `[=]`
+- タブ: `[{]`, `[|]`, `[\]`, `[}]`, `[~]`
+- 一括操作: `[!]`
+- アルファベット: `[A]`〜`[Z]`
+
+新しいキーを追加する場合は、この正規表現も更新すること。
+
 ---
 
 ## Game Design Concepts
