@@ -71,6 +71,12 @@ pub fn tick(state: &mut CookieState, delta_ticks: u32) {
     // Tick active buffs
     tick_buffs(state, delta_ticks);
 
+    // Tick sugar boost
+    tick_sugar_boost(state, delta_ticks);
+
+    // Tick auto-clicker
+    tick_auto_clicker(state, delta_ticks);
+
     // Tick golden cookie spawning
     tick_golden(state, delta_ticks);
 
@@ -178,8 +184,8 @@ pub fn claim_golden(state: &mut CookieState) -> bool {
     // Pick a random effect
     let effect = pick_golden_effect(state);
 
-    // Apply the effect (research can extend buff duration)
-    let buff_dur_mult = state.research_buff_duration();
+    // Apply the effect (research + prestige can extend buff duration)
+    let buff_dur_mult = state.total_buff_duration();
     match &effect {
         GoldenEffect::ProductionFrenzy { .. } => {
             let ticks = (70.0 * buff_dur_mult) as u32;
@@ -221,13 +227,20 @@ pub fn claim_golden(state: &mut CookieState) -> bool {
 
 /// Pick a random golden effect.
 fn pick_golden_effect(state: &mut CookieState) -> GoldenEffect {
+    let effect_mult = state.prestige_golden_effect_multiplier();
     let r = state.next_random() % 100;
     if r < 40 {
-        GoldenEffect::ProductionFrenzy { multiplier: 7.0 }
+        GoldenEffect::ProductionFrenzy {
+            multiplier: 7.0 * effect_mult,
+        }
     } else if r < 70 {
-        GoldenEffect::ClickFrenzy { multiplier: 10.0 }
+        GoldenEffect::ClickFrenzy {
+            multiplier: 10.0 * effect_mult,
+        }
     } else {
-        GoldenEffect::InstantBonus { cps_seconds: 10.0 }
+        GoldenEffect::InstantBonus {
+            cps_seconds: 10.0 * effect_mult,
+        }
     }
 }
 
@@ -707,6 +720,15 @@ pub fn perform_prestige(state: &mut CookieState) -> u64 {
     state.cookies_all_runs += state.cookies_all_time;
     state.heavenly_chips += new_chips;
     state.prestige_count += 1;
+
+    // Award sugar (10% of new chips)
+    let new_sugar = new_chips / 10;
+    if new_sugar > 0 {
+        state.sugar += new_sugar;
+        state.sugar_all_time += new_sugar;
+        state.add_log(&format!("🍬 砂糖 +{} 獲得！", new_sugar), true);
+    }
+
     if state.cookies_all_time > state.best_cookies_single_run {
         state.best_cookies_single_run = state.cookies_all_time;
     }
@@ -741,7 +763,8 @@ pub fn perform_prestige(state: &mut CookieState) -> u64 {
         .sum();
 
     // Recalculate prestige multiplier from chips + prestige upgrades
-    let chip_bonus = 1.0 + state.heavenly_chips as f64 * 0.01;
+    // 1チップ = +5% CPS (旧: +1%)
+    let chip_bonus = 1.0 + state.heavenly_chips as f64 * 0.05;
     let upgrade_cps_mult: f64 = state
         .prestige_upgrades
         .iter()
@@ -770,6 +793,20 @@ pub fn perform_prestige(state: &mut CookieState) -> u64 {
         })
         .product();
 
+    // Calculate starting cursors from prestige upgrades
+    let starting_cursors: u32 = state
+        .prestige_upgrades
+        .iter()
+        .filter(|u| u.purchased)
+        .filter_map(|u| {
+            if let super::state::PrestigeEffect::StartingCursors(count) = &u.effect {
+                Some(*count)
+            } else {
+                None
+            }
+        })
+        .sum();
+
     // Reset game state (keep prestige fields)
     state.cookies = starting_cookies;
     state.cookies_all_time = starting_cookies;
@@ -779,6 +816,18 @@ pub fn perform_prestige(state: &mut CookieState) -> u64 {
         .iter()
         .map(|k| super::state::Producer::new(k.clone()))
         .collect();
+
+    // Apply starting cursors
+    if starting_cursors > 0 {
+        if let Some(cursor) = state
+            .producers
+            .iter_mut()
+            .find(|p| p.kind == super::state::ProducerKind::Cursor)
+        {
+            cursor.count = starting_cursors;
+        }
+    }
+
     state.upgrades = CookieState::create_upgrades();
     state.log.clear();
     state.show_upgrades = false;
@@ -841,6 +890,18 @@ pub fn buy_prestige_upgrade(state: &mut CookieState, index: usize) -> bool {
     if state.prestige_upgrades[index].purchased {
         return false;
     }
+
+    // Check prerequisite
+    if let Some(req_id) = state.prestige_upgrades[index].requires {
+        let prereq_purchased = state
+            .prestige_upgrades
+            .iter()
+            .any(|u| u.id == req_id && u.purchased);
+        if !prereq_purchased {
+            return false;
+        }
+    }
+
     let cost = state.prestige_upgrades[index].cost;
     if state.available_chips() < cost {
         return false;
@@ -851,13 +912,119 @@ pub fn buy_prestige_upgrade(state: &mut CookieState, index: usize) -> bool {
 
     let name = state.prestige_upgrades[index].name.clone();
     let desc = state.prestige_upgrades[index].description.clone();
+    state.add_log(&format!("👼 {} 購入！({})", name, desc), true);
+    state.purchase_flash = 10;
+
+    true
+}
+
+// ═══════════════════════════════════════════════════════
+// Sugar Boost System
+// ═══════════════════════════════════════════════════════
+
+/// Activate a sugar boost. Returns true if successful.
+pub fn activate_sugar_boost(
+    state: &mut CookieState,
+    kind: super::state::SugarBoostKind,
+) -> bool {
+    // Check if already boosted
+    if state.active_sugar_boost.is_some() {
+        state.add_log("⚠ 既にブースト発動中です", true);
+        return false;
+    }
+
+    // Check prestige requirement
+    if state.prestige_count < kind.required_prestige() {
+        state.add_log(
+            &format!(
+                "⚠ 転生{}回で解放されます",
+                kind.required_prestige()
+            ),
+            true,
+        );
+        return false;
+    }
+
+    // Check cost
+    let cost = kind.cost();
+    if state.sugar < cost {
+        state.add_log(&format!("⚠ 砂糖が足りません (必要: {})", cost), true);
+        return false;
+    }
+
+    // Apply sugar boost multiplier from prestige upgrades
+    let boost_mult = state.prestige_sugar_boost_multiplier();
+    let effective_mult = kind.multiplier() * boost_mult;
+    let duration = kind.duration_ticks();
+
+    state.sugar -= cost;
+    state.active_sugar_boost = Some(super::state::ActiveSugarBoost {
+        kind: kind.clone(),
+        ticks_left: duration,
+    });
+
     state.add_log(
-        &format!("👼 {} 購入！({})", name, desc),
+        &format!(
+            "🍬 {} 発動！ CPS×{:.1} ({:.0}秒)",
+            kind.name(),
+            effective_mult,
+            duration as f64 / 10.0
+        ),
         true,
     );
     state.purchase_flash = 10;
 
     true
+}
+
+/// Tick the active sugar boost timer.
+fn tick_sugar_boost(state: &mut CookieState, delta_ticks: u32) {
+    if let Some(ref mut boost) = state.active_sugar_boost {
+        boost.ticks_left = boost.ticks_left.saturating_sub(delta_ticks);
+        if boost.ticks_left == 0 {
+            state.add_log("🍬 砂糖ブースト終了", true);
+            state.active_sugar_boost = None;
+        }
+    }
+}
+
+/// Tick the auto-clicker (unlocked at prestige 1).
+fn tick_auto_clicker(state: &mut CookieState, delta_ticks: u32) {
+    // Check if unlocked and enabled
+    if !state.is_auto_clicker_unlocked() || !state.auto_clicker_enabled {
+        return;
+    }
+
+    // Tick timer
+    state.auto_clicker_timer += delta_ticks;
+    let interval = state.auto_clicker_interval();
+
+    // Perform auto-clicks
+    while state.auto_clicker_timer >= interval {
+        state.auto_clicker_timer -= interval;
+        // Perform click (without combo bonus, just base click power)
+        let power = state.effective_click_power();
+        state.cookies += power;
+        state.cookies_all_time += power;
+        state.total_clicks += 1;
+    }
+}
+
+/// Toggle auto-clicker on/off. Returns the new state.
+pub fn toggle_auto_clicker(state: &mut CookieState) -> bool {
+    if !state.is_auto_clicker_unlocked() {
+        state.add_log("⚠ オートクリッカーは転生1回で解放されます", true);
+        return false;
+    }
+
+    state.auto_clicker_enabled = !state.auto_clicker_enabled;
+    if state.auto_clicker_enabled {
+        let rate = state.auto_clicker_rate();
+        state.add_log(&format!("🤖 オートクリッカー ON ({}/秒)", rate), true);
+    } else {
+        state.add_log("🤖 オートクリッカー OFF", true);
+    }
+    state.auto_clicker_enabled
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1589,8 +1756,8 @@ mod tests {
         state.cookies_all_time = 100e12; // sqrt(100) = 10 chips
         perform_prestige(&mut state);
         assert_eq!(state.heavenly_chips, 10);
-        // prestige_multiplier = 1.0 + 10 * 0.01 = 1.10
-        assert!((state.prestige_multiplier - 1.10).abs() < 0.001);
+        // prestige_multiplier = 1.0 + 10 * 0.05 = 1.50 (旧: 0.01 = 1.10)
+        assert!((state.prestige_multiplier - 1.50).abs() < 0.001);
     }
 
     #[test]

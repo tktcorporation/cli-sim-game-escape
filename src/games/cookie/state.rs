@@ -398,15 +398,34 @@ pub struct CookieLogEntry {
     pub is_important: bool,
 }
 
+/// Prestige upgrade path (for tree structure).
+#[derive(Clone, Debug, PartialEq)]
+pub enum PrestigePath {
+    /// Root upgrade (天使の贈り物)
+    Root,
+    /// 生産パス — 放置向け、CPS強化
+    Production,
+    /// クリックパス — アクティブ向け、クリック強化
+    Click,
+    /// 幸運パス — イベント向け、ゴールデン強化
+    Luck,
+}
+
 /// Prestige upgrade definition.
 #[derive(Clone, Debug)]
 pub struct PrestigeUpgrade {
+    /// Unique identifier for prerequisite checking.
+    pub id: &'static str,
     pub name: String,
     pub description: String,
     /// Cost in heavenly chips.
     pub cost: u64,
     pub purchased: bool,
     pub effect: PrestigeEffect,
+    /// ID of the required upgrade (None = no prerequisite).
+    pub requires: Option<&'static str>,
+    /// Which path this upgrade belongs to.
+    pub path: PrestigePath,
 }
 
 /// Prestige upgrade effects.
@@ -422,6 +441,85 @@ pub enum PrestigeEffect {
     GoldenCookieSpeed(f64),
     /// Retain a percentage of milk across resets.
     MilkRetention(f64),
+    /// Reduce all producer costs by this fraction (e.g. 0.1 = 10% off).
+    ProducerCostReduction(f64),
+    /// Start with N Cursors after prestige.
+    StartingCursors(u32),
+    /// Sugar boost effectiveness multiplier.
+    SugarBoostMultiplier(f64),
+    /// Golden cookie effect duration multiplier.
+    GoldenDuration(f64),
+    /// Golden cookie effect strength multiplier.
+    GoldenEffectMultiplier(f64),
+}
+
+// ═══════════════════════════════════════════════════════
+// Sugar System — 生産ブースト用消費リソース
+// ═══════════════════════════════════════════════════════
+
+/// Sugar boost types.
+#[derive(Clone, Debug, PartialEq)]
+pub enum SugarBoostKind {
+    /// シュガーラッシュ: CPS ×2, 30秒
+    Rush,
+    /// シュガーフィーバー: CPS ×5, 30秒
+    Fever,
+    /// シュガーフレンジー: CPS ×10, 60秒 (転生3回で解放)
+    Frenzy,
+}
+
+impl SugarBoostKind {
+    /// Cost in sugar.
+    pub fn cost(&self) -> u64 {
+        match self {
+            SugarBoostKind::Rush => 1,
+            SugarBoostKind::Fever => 5,
+            SugarBoostKind::Frenzy => 20,
+        }
+    }
+
+    /// CPS multiplier.
+    pub fn multiplier(&self) -> f64 {
+        match self {
+            SugarBoostKind::Rush => 2.0,
+            SugarBoostKind::Fever => 5.0,
+            SugarBoostKind::Frenzy => 10.0,
+        }
+    }
+
+    /// Duration in ticks (10 ticks = 1 second).
+    pub fn duration_ticks(&self) -> u32 {
+        match self {
+            SugarBoostKind::Rush => 300,   // 30秒
+            SugarBoostKind::Fever => 300,  // 30秒
+            SugarBoostKind::Frenzy => 600, // 60秒
+        }
+    }
+
+    /// Name for display.
+    pub fn name(&self) -> &'static str {
+        match self {
+            SugarBoostKind::Rush => "シュガーラッシュ",
+            SugarBoostKind::Fever => "シュガーフィーバー",
+            SugarBoostKind::Frenzy => "シュガーフレンジー",
+        }
+    }
+
+    /// Prestige count required to unlock.
+    pub fn required_prestige(&self) -> u32 {
+        match self {
+            SugarBoostKind::Rush => 0,
+            SugarBoostKind::Fever => 0,
+            SugarBoostKind::Frenzy => 3,
+        }
+    }
+}
+
+/// Active sugar boost.
+#[derive(Clone, Debug)]
+pub struct ActiveSugarBoost {
+    pub kind: SugarBoostKind,
+    pub ticks_left: u32,
 }
 
 // ═══════════════════════════════════════════════════════
@@ -658,6 +756,22 @@ pub struct CookieState {
     /// Flash timer for prestige action.
     pub prestige_flash: u32,
 
+    // === Sugar system — 生産ブースト用消費リソース ===
+    /// Current sugar amount.
+    pub sugar: u64,
+    /// Total sugar earned all time.
+    pub sugar_all_time: u64,
+    /// Active sugar boost (if any).
+    pub active_sugar_boost: Option<ActiveSugarBoost>,
+    /// Whether showing the sugar boost panel.
+    pub show_sugar: bool,
+
+    // === Auto-clicker system — unlocked at prestige 1 ===
+    /// Whether auto-clicker is enabled.
+    pub auto_clicker_enabled: bool,
+    /// Ticks until next auto-click (internal timer).
+    pub auto_clicker_timer: u32,
+
     // === Statistics — survives reset ===
     /// Total ticks played across all runs.
     pub total_ticks: u64,
@@ -763,6 +877,14 @@ impl CookieState {
             show_prestige: false,
             prestige_upgrades: Self::create_prestige_upgrades(),
             prestige_flash: 0,
+            // Sugar system
+            sugar: 0,
+            sugar_all_time: 0,
+            active_sugar_boost: None,
+            show_sugar: false,
+            // Auto-clicker
+            auto_clicker_enabled: false,
+            auto_clicker_timer: 0,
             // Statistics
             total_ticks: 0,
             best_cps: 0.0,
@@ -1670,61 +1792,177 @@ impl CookieState {
 
     fn create_prestige_upgrades() -> Vec<PrestigeUpgrade> {
         vec![
+            // ═══════════════════════════════════════════════════════
+            // Root — すべてのパスの前提
+            // ═══════════════════════════════════════════════════════
             PrestigeUpgrade {
+                id: "angels_gift",
                 name: "天使の贈り物".into(),
                 description: "転生後 1,000 クッキーで開始".into(),
                 cost: 1,
                 purchased: false,
                 effect: PrestigeEffect::StartingCookies(1_000.0),
+                requires: None,
+                path: PrestigePath::Root,
             },
+            // ═══════════════════════════════════════════════════════
+            // 生産パス — 放置向け、CPS強化
+            // ═══════════════════════════════════════════════════════
             PrestigeUpgrade {
+                id: "heavenly_power",
                 name: "天界の力".into(),
                 description: "CPS 永続 ×1.5".into(),
                 cost: 3,
                 purchased: false,
                 effect: PrestigeEffect::CpsMultiplier(1.5),
+                requires: Some("angels_gift"),
+                path: PrestigePath::Production,
             },
             PrestigeUpgrade {
-                name: "天使のクリック".into(),
-                description: "クリック力 永続 ×2".into(),
-                cost: 5,
-                purchased: false,
-                effect: PrestigeEffect::ClickMultiplier(2.0),
-            },
-            PrestigeUpgrade {
-                name: "ゴールデンラッシュ".into(),
-                description: "ゴールデンクッキー出現速度 1.5倍".into(),
-                cost: 10,
-                purchased: false,
-                effect: PrestigeEffect::GoldenCookieSpeed(0.67),
-            },
-            PrestigeUpgrade {
+                id: "angels_aura",
                 name: "天使のオーラ".into(),
                 description: "CPS 永続 ×2".into(),
-                cost: 25,
+                cost: 10,
                 purchased: false,
                 effect: PrestigeEffect::CpsMultiplier(2.0),
+                requires: Some("heavenly_power"),
+                path: PrestigePath::Production,
             },
             PrestigeUpgrade {
-                name: "ミルクの記憶".into(),
-                description: "転生後にミルクを50%保持".into(),
+                id: "factory_memory",
+                name: "工場の記憶".into(),
+                description: "転生後 Cursor 5台で開始".into(),
+                cost: 25,
+                purchased: false,
+                effect: PrestigeEffect::StartingCursors(5),
+                requires: Some("angels_aura"),
+                path: PrestigePath::Production,
+            },
+            PrestigeUpgrade {
+                id: "efficiency_peak",
+                name: "効率の極致".into(),
+                description: "全生産者コスト -10%".into(),
                 cost: 50,
                 purchased: false,
-                effect: PrestigeEffect::MilkRetention(0.5),
+                effect: PrestigeEffect::ProducerCostReduction(0.1),
+                requires: Some("factory_memory"),
+                path: PrestigePath::Production,
             },
             PrestigeUpgrade {
+                id: "heavenly_wealth",
                 name: "天界の富".into(),
                 description: "転生後 1,000,000 クッキーで開始".into(),
                 cost: 100,
                 purchased: false,
                 effect: PrestigeEffect::StartingCookies(1_000_000.0),
+                requires: Some("efficiency_peak"),
+                path: PrestigePath::Production,
+            },
+            // ═══════════════════════════════════════════════════════
+            // クリックパス — アクティブ向け、クリック強化
+            // ═══════════════════════════════════════════════════════
+            PrestigeUpgrade {
+                id: "angels_click",
+                name: "天使のクリック".into(),
+                description: "クリック力 永続 ×2".into(),
+                cost: 3,
+                purchased: false,
+                effect: PrestigeEffect::ClickMultiplier(2.0),
+                requires: Some("angels_gift"),
+                path: PrestigePath::Click,
             },
             PrestigeUpgrade {
+                id: "gods_click",
                 name: "神のクリック".into(),
+                description: "クリック力 永続 ×3".into(),
+                cost: 10,
+                purchased: false,
+                effect: PrestigeEffect::ClickMultiplier(3.0),
+                requires: Some("angels_click"),
+                path: PrestigePath::Click,
+            },
+            PrestigeUpgrade {
+                id: "sugar_alchemy",
+                name: "砂糖錬金術".into(),
+                description: "砂糖ブースト効果 +50%".into(),
+                cost: 25,
+                purchased: false,
+                effect: PrestigeEffect::SugarBoostMultiplier(1.5),
+                requires: Some("gods_click"),
+                path: PrestigePath::Click,
+            },
+            PrestigeUpgrade {
+                id: "combo_mastery",
+                name: "連撃の極意".into(),
+                description: "クリック力 永続 ×2".into(),
+                cost: 50,
+                purchased: false,
+                effect: PrestigeEffect::ClickMultiplier(2.0),
+                requires: Some("sugar_alchemy"),
+                path: PrestigePath::Click,
+            },
+            PrestigeUpgrade {
+                id: "click_sovereign",
+                name: "クリックの覇者".into(),
                 description: "クリック力 永続 ×5".into(),
-                cost: 200,
+                cost: 100,
                 purchased: false,
                 effect: PrestigeEffect::ClickMultiplier(5.0),
+                requires: Some("combo_mastery"),
+                path: PrestigePath::Click,
+            },
+            // ═══════════════════════════════════════════════════════
+            // 幸運パス — イベント向け、ゴールデン強化
+            // ═══════════════════════════════════════════════════════
+            PrestigeUpgrade {
+                id: "golden_rush",
+                name: "ゴールデンラッシュ".into(),
+                description: "ゴールデンクッキー出現 1.5倍速".into(),
+                cost: 3,
+                purchased: false,
+                effect: PrestigeEffect::GoldenCookieSpeed(0.67),
+                requires: Some("angels_gift"),
+                path: PrestigePath::Luck,
+            },
+            PrestigeUpgrade {
+                id: "golden_intuition",
+                name: "黄金の直感".into(),
+                description: "ゴールデン効果時間 +30%".into(),
+                cost: 10,
+                purchased: false,
+                effect: PrestigeEffect::GoldenDuration(1.3),
+                requires: Some("golden_rush"),
+                path: PrestigePath::Luck,
+            },
+            PrestigeUpgrade {
+                id: "luck_extension",
+                name: "幸運の延長".into(),
+                description: "ゴールデン効果時間 +50%".into(),
+                cost: 25,
+                purchased: false,
+                effect: PrestigeEffect::GoldenDuration(1.5),
+                requires: Some("golden_intuition"),
+                path: PrestigePath::Luck,
+            },
+            PrestigeUpgrade {
+                id: "milk_memory",
+                name: "ミルクの記憶".into(),
+                description: "転生後にミルクを50%保持".into(),
+                cost: 50,
+                purchased: false,
+                effect: PrestigeEffect::MilkRetention(0.5),
+                requires: Some("luck_extension"),
+                path: PrestigePath::Luck,
+            },
+            PrestigeUpgrade {
+                id: "luck_sovereign",
+                name: "幸運の支配者".into(),
+                description: "ゴールデン効果 ×2".into(),
+                cost: 100,
+                purchased: false,
+                effect: PrestigeEffect::GoldenEffectMultiplier(2.0),
+                requires: Some("milk_memory"),
+                path: PrestigePath::Luck,
             },
         ]
     }
@@ -1870,6 +2108,79 @@ impl CookieState {
         mult
     }
 
+    /// Buff duration multiplier from prestige upgrades.
+    pub fn prestige_buff_duration(&self) -> f64 {
+        let mut mult = 1.0;
+        for upgrade in &self.prestige_upgrades {
+            if upgrade.purchased {
+                if let PrestigeEffect::GoldenDuration(m) = &upgrade.effect {
+                    mult *= m;
+                }
+            }
+        }
+        mult
+    }
+
+    /// Golden effect multiplier from prestige upgrades.
+    pub fn prestige_golden_effect_multiplier(&self) -> f64 {
+        let mut mult = 1.0;
+        for upgrade in &self.prestige_upgrades {
+            if upgrade.purchased {
+                if let PrestigeEffect::GoldenEffectMultiplier(m) = &upgrade.effect {
+                    mult *= m;
+                }
+            }
+        }
+        mult
+    }
+
+    /// Total buff duration multiplier (research + prestige).
+    pub fn total_buff_duration(&self) -> f64 {
+        self.research_buff_duration() * self.prestige_buff_duration()
+    }
+
+    /// Sugar boost effectiveness multiplier from prestige upgrades.
+    pub fn prestige_sugar_boost_multiplier(&self) -> f64 {
+        let mut mult = 1.0;
+        for upgrade in &self.prestige_upgrades {
+            if upgrade.purchased {
+                if let PrestigeEffect::SugarBoostMultiplier(m) = &upgrade.effect {
+                    mult *= m;
+                }
+            }
+        }
+        mult
+    }
+
+    /// Current sugar boost CPS multiplier (1.0 if no boost active).
+    pub fn sugar_boost_multiplier(&self) -> f64 {
+        if let Some(ref boost) = self.active_sugar_boost {
+            boost.kind.multiplier() * self.prestige_sugar_boost_multiplier()
+        } else {
+            1.0
+        }
+    }
+
+    /// Whether auto-clicker is unlocked (prestige >= 1).
+    pub fn is_auto_clicker_unlocked(&self) -> bool {
+        self.prestige_count >= 1
+    }
+
+    /// Auto-clicker rate (clicks per second).
+    /// Returns 1 at prestige 1-9, 5 at prestige 10+.
+    pub fn auto_clicker_rate(&self) -> u32 {
+        if self.prestige_count >= 10 {
+            5
+        } else {
+            1
+        }
+    }
+
+    /// Ticks between auto-clicks.
+    pub fn auto_clicker_interval(&self) -> u32 {
+        10 / self.auto_clicker_rate() // 10 ticks/sec ÷ rate
+    }
+
     /// Synergy multiplier from research.
     pub fn research_synergy_modifier(&self) -> f64 {
         let mut mult = 1.0;
@@ -2002,12 +2313,28 @@ impl CookieState {
     // === Market helper ===
 
     /// Combined cost modifier from market, research, dragon, and discount.
+    /// Cost reduction from prestige upgrades (e.g. 0.1 = 10% off).
+    pub fn prestige_cost_reduction(&self) -> f64 {
+        self.prestige_upgrades
+            .iter()
+            .filter(|u| u.purchased)
+            .filter_map(|u| {
+                if let PrestigeEffect::ProducerCostReduction(pct) = &u.effect {
+                    Some(*pct)
+                } else {
+                    None
+                }
+            })
+            .sum()
+    }
+
     pub fn total_cost_modifier(&self) -> f64 {
         let market = self.market_phase.cost_multiplier();
         let research = self.research_cost_modifier();
         let dragon = self.dragon_cost_modifier();
         let discount = 1.0 - self.active_discount;
-        market * research * dragon * discount
+        let prestige = 1.0 - self.prestige_cost_reduction();
+        market * research * dragon * discount * prestige
     }
 
     /// Available heavenly chips (earned - spent).
@@ -2147,7 +2474,10 @@ impl CookieState {
             }
         }
 
-        after_market * multiplier
+        // Step 8: Apply sugar boost
+        let sugar_mult = self.sugar_boost_multiplier();
+
+        after_market * multiplier * sugar_mult
     }
 
     /// Effective cookies per click (with buffs, research, dragon).
