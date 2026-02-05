@@ -15,6 +15,7 @@ use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
 use ratzilla::ratatui::Terminal;
 use ratzilla::{DomBackend, WebRenderer};
+use wasm_bindgen::prelude::*;
 
 /// Use `elementFromPoint` to find which grid row was clicked.
 ///
@@ -131,6 +132,31 @@ fn main() -> io::Result<()> {
             );
         }
     });
+
+    // Touch event handler (for mobile devices)
+    // Ratzilla only handles mouse events, so we need to add touch support explicitly
+    {
+        let app_state = app_state.clone();
+        let click_state = click_state.clone();
+        let closure = Closure::<dyn FnMut(_)>::new(move |event: web_sys::TouchEvent| {
+            // Prevent default to avoid double-firing with emulated mouse events
+            event.prevent_default();
+
+            // Get the first touch point
+            if let Some(touch) = event.changed_touches().get(0) {
+                let client_x = touch.client_x() as f64;
+                let client_y = touch.client_y() as f64;
+                handle_tap(client_x, client_y, &app_state, &click_state);
+            }
+        });
+
+        let window = web_sys::window().expect("no global window exists");
+        let document = window.document().expect("should have a document");
+        document
+            .add_event_listener_with_callback("touchstart", closure.as_ref().unchecked_ref())
+            .expect("failed to add touchstart listener");
+        closure.forget();
+    }
 
     // Keyboard handler
     terminal.on_key_event({

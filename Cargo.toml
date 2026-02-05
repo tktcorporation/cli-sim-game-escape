@@ -8,7 +8,8 @@ ratzilla = "0.3"
 console_error_panic_hook = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "DomRect", "HtmlCollection", "Performance", "Storage", "console"] }
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = ["Window", "Document", "Element", "DomRect", "HtmlCollection", "Performance", "Storage", "console", "Touch", "TouchEvent", "TouchList"] }
 
 [dev-dependencies]
 proptest = "1.4"
