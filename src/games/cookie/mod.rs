@@ -172,6 +172,24 @@ impl Game for CookieGame {
                 logic::buy_producer(&mut self.state, &kind);
                 true
             }
+            // Sugar boost activation (Shift+R=Rush, Shift+F=Fever, Shift+Z=Frenzy)
+            'R' if self.state.show_prestige => {
+                logic::activate_sugar_boost(&mut self.state, state::SugarBoostKind::Rush);
+                true
+            }
+            'F' if self.state.show_prestige => {
+                logic::activate_sugar_boost(&mut self.state, state::SugarBoostKind::Fever);
+                true
+            }
+            'Z' if self.state.show_prestige => {
+                logic::activate_sugar_boost(&mut self.state, state::SugarBoostKind::Frenzy);
+                true
+            }
+            // Auto-clicker toggle (Shift+A)
+            'A' if self.state.show_prestige => {
+                logic::toggle_auto_clicker(&mut self.state);
+                true
+            }
             'a'..='z' if self.state.show_prestige => {
                 let idx = (key as u8 - b'a') as usize;
                 logic::buy_prestige_upgrade(&mut self.state, idx);
