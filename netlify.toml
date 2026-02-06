@@ -6,3 +6,16 @@
   RUSTUP_HOME = "/opt/buildhome/.rustup"
   CARGO_HOME = "/opt/buildhome/.cargo"
   TRUNK_VERSION = "0.21.14"
+  # Reduce Netlify verbose output
+  CARGO_TERM_VERBOSE = "false"
+
+# Cache Rust build artifacts for faster subsequent builds
+[[plugins]]
+  package = "netlify-plugin-cache"
+
+  [plugins.inputs]
+    paths = [
+      "/opt/buildhome/.cargo/registry",
+      "/opt/buildhome/.cargo/bin",
+      "target",
+    ]
