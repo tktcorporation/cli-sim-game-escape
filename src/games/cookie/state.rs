@@ -769,7 +769,6 @@ pub struct CookieState {
     /// Active sugar boost (if any).
     pub active_sugar_boost: Option<ActiveSugarBoost>,
     /// Whether showing the sugar boost panel.
-    pub show_sugar: bool,
 
     // === Auto-clicker system — unlocked at prestige 1 ===
     /// Whether auto-clicker is enabled.
@@ -886,7 +885,6 @@ impl CookieState {
             sugar: 0,
             sugar_all_time: 0,
             active_sugar_boost: None,
-            show_sugar: false,
             // Auto-clicker
             auto_clicker_enabled: false,
             auto_clicker_timer: 0,

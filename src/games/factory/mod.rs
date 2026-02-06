@@ -16,6 +16,7 @@ use crate::games::Game;
 use crate::input::{ClickState, InputEvent};
 
 use actions::*;
+use grid::VIEW_W;
 use state::{FactoryState, PlacementTool};
 
 pub struct FactoryGame {
@@ -57,6 +58,21 @@ impl FactoryGame {
             }
             SELECT_DELETE => {
                 self.state.tool = PlacementTool::Delete;
+                true
+            }
+            TOGGLE_MINER_MODE => {
+                logic::toggle_miner_mode(&mut self.state);
+                true
+            }
+            id if id >= GRID_CLICK_BASE => {
+                let offset = (id - GRID_CLICK_BASE) as usize;
+                let vy_offset = offset / VIEW_W;
+                let vx_offset = offset % VIEW_W;
+                let target_x = self.state.viewport_x + vx_offset;
+                let target_y = self.state.viewport_y + vy_offset;
+                self.state.cursor_x = target_x;
+                self.state.cursor_y = target_y;
+                logic::place(&mut self.state);
                 true
             }
             _ => false,

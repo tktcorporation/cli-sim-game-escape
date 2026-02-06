@@ -226,9 +226,9 @@ fn render_cookie_display(
     };
 
     let click_label = if click_power > 1.0 {
-        format!("[C]+{}", format_number(click_power))
+        format!("CLICK +{}", format_number(click_power))
     } else {
-        "[C] CLICK!".to_string()
+        "CLICK!".to_string()
     };
 
     let ready_count = state.ready_milestone_count();
@@ -617,7 +617,7 @@ fn render_buffs_and_golden(
         lines.push(Line::from(vec![
             Span::styled(" 🍪 ゴールデンクッキー！ ", golden_style),
             Span::styled(
-                format!("[G]で取得 (残り{:.0}秒)", secs_left),
+                format!("タップで取得 (残り{:.0}秒)", secs_left),
                 Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
             ),
         ]));
@@ -790,7 +790,7 @@ fn render_producers(
             let best_marker = if is_best_roi { "◆" } else { " " };
 
             let mut spans = vec![
-                Span::styled(format!("{}{} [{}] ", best_marker, rating_display, p.kind.key()), key_style),
+                Span::styled(format!("{}{} ", best_marker, rating_display), key_style),
                 Span::styled(
                     format!("{:<8} {:>2}x ", p.kind.name(), p.count),
                     text_style,
@@ -822,7 +822,7 @@ fn render_producers(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(producer_border_color))
-            .title(" Producers [1-0,-,=]で購入 ◆=最高効率 ★=回収速度 "),
+            .title(" Producers ◆=最高効率 ★=回収速度 "),
     );
     f.render_widget(widget, area);
 
@@ -853,23 +853,13 @@ fn render_upgrades(
         .collect();
 
     let mut all_items: Vec<ListItem> = Vec::new();
-    let mut key_idx: u8 = 0;
 
     // === Upgrade items ===
     for (_, upgrade, unlocked) in &available {
         let can_afford = state.cookies >= upgrade.cost && *unlocked;
-        let key = (b'a' + key_idx) as char;
-        key_idx += 1;
         let cost_str = format_number(upgrade.cost);
 
         if *unlocked {
-            let key_style = if can_afford {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
             let text_style = if can_afford {
                 Style::default().fg(Color::White)
             } else {
@@ -877,9 +867,8 @@ fn render_upgrades(
             };
 
             all_items.push(ListItem::new(Line::from(vec![
-                Span::styled(format!(" [{}] ", key), key_style),
                 Span::styled(
-                    format!("{} - {} ({})", upgrade.name, upgrade.description, cost_str),
+                    format!(" {} - {} ({})", upgrade.name, upgrade.description, cost_str),
                     text_style,
                 ),
             ])));
@@ -893,9 +882,8 @@ fn render_upgrades(
             };
 
             all_items.push(ListItem::new(Line::from(vec![
-                Span::styled(format!(" [{}] ", key), Style::default().fg(Color::DarkGray)),
                 Span::styled(
-                    format!("{} - {} ", upgrade.name, upgrade.description),
+                    format!(" {} - {} ", upgrade.name, upgrade.description),
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(hint, Style::default().fg(Color::Red)),
@@ -915,7 +903,7 @@ fn render_upgrades(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Magenta))
-            .title(" Upgrades [A-Z]で購入 "),
+            .title(" Upgrades "),
     );
     f.render_widget(widget, area);
 
@@ -974,7 +962,6 @@ fn render_research(
 
         let can_buy_tier = node.tier <= max_tier + 1;
         let can_afford = state.cookies >= node.cost && can_buy_tier;
-        let key = (b'a' + key_idx) as char;
         key_idx += 1;
 
         let path_icon = match &node.path {
@@ -984,13 +971,6 @@ fn render_research(
         };
 
         if can_buy_tier {
-            let key_style = if can_afford {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
             let text_style = if can_afford {
                 Style::default().fg(Color::White)
             } else {
@@ -998,10 +978,9 @@ fn render_research(
             };
 
             all_items.push(ListItem::new(Line::from(vec![
-                Span::styled(format!(" [{}] ", key), key_style),
                 Span::styled(
                     format!(
-                        "{} T{}: {} - {} ({})",
+                        " {} T{}: {} - {} ({})",
                         path_icon,
                         node.tier,
                         node.name,
@@ -1013,10 +992,9 @@ fn render_research(
             ])));
         } else {
             all_items.push(ListItem::new(Line::from(vec![
-                Span::styled(format!(" [{}] ", key), Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!(
-                        "{} T{}: {} 🔒 前段階の研究が必要",
+                        " {} T{}: {} 🔒 前段階の研究が必要",
                         path_icon, node.tier, node.name
                     ),
                     Style::default().fg(Color::DarkGray),
@@ -1029,7 +1007,7 @@ fn render_research(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(" Research [A-Z]で購入 "),
+            .title(" Research "),
     );
     f.render_widget(widget, area);
 
@@ -1086,6 +1064,7 @@ fn render_milestones(
     ]));
 
     // Ready count hint
+    let mut bulk_claim_line: Option<u16> = None;
     if ready > 0 {
         lines.push(Line::from(vec![
             Span::styled(
@@ -1095,10 +1074,13 @@ fn render_milestones(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                " [a-z]個別  [!]一括解放",
-                Style::default().fg(Color::DarkGray),
+                " ▶一括解放",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ),
         ]));
+        bulk_claim_line = Some(lines.len() as u16 - 1);
     }
 
     // Available height for milestone list (area minus border + header lines + effects section)
@@ -1112,17 +1094,10 @@ fn render_milestones(
         .filter(|m| m.status == MilestoneStatus::Ready)
         .collect();
     for milestone in &ready_milestones {
-        let key = (b'a' + ready_key_idx) as char;
         ready_key_idx += 1;
         lines.push(Line::from(vec![
             Span::styled(
-                format!(" [{}] ", key),
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("✨ {}", milestone.name),
+                format!(" ✨ {}", milestone.name),
                 Style::default()
                     .fg(Color::Green)
                     .add_modifier(Modifier::BOLD),
@@ -1292,11 +1267,18 @@ fn render_milestones(
         .wrap(Wrap { trim: false });
     f.render_widget(widget, area);
 
-    // Click targets for ready milestones (they are at the top of the list)
+    // Click targets for ready milestones and bulk claim
     let mut cs = click_state.borrow_mut();
-    // header_used + 1 for border top
-    let first_ready_row = area.y + 1 + header_used;
     let content_end = area.y + area.height.saturating_sub(1);
+    // Bulk claim button
+    if let Some(line_idx) = bulk_claim_line {
+        let row = area.y + 1 + line_idx;
+        if row < content_end {
+            cs.add_row_target(area, row, CLAIM_ALL_MILESTONES);
+        }
+    }
+    // Individual ready milestones (after header lines)
+    let first_ready_row = area.y + 1 + header_used;
     for i in 0..ready_key_idx {
         let row = first_ready_row + i as u16;
         if row < content_end {
@@ -1339,6 +1321,14 @@ fn render_prestige(
         ),
     ]));
 
+    // Track line indices for click targets (line index within the lines vec)
+    let mut prestige_reset_line: Option<u16> = None;
+    let mut prestige_upgrade_lines: Vec<(usize, u16)> = Vec::new(); // (upgrade_idx, line_idx)
+    let mut sugar_boost_lines: Vec<(u16, u16)> = Vec::new(); // (action_id, line_idx)
+    let mut auto_clicker_line: Option<u16> = None;
+    let mut dragon_feed_lines: Vec<(usize, u16)> = Vec::new(); // (producer_idx, line_idx)
+    let mut dragon_aura_line: Option<u16> = None;
+
     // Pending chips preview
     if pending > 0 {
         let blink = (state.anim_frame / 3).is_multiple_of(2);
@@ -1351,9 +1341,10 @@ fn render_prestige(
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD)
         };
+        prestige_reset_line = Some(lines.len() as u16);
         lines.push(Line::from(vec![
             Span::styled(
-                format!(" 🌟 [P] 転生で +{} チップ獲得！", pending),
+                format!(" 🌟 ▶転生で +{} チップ獲得！", pending),
                 style,
             ),
         ]));
@@ -1400,8 +1391,6 @@ fn render_prestige(
         )));
 
         for (i, upgrade) in path_upgrades {
-            let key = (b'a' + i as u8) as char;
-
             // Check prerequisite
             let prereq_met = upgrade.requires.is_none()
                 || state
@@ -1409,14 +1398,13 @@ fn render_prestige(
                     .iter()
                     .any(|u| Some(u.id) == upgrade.requires && u.purchased);
 
+            let line_idx = lines.len() as u16;
+            prestige_upgrade_lines.push((i, line_idx));
+
             if upgrade.purchased {
                 lines.push(Line::from(vec![
                     Span::styled(
-                        format!("  [{}] ", key),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        format!("✅ {} ", upgrade.name),
+                        format!("  ✅ {} ", upgrade.name),
                         Style::default().fg(Color::Green),
                     ),
                     Span::styled(
@@ -1425,14 +1413,9 @@ fn render_prestige(
                     ),
                 ]));
             } else if !prereq_met {
-                // Locked - prerequisite not met
                 lines.push(Line::from(vec![
                     Span::styled(
-                        format!("  [{}] ", key),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        format!("🔒 {} ", upgrade.name),
+                        format!("  🔒 {} ", upgrade.name),
                         Style::default().fg(Color::DarkGray),
                     ),
                     Span::styled(
@@ -1442,21 +1425,13 @@ fn render_prestige(
                 ]));
             } else {
                 let can_afford = available >= upgrade.cost;
-                let key_style = if can_afford {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
                 let text_style = if can_afford {
                     Style::default().fg(Color::White)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
                 lines.push(Line::from(vec![
-                    Span::styled(format!("  [{}] ", key), key_style),
-                    Span::styled(format!("{} ", upgrade.name), text_style),
+                    Span::styled(format!("  {} ", upgrade.name), text_style),
                     Span::styled(format!("- {} ", upgrade.description), text_style),
                     Span::styled(
                         format!("({}チップ)", upgrade.cost),
@@ -1517,11 +1492,11 @@ fn render_prestige(
     // Sugar boost options
     use super::state::SugarBoostKind;
     let boosts = [
-        (SugarBoostKind::Rush, "R"),
-        (SugarBoostKind::Fever, "F"),
-        (SugarBoostKind::Frenzy, "Z"),
+        (SugarBoostKind::Rush, SUGAR_RUSH),
+        (SugarBoostKind::Fever, SUGAR_FEVER),
+        (SugarBoostKind::Frenzy, SUGAR_FRENZY),
     ];
-    for (kind, key) in boosts.iter() {
+    for (kind, action_id) in boosts.iter() {
         let cost = kind.cost();
         let mult = kind.multiplier() * state.prestige_sugar_boost_multiplier();
         let duration = kind.duration_ticks() as f64 / 10.0;
@@ -1530,14 +1505,13 @@ fn render_prestige(
         let is_unlocked = state.prestige_count >= required_prestige;
         let can_afford = state.sugar >= cost && state.active_sugar_boost.is_none();
 
+        let line_idx = lines.len() as u16;
+        sugar_boost_lines.push((*action_id, line_idx));
+
         if !is_unlocked {
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!(" [{}] ", key),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("🔒 {} ", kind.name()),
+                    format!(" 🔒 {} ", kind.name()),
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::styled(
@@ -1546,21 +1520,13 @@ fn render_prestige(
                 ),
             ]));
         } else {
-            let key_style = if can_afford {
-                Style::default()
-                    .fg(Color::Rgb(255, 182, 193))
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
             let text_style = if can_afford {
                 Style::default().fg(Color::White)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
             lines.push(Line::from(vec![
-                Span::styled(format!(" [{}] ", key), key_style),
-                Span::styled(format!("{} ", kind.name()), text_style),
+                Span::styled(format!(" {} ", kind.name()), text_style),
                 Span::styled(
                     format!("CPS×{:.1} {:.0}秒 ", mult, duration),
                     text_style,
@@ -1597,9 +1563,10 @@ fn render_prestige(
         } else {
             Color::Red
         };
+        auto_clicker_line = Some(lines.len() as u16);
         lines.push(Line::from(vec![
             Span::styled(
-                " [A] オートクリッカー ",
+                " 🤖 オートクリッカー ",
                 Style::default()
                     .fg(Color::Rgb(100, 149, 237))
                     .add_modifier(Modifier::BOLD),
@@ -1674,18 +1641,28 @@ fn render_prestige(
             ),
             Span::styled(bar, Style::default().fg(Color::Red)),
             Span::styled(
-                format!(" {}/{} ", fed, feed_cost),
+                format!(" {}/{}", fed, feed_cost),
                 Style::default().fg(Color::White),
             ),
-            Span::styled(
-                "[1-8]で生産者を捧げる",
-                Style::default().fg(Color::DarkGray),
-            ),
         ]));
+        // Dragon feed rows — show producers with count > 0
+        for p in &state.producers {
+            if p.count > 0 {
+                let line_idx = lines.len() as u16;
+                dragon_feed_lines.push((p.kind.index(), line_idx));
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        format!("   ▶{} ({}台)", p.kind.name(), p.count),
+                        Style::default().fg(Color::Red),
+                    ),
+                ]));
+            }
+        }
     }
 
     // Dragon aura selection
     if state.dragon_level >= 1 {
+        dragon_aura_line = Some(lines.len() as u16);
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" 🔮 オーラ: {} ", state.dragon_aura.name()),
@@ -1698,7 +1675,7 @@ fn render_prestige(
                 Style::default().fg(Color::Magenta),
             ),
             Span::styled(
-                "[9]で切替",
+                "▶切替",
                 Style::default().fg(Color::DarkGray),
             ),
         ]));
@@ -1779,19 +1756,49 @@ fn render_prestige(
         .wrap(Wrap { trim: false });
     f.render_widget(widget, area);
 
-    // Click targets
+    // Click targets — use tracked line indices for accurate positioning
     let mut cs = click_state.borrow_mut();
     let content_end = area.y + area.height.saturating_sub(1);
-    // Prestige reset action (on pending chips line)
-    if pending > 0 && area.y + 2 < content_end {
-        cs.add_row_target(area, area.y + 2, PRESTIGE_RESET);
-    }
-    // Prestige upgrade purchase
-    let first_upgrade_row = area.y + 4; // after header + pending + separator
-    for (i, _) in state.prestige_upgrades.iter().enumerate() {
-        let row = first_upgrade_row + i as u16;
+    // Prestige reset
+    if let Some(line_idx) = prestige_reset_line {
+        let row = area.y + 1 + line_idx;
         if row < content_end {
-            cs.add_row_target(area, row, BUY_PRESTIGE_UPGRADE_BASE + i as u16);
+            cs.add_row_target(area, row, PRESTIGE_RESET);
+        }
+    }
+    // Prestige upgrades
+    for (upgrade_idx, line_idx) in &prestige_upgrade_lines {
+        let row = area.y + 1 + line_idx;
+        if row < content_end {
+            cs.add_row_target(area, row, BUY_PRESTIGE_UPGRADE_BASE + *upgrade_idx as u16);
+        }
+    }
+    // Sugar boosts
+    for (action_id, line_idx) in &sugar_boost_lines {
+        let row = area.y + 1 + line_idx;
+        if row < content_end {
+            cs.add_row_target(area, row, *action_id);
+        }
+    }
+    // Auto-clicker toggle
+    if let Some(line_idx) = auto_clicker_line {
+        let row = area.y + 1 + line_idx;
+        if row < content_end {
+            cs.add_row_target(area, row, TOGGLE_AUTO_CLICKER);
+        }
+    }
+    // Dragon feed
+    for (producer_idx, line_idx) in &dragon_feed_lines {
+        let row = area.y + 1 + line_idx;
+        if row < content_end {
+            cs.add_row_target(area, row, DRAGON_FEED_BASE + *producer_idx as u16);
+        }
+    }
+    // Dragon aura cycle
+    if let Some(line_idx) = dragon_aura_line {
+        let row = area.y + 1 + line_idx;
+        if row < content_end {
+            cs.add_row_target(area, row, DRAGON_CYCLE_AURA);
         }
     }
 }

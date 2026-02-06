@@ -1,4 +1,4 @@
-/// Game trait and game selection logic.
+//! Game trait and game selection logic.
 
 pub mod career;
 pub mod cookie;

@@ -181,9 +181,8 @@ fn render_actions(
     let mut lines = Vec::new();
     let mut cs = click_state.borrow_mut();
 
-    // Training options [1]-[5]
+    // Training options
     for (i, t) in TRAININGS.iter().enumerate() {
-        let key = (b'1' + i as u8) as char;
         let affordable = state.money >= t.cost;
         let cost_str = if t.cost > 0.0 {
             format!("¥{}", format_money(t.cost))
@@ -193,9 +192,9 @@ fn render_actions(
 
         let effect = training_effect_str(t);
         let label = if is_narrow {
-            format!(" [{}] {} {}", key, t.name, cost_str)
+            format!(" ▶{} {}", t.name, cost_str)
         } else {
-            format!(" [{}] {:　<9} {:　<7} {}", key, t.name, effect, cost_str)
+            format!(" ▶{:　<9} {:　<7} {}", t.name, effect, cost_str)
         };
 
         let color = if affordable { Color::White } else { Color::DarkGray };
@@ -206,11 +205,11 @@ fn render_actions(
     // Spacer + navigation
     lines.push(Line::from(""));
 
-    // [6] Job Market
+    // Job Market
     let job_row = area.y + 1 + TRAININGS.len() as u16 + 1;
     lines.push(Line::from(vec![
         Span::styled(
-            " [6] ",
+            " ▶ ",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -220,11 +219,11 @@ fn render_actions(
     ]));
     cs.add_row_target(area, job_row, GO_JOB_MARKET);
 
-    // [7] Invest
+    // Invest
     let invest_row = area.y + 1 + TRAININGS.len() as u16 + 2;
     lines.push(Line::from(vec![
         Span::styled(
-            " [7] ",
+            " ▶ ",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -323,33 +322,26 @@ fn render_job_market(
         let info = job_info(kind);
         let available = can_apply(state, kind);
         let is_current = kind == state.job;
-        let key = if i < 9 {
-            (b'1' + i as u8) as char
-        } else {
-            '0'
-        };
 
         let (fg, marker) = if is_current {
-            (Color::Cyan, " * ")
+            (Color::Cyan, " ●")
         } else if available {
-            (Color::Green, "   ")
+            (Color::Green, " ▶")
         } else {
-            (Color::DarkGray, "   ")
+            (Color::DarkGray, "  ")
         };
 
         let req_str = requirement_str(&info, state, is_narrow);
         let label = if is_narrow {
             format!(
-                " [{}]{}{} ¥{}",
-                key,
+                " {}{} ¥{}",
                 marker,
                 info.name,
                 info.salary as u64
             )
         } else {
             format!(
-                " [{}]{}{:　<8} ¥{}/tick  {}",
-                key,
+                " {}{:　<8} ¥{}/tick  {}",
                 marker,
                 info.name,
                 info.salary as u64,
@@ -364,9 +356,9 @@ fn render_job_market(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         if is_narrow {
-            " 緑=応募可 灰=条件未達 *=現職"
+            " ▶=応募可 ●=現職"
         } else {
-            " (緑=応募可能  灰=条件未達  *=現在の職業)"
+            " (▶=応募可能  ●=現在の職業)"
         },
         Style::default().fg(Color::DarkGray),
     )));
@@ -381,15 +373,12 @@ fn render_job_market(
     // Footer: back button
     let footer_lines = vec![
         Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                " [-] ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("戻る", Style::default().fg(Color::White)),
-        ]),
+        Line::from(Span::styled(
+            " ◀ 戻る",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
     ];
     cs.add_row_target(chunks[1], chunks[1].y + 2, BACK_FROM_JOBS);
     let footer_block = Block::default()
@@ -549,28 +538,26 @@ fn render_invest(
     let mut cs = click_state.borrow_mut();
 
     let investments = [
-        ('1', InvestKind::Savings, "低リスク低利回り"),
-        ('2', InvestKind::Stocks, "中リスク中利回り"),
-        ('3', InvestKind::RealEstate, "高リスク高利回り"),
+        (InvestKind::Savings, "低リスク低利回り"),
+        (InvestKind::Stocks, "中リスク中利回り"),
+        (InvestKind::RealEstate, "高リスク高利回り"),
     ];
 
-    for (key, kind, desc) in &investments {
+    for (kind, desc) in &investments {
         let info = invest_info(*kind);
         let affordable = state.money >= info.increment;
         let color = if affordable { Color::White } else { Color::DarkGray };
 
         let label = if is_narrow {
             format!(
-                " [{}] {} +¥{} {}",
-                key,
+                " ▶{} +¥{} {}",
                 info.name,
                 format_money(info.increment),
                 desc
             )
         } else {
             format!(
-                " [{}] {:　<5} +¥{}  ({})",
-                key,
+                " ▶{:　<5} +¥{}  ({})",
                 info.name,
                 format_money(info.increment),
                 desc
@@ -598,15 +585,12 @@ fn render_invest(
     // Footer: back button
     let footer_lines = vec![
         Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                " [-] ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("戻る", Style::default().fg(Color::White)),
-        ]),
+        Line::from(Span::styled(
+            " ◀ 戻る",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
     ];
     cs.add_row_target(chunks[2], chunks[2].y + 2, BACK_FROM_INVEST);
     let footer_block = Block::default()

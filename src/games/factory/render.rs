@@ -1,4 +1,4 @@
-/// Tiny Factory rendering with animations and help.
+//! Tiny Factory rendering with animations and help.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -60,7 +60,7 @@ fn render_wide(
         .split(h_chunks[1]);
 
     render_header(state, f, left_chunks[0], false);
-    render_grid(state, f, left_chunks[1]);
+    render_grid(state, f, left_chunks[1], click_state);
     render_tool_panel(state, f, left_chunks[2], click_state);
     render_stats(state, f, right_chunks[0]);
     render_log(state, f, right_chunks[1]);
@@ -82,7 +82,7 @@ fn render_narrow(
         .split(area);
 
     render_header(state, f, chunks[0], true);
-    render_grid(state, f, chunks[1]);
+    render_grid(state, f, chunks[1], click_state);
     render_tool_panel(state, f, chunks[2], click_state);
 }
 
@@ -181,7 +181,7 @@ fn render_header(state: &FactoryState, f: &mut Frame, area: Rect, is_narrow: boo
 
 fn tool_name(tool: &PlacementTool) -> String {
     match tool {
-        PlacementTool::None => "None (数字キーで選択)".into(),
+        PlacementTool::None => "None".into(),
         PlacementTool::Miner => "Miner ($10)".into(),
         PlacementTool::Smelter => "Smelter ($25)".into(),
         PlacementTool::Assembler => "Assembler ($50)".into(),
@@ -382,7 +382,12 @@ fn cursor_on_machine(state: &FactoryState, ax: usize, ay: usize) -> bool {
     cx >= ax && cx <= ax + 1 && cy >= ay && cy <= ay + 1
 }
 
-fn render_grid(state: &FactoryState, f: &mut Frame, area: Rect) {
+fn render_grid(
+    state: &FactoryState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
     let mut lines: Vec<Line> = Vec::new();
     let vx = state.viewport_x;
     let vy = state.viewport_y;
@@ -482,7 +487,7 @@ fn render_grid(state: &FactoryState, f: &mut Frame, area: Rect) {
     }
 
     let title = format!(
-        " Grid ({},{}) {}×{} T:切替 ",
+        " Grid ({},{}) {}×{} ",
         state.cursor_x, state.cursor_y, GRID_W, GRID_H
     );
     let widget = Paragraph::new(lines).block(
@@ -492,6 +497,19 @@ fn render_grid(state: &FactoryState, f: &mut Frame, area: Rect) {
             .title(title),
     );
     f.render_widget(widget, area);
+
+    // Register click targets for each grid cell in viewport
+    let mut cs = click_state.borrow_mut();
+    let vx = state.viewport_x;
+    let vy = state.viewport_y;
+    for gy in vy..(vy + VIEW_H).min(GRID_H) {
+        for gx in vx..(vx + VIEW_W).min(GRID_W) {
+            let term_col = area.x + 1 + 1 + (gx - vx) as u16 * 2; // border + padding + 2 chars per cell
+            let term_row = area.y + 1 + (gy - vy) as u16; // border
+            let action_id = GRID_CLICK_BASE + ((gy - vy) * VIEW_W + (gx - vx)) as u16;
+            cs.add_click_target(Rect::new(term_col, term_row, 2, 1), action_id);
+        }
+    }
 }
 
 /// Per-kind aggregated stats for display.
@@ -662,8 +680,8 @@ fn render_log(state: &FactoryState, f: &mut Frame, area: Rect) {
 /// Tool descriptions for each placement tool.
 fn tool_description(tool: &PlacementTool) -> &'static str {
     match tool {
-        PlacementTool::None => "↑キーまたはクリックでツールを選択してください",
-        PlacementTool::Miner => "鉱石を自動生産 [T]で鉄/銅切替",
+        PlacementTool::None => "ツールを選択してグリッドをタップ",
+        PlacementTool::Miner => "鉱石を自動生産",
         PlacementTool::Smelter => "鉱石→板に精錬(鉄/銅自動判別)",
         PlacementTool::Assembler => "鉄板(=)→歯車(*)を組立。入力:鉄板",
         PlacementTool::Exporter => "アイテムを売却して$に変換。何でも受付",
@@ -693,27 +711,28 @@ fn render_tool_panel(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    // Tool definitions: (display_key, tool variant, label, cost_str, action_id)
-    let tools: Vec<(char, PlacementTool, &str, String, u16)> = vec![
-        ('1', PlacementTool::Miner, "Miner", "$10".into(), SELECT_MINER),
-        ('2', PlacementTool::Smelter, "Smelter", "$25".into(), SELECT_SMELTER),
-        ('3', PlacementTool::Assembler, "Assembler", "$50".into(), SELECT_ASSEMBLER),
-        ('4', PlacementTool::Exporter, "Exporter", "$15".into(), SELECT_EXPORTER),
-        ('5', PlacementTool::Fabricator, "Fabricator", "$75".into(), SELECT_FABRICATOR),
-        ('b', PlacementTool::Belt, "Belt", "$2".into(), SELECT_BELT),
-        ('d', PlacementTool::Delete, "Delete", "---".into(), SELECT_DELETE),
+    // Tool definitions: (tool variant, label, cost_str, action_id)
+    let tools: Vec<(PlacementTool, &str, String, u16)> = vec![
+        (PlacementTool::Miner, "Miner", "$10".into(), SELECT_MINER),
+        (PlacementTool::Smelter, "Smelter", "$25".into(), SELECT_SMELTER),
+        (PlacementTool::Assembler, "Assembler", "$50".into(), SELECT_ASSEMBLER),
+        (PlacementTool::Exporter, "Exporter", "$15".into(), SELECT_EXPORTER),
+        (PlacementTool::Fabricator, "Fabricator", "$75".into(), SELECT_FABRICATOR),
+        (PlacementTool::Belt, "Belt", "$2".into(), SELECT_BELT),
+        (PlacementTool::Delete, "Delete", "---".into(), SELECT_DELETE),
     ];
 
     let mut lines: Vec<Line> = Vec::new();
+    let mut miner_toggle_row: Option<u16> = None;
 
     // Tool selection rows
-    for (key, tool, label, cost, _action_id) in &tools {
+    for (tool, label, cost, _action_id) in &tools {
         let is_selected = std::mem::discriminant(&state.tool) == std::mem::discriminant(tool);
         let color = tool_color(tool);
 
         let marker = if is_selected { "▶" } else { " " };
 
-        let key_style = if is_selected {
+        let marker_style = if is_selected {
             Style::default()
                 .fg(color)
                 .add_modifier(Modifier::BOLD | Modifier::REVERSED)
@@ -729,7 +748,7 @@ fn render_tool_panel(
         };
 
         lines.push(Line::from(vec![
-            Span::styled(format!(" {}[{}] ", marker, key), key_style),
+            Span::styled(format!(" {} ", marker), marker_style),
             Span::styled(format!("{:<10}", label), label_style),
             Span::styled(format!("{:<6}", cost), label_style),
         ]));
@@ -745,18 +764,33 @@ fn render_tool_panel(
             .add_modifier(Modifier::BOLD),
     )));
 
+    // Miner mode toggle button (when miner is selected or cursor is on a miner)
+    if matches!(state.tool, PlacementTool::Miner) {
+        miner_toggle_row = Some(area.y + 1 + lines.len() as u16);
+        lines.push(Line::from(Span::styled(
+            " ▶鉄/銅切替",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
     let widget = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
-            .title(" ツール [↑↓/Space設置/Q戻る] "),
+            .title(" ツール "),
     );
     f.render_widget(widget, area);
 
     // Register click targets for each tool row
     let mut cs = click_state.borrow_mut();
-    for (i, (_key, _tool, _label, _cost, action_id)) in tools.iter().enumerate() {
+    for (i, (_tool, _label, _cost, action_id)) in tools.iter().enumerate() {
         cs.add_row_target(area, area.y + 1 + i as u16, *action_id);
+    }
+    // Miner mode toggle
+    if let Some(row) = miner_toggle_row {
+        cs.add_row_target(area, row, TOGGLE_MINER_MODE);
     }
 }
 

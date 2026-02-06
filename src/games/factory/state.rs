@@ -1,4 +1,4 @@
-/// Tiny Factory game state.
+//! Tiny Factory game state.
 
 use super::grid::{Cell, GRID_H, GRID_W, VIEW_H, VIEW_W};
 

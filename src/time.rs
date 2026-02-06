@@ -1,8 +1,8 @@
-/// Fixed-timestep game clock using an accumulator pattern.
-///
-/// `draw_web()` calls at ~60fps with variable delta. GameTime converts
-/// this into a fixed number of discrete ticks per second, making game
-/// logic deterministic and fully testable.
+//! Fixed-timestep game clock using an accumulator pattern.
+//!
+//! `draw_web()` calls at ~60fps with variable delta. GameTime converts
+//! this into a fixed number of discrete ticks per second, making game
+//! logic deterministic and fully testable.
 
 pub struct GameTime {
     /// Milliseconds per tick (e.g. 100ms = 10 ticks/sec)
@@ -37,7 +37,7 @@ impl GameTime {
             Some(prev) => {
                 let d = now_ms - prev;
                 // Clamp to avoid spiral-of-death if tab was backgrounded
-                d.min(500.0).max(0.0)
+                d.clamp(0.0, 500.0)
             }
             None => 0.0, // First frame: no delta
         };
