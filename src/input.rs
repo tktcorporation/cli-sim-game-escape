@@ -1,22 +1,26 @@
-/// Shared input handling: coordinate conversion, click targets, and event types.
-///
-/// This module is game-agnostic. Each game implements its own input dispatch.
+//! Shared input handling: coordinate conversion, click targets, and event types.
+//!
+//! This module is game-agnostic. Each game implements its own input dispatch.
+
+use ratzilla::ratatui::layout::Rect;
 
 /// All possible input events, normalized from keyboard, mouse, and touch sources.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
-    /// A key press (from keyboard, mouse click, or touch tap).
+    /// A key press from keyboard.
     Key(char),
+    /// A click/tap on a registered target, identified by a semantic action ID.
+    /// Each game defines its own action ID constants.
+    Click(u16),
 }
 
 /// A region on screen that can be tapped/clicked to trigger an action.
 #[derive(Debug, Clone)]
 pub struct ClickTarget {
-    pub row: u16,
-    pub key: char,
-    /// Optional column range for horizontal targeting within a row.
-    /// If None, the target matches the entire row.
-    pub col_range: Option<(u16, u16)>,
+    /// The rectangular region (in terminal cell coordinates) for hit testing.
+    pub rect: Rect,
+    /// Semantic action ID. Each game defines its own constants.
+    pub action_id: u16,
 }
 
 /// Shared state between the render loop and click handler.
@@ -39,38 +43,40 @@ impl ClickState {
         self.targets.clear();
     }
 
-    pub fn add_target(&mut self, row: u16, key: char) {
-        self.targets.push(ClickTarget { row, key, col_range: None });
+    /// Register a click target with a rectangular hit region and a semantic action ID.
+    pub fn add_click_target(&mut self, rect: Rect, action_id: u16) {
+        self.targets.push(ClickTarget { rect, action_id });
     }
 
-    /// Add a target with a specific column range (col_start..col_end, exclusive).
-    #[cfg(test)]
-    pub fn add_target_col(&mut self, row: u16, col_start: u16, col_end: u16, key: char) {
-        self.targets.push(ClickTarget { row, key, col_range: Some((col_start, col_end)) });
-    }
-
-    /// Find the action key for a given terminal row (row-wide only, ignores column targets).
-    #[cfg(test)]
-    pub fn find_target_key(&self, row: u16) -> Option<char> {
-        self.find_target_key_at(row, None)
-    }
-
-    /// Find the action key for a given terminal row and column.
-    /// Column-specific targets are checked first, then row-wide targets.
-    pub fn find_target_key_at(&self, row: u16, col: Option<u16>) -> Option<char> {
-        // First, try column-specific targets
-        if let Some(c) = col {
-            if let Some(t) = self.targets.iter().find(|t| {
-                t.row == row && t.col_range.is_some_and(|(start, end)| c >= start && c < end)
-            }) {
-                return Some(t.key);
-            }
+    /// Convenience: register a full-row click target at the given row within an area.
+    pub fn add_row_target(&mut self, area: Rect, row: u16, action_id: u16) {
+        if row >= area.y && row < area.y + area.height {
+            self.targets.push(ClickTarget {
+                rect: Rect::new(area.x, row, area.width, 1),
+                action_id,
+            });
         }
-        // Fall back to row-wide targets (col_range == None)
-        self.targets.iter()
-            .find(|t| t.row == row && t.col_range.is_none())
-            .map(|t| t.key)
     }
+
+    /// Hit-test a terminal cell coordinate against all registered targets.
+    /// Returns the action ID of the first matching target (last registered takes priority
+    /// when targets overlap, matching typical UI layering where later elements are on top).
+    pub fn hit_test(&self, col: u16, row: u16) -> Option<u16> {
+        // Iterate in reverse so later-registered (topmost) targets win.
+        self.targets.iter().rev().find_map(|t| {
+            let r = &t.rect;
+            if col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height {
+                Some(t.action_id)
+            } else {
+                None
+            }
+        })
+    }
+}
+
+/// Determine whether a screen width (in columns) should use narrow layout.
+pub fn is_narrow_layout(width: u16) -> bool {
+    width < 60
 }
 
 /// Convert a pixel Y coordinate to a terminal row index.
@@ -96,18 +102,6 @@ pub fn pixel_y_to_row(click_y: f64, grid_height: f64, terminal_rows: u16) -> Opt
     Some(row)
 }
 
-/// Determine whether a screen width (in columns) should use narrow layout.
-pub fn is_narrow_layout(width: u16) -> bool {
-    width < 60
-}
-
-/// Resolve a tap row to a key using click targets, then wrap as a Key event.
-/// Returns None if the tap didn't hit any target.
-#[cfg(test)]
-pub fn resolve_tap(row: u16, click_state: &ClickState) -> Option<InputEvent> {
-    click_state.find_target_key(row).map(InputEvent::Key)
-}
-
 /// Convert a pixel X coordinate to a terminal column index.
 #[cfg(test)]
 pub fn pixel_x_to_col(click_x: f64, grid_width: f64, terminal_cols: u16) -> Option<u16> {
@@ -119,37 +113,125 @@ pub fn pixel_x_to_col(click_x: f64, grid_width: f64, terminal_cols: u16) -> Opti
     if col >= terminal_cols { None } else { Some(col) }
 }
 
-/// Resolve a tap at (row, col) to a key, checking column-specific targets first.
-pub fn resolve_tap_at(row: u16, col: u16, click_state: &ClickState) -> Option<InputEvent> {
-    click_state.find_target_key_at(row, Some(col)).map(InputEvent::Key)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // ── resolve_tap tests ─────────────────────────────────────────────
+    // ── hit_test tests ──────────────────────────────────────────────
 
     #[test]
-    fn resolve_tap_finds_target() {
+    fn hit_test_basic() {
         let mut cs = ClickState::new();
-        cs.add_target(10, '1');
-        cs.add_target(11, '2');
+        cs.add_click_target(Rect::new(0, 10, 80, 1), 1);
+        cs.add_click_target(Rect::new(0, 11, 80, 1), 2);
 
-        assert_eq!(resolve_tap(10, &cs), Some(InputEvent::Key('1')));
-        assert_eq!(resolve_tap(11, &cs), Some(InputEvent::Key('2')));
+        assert_eq!(cs.hit_test(5, 10), Some(1));
+        assert_eq!(cs.hit_test(5, 11), Some(2));
     }
 
     #[test]
-    fn resolve_tap_misses_returns_none() {
+    fn hit_test_miss_returns_none() {
         let mut cs = ClickState::new();
-        cs.add_target(10, '1');
+        cs.add_click_target(Rect::new(0, 10, 80, 1), 1);
 
-        assert_eq!(resolve_tap(9, &cs), None);
-        assert_eq!(resolve_tap(11, &cs), None);
+        assert_eq!(cs.hit_test(5, 9), None);
+        assert_eq!(cs.hit_test(5, 11), None);
     }
 
-    // ── pixel_y_to_row tests ───────────────────────────────────────────
+    #[test]
+    fn hit_test_multi_row_rect() {
+        let mut cs = ClickState::new();
+        cs.add_click_target(Rect::new(0, 5, 40, 3), 42);
+
+        assert_eq!(cs.hit_test(10, 4), None);
+        assert_eq!(cs.hit_test(10, 5), Some(42));
+        assert_eq!(cs.hit_test(10, 6), Some(42));
+        assert_eq!(cs.hit_test(10, 7), Some(42));
+        assert_eq!(cs.hit_test(10, 8), None);
+    }
+
+    #[test]
+    fn hit_test_column_precision() {
+        let mut cs = ClickState::new();
+        // Two targets side by side on the same row
+        cs.add_click_target(Rect::new(0, 5, 10, 1), 1);
+        cs.add_click_target(Rect::new(10, 5, 10, 1), 2);
+
+        assert_eq!(cs.hit_test(3, 5), Some(1));
+        assert_eq!(cs.hit_test(9, 5), Some(1));
+        assert_eq!(cs.hit_test(10, 5), Some(2));
+        assert_eq!(cs.hit_test(15, 5), Some(2));
+        assert_eq!(cs.hit_test(20, 5), None);
+    }
+
+    #[test]
+    fn hit_test_overlap_last_wins() {
+        let mut cs = ClickState::new();
+        // Row-wide target registered first
+        cs.add_click_target(Rect::new(0, 5, 80, 1), 1);
+        // Narrower target registered later (on top)
+        cs.add_click_target(Rect::new(5, 5, 10, 1), 2);
+
+        // Inside the narrow target → later target wins
+        assert_eq!(cs.hit_test(7, 5), Some(2));
+        // Outside the narrow target → falls back to row-wide
+        assert_eq!(cs.hit_test(0, 5), Some(1));
+        assert_eq!(cs.hit_test(20, 5), Some(1));
+    }
+
+    #[test]
+    fn hit_test_empty() {
+        let cs = ClickState::new();
+        assert_eq!(cs.hit_test(0, 0), None);
+    }
+
+    // ── add_row_target tests ──────────────────────────────────────
+
+    #[test]
+    fn add_row_target_within_area() {
+        let mut cs = ClickState::new();
+        let area = Rect::new(5, 10, 30, 5);
+        cs.add_row_target(area, 12, 99);
+
+        assert_eq!(cs.targets.len(), 1);
+        assert_eq!(cs.hit_test(15, 12), Some(99));
+    }
+
+    #[test]
+    fn add_row_target_outside_area_ignored() {
+        let mut cs = ClickState::new();
+        let area = Rect::new(5, 10, 30, 5);
+        cs.add_row_target(area, 9, 99);  // before area
+        cs.add_row_target(area, 15, 98); // after area
+
+        assert_eq!(cs.targets.len(), 0);
+    }
+
+    // ── ClickState management tests ────────────────────────────────
+
+    #[test]
+    fn click_state_clear() {
+        let mut cs = ClickState::new();
+        cs.add_click_target(Rect::new(0, 1, 80, 1), 1);
+        cs.add_click_target(Rect::new(0, 2, 80, 1), 2);
+        assert_eq!(cs.targets.len(), 2);
+
+        cs.clear_targets();
+        assert_eq!(cs.targets.len(), 0);
+        assert_eq!(cs.hit_test(0, 1), None);
+    }
+
+    // ── Layout responsive tests ────────────────────────────────────
+
+    #[test]
+    fn narrow_layout_threshold() {
+        assert!(is_narrow_layout(30));
+        assert!(is_narrow_layout(59));
+        assert!(!is_narrow_layout(60));
+        assert!(!is_narrow_layout(80));
+    }
+
+    // ── pixel coordinate conversion tests ──────────────────────────
 
     #[test]
     fn pixel_to_row_basic() {
@@ -189,76 +271,20 @@ mod tests {
         assert_eq!(pixel_y_to_row(399.0, 400.0, 24), Some(23));
     }
 
-    // ── find_target_key tests ──────────────────────────────────────────
-
     #[test]
-    fn find_target_key_matches() {
-        let mut cs = ClickState::new();
-        cs.add_target(5, '1');
-        cs.add_target(6, '2');
-        cs.add_target(7, 'n');
-
-        assert_eq!(cs.find_target_key(5), Some('1'));
-        assert_eq!(cs.find_target_key(6), Some('2'));
-        assert_eq!(cs.find_target_key(7), Some('n'));
+    fn pixel_x_to_col_basic() {
+        assert_eq!(pixel_x_to_col(0.0, 800.0, 80), Some(0));
+        assert_eq!(pixel_x_to_col(10.0, 800.0, 80), Some(1));
+        assert_eq!(pixel_x_to_col(799.0, 800.0, 80), Some(79));
     }
 
     #[test]
-    fn find_target_key_no_match() {
-        let mut cs = ClickState::new();
-        cs.add_target(5, '1');
-        assert_eq!(cs.find_target_key(0), None);
-        assert_eq!(cs.find_target_key(100), None);
+    fn pixel_x_to_col_out_of_bounds() {
+        assert_eq!(pixel_x_to_col(800.0, 800.0, 80), None);
+        assert_eq!(pixel_x_to_col(-1.0, 800.0, 80), None);
     }
 
-    #[test]
-    fn find_target_key_empty() {
-        let cs = ClickState::new();
-        assert_eq!(cs.find_target_key(0), None);
-    }
-
-    #[test]
-    fn find_target_key_duplicate_rows_returns_first() {
-        let mut cs = ClickState::new();
-        cs.add_target(5, 'a');
-        cs.add_target(5, 'b');
-        assert_eq!(cs.find_target_key(5), Some('a'));
-    }
-
-    // ── ClickState management tests ────────────────────────────────────
-
-    #[test]
-    fn click_state_clear() {
-        let mut cs = ClickState::new();
-        cs.add_target(1, 'x');
-        cs.add_target(2, 'y');
-        assert_eq!(cs.targets.len(), 2);
-
-        cs.clear_targets();
-        assert_eq!(cs.targets.len(), 0);
-        assert_eq!(cs.find_target_key(1), None);
-    }
-
-    // ── Layout responsive tests ────────────────────────────────────────
-
-    #[test]
-    fn narrow_layout_threshold() {
-        assert!(is_narrow_layout(30));
-        assert!(is_narrow_layout(59));
-        assert!(!is_narrow_layout(60));
-        assert!(!is_narrow_layout(80));
-    }
-
-    // ── Integration-style pipeline tests ────────────────────────────────
-
-    /// Helper: simulate tapping the center of a given target row.
-    fn assert_tap_hits(cs: &ClickState, grid_height: f64, target_row: u16, expected_key: char) {
-        let cell_height = grid_height / cs.terminal_rows as f64;
-        let click_y = target_row as f64 * cell_height + cell_height / 2.0;
-        let row = pixel_y_to_row(click_y, grid_height, cs.terminal_rows);
-        assert_eq!(row, Some(target_row));
-        assert_eq!(cs.find_target_key(target_row), Some(expected_key));
-    }
+    // ── Integration-style pipeline tests ────────────────────────────
 
     #[test]
     fn full_click_pipeline() {
@@ -266,12 +292,12 @@ mod tests {
         cs.terminal_cols = 80;
         cs.terminal_rows = 30;
 
-        cs.add_target(11, '1');
-        cs.add_target(12, '2');
-        cs.add_target(13, 'n');
+        cs.add_click_target(Rect::new(0, 11, 80, 1), 1);
+        cs.add_click_target(Rect::new(0, 12, 80, 1), 2);
+        cs.add_click_target(Rect::new(0, 13, 80, 1), 3);
 
         for row in 27..30 {
-            cs.add_target(row, 'i');
+            cs.add_click_target(Rect::new(0, row, 80, 1), 99);
         }
 
         let grid_height = 450.0;
@@ -280,11 +306,11 @@ mod tests {
         let click_y = 11.0 * cell_height + 7.0;
         let row = pixel_y_to_row(click_y, grid_height, cs.terminal_rows).unwrap();
         assert_eq!(row, 11);
-        assert_eq!(cs.find_target_key(row), Some('1'));
+        assert_eq!(cs.hit_test(0, row), Some(1));
 
         let click_y = 28.0 * cell_height + 10.0;
         let row = pixel_y_to_row(click_y, grid_height, cs.terminal_rows).unwrap();
-        assert_eq!(cs.find_target_key(row), Some('i'));
+        assert_eq!(cs.hit_test(0, row), Some(99));
     }
 
     #[test]
@@ -300,89 +326,33 @@ mod tests {
         }
     }
 
-    // ── Column-specific click target tests ──────────────────────────────
-
-    #[test]
-    fn col_target_matches_within_range() {
-        let mut cs = ClickState::new();
-        cs.add_target_col(5, 0, 10, 'a');
-        cs.add_target_col(5, 10, 20, 'b');
-        assert_eq!(cs.find_target_key_at(5, Some(3)), Some('a'));
-        assert_eq!(cs.find_target_key_at(5, Some(15)), Some('b'));
-    }
-
-    #[test]
-    fn col_target_exclusive_end() {
-        let mut cs = ClickState::new();
-        cs.add_target_col(5, 0, 10, 'a');
-        cs.add_target_col(5, 10, 20, 'b');
-        // col 10 should match 'b' (start inclusive), not 'a' (end exclusive)
-        assert_eq!(cs.find_target_key_at(5, Some(10)), Some('b'));
-        // col 9 should match 'a'
-        assert_eq!(cs.find_target_key_at(5, Some(9)), Some('a'));
-    }
-
-    #[test]
-    fn col_target_falls_back_to_row_wide() {
-        let mut cs = ClickState::new();
-        cs.add_target_col(5, 0, 10, 'a');
-        cs.add_target(5, 'z'); // row-wide fallback
-        // Click in col range → col target
-        assert_eq!(cs.find_target_key_at(5, Some(5)), Some('a'));
-        // Click outside col range → row-wide fallback
-        assert_eq!(cs.find_target_key_at(5, Some(30)), Some('z'));
-    }
-
-    #[test]
-    fn col_target_no_col_uses_row_wide() {
-        let mut cs = ClickState::new();
-        cs.add_target_col(5, 0, 10, 'a');
-        cs.add_target(5, 'z');
-        // No column → row-wide only
-        assert_eq!(cs.find_target_key_at(5, None), Some('z'));
-    }
-
-    #[test]
-    fn pixel_x_to_col_basic() {
-        assert_eq!(pixel_x_to_col(0.0, 800.0, 80), Some(0));
-        assert_eq!(pixel_x_to_col(10.0, 800.0, 80), Some(1));
-        assert_eq!(pixel_x_to_col(799.0, 800.0, 80), Some(79));
-    }
-
-    #[test]
-    fn pixel_x_to_col_out_of_bounds() {
-        assert_eq!(pixel_x_to_col(800.0, 800.0, 80), None);
-        assert_eq!(pixel_x_to_col(-1.0, 800.0, 80), None);
-    }
-
-    #[test]
-    fn resolve_tap_at_uses_col() {
-        let mut cs = ClickState::new();
-        cs.add_target_col(5, 0, 10, 'a');
-        cs.add_target_col(5, 10, 20, 'b');
-        assert_eq!(resolve_tap_at(5, 3, &cs), Some(InputEvent::Key('a')));
-        assert_eq!(resolve_tap_at(5, 15, &cs), Some(InputEvent::Key('b')));
-        assert_eq!(resolve_tap_at(5, 25, &cs), None); // no match
-    }
-
     #[test]
     fn mobile_narrow_click_pipeline() {
         let mut cs = ClickState::new();
         cs.terminal_cols = 37;
         cs.terminal_rows = 50;
 
-        cs.add_target(9, '1');
-        cs.add_target(10, '2');
-        cs.add_target(11, 'n');
+        cs.add_click_target(Rect::new(0, 9, 37, 1), 1);
+        cs.add_click_target(Rect::new(0, 10, 37, 1), 2);
+        cs.add_click_target(Rect::new(0, 11, 37, 1), 3);
 
         for row in 47..50 {
-            cs.add_target(row, 'i');
+            cs.add_click_target(Rect::new(0, row, 37, 1), 99);
         }
 
         let grid_height = 50.0 * 15.0;
-        assert_tap_hits(&cs, grid_height, 9, '1');
-        assert_tap_hits(&cs, grid_height, 10, '2');
-        assert_tap_hits(&cs, grid_height, 11, 'n');
-        assert_tap_hits(&cs, grid_height, 48, 'i');
+
+        fn assert_tap_hits(cs: &ClickState, grid_height: f64, target_row: u16, expected_id: u16) {
+            let cell_height = grid_height / cs.terminal_rows as f64;
+            let click_y = target_row as f64 * cell_height + cell_height / 2.0;
+            let row = pixel_y_to_row(click_y, grid_height, cs.terminal_rows);
+            assert_eq!(row, Some(target_row));
+            assert_eq!(cs.hit_test(0, target_row), Some(expected_id));
+        }
+
+        assert_tap_hits(&cs, grid_height, 9, 1);
+        assert_tap_hits(&cs, grid_height, 10, 2);
+        assert_tap_hits(&cs, grid_height, 11, 3);
+        assert_tap_hits(&cs, grid_height, 48, 99);
     }
 }

@@ -126,37 +126,25 @@
       });
     })();
 
-    // Standard click handler: parse action keys from clicked <pre> text content
-    // and dispatch corresponding keyboard events for ratzilla's on_key_event handler.
-    function handleClickOrTap(clientX, clientY) {
-      var el = document.elementFromPoint(clientX, clientY);
-      if (!el) return;
-      // Walk up to find a <pre> element (ratzilla renders each row as <pre>)
-      while (el && el.tagName !== 'PRE') {
-        el = el.parentElement;
-      }
-      if (!el) return;
-      var text = el.textContent || '';
-      // Match action keys like [1], [2], [0], [-], [=], [N], [S], [I], [R], [H], tab keys ({|}~\)
-      var match = text.match(/\[([0-9A-Za-z\-=!~{}|\\])\]/);
-      if (!match) return;
-      var key = match[1].toLowerCase();
-      document.dispatchEvent(new KeyboardEvent('keydown', {
-        key: key,
-        code: 'Key' + key.toUpperCase(),
-        bubbles: true
-      }));
-    }
-
-    document.addEventListener('click', function(e) {
-      handleClickOrTap(e.clientX, e.clientY);
-    });
-
-    document.addEventListener('touchstart', function(e) {
-      if (e.touches.length > 0) {
+    // Touch handler: convert touch events to synthetic mousedown events.
+    // This lets Ratzilla's on_mouse_event handler (registered in Rust) process
+    // taps through the same ClickState hit-test path as desktop clicks.
+    //
+    // We dispatch a synthetic mousedown instead of handling touch in WASM because
+    // web-sys TouchEvent/Touch/TouchList causes iOS Safari's WebKit WASM engine
+    // to render a black screen (discovered in commit 0caf982).
+    (function() {
+      document.addEventListener('touchstart', function(e) {
+        if (e.touches.length === 0) return;
         var touch = e.touches[0];
-        handleClickOrTap(touch.clientX, touch.clientY);
-      }
-    }, { passive: true });
+        // Dispatch a synthetic mousedown so Ratzilla's on_mouse_event fires
+        document.dispatchEvent(new MouseEvent('mousedown', {
+          clientX: touch.clientX,
+          clientY: touch.clientY,
+          button: 0,
+          bubbles: true
+        }));
+      }, { passive: true });
+    })();
   </script>
 </html>
