@@ -1359,7 +1359,7 @@ fn render_prestige(
         ]));
     } else {
         lines.push(Line::from(Span::styled(
-            " (1兆クッキーで転生可能になります)",
+            " (10億クッキーで転生可能になります)",
             Style::default().fg(Color::DarkGray),
         )));
     }

@@ -750,7 +750,7 @@ pub struct CookieState {
     pub heavenly_chips: u64,
     /// Heavenly chips spent on prestige upgrades.
     pub heavenly_chips_spent: u64,
-    /// CPS multiplier from heavenly chips (1.0 + chips * 0.01).
+    /// CPS multiplier from heavenly chips (1.0 + chips * 0.10).
     pub prestige_multiplier: f64,
     /// Total cookies baked across all runs (for prestige calculation).
     pub cookies_all_runs: f64,
@@ -859,14 +859,14 @@ impl CookieState {
             particles: Vec::new(),
             synergy_multiplier: 1.0,
             cross_synergies: Vec::new(),
-            golden_next_spawn: 300, // First golden cookie after 30 seconds
+            golden_next_spawn: 200, // First golden cookie after 20 seconds (faster early excitement)
             golden_event: None,
             active_buffs: Vec::new(),
             golden_cookies_claimed: 0,
             rng_state: 42,
             count_scalings: Vec::new(),
             cps_percent_bonuses: Vec::new(),
-            mini_event_next: 150, // First mini-event after 15 seconds
+            mini_event_next: 100, // First mini-event after 10 seconds (faster early excitement)
             active_discount: 0.0,
             milestones,
             milk: 0.0,
@@ -1588,9 +1588,21 @@ impl CookieState {
                 status: MilestoneStatus::Locked,
             },
             Milestone {
+                name: "クッキー大王".into(),
+                description: "クッキーを10,000,000枚焼く".into(),
+                condition: MilestoneCondition::TotalCookies(10_000_000.0),
+                status: MilestoneStatus::Locked,
+            },
+            Milestone {
                 name: "クッキー財閥".into(),
                 description: "クッキーを100,000,000枚焼く".into(),
                 condition: MilestoneCondition::TotalCookies(100_000_000.0),
+                status: MilestoneStatus::Locked,
+            },
+            Milestone {
+                name: "クッキー王朝".into(),
+                description: "クッキーを1,000,000,000枚焼く".into(),
+                condition: MilestoneCondition::TotalCookies(1_000_000_000.0),
                 status: MilestoneStatus::Locked,
             },
             Milestone {
@@ -1632,9 +1644,21 @@ impl CookieState {
                 status: MilestoneStatus::Locked,
             },
             Milestone {
+                name: "工業化の波".into(),
+                description: "CPS 500 達成".into(),
+                condition: MilestoneCondition::CpsReached(500.0),
+                status: MilestoneStatus::Locked,
+            },
+            Milestone {
                 name: "産業革命".into(),
                 description: "CPS 1,000 達成".into(),
                 condition: MilestoneCondition::CpsReached(1_000.0),
+                status: MilestoneStatus::Locked,
+            },
+            Milestone {
+                name: "大量生産".into(),
+                description: "CPS 5,000 達成".into(),
+                condition: MilestoneCondition::CpsReached(5_000.0),
                 status: MilestoneStatus::Locked,
             },
             Milestone {
@@ -1803,10 +1827,10 @@ impl CookieState {
             PrestigeUpgrade {
                 id: "angels_gift",
                 name: "天使の贈り物".into(),
-                description: "転生後 1,000 クッキーで開始".into(),
+                description: "転生後 10,000 クッキーで開始".into(),
                 cost: 1,
                 purchased: false,
-                effect: PrestigeEffect::StartingCookies(1_000.0),
+                effect: PrestigeEffect::StartingCookies(10_000.0),
                 requires: None,
                 path: PrestigePath::Root,
             },
@@ -1817,7 +1841,7 @@ impl CookieState {
                 id: "heavenly_power",
                 name: "天界の力".into(),
                 description: "CPS 永続 ×1.5".into(),
-                cost: 3,
+                cost: 2,
                 purchased: false,
                 effect: PrestigeEffect::CpsMultiplier(1.5),
                 requires: Some("angels_gift"),
@@ -1827,7 +1851,7 @@ impl CookieState {
                 id: "angels_aura",
                 name: "天使のオーラ".into(),
                 description: "CPS 永続 ×2".into(),
-                cost: 10,
+                cost: 5,
                 purchased: false,
                 effect: PrestigeEffect::CpsMultiplier(2.0),
                 requires: Some("heavenly_power"),
@@ -1836,10 +1860,10 @@ impl CookieState {
             PrestigeUpgrade {
                 id: "factory_memory",
                 name: "工場の記憶".into(),
-                description: "転生後 Cursor 5台で開始".into(),
-                cost: 25,
+                description: "転生後 Cursor 10台で開始".into(),
+                cost: 15,
                 purchased: false,
-                effect: PrestigeEffect::StartingCursors(5),
+                effect: PrestigeEffect::StartingCursors(10),
                 requires: Some("angels_aura"),
                 path: PrestigePath::Production,
             },
@@ -1847,7 +1871,7 @@ impl CookieState {
                 id: "efficiency_peak",
                 name: "効率の極致".into(),
                 description: "全生産者コスト -10%".into(),
-                cost: 50,
+                cost: 30,
                 purchased: false,
                 effect: PrestigeEffect::ProducerCostReduction(0.1),
                 requires: Some("factory_memory"),
@@ -1856,10 +1880,10 @@ impl CookieState {
             PrestigeUpgrade {
                 id: "heavenly_wealth",
                 name: "天界の富".into(),
-                description: "転生後 1,000,000 クッキーで開始".into(),
-                cost: 100,
+                description: "転生後 10,000,000 クッキーで開始".into(),
+                cost: 60,
                 purchased: false,
-                effect: PrestigeEffect::StartingCookies(1_000_000.0),
+                effect: PrestigeEffect::StartingCookies(10_000_000.0),
                 requires: Some("efficiency_peak"),
                 path: PrestigePath::Production,
             },
@@ -1870,7 +1894,7 @@ impl CookieState {
                 id: "angels_click",
                 name: "天使のクリック".into(),
                 description: "クリック力 永続 ×2".into(),
-                cost: 3,
+                cost: 2,
                 purchased: false,
                 effect: PrestigeEffect::ClickMultiplier(2.0),
                 requires: Some("angels_gift"),
@@ -1880,7 +1904,7 @@ impl CookieState {
                 id: "gods_click",
                 name: "神のクリック".into(),
                 description: "クリック力 永続 ×3".into(),
-                cost: 10,
+                cost: 5,
                 purchased: false,
                 effect: PrestigeEffect::ClickMultiplier(3.0),
                 requires: Some("angels_click"),
@@ -1890,7 +1914,7 @@ impl CookieState {
                 id: "sugar_alchemy",
                 name: "砂糖錬金術".into(),
                 description: "砂糖ブースト効果 +50%".into(),
-                cost: 25,
+                cost: 15,
                 purchased: false,
                 effect: PrestigeEffect::SugarBoostMultiplier(1.5),
                 requires: Some("gods_click"),
@@ -1900,7 +1924,7 @@ impl CookieState {
                 id: "combo_mastery",
                 name: "連撃の極意".into(),
                 description: "クリック力 永続 ×2".into(),
-                cost: 50,
+                cost: 30,
                 purchased: false,
                 effect: PrestigeEffect::ClickMultiplier(2.0),
                 requires: Some("sugar_alchemy"),
@@ -1910,7 +1934,7 @@ impl CookieState {
                 id: "click_sovereign",
                 name: "クリックの覇者".into(),
                 description: "クリック力 永続 ×5".into(),
-                cost: 100,
+                cost: 60,
                 purchased: false,
                 effect: PrestigeEffect::ClickMultiplier(5.0),
                 requires: Some("combo_mastery"),
@@ -1923,7 +1947,7 @@ impl CookieState {
                 id: "golden_rush",
                 name: "ゴールデンラッシュ".into(),
                 description: "ゴールデンクッキー出現 1.5倍速".into(),
-                cost: 3,
+                cost: 2,
                 purchased: false,
                 effect: PrestigeEffect::GoldenCookieSpeed(0.67),
                 requires: Some("angels_gift"),
@@ -1933,7 +1957,7 @@ impl CookieState {
                 id: "golden_intuition",
                 name: "黄金の直感".into(),
                 description: "ゴールデン効果時間 +30%".into(),
-                cost: 10,
+                cost: 5,
                 purchased: false,
                 effect: PrestigeEffect::GoldenDuration(1.3),
                 requires: Some("golden_rush"),
@@ -1943,7 +1967,7 @@ impl CookieState {
                 id: "luck_extension",
                 name: "幸運の延長".into(),
                 description: "ゴールデン効果時間 +50%".into(),
-                cost: 25,
+                cost: 15,
                 purchased: false,
                 effect: PrestigeEffect::GoldenDuration(1.5),
                 requires: Some("golden_intuition"),
@@ -1953,7 +1977,7 @@ impl CookieState {
                 id: "milk_memory",
                 name: "ミルクの記憶".into(),
                 description: "転生後にミルクを50%保持".into(),
-                cost: 50,
+                cost: 30,
                 purchased: false,
                 effect: PrestigeEffect::MilkRetention(0.5),
                 requires: Some("luck_extension"),
@@ -1963,7 +1987,7 @@ impl CookieState {
                 id: "luck_sovereign",
                 name: "幸運の支配者".into(),
                 description: "ゴールデン効果 ×2".into(),
-                cost: 100,
+                cost: 60,
                 purchased: false,
                 effect: PrestigeEffect::GoldenEffectMultiplier(2.0),
                 requires: Some("milk_memory"),
@@ -2348,9 +2372,10 @@ impl CookieState {
     }
 
     /// Calculate how many new heavenly chips would be earned from current run.
+    /// Threshold: 10億 (1e9) cookies per chip² (lowered from 1e12 for better pacing).
     pub fn pending_heavenly_chips(&self) -> u64 {
         let total = self.cookies_all_runs + self.cookies_all_time;
-        let total_chips = (total / 1e12).sqrt().floor() as u64;
+        let total_chips = (total / 1e9).sqrt().floor() as u64;
         total_chips.saturating_sub(self.heavenly_chips)
     }
 

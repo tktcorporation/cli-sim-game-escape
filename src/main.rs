@@ -19,6 +19,7 @@ use ratzilla::{DomBackend, WebRenderer};
 // ── Menu action IDs ─────────────────────────────────────────────
 pub const MENU_SELECT_COOKIE: u16 = 1;
 pub const MENU_SELECT_FACTORY: u16 = 2;
+pub const MENU_SELECT_CAREER: u16 = 3;
 
 /// Use `elementFromPoint` to find which grid cell was clicked.
 ///
@@ -112,6 +113,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 }
                 InputEvent::Key('2') | InputEvent::Click(MENU_SELECT_FACTORY) => {
                     Some(GameChoice::Factory)
+                }
+                InputEvent::Key('3') | InputEvent::Click(MENU_SELECT_CAREER) => {
+                    Some(GameChoice::Career)
                 }
                 _ => None,
             };
@@ -294,6 +298,20 @@ fn render_menu(
             "     工場を作って生産ラインを最適化する放置ゲーム",
             Style::default().fg(Color::DarkGray),
         )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                " [3] ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Career Simulator", Style::default().fg(Color::White)),
+        ]),
+        Line::from(Span::styled(
+            "     スキルを磨いて転職・投資でキャリアを築くシミュレーション",
+            Style::default().fg(Color::DarkGray),
+        )),
     ];
 
     let menu_widget = Paragraph::new(menu_lines).block(
@@ -313,6 +331,9 @@ fn render_menu(
         // Tiny Factory: title + description rows
         cs.add_row_target(chunks[1], chunks[1].y + 5, MENU_SELECT_FACTORY);
         cs.add_row_target(chunks[1], chunks[1].y + 6, MENU_SELECT_FACTORY);
+        // Career Simulator: title + description rows
+        cs.add_row_target(chunks[1], chunks[1].y + 8, MENU_SELECT_CAREER);
+        cs.add_row_target(chunks[1], chunks[1].y + 9, MENU_SELECT_CAREER);
     }
 
     // Footer
