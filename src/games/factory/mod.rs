@@ -1,5 +1,6 @@
-/// Tiny Factory — a grid-based factory automation game.
+//! Tiny Factory — a grid-based factory automation game.
 
+pub mod actions;
 pub mod grid;
 pub mod logic;
 pub mod render;
@@ -14,6 +15,7 @@ use ratzilla::ratatui::Frame;
 use crate::games::Game;
 use crate::input::{ClickState, InputEvent};
 
+use actions::*;
 use state::{FactoryState, PlacementTool};
 
 pub struct FactoryGame {
@@ -26,14 +28,42 @@ impl FactoryGame {
             state: FactoryState::new(),
         }
     }
-}
 
-impl Game for FactoryGame {
-    fn handle_input(&mut self, event: &InputEvent) -> bool {
-        let key = match event {
-            InputEvent::Key(c) => *c,
-        };
+    fn handle_click(&mut self, action_id: u16) -> bool {
+        match action_id {
+            SELECT_MINER => {
+                self.state.tool = PlacementTool::Miner;
+                true
+            }
+            SELECT_SMELTER => {
+                self.state.tool = PlacementTool::Smelter;
+                true
+            }
+            SELECT_ASSEMBLER => {
+                self.state.tool = PlacementTool::Assembler;
+                true
+            }
+            SELECT_EXPORTER => {
+                self.state.tool = PlacementTool::Exporter;
+                true
+            }
+            SELECT_FABRICATOR => {
+                self.state.tool = PlacementTool::Fabricator;
+                true
+            }
+            SELECT_BELT => {
+                self.state.tool = PlacementTool::Belt;
+                true
+            }
+            SELECT_DELETE => {
+                self.state.tool = PlacementTool::Delete;
+                true
+            }
+            _ => false,
+        }
+    }
 
+    fn handle_key(&mut self, key: char) -> bool {
         match key {
             // Tool selection
             '1' => {
@@ -93,6 +123,15 @@ impl Game for FactoryGame {
             _ => false,
         }
     }
+}
+
+impl Game for FactoryGame {
+    fn handle_input(&mut self, event: &InputEvent) -> bool {
+        match event {
+            InputEvent::Key(c) => self.handle_key(*c),
+            InputEvent::Click(id) => self.handle_click(*id),
+        }
+    }
 
     fn tick(&mut self, delta_ticks: u32) {
         logic::tick_n(&mut self.state, delta_ticks);
@@ -148,5 +187,18 @@ mod tests {
         assert_eq!(game.state.belt_direction, grid::Direction::Right);
         game.handle_input(&InputEvent::Key('j')); // move down
         assert_eq!(game.state.belt_direction, grid::Direction::Down);
+    }
+
+    // ── Click action tests ──────────────────────────────────────
+
+    #[test]
+    fn click_action_select_tool() {
+        let mut game = FactoryGame::new();
+        game.handle_input(&InputEvent::Click(SELECT_MINER));
+        assert_eq!(game.state.tool, PlacementTool::Miner);
+        game.handle_input(&InputEvent::Click(SELECT_BELT));
+        assert_eq!(game.state.tool, PlacementTool::Belt);
+        game.handle_input(&InputEvent::Click(SELECT_DELETE));
+        assert_eq!(game.state.tool, PlacementTool::Delete);
     }
 }

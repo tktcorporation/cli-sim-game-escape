@@ -5,7 +5,7 @@ mod time;
 use std::{cell::RefCell, io, rc::Rc};
 
 use games::{create_game, AppState, GameChoice};
-use input::{is_narrow_layout, resolve_tap_at, ClickState, InputEvent};
+use input::{is_narrow_layout, ClickState, InputEvent};
 use time::GameTime;
 
 use ratzilla::event::{KeyCode, MouseButton, MouseEventKind};
@@ -16,13 +16,24 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
 use ratzilla::ratatui::Terminal;
 use ratzilla::{DomBackend, WebRenderer};
 
-/// Use `elementFromPoint` to find which grid row was clicked.
+// ── Menu action IDs ─────────────────────────────────────────────
+pub const MENU_SELECT_COOKIE: u16 = 1;
+pub const MENU_SELECT_FACTORY: u16 = 2;
+pub const MENU_SELECT_CAREER: u16 = 3;
+
+/// Use `elementFromPoint` to find which grid cell was clicked.
 ///
 /// Ratzilla renders each terminal row as a `<pre>` child of `div#grid`.
 /// Instead of pixel-math (fragile under zoom / scroll / CSS transforms),
 /// we ask the browser which element sits at the click coordinates,
 /// then walk up to the `<pre>` and find its index among siblings.
-fn dom_element_to_row(client_x: f64, client_y: f64) -> Option<u16> {
+///
+/// Returns `(row, col)` in terminal cell coordinates.
+fn dom_element_to_cell(
+    client_x: f64,
+    client_y: f64,
+    terminal_cols: u16,
+) -> Option<(u16, u16)> {
     let window = web_sys::window()?;
     let document = window.document()?;
     let element = document.element_from_point(client_x as f32, client_y as f32)?;
@@ -34,14 +45,30 @@ fn dom_element_to_row(client_x: f64, client_y: f64) -> Option<u16> {
     let grid = pre.parent_element()?;
     let children = grid.children();
     let len = children.length();
+    let mut row = None;
     for i in 0..len {
         if let Some(child) = children.item(i) {
             if child == pre {
-                return Some(i as u16);
+                row = Some(i as u16);
+                break;
             }
         }
     }
-    None
+    let row = row?;
+
+    // Compute column from x position within the <pre> element.
+    // All <pre> elements use a monospace font, so character width is uniform.
+    let rect = pre.get_bounding_client_rect();
+    let pre_left = rect.left();
+    let pre_width = rect.width();
+    if pre_width <= 0.0 || terminal_cols == 0 {
+        return Some((row, 0));
+    }
+    let relative_x = (client_x - pre_left).max(0.0);
+    let col = ((relative_x / pre_width) * terminal_cols as f64) as u16;
+    let col = col.min(terminal_cols.saturating_sub(1));
+
+    Some((row, col))
 }
 
 /// Walk up the DOM from `el` to find the nearest `<pre>` ancestor (or self).
@@ -63,43 +90,42 @@ fn handle_tap(
     app_state: &Rc<RefCell<AppState>>,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let row = match dom_element_to_row(client_x, client_y) {
+    let cs = click_state.borrow();
+    let (row, col) = match dom_element_to_cell(client_x, client_y, cs.terminal_cols) {
         Some(r) => r,
         None => return,
     };
 
-    let cs = click_state.borrow();
-    if let Some(event) = resolve_tap_at(row, 0, &cs) {
+    if let Some(action_id) = cs.hit_test(col, row) {
         drop(cs);
-        dispatch_event(&event, app_state);
+        dispatch_event(&InputEvent::Click(action_id), app_state);
     }
 }
 
 /// Dispatch an input event to the current app state.
 fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
-    let key = match event {
-        InputEvent::Key(c) => *c,
-    };
-
     let mut state = app_state.borrow_mut();
     match &mut *state {
-        AppState::Menu => match key {
-            '1' => {
-                let game = create_game(&GameChoice::Cookie);
+        AppState::Menu => {
+            let choice = match event {
+                InputEvent::Key('1') | InputEvent::Click(MENU_SELECT_COOKIE) => {
+                    Some(GameChoice::Cookie)
+                }
+                InputEvent::Key('2') | InputEvent::Click(MENU_SELECT_FACTORY) => {
+                    Some(GameChoice::Factory)
+                }
+                InputEvent::Key('3') | InputEvent::Click(MENU_SELECT_CAREER) => {
+                    Some(GameChoice::Career)
+                }
+                _ => None,
+            };
+            if let Some(choice) = choice {
+                let game = create_game(&choice);
                 *state = AppState::Playing { game };
             }
-            '2' => {
-                let game = create_game(&GameChoice::Factory);
-                *state = AppState::Playing { game };
-            }
-            '3' => {
-                let game = create_game(&GameChoice::Career);
-                *state = AppState::Playing { game };
-            }
-            _ => {}
-        },
+        }
         AppState::Playing { game } => {
-            if key == 'q' {
+            if matches!(event, InputEvent::Key('q')) {
                 *state = AppState::Menu;
             } else {
                 game.handle_input(event);
@@ -296,18 +322,18 @@ fn render_menu(
     );
     f.render_widget(menu_widget, chunks[1]);
 
-    // Register click targets
+    // Register click targets with semantic action IDs
     {
         let mut cs = click_state.borrow_mut();
-        // Menu item 1: title row
-        cs.add_target(chunks[1].y + 2, '1');
-        cs.add_target(chunks[1].y + 3, '1');
-        // Menu item 2:
-        cs.add_target(chunks[1].y + 5, '2');
-        cs.add_target(chunks[1].y + 6, '2');
-        // Menu item 3:
-        cs.add_target(chunks[1].y + 8, '3');
-        cs.add_target(chunks[1].y + 9, '3');
+        // Cookie Factory: title + description rows
+        cs.add_row_target(chunks[1], chunks[1].y + 2, MENU_SELECT_COOKIE);
+        cs.add_row_target(chunks[1], chunks[1].y + 3, MENU_SELECT_COOKIE);
+        // Tiny Factory: title + description rows
+        cs.add_row_target(chunks[1], chunks[1].y + 5, MENU_SELECT_FACTORY);
+        cs.add_row_target(chunks[1], chunks[1].y + 6, MENU_SELECT_FACTORY);
+        // Career Simulator: title + description rows
+        cs.add_row_target(chunks[1], chunks[1].y + 8, MENU_SELECT_CAREER);
+        cs.add_row_target(chunks[1], chunks[1].y + 9, MENU_SELECT_CAREER);
     }
 
     // Footer

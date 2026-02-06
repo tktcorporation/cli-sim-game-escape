@@ -11,6 +11,7 @@ use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
 
+use super::actions::*;
 use super::grid::{anchor_of, machine_at, Cell, MachineKind, MinerMode, GRID_H, GRID_W, VIEW_H, VIEW_W};
 use super::state::{FactoryState, PlacementTool};
 
@@ -692,21 +693,21 @@ fn render_tool_panel(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    // Tool definitions: (key, tool variant, label, cost_str)
-    let tools: Vec<(char, PlacementTool, &str, String)> = vec![
-        ('1', PlacementTool::Miner, "Miner", "$10".into()),
-        ('2', PlacementTool::Smelter, "Smelter", "$25".into()),
-        ('3', PlacementTool::Assembler, "Assembler", "$50".into()),
-        ('4', PlacementTool::Exporter, "Exporter", "$15".into()),
-        ('5', PlacementTool::Fabricator, "Fabricator", "$75".into()),
-        ('b', PlacementTool::Belt, "Belt", "$2".into()),
-        ('d', PlacementTool::Delete, "Delete", "---".into()),
+    // Tool definitions: (display_key, tool variant, label, cost_str, action_id)
+    let tools: Vec<(char, PlacementTool, &str, String, u16)> = vec![
+        ('1', PlacementTool::Miner, "Miner", "$10".into(), SELECT_MINER),
+        ('2', PlacementTool::Smelter, "Smelter", "$25".into(), SELECT_SMELTER),
+        ('3', PlacementTool::Assembler, "Assembler", "$50".into(), SELECT_ASSEMBLER),
+        ('4', PlacementTool::Exporter, "Exporter", "$15".into(), SELECT_EXPORTER),
+        ('5', PlacementTool::Fabricator, "Fabricator", "$75".into(), SELECT_FABRICATOR),
+        ('b', PlacementTool::Belt, "Belt", "$2".into(), SELECT_BELT),
+        ('d', PlacementTool::Delete, "Delete", "---".into(), SELECT_DELETE),
     ];
 
     let mut lines: Vec<Line> = Vec::new();
 
     // Tool selection rows
-    for (key, tool, label, cost) in &tools {
+    for (key, tool, label, cost, _action_id) in &tools {
         let is_selected = std::mem::discriminant(&state.tool) == std::mem::discriminant(tool);
         let color = tool_color(tool);
 
@@ -754,8 +755,8 @@ fn render_tool_panel(
 
     // Register click targets for each tool row
     let mut cs = click_state.borrow_mut();
-    for (i, (key, _, _, _)) in tools.iter().enumerate() {
-        cs.add_target(area.y + 1 + i as u16, *key);
+    for (i, (_key, _tool, _label, _cost, action_id)) in tools.iter().enumerate() {
+        cs.add_row_target(area, area.y + 1 + i as u16, *action_id);
     }
 }
 

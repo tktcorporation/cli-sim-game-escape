@@ -11,6 +11,7 @@ use ratzilla::ratatui::Frame;
 
 use crate::input::ClickState;
 
+use super::actions::*;
 use super::logic::format_number;
 use super::state::{CookieState, ParticleStyle};
 
@@ -145,17 +146,17 @@ fn render_tab_bar(
     };
     let prestige_color = if pending_chips > 0 { Color::Yellow } else { Color::Blue };
 
-    let tabs: [(String, Style, char); 5] = [
-        (" ▸ Producers ".to_string(), tab_style(0, Color::Green), '{'),
-        (" ▸ Upgrades ".to_string(), tab_style(1, Color::Magenta), '|'),
-        (" ▸ Research ".to_string(), tab_style(2, Color::Cyan), '\\'),
-        (milestone_label, tab_style(3, milestone_color), '}'),
-        (prestige_label, tab_style(4, prestige_color), '~'),
+    let tabs: [(String, Style, u16); 5] = [
+        (" ▸ Producers ".to_string(), tab_style(0, Color::Green), TAB_PRODUCERS),
+        (" ▸ Upgrades ".to_string(), tab_style(1, Color::Magenta), TAB_UPGRADES),
+        (" ▸ Research ".to_string(), tab_style(2, Color::Cyan), TAB_RESEARCH),
+        (milestone_label, tab_style(3, milestone_color), TAB_MILESTONES),
+        (prestige_label, tab_style(4, prestige_color), TAB_PRESTIGE),
     ];
 
     // Render each tab on its own row
     let mut cs = click_state.borrow_mut();
-    for (i, (label, style, key)) in tabs.iter().enumerate() {
+    for (i, (label, style, action_id)) in tabs.iter().enumerate() {
         let row_y = area.y + i as u16;
         if row_y >= area.y + area.height {
             break;
@@ -163,7 +164,7 @@ fn render_tab_bar(
         let row_area = Rect::new(area.x, row_y, area.width, 1);
         let widget = Paragraph::new(Line::from(Span::styled(label.as_str(), *style)));
         f.render_widget(widget, row_area);
-        cs.add_target(row_y, *key);
+        cs.add_row_target(area, row_y, *action_id);
     }
 }
 
@@ -465,11 +466,9 @@ fn render_cookie_display(
     // Particles render on all screen sizes
     render_particles(state, f, area);
 
-    // Register the whole cookie display area as a click target for 'c'
+    // Register the whole cookie display area as a click target
     let mut cs = click_state.borrow_mut();
-    for row in area.y..area.y + area.height {
-        cs.add_target(row, 'c');
-    }
+    cs.add_click_target(area, CLICK_COOKIE);
 }
 
 /// Build a sparkline string from a history of values.
@@ -625,10 +624,7 @@ fn render_buffs_and_golden(
 
         // Register golden cookie click target
         let mut cs = click_state.borrow_mut();
-        cs.add_target(area.y, 'g');
-        if area.height > 1 {
-            cs.add_target(area.y + 1, 'g');
-        }
+        cs.add_click_target(area, CLAIM_GOLDEN);
     }
 
     // Active buffs
@@ -836,7 +832,7 @@ fn render_producers(
     for (i, p) in state.producers.iter().enumerate() {
         let row = area.y + 1 + i as u16;
         if row < content_end {
-            cs.add_target(row, p.kind.key());
+            cs.add_row_target(area, row, BUY_PRODUCER_BASE + p.kind.index() as u16);
         }
     }
 }
@@ -929,8 +925,7 @@ fn render_upgrades(
     for i in 0..all_items.len() {
         let row = area.y + 1 + i as u16;
         if row < content_end {
-            let key = (b'a' + i as u8) as char;
-            cs.add_target(row, key);
+            cs.add_row_target(area, row, BUY_UPGRADE_BASE + i as u16);
         }
     }
 }
@@ -1045,8 +1040,7 @@ fn render_research(
         // +1 for border, +1 for header line
         let row = area.y + 2 + i as u16;
         if row < content_end {
-            let key = (b'a' + i as u8) as char;
-            cs.add_target(row, key);
+            cs.add_row_target(area, row, BUY_RESEARCH_BASE + i as u16);
         }
     }
 }
@@ -1306,8 +1300,7 @@ fn render_milestones(
     for i in 0..ready_key_idx {
         let row = first_ready_row + i as u16;
         if row < content_end {
-            let key = (b'a' + i) as char;
-            cs.add_target(row, key);
+            cs.add_row_target(area, row, CLAIM_MILESTONE_BASE + i as u16);
         }
     }
 }
@@ -1789,17 +1782,16 @@ fn render_prestige(
     // Click targets
     let mut cs = click_state.borrow_mut();
     let content_end = area.y + area.height.saturating_sub(1);
-    // P for prestige action (on pending chips line)
+    // Prestige reset action (on pending chips line)
     if pending > 0 && area.y + 2 < content_end {
-        cs.add_target(area.y + 2, 'p'); // the "転生で +N チップ" line
+        cs.add_row_target(area, area.y + 2, PRESTIGE_RESET);
     }
-    // a-z for prestige upgrade purchase
+    // Prestige upgrade purchase
     let first_upgrade_row = area.y + 4; // after header + pending + separator
     for (i, _) in state.prestige_upgrades.iter().enumerate() {
         let row = first_upgrade_row + i as u16;
         if row < content_end {
-            let key = (b'a' + i as u8) as char;
-            cs.add_target(row, key);
+            cs.add_row_target(area, row, BUY_PRESTIGE_UPGRADE_BASE + i as u16);
         }
     }
 }

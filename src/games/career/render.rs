@@ -11,6 +11,8 @@ use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
 
+use super::actions::*;
+
 use super::logic::{can_apply, format_money, format_money_exact, income_per_tick, next_available_job};
 use super::state::{
     invest_info, job_info, CareerState, InvestKind, Screen, ALL_JOBS, SKILL_CAP, TRAININGS,
@@ -198,13 +200,14 @@ fn render_actions(
 
         let color = if affordable { Color::White } else { Color::DarkGray };
         lines.push(Line::from(Span::styled(label, Style::default().fg(color))));
-        cs.add_target(area.y + 1 + i as u16, key);
+        cs.add_row_target(area, area.y + 1 + i as u16, TRAINING_BASE + i as u16);
     }
 
     // Spacer + navigation
     lines.push(Line::from(""));
 
     // [6] Job Market
+    let job_row = area.y + 1 + TRAININGS.len() as u16 + 1;
     lines.push(Line::from(vec![
         Span::styled(
             " [6] ",
@@ -215,9 +218,10 @@ fn render_actions(
         Span::styled("転職する", Style::default().fg(Color::White)),
         next_job_hint(state),
     ]));
-    cs.add_target(area.y + 1 + TRAININGS.len() as u16 + 1, '6');
+    cs.add_row_target(area, job_row, GO_JOB_MARKET);
 
     // [7] Invest
+    let invest_row = area.y + 1 + TRAININGS.len() as u16 + 2;
     lines.push(Line::from(vec![
         Span::styled(
             " [7] ",
@@ -227,7 +231,7 @@ fn render_actions(
         ),
         Span::styled("投資する", Style::default().fg(Color::White)),
     ]));
-    cs.add_target(area.y + 1 + TRAININGS.len() as u16 + 2, '7');
+    cs.add_row_target(area, invest_row, GO_INVEST);
 
     let block = Block::default()
         .borders(borders)
@@ -354,7 +358,7 @@ fn render_job_market(
         };
 
         lines.push(Line::from(Span::styled(label, Style::default().fg(fg))));
-        cs.add_target(chunks[0].y + 1 + i as u16, key);
+        cs.add_row_target(chunks[0], chunks[0].y + 1 + i as u16, APPLY_JOB_BASE + i as u16);
     }
 
     lines.push(Line::from(""));
@@ -387,7 +391,7 @@ fn render_job_market(
             Span::styled("戻る", Style::default().fg(Color::White)),
         ]),
     ];
-    cs.add_target(chunks[1].y + 2, '-');
+    cs.add_row_target(chunks[1], chunks[1].y + 2, BACK_FROM_JOBS);
     let footer_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
@@ -577,8 +581,9 @@ fn render_invest(
     }
 
     // Register click targets for investment actions
-    for (i, (key, _, _)) in investments.iter().enumerate() {
-        cs.add_target(chunks[1].y + 1 + i as u16, *key);
+    let invest_action_ids = [INVEST_SAVINGS, INVEST_STOCKS, INVEST_REAL_ESTATE];
+    for (i, &action_id) in invest_action_ids.iter().enumerate() {
+        cs.add_row_target(chunks[1], chunks[1].y + 1 + i as u16, action_id);
     }
 
     let action_block = Block::default()
@@ -603,7 +608,7 @@ fn render_invest(
             Span::styled("戻る", Style::default().fg(Color::White)),
         ]),
     ];
-    cs.add_target(chunks[2].y + 2, '-');
+    cs.add_row_target(chunks[2], chunks[2].y + 2, BACK_FROM_INVEST);
     let footer_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));

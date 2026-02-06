@@ -125,6 +125,11 @@ impl ProducerKind {
             ProducerKind::AntimatterCondenser => 11,
         }
     }
+
+    /// Convert an index back to a ProducerKind.
+    pub fn from_index(idx: usize) -> Option<ProducerKind> {
+        ProducerKind::all().get(idx).cloned()
+    }
 }
 
 /// ROI (Return on Investment) information for a producer.

@@ -1,5 +1,6 @@
 //! Cookie Factory — an incremental cookie clicker game.
 
+pub mod actions;
 pub mod logic;
 pub mod render;
 pub mod save;
@@ -16,7 +17,8 @@ use ratzilla::ratatui::Frame;
 use crate::input::{ClickState, InputEvent};
 use crate::games::Game;
 
-use state::{CookieState, ProducerKind};
+use actions::*;
+use state::{CookieState, DragonAura, ProducerKind, SugarBoostKind};
 
 pub struct CookieGame {
     pub state: CookieState,
@@ -42,14 +44,152 @@ impl CookieGame {
             save_countdown: save::AUTOSAVE_INTERVAL,
         }
     }
-}
 
-impl Game for CookieGame {
-    fn handle_input(&mut self, event: &InputEvent) -> bool {
-        let key = match event {
-            InputEvent::Key(c) => *c,
-        };
+    /// Handle a click action by semantic action ID (direct dispatch, no context ambiguity).
+    fn handle_click(&mut self, action_id: u16) -> bool {
+        match action_id {
+            CLICK_COOKIE => {
+                logic::click(&mut self.state);
+                true
+            }
+            CLAIM_GOLDEN => {
+                logic::claim_golden(&mut self.state);
+                true
+            }
+            TAB_PRODUCERS => {
+                self.state.show_upgrades = false;
+                self.state.show_research = false;
+                self.state.show_milestones = false;
+                self.state.show_prestige = false;
+                true
+            }
+            TAB_UPGRADES => {
+                self.state.show_upgrades = true;
+                self.state.show_research = false;
+                self.state.show_milestones = false;
+                self.state.show_prestige = false;
+                true
+            }
+            TAB_RESEARCH => {
+                self.state.show_research = true;
+                self.state.show_upgrades = false;
+                self.state.show_milestones = false;
+                self.state.show_prestige = false;
+                true
+            }
+            TAB_MILESTONES => {
+                self.state.show_milestones = true;
+                self.state.show_upgrades = false;
+                self.state.show_research = false;
+                self.state.show_prestige = false;
+                true
+            }
+            TAB_PRESTIGE => {
+                self.state.show_prestige = true;
+                self.state.show_upgrades = false;
+                self.state.show_research = false;
+                self.state.show_milestones = false;
+                true
+            }
+            id if (BUY_PRODUCER_BASE..BUY_PRODUCER_BASE + 12).contains(&id) => {
+                let idx = (id - BUY_PRODUCER_BASE) as usize;
+                if let Some(kind) = ProducerKind::from_index(idx) {
+                    logic::buy_producer(&mut self.state, &kind);
+                }
+                true
+            }
+            id if (BUY_UPGRADE_BASE..BUY_UPGRADE_BASE + 26).contains(&id) => {
+                let display_idx = (id - BUY_UPGRADE_BASE) as usize;
+                let available: Vec<usize> = self.state.upgrades.iter().enumerate()
+                    .filter(|(_, u)| !u.purchased)
+                    .map(|(i, _)| i)
+                    .collect();
+                if let Some(&real_idx) = available.get(display_idx) {
+                    logic::buy_upgrade(&mut self.state, real_idx);
+                }
+                true
+            }
+            id if (BUY_RESEARCH_BASE..BUY_RESEARCH_BASE + 26).contains(&id) => {
+                let display_idx = (id - BUY_RESEARCH_BASE) as usize;
+                let visible: Vec<usize> = self.state.research_nodes.iter().enumerate()
+                    .filter(|(_, n)| {
+                        if self.state.research_path != state::ResearchPath::None
+                            && n.path != self.state.research_path
+                        {
+                            return false;
+                        }
+                        !n.purchased
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                if let Some(&real_idx) = visible.get(display_idx) {
+                    logic::buy_research(&mut self.state, real_idx);
+                }
+                true
+            }
+            id if (CLAIM_MILESTONE_BASE..CLAIM_MILESTONE_BASE + 26).contains(&id) => {
+                let display_idx = (id - CLAIM_MILESTONE_BASE) as usize;
+                let ready: Vec<usize> = self.state.milestones.iter().enumerate()
+                    .filter(|(_, m)| m.status == state::MilestoneStatus::Ready)
+                    .map(|(i, _)| i)
+                    .collect();
+                if let Some(&real_idx) = ready.get(display_idx) {
+                    logic::claim_milestone(&mut self.state, real_idx);
+                }
+                true
+            }
+            CLAIM_ALL_MILESTONES => {
+                logic::claim_all_milestones(&mut self.state);
+                true
+            }
+            PRESTIGE_RESET => {
+                logic::perform_prestige(&mut self.state);
+                true
+            }
+            id if (BUY_PRESTIGE_UPGRADE_BASE..BUY_PRESTIGE_UPGRADE_BASE + 26).contains(&id) => {
+                let idx = (id - BUY_PRESTIGE_UPGRADE_BASE) as usize;
+                logic::buy_prestige_upgrade(&mut self.state, idx);
+                true
+            }
+            id if (DRAGON_FEED_BASE..DRAGON_FEED_BASE + 12).contains(&id) => {
+                let idx = (id - DRAGON_FEED_BASE) as usize;
+                if let Some(kind) = ProducerKind::from_index(idx) {
+                    logic::feed_dragon(&mut self.state, &kind, 1);
+                }
+                true
+            }
+            DRAGON_CYCLE_AURA => {
+                let auras = DragonAura::all();
+                let current_idx = auras.iter().position(|a| *a == self.state.dragon_aura);
+                let next = match current_idx {
+                    Some(i) => auras[(i + 1) % auras.len()].clone(),
+                    None => auras[0].clone(),
+                };
+                logic::set_dragon_aura(&mut self.state, next);
+                true
+            }
+            SUGAR_RUSH => {
+                logic::activate_sugar_boost(&mut self.state, SugarBoostKind::Rush);
+                true
+            }
+            SUGAR_FEVER => {
+                logic::activate_sugar_boost(&mut self.state, SugarBoostKind::Fever);
+                true
+            }
+            SUGAR_FRENZY => {
+                logic::activate_sugar_boost(&mut self.state, SugarBoostKind::Frenzy);
+                true
+            }
+            TOGGLE_AUTO_CLICKER => {
+                logic::toggle_auto_clicker(&mut self.state);
+                true
+            }
+            _ => false,
+        }
+    }
 
+    /// Handle a keyboard key press (context-dependent, as before).
+    fn handle_key(&mut self, key: char) -> bool {
         match key {
             'c' => {
                 logic::click(&mut self.state);
@@ -80,9 +220,8 @@ impl Game for CookieGame {
                 self.state.show_prestige = false;
                 true
             }
-            // Tab direct-set keys (used by click targets, not toggling)
+            // Tab direct-set keys (used by keyboard shortcuts)
             '{' => {
-                // Go to Producers tab
                 self.state.show_upgrades = false;
                 self.state.show_research = false;
                 self.state.show_milestones = false;
@@ -90,7 +229,6 @@ impl Game for CookieGame {
                 true
             }
             '|' => {
-                // Go to Upgrades tab
                 self.state.show_upgrades = true;
                 self.state.show_research = false;
                 self.state.show_milestones = false;
@@ -98,7 +236,6 @@ impl Game for CookieGame {
                 true
             }
             '\\' => {
-                // Go to Research tab
                 self.state.show_research = true;
                 self.state.show_upgrades = false;
                 self.state.show_milestones = false;
@@ -106,7 +243,6 @@ impl Game for CookieGame {
                 true
             }
             '}' => {
-                // Go to Milestones tab
                 self.state.show_milestones = true;
                 self.state.show_upgrades = false;
                 self.state.show_research = false;
@@ -114,7 +250,6 @@ impl Game for CookieGame {
                 true
             }
             '~' => {
-                // Go to Prestige tab
                 self.state.show_prestige = true;
                 self.state.show_upgrades = false;
                 self.state.show_research = false;
@@ -122,12 +257,10 @@ impl Game for CookieGame {
                 true
             }
             'p' if self.state.show_prestige => {
-                // Perform prestige reset
                 logic::perform_prestige(&mut self.state);
                 true
             }
             '1'..='8' if self.state.show_prestige => {
-                // In prestige mode: feed producer to dragon
                 let kind = match key {
                     '1' => ProducerKind::Cursor,
                     '2' => ProducerKind::Grandma,
@@ -143,8 +276,7 @@ impl Game for CookieGame {
                 true
             }
             '9' if self.state.show_prestige => {
-                // Cycle dragon aura
-                let auras = state::DragonAura::all();
+                let auras = DragonAura::all();
                 let current_idx = auras.iter().position(|a| *a == self.state.dragon_aura);
                 let next = match current_idx {
                     Some(i) => auras[(i + 1) % auras.len()].clone(),
@@ -174,15 +306,15 @@ impl Game for CookieGame {
             }
             // Sugar boost activation (Shift+R=Rush, Shift+F=Fever, Shift+Z=Frenzy)
             'R' if self.state.show_prestige => {
-                logic::activate_sugar_boost(&mut self.state, state::SugarBoostKind::Rush);
+                logic::activate_sugar_boost(&mut self.state, SugarBoostKind::Rush);
                 true
             }
             'F' if self.state.show_prestige => {
-                logic::activate_sugar_boost(&mut self.state, state::SugarBoostKind::Fever);
+                logic::activate_sugar_boost(&mut self.state, SugarBoostKind::Fever);
                 true
             }
             'Z' if self.state.show_prestige => {
-                logic::activate_sugar_boost(&mut self.state, state::SugarBoostKind::Frenzy);
+                logic::activate_sugar_boost(&mut self.state, SugarBoostKind::Frenzy);
                 true
             }
             // Auto-clicker toggle (Shift+A)
@@ -196,7 +328,6 @@ impl Game for CookieGame {
                 true
             }
             'a'..='z' if self.state.show_milestones => {
-                // Map 'a'..'z' to ready milestone indices
                 let display_idx = (key as u8 - b'a') as usize;
                 let ready: Vec<usize> = self
                     .state
@@ -212,7 +343,6 @@ impl Game for CookieGame {
                 true
             }
             '!' if self.state.show_milestones => {
-                // Claim all ready milestones at once
                 logic::claim_all_milestones(&mut self.state);
                 true
             }
@@ -258,6 +388,15 @@ impl Game for CookieGame {
             _ => false,
         }
     }
+}
+
+impl Game for CookieGame {
+    fn handle_input(&mut self, event: &InputEvent) -> bool {
+        match event {
+            InputEvent::Key(c) => self.handle_key(*c),
+            InputEvent::Click(id) => self.handle_click(*id),
+        }
+    }
 
     fn tick(&mut self, delta_ticks: u32) {
         logic::tick(&mut self.state, delta_ticks);
@@ -279,6 +418,8 @@ impl Game for CookieGame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Keyboard input tests (same as before) ────────────────────
 
     #[test]
     fn cookie_game_click_produces_cookies() {
@@ -512,5 +653,63 @@ mod tests {
         assert_eq!(game.state.producers[10].count, 1);
         game.handle_input(&InputEvent::Key('=')); // AntimatterCondenser
         assert_eq!(game.state.producers[11].count, 1);
+    }
+
+    // ── Click action tests (new: semantic action IDs) ────────────
+
+    #[test]
+    fn click_action_produces_cookies() {
+        let mut game = CookieGame::new();
+        game.handle_input(&InputEvent::Click(CLICK_COOKIE));
+        assert!((game.state.cookies - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn click_action_buy_producer() {
+        let mut game = CookieGame::new();
+        game.state.cookies = 100.0;
+        game.handle_input(&InputEvent::Click(BUY_PRODUCER_BASE)); // Cursor
+        assert_eq!(game.state.producers[0].count, 1);
+    }
+
+    #[test]
+    fn click_action_buy_producer_no_context_dependency() {
+        let mut game = CookieGame::new();
+        game.state.cookies = 100.0;
+        // Even with upgrades tab open, click action directly buys producer
+        game.state.show_upgrades = true;
+        game.handle_input(&InputEvent::Click(BUY_PRODUCER_BASE));
+        assert_eq!(game.state.producers[0].count, 1);
+    }
+
+    #[test]
+    fn click_action_tab_navigation() {
+        let mut game = CookieGame::new();
+        game.handle_input(&InputEvent::Click(TAB_UPGRADES));
+        assert!(game.state.show_upgrades);
+        game.handle_input(&InputEvent::Click(TAB_PRODUCERS));
+        assert!(!game.state.show_upgrades);
+    }
+
+    #[test]
+    fn click_action_golden_cookie() {
+        let mut game = CookieGame::new();
+        game.state.producers[1].count = 5;
+        game.state.golden_event = Some(state::GoldenCookieEvent {
+            appear_ticks_left: 50,
+            claimed: false,
+        });
+        game.handle_input(&InputEvent::Click(CLAIM_GOLDEN));
+        assert!(game.state.golden_event.is_none());
+    }
+
+    #[test]
+    fn click_action_prestige_reset() {
+        let mut game = CookieGame::new();
+        game.state.cookies = 1e15;
+        game.state.cookies_all_time = 1e15;
+        game.handle_input(&InputEvent::Click(PRESTIGE_RESET));
+        // After prestige, cookies should be reset
+        assert!(game.state.cookies < 1.0);
     }
 }

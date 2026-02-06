@@ -1,5 +1,6 @@
 //! Career Simulator — climb the career ladder, invest, and grow your influence.
 
+pub mod actions;
 pub mod logic;
 pub mod render;
 pub mod state;
@@ -13,6 +14,7 @@ use ratzilla::ratatui::Frame;
 use crate::games::Game;
 use crate::input::{ClickState, InputEvent};
 
+use actions::*;
 use state::{CareerState, InvestKind, Screen};
 
 pub struct CareerGame {
@@ -25,44 +27,58 @@ impl CareerGame {
             state: CareerState::new(),
         }
     }
-}
 
-impl Game for CareerGame {
-    fn handle_input(&mut self, event: &InputEvent) -> bool {
-        let key = match event {
-            InputEvent::Key(c) => *c,
-        };
+    fn handle_click(&mut self, action_id: u16) -> bool {
+        match action_id {
+            // Main screen: training
+            id if (TRAINING_BASE..TRAINING_BASE + 5).contains(&id) => {
+                logic::buy_training(&mut self.state, (id - TRAINING_BASE) as usize);
+                true
+            }
+            GO_JOB_MARKET => {
+                self.state.screen = Screen::JobMarket;
+                true
+            }
+            GO_INVEST => {
+                self.state.screen = Screen::Invest;
+                true
+            }
+            // Job Market screen
+            id if (APPLY_JOB_BASE..APPLY_JOB_BASE + 10).contains(&id) => {
+                logic::apply_job(&mut self.state, (id - APPLY_JOB_BASE) as usize);
+                true
+            }
+            BACK_FROM_JOBS | BACK_FROM_INVEST => {
+                self.state.screen = Screen::Main;
+                true
+            }
+            // Invest screen
+            INVEST_SAVINGS => {
+                logic::invest(&mut self.state, InvestKind::Savings);
+                true
+            }
+            INVEST_STOCKS => {
+                logic::invest(&mut self.state, InvestKind::Stocks);
+                true
+            }
+            INVEST_REAL_ESTATE => {
+                logic::invest(&mut self.state, InvestKind::RealEstate);
+                true
+            }
+            _ => false,
+        }
+    }
 
+    fn handle_key(&mut self, key: char) -> bool {
         match self.state.screen {
             Screen::Main => match key {
-                '1' => {
-                    logic::buy_training(&mut self.state, 0);
-                    true
-                }
-                '2' => {
-                    logic::buy_training(&mut self.state, 1);
-                    true
-                }
-                '3' => {
-                    logic::buy_training(&mut self.state, 2);
-                    true
-                }
-                '4' => {
-                    logic::buy_training(&mut self.state, 3);
-                    true
-                }
-                '5' => {
-                    logic::buy_training(&mut self.state, 4);
-                    true
-                }
-                '6' => {
-                    self.state.screen = Screen::JobMarket;
-                    true
-                }
-                '7' => {
-                    self.state.screen = Screen::Invest;
-                    true
-                }
+                '1' => { logic::buy_training(&mut self.state, 0); true }
+                '2' => { logic::buy_training(&mut self.state, 1); true }
+                '3' => { logic::buy_training(&mut self.state, 2); true }
+                '4' => { logic::buy_training(&mut self.state, 3); true }
+                '5' => { logic::buy_training(&mut self.state, 4); true }
+                '6' => { self.state.screen = Screen::JobMarket; true }
+                '7' => { self.state.screen = Screen::Invest; true }
                 _ => false,
             },
             Screen::JobMarket => match key {
@@ -76,22 +92,25 @@ impl Game for CareerGame {
                 '8' => { logic::apply_job(&mut self.state, 7); true }
                 '9' => { logic::apply_job(&mut self.state, 8); true }
                 '0' => { logic::apply_job(&mut self.state, 9); true }
-                '-' => {
-                    self.state.screen = Screen::Main;
-                    true
-                }
+                '-' => { self.state.screen = Screen::Main; true }
                 _ => false,
             },
             Screen::Invest => match key {
                 '1' => { logic::invest(&mut self.state, InvestKind::Savings); true }
                 '2' => { logic::invest(&mut self.state, InvestKind::Stocks); true }
                 '3' => { logic::invest(&mut self.state, InvestKind::RealEstate); true }
-                '-' => {
-                    self.state.screen = Screen::Main;
-                    true
-                }
+                '-' => { self.state.screen = Screen::Main; true }
                 _ => false,
             },
+        }
+    }
+}
+
+impl Game for CareerGame {
+    fn handle_input(&mut self, event: &InputEvent) -> bool {
+        match event {
+            InputEvent::Key(c) => self.handle_key(*c),
+            InputEvent::Click(id) => self.handle_click(*id),
         }
     }
 
@@ -195,5 +214,50 @@ mod tests {
         game.handle_input(&InputEvent::Key('6'));
         game.handle_input(&InputEvent::Key('3'));
         assert_eq!(game.state.job, state::JobKind::Programmer);
+    }
+
+    // ── Click action tests ──────────────────────────────────────
+
+    #[test]
+    fn click_action_training() {
+        let mut game = CareerGame::new();
+        // Free self-study via click (index 3)
+        game.handle_input(&InputEvent::Click(TRAINING_BASE + 3));
+        assert_eq!(game.state.knowledge, 1.0);
+    }
+
+    #[test]
+    fn click_action_screen_navigation() {
+        let mut game = CareerGame::new();
+        assert_eq!(game.state.screen, Screen::Main);
+
+        game.handle_input(&InputEvent::Click(GO_JOB_MARKET));
+        assert_eq!(game.state.screen, Screen::JobMarket);
+
+        game.handle_input(&InputEvent::Click(BACK_FROM_JOBS));
+        assert_eq!(game.state.screen, Screen::Main);
+
+        game.handle_input(&InputEvent::Click(GO_INVEST));
+        assert_eq!(game.state.screen, Screen::Invest);
+
+        game.handle_input(&InputEvent::Click(BACK_FROM_INVEST));
+        assert_eq!(game.state.screen, Screen::Main);
+    }
+
+    #[test]
+    fn click_action_job_apply() {
+        let mut game = CareerGame::new();
+        game.state.knowledge = 10.0;
+        game.handle_input(&InputEvent::Click(APPLY_JOB_BASE + 1)); // office clerk
+        assert_eq!(game.state.job, state::JobKind::OfficeClerk);
+    }
+
+    #[test]
+    fn click_action_invest() {
+        let mut game = CareerGame::new();
+        game.state.money = 5_000.0;
+        game.handle_input(&InputEvent::Click(INVEST_SAVINGS));
+        assert_eq!(game.state.savings, 1_000.0);
+        assert_eq!(game.state.money, 4_000.0);
     }
 }
