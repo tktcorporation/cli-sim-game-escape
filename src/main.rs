@@ -92,6 +92,10 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 let game = create_game(&GameChoice::Factory);
                 *state = AppState::Playing { game };
             }
+            '3' => {
+                let game = create_game(&GameChoice::Career);
+                *state = AppState::Playing { game };
+            }
             _ => {}
         },
         AppState::Playing { game } => {
@@ -268,6 +272,20 @@ fn render_menu(
             "     工場を作って生産ラインを最適化する放置ゲーム",
             Style::default().fg(Color::DarkGray),
         )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                " [3] ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Career Simulator", Style::default().fg(Color::White)),
+        ]),
+        Line::from(Span::styled(
+            "     スキルを磨いて転職・投資でキャリアを築くシミュレーション",
+            Style::default().fg(Color::DarkGray),
+        )),
     ];
 
     let menu_widget = Paragraph::new(menu_lines).block(
@@ -287,6 +305,9 @@ fn render_menu(
         // Menu item 2:
         cs.add_target(chunks[1].y + 5, '2');
         cs.add_target(chunks[1].y + 6, '2');
+        // Menu item 3:
+        cs.add_target(chunks[1].y + 8, '3');
+        cs.add_target(chunks[1].y + 9, '3');
     }
 
     // Footer
