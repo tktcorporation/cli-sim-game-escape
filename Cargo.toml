@@ -12,3 +12,11 @@ web-sys = { version = "0.3", features = ["Window", "Document", "Element", "DomRe
 
 [dev-dependencies]
 proptest = "1.4"
+
+[profile.release]
+# Optimize for small WASM binary size (faster download & parse)
+opt-level = "s"
+# Thin LTO: good size reduction without the extreme compile time of fat LTO
+lto = "thin"
+# Strip debug info from release builds
+strip = "debuginfo"

@@ -2,3 +2,4 @@
 /dist
 *.wasm
 .serena/
+node_modules/
