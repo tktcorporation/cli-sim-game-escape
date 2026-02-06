@@ -257,6 +257,79 @@ pub enum InvestKind {
     RealEstate,
 }
 
+/// Lifestyle level — higher level gives skill bonuses but costs more.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LifestyleLevel {
+    Frugal,  // Lv.1 質素
+    Normal,  // Lv.2 普通
+    Comfort, // Lv.3 快適
+    Wealthy, // Lv.4 裕福
+    Luxury,  // Lv.5 豪華
+}
+
+pub const ALL_LIFESTYLES: [LifestyleLevel; 5] = [
+    LifestyleLevel::Frugal,
+    LifestyleLevel::Normal,
+    LifestyleLevel::Comfort,
+    LifestyleLevel::Wealthy,
+    LifestyleLevel::Luxury,
+];
+
+/// Static info about a lifestyle level.
+pub struct LifestyleInfo {
+    pub name: &'static str,
+    pub level: u8,
+    pub living_cost: f64,       // per month
+    pub rent: f64,              // per month
+    pub skill_efficiency: f64,  // multiplier bonus (0.0 = no bonus)
+    pub rep_bonus: f64,         // per tick (additional)
+}
+
+pub fn lifestyle_info(level: LifestyleLevel) -> LifestyleInfo {
+    match level {
+        LifestyleLevel::Frugal => LifestyleInfo {
+            name: "質素",
+            level: 1,
+            living_cost: 600.0,
+            rent: 400.0,
+            skill_efficiency: 0.0,
+            rep_bonus: 0.0,
+        },
+        LifestyleLevel::Normal => LifestyleInfo {
+            name: "普通",
+            level: 2,
+            living_cost: 1_200.0,
+            rent: 800.0,
+            skill_efficiency: 0.15,
+            rep_bonus: 0.0,
+        },
+        LifestyleLevel::Comfort => LifestyleInfo {
+            name: "快適",
+            level: 3,
+            living_cost: 2_500.0,
+            rent: 1_500.0,
+            skill_efficiency: 0.30,
+            rep_bonus: 0.003,
+        },
+        LifestyleLevel::Wealthy => LifestyleInfo {
+            name: "裕福",
+            level: 4,
+            living_cost: 5_000.0,
+            rent: 3_000.0,
+            skill_efficiency: 0.50,
+            rep_bonus: 0.006,
+        },
+        LifestyleLevel::Luxury => LifestyleInfo {
+            name: "豪華",
+            level: 5,
+            living_cost: 10_000.0,
+            rent: 6_000.0,
+            skill_efficiency: 0.70,
+            rep_bonus: 0.010,
+        },
+    }
+}
+
 /// Investment option info.
 pub struct InvestInfo {
     pub name: &'static str,
@@ -269,17 +342,20 @@ pub fn invest_info(kind: InvestKind) -> InvestInfo {
         InvestKind::Savings => InvestInfo {
             name: "貯金",
             increment: 1_000.0,
-            return_rate: 0.00002,
+            // 0.05%/month = 0.0005/month / 300 ticks
+            return_rate: 0.0005 / 300.0,
         },
         InvestKind::Stocks => InvestInfo {
             name: "株式投資",
             increment: 5_000.0,
-            return_rate: 0.0001,
+            // 0.5%/month = 0.005/month / 300 ticks
+            return_rate: 0.005 / 300.0,
         },
         InvestKind::RealEstate => InvestInfo {
             name: "不動産",
-            increment: 50_000.0,
-            return_rate: 0.0003,
+            increment: 80_000.0,
+            // 1.5%/month = 0.015/month / 300 ticks
+            return_rate: 0.015 / 300.0,
         },
     }
 }
@@ -290,16 +366,50 @@ pub enum Screen {
     Main,
     JobMarket,
     Invest,
+    Budget,
+    Lifestyle,
 }
 
 /// Maximum skill level.
 pub const SKILL_CAP: f64 = 100.0;
 
 /// Ticks per game day (10 ticks/sec × 10 sec = 1 day).
+#[cfg(test)]
 pub const TICKS_PER_DAY: u64 = 100;
+
+/// Ticks per month (game pay period: 300 ticks = 30 seconds).
+pub const TICKS_PER_MONTH: u32 = 300;
 
 /// Reputation gain per tick from working.
 const BASE_REP_GAIN: f64 = 0.002;
+
+/// Monthly snapshot for the budget display.
+#[derive(Clone, Debug)]
+pub struct MonthlyReport {
+    pub gross_salary: f64,
+    pub tax: f64,
+    pub insurance: f64,
+    pub net_salary: f64,
+    pub passive_income: f64,
+    pub living_cost: f64,
+    pub rent: f64,
+    pub cashflow: f64,
+}
+
+impl MonthlyReport {
+    pub fn empty() -> Self {
+        Self {
+            gross_salary: 0.0,
+            tax: 0.0,
+            insurance: 0.0,
+            net_salary: 0.0,
+            passive_income: 0.0,
+            living_cost: 0.0,
+            rent: 0.0,
+            cashflow: 0.0,
+        }
+    }
+}
 
 /// Career simulator game state.
 pub struct CareerState {
@@ -321,6 +431,19 @@ pub struct CareerState {
 
     pub screen: Screen,
     pub log: Vec<String>,
+
+    // Cash flow system
+    pub lifestyle: LifestyleLevel,
+    pub month_ticks: u32,
+    pub months_elapsed: u32,
+    pub month_gross_earned: f64,
+
+    // Monthly report (updated each payday)
+    pub last_report: MonthlyReport,
+
+    // Economic freedom tracking
+    pub won: bool,
+    pub won_message: Option<String>,
 }
 
 impl CareerState {
@@ -340,9 +463,17 @@ impl CareerState {
             real_estate: 0.0,
             screen: Screen::Main,
             log: vec!["キャリアシミュレーターへようこそ！".into()],
+            lifestyle: LifestyleLevel::Frugal,
+            month_ticks: 0,
+            months_elapsed: 0,
+            month_gross_earned: 0.0,
+            last_report: MonthlyReport::empty(),
+            won: false,
+            won_message: None,
         }
     }
 
+    #[cfg(test)]
     pub fn day(&self) -> u64 {
         self.total_ticks / TICKS_PER_DAY + 1
     }
@@ -371,6 +502,9 @@ mod tests {
         assert_eq!(s.technical, 0.0);
         assert_eq!(s.screen, Screen::Main);
         assert_eq!(s.day(), 1);
+        assert_eq!(s.lifestyle, LifestyleLevel::Frugal);
+        assert_eq!(s.months_elapsed, 0);
+        assert!(!s.won);
     }
 
     #[test]
@@ -426,5 +560,33 @@ mod tests {
             assert!(info.increment > 0.0);
             assert!(info.return_rate > 0.0);
         }
+    }
+
+    #[test]
+    fn lifestyle_info_valid() {
+        for &level in &ALL_LIFESTYLES {
+            let info = lifestyle_info(level);
+            assert!(!info.name.is_empty());
+            assert!(info.living_cost >= 0.0);
+            assert!(info.rent >= 0.0);
+            assert!(info.skill_efficiency >= 0.0);
+        }
+    }
+
+    #[test]
+    fn lifestyle_costs_increase_with_level() {
+        let frugal = lifestyle_info(LifestyleLevel::Frugal);
+        let luxury = lifestyle_info(LifestyleLevel::Luxury);
+        assert!(luxury.living_cost > frugal.living_cost);
+        assert!(luxury.rent > frugal.rent);
+        assert!(luxury.skill_efficiency > frugal.skill_efficiency);
+    }
+
+    #[test]
+    fn monthly_report_empty_has_zero_fields() {
+        let r = MonthlyReport::empty();
+        assert_eq!(r.gross_salary, 0.0);
+        assert_eq!(r.tax, 0.0);
+        assert_eq!(r.cashflow, 0.0);
     }
 }
