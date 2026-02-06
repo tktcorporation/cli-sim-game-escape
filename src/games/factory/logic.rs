@@ -1,4 +1,4 @@
-/// Tiny Factory game logic — pure functions, fully testable.
+//! Tiny Factory game logic — pure functions, fully testable.
 
 use super::grid::{anchor_of, Belt, Cell, Direction, ItemKind, Machine, MachineKind, MinerMode, GRID_H, GRID_W};
 use super::state::{FactoryState, PlacementTool};

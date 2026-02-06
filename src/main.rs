@@ -20,6 +20,7 @@ use ratzilla::{DomBackend, WebRenderer};
 pub const MENU_SELECT_COOKIE: u16 = 1;
 pub const MENU_SELECT_FACTORY: u16 = 2;
 pub const MENU_SELECT_CAREER: u16 = 3;
+pub const BACK_TO_MENU: u16 = 65535;
 
 /// Use `elementFromPoint` to find which grid cell was clicked.
 ///
@@ -125,7 +126,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
             }
         }
         AppState::Playing { game } => {
-            if matches!(event, InputEvent::Key('q')) {
+            if matches!(event, InputEvent::Key('q') | InputEvent::Click(BACK_TO_MENU)) {
                 *state = AppState::Menu;
             } else {
                 game.handle_input(event);
@@ -212,13 +213,18 @@ fn main() -> io::Result<()> {
                         game.tick(delta_ticks);
                     }
 
-                    // Main layout: title area + game area
-                    let chunks = Layout::default()
-                        .direction(Direction::Vertical)
-                        .constraints([Constraint::Min(1)])
-                        .split(size);
+                    game.render(f, size, &click_state);
 
-                    game.render(f, chunks[0], &click_state);
+                    // Overlay back button in top-left corner
+                    let back_area = Rect::new(size.x, size.y, 6, 1);
+                    let back = Paragraph::new(Span::styled(
+                        " ◀戻る",
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                    f.render_widget(back, back_area);
+                    click_state
+                        .borrow_mut()
+                        .add_click_target(back_area, BACK_TO_MENU);
                 }
             }
         }
@@ -273,7 +279,7 @@ fn render_menu(
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                " [1] ",
+                " ▶ ",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -281,13 +287,13 @@ fn render_menu(
             Span::styled("Cookie Factory", Style::default().fg(Color::White)),
         ]),
         Line::from(Span::styled(
-            "     クッキーをクリックして増やす放置ゲーム",
+            "    クッキーをクリックして増やす放置ゲーム",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                " [2] ",
+                " ▶ ",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -295,13 +301,13 @@ fn render_menu(
             Span::styled("Tiny Factory", Style::default().fg(Color::White)),
         ]),
         Line::from(Span::styled(
-            "     工場を作って生産ラインを最適化する放置ゲーム",
+            "    工場を作って生産ラインを最適化する放置ゲーム",
             Style::default().fg(Color::DarkGray),
         )),
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                " [3] ",
+                " ▶ ",
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
@@ -309,7 +315,7 @@ fn render_menu(
             Span::styled("Career Simulator", Style::default().fg(Color::White)),
         ]),
         Line::from(Span::styled(
-            "     スキルを磨いて転職・投資でキャリアを築くシミュレーション",
+            "    スキルを磨いて転職・投資でキャリアを築くシミュレーション",
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -338,7 +344,7 @@ fn render_menu(
 
     // Footer
     let footer_widget = Paragraph::new(Line::from(Span::styled(
-        "数字キーまたはタップでゲームを選択",
+        "タップでゲームを選択",
         Style::default().fg(Color::DarkGray),
     )))
     .block(

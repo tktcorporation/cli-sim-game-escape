@@ -1,4 +1,4 @@
-/// Grid types for the Tiny Factory game.
+//! Grid types for the Tiny Factory game.
 
 pub const GRID_W: usize = 40;
 pub const GRID_H: usize = 30;
@@ -26,17 +26,6 @@ impl Direction {
             Direction::Right => (1, 0),
         }
     }
-
-    /// ASCII char for display.
-    pub fn arrow(&self) -> char {
-        match self {
-            Direction::Up => '^',
-            Direction::Down => 'v',
-            Direction::Left => '<',
-            Direction::Right => '>',
-        }
-    }
-
     /// Opposite direction.
     pub fn opposite(&self) -> Direction {
         match self {
@@ -110,17 +99,6 @@ impl MachineKind {
             MachineKind::Fabricator => "Fabricator",
         }
     }
-
-    pub fn symbol(&self) -> char {
-        match self {
-            MachineKind::Miner => 'M',
-            MachineKind::Smelter => 'S',
-            MachineKind::Assembler => 'A',
-            MachineKind::Exporter => 'E',
-            MachineKind::Fabricator => 'F',
-        }
-    }
-
     /// Cost to place this machine.
     pub fn cost(&self) -> u64 {
         match self {
@@ -140,18 +118,6 @@ impl MachineKind {
             MachineKind::Assembler => 20,  // 0.5 per second
             MachineKind::Exporter => 5,   // 2 per second
             MachineKind::Fabricator => 25, // 0.4 per second
-        }
-    }
-
-    /// Primary input required (None for Miner, Exporter, Fabricator).
-    /// Fabricator uses special 2-input logic handled in tick.
-    pub fn input(&self) -> Option<ItemKind> {
-        match self {
-            MachineKind::Miner => None,
-            MachineKind::Smelter => None, // polymorphic: accepts IronOre or CopperOre
-            MachineKind::Assembler => Some(ItemKind::IronPlate),
-            MachineKind::Exporter => None, // accepts any
-            MachineKind::Fabricator => None, // 2-input: IronPlate + CopperPlate
         }
     }
 
@@ -307,9 +273,7 @@ mod tests {
 
     #[test]
     fn machine_recipes() {
-        assert_eq!(MachineKind::Miner.input(), None);
         assert_eq!(MachineKind::Miner.output(), Some(ItemKind::IronOre));
-        assert_eq!(MachineKind::Smelter.input(), None); // polymorphic: accepts IronOre or CopperOre
         assert_eq!(MachineKind::Smelter.output(), Some(ItemKind::IronPlate));
     }
 
