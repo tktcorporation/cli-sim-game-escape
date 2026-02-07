@@ -40,6 +40,17 @@ impl CareerGame {
     }
 
     fn handle_click(&mut self, action_id: u16) -> bool {
+        // Back button: go up one level (sub-screen → main), don't leave game
+        if action_id == crate::BACK_TO_MENU {
+            return match self.state.screen {
+                Screen::Main => false, // Let main.rs go to menu
+                _ => {
+                    self.state.screen = Screen::Main;
+                    true
+                }
+            };
+        }
+
         let game_over = is_game_over(&self.state);
         match action_id {
             // Main screen
@@ -116,6 +127,17 @@ impl CareerGame {
     }
 
     fn handle_key(&mut self, key: char) -> bool {
+        // 'q' (Esc) = go back one level. Only reach menu from Main screen.
+        if key == 'q' {
+            return match self.state.screen {
+                Screen::Main => false, // Let main.rs go to menu
+                _ => {
+                    self.state.screen = Screen::Main;
+                    true
+                }
+            };
+        }
+
         let game_over = is_game_over(&self.state);
         match self.state.screen {
             Screen::Main => match key {
