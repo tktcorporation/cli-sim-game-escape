@@ -43,12 +43,20 @@ impl CareerGame {
                 self.state.screen = Screen::Invest;
                 true
             }
+            GO_BUDGET => {
+                self.state.screen = Screen::Budget;
+                true
+            }
+            GO_LIFESTYLE => {
+                self.state.screen = Screen::Lifestyle;
+                true
+            }
             // Job Market screen
             id if (APPLY_JOB_BASE..APPLY_JOB_BASE + 10).contains(&id) => {
                 logic::apply_job(&mut self.state, (id - APPLY_JOB_BASE) as usize);
                 true
             }
-            BACK_FROM_JOBS | BACK_FROM_INVEST => {
+            BACK_FROM_JOBS | BACK_FROM_INVEST | BACK_FROM_BUDGET | BACK_FROM_LIFESTYLE => {
                 self.state.screen = Screen::Main;
                 true
             }
@@ -65,6 +73,11 @@ impl CareerGame {
                 logic::invest(&mut self.state, InvestKind::RealEstate);
                 true
             }
+            // Lifestyle screen
+            id if (LIFESTYLE_BASE..LIFESTYLE_BASE + 5).contains(&id) => {
+                logic::change_lifestyle(&mut self.state, (id - LIFESTYLE_BASE) as usize);
+                true
+            }
             _ => false,
         }
     }
@@ -79,6 +92,8 @@ impl CareerGame {
                 '5' => { logic::buy_training(&mut self.state, 4); true }
                 '6' => { self.state.screen = Screen::JobMarket; true }
                 '7' => { self.state.screen = Screen::Invest; true }
+                '8' => { self.state.screen = Screen::Budget; true }
+                '9' => { self.state.screen = Screen::Lifestyle; true }
                 _ => false,
             },
             Screen::JobMarket => match key {
@@ -99,6 +114,19 @@ impl CareerGame {
                 '1' => { logic::invest(&mut self.state, InvestKind::Savings); true }
                 '2' => { logic::invest(&mut self.state, InvestKind::Stocks); true }
                 '3' => { logic::invest(&mut self.state, InvestKind::RealEstate); true }
+                '-' => { self.state.screen = Screen::Main; true }
+                _ => false,
+            },
+            Screen::Budget => match key {
+                '-' => { self.state.screen = Screen::Main; true }
+                _ => false,
+            },
+            Screen::Lifestyle => match key {
+                '1' => { logic::change_lifestyle(&mut self.state, 0); true }
+                '2' => { logic::change_lifestyle(&mut self.state, 1); true }
+                '3' => { logic::change_lifestyle(&mut self.state, 2); true }
+                '4' => { logic::change_lifestyle(&mut self.state, 3); true }
+                '5' => { logic::change_lifestyle(&mut self.state, 4); true }
                 '-' => { self.state.screen = Screen::Main; true }
                 _ => false,
             },
@@ -156,6 +184,18 @@ mod tests {
 
         game.handle_input(&InputEvent::Key('7'));
         assert_eq!(game.state.screen, Screen::Invest);
+
+        game.handle_input(&InputEvent::Key('-'));
+        assert_eq!(game.state.screen, Screen::Main);
+
+        game.handle_input(&InputEvent::Key('8'));
+        assert_eq!(game.state.screen, Screen::Budget);
+
+        game.handle_input(&InputEvent::Key('-'));
+        assert_eq!(game.state.screen, Screen::Main);
+
+        game.handle_input(&InputEvent::Key('9'));
+        assert_eq!(game.state.screen, Screen::Lifestyle);
 
         game.handle_input(&InputEvent::Key('-'));
         assert_eq!(game.state.screen, Screen::Main);
@@ -242,6 +282,18 @@ mod tests {
 
         game.handle_input(&InputEvent::Click(BACK_FROM_INVEST));
         assert_eq!(game.state.screen, Screen::Main);
+
+        game.handle_input(&InputEvent::Click(GO_BUDGET));
+        assert_eq!(game.state.screen, Screen::Budget);
+
+        game.handle_input(&InputEvent::Click(BACK_FROM_BUDGET));
+        assert_eq!(game.state.screen, Screen::Main);
+
+        game.handle_input(&InputEvent::Click(GO_LIFESTYLE));
+        assert_eq!(game.state.screen, Screen::Lifestyle);
+
+        game.handle_input(&InputEvent::Click(BACK_FROM_LIFESTYLE));
+        assert_eq!(game.state.screen, Screen::Main);
     }
 
     #[test]
@@ -259,5 +311,37 @@ mod tests {
         game.handle_input(&InputEvent::Click(INVEST_SAVINGS));
         assert_eq!(game.state.savings, 1_000.0);
         assert_eq!(game.state.money, 4_000.0);
+    }
+
+    #[test]
+    fn click_action_lifestyle() {
+        let mut game = CareerGame::new();
+        game.handle_input(&InputEvent::Click(GO_LIFESTYLE));
+        assert_eq!(game.state.screen, Screen::Lifestyle);
+
+        game.handle_input(&InputEvent::Click(LIFESTYLE_BASE + 1)); // Normal
+        assert_eq!(game.state.lifestyle, state::LifestyleLevel::Normal);
+        assert_eq!(game.state.screen, Screen::Main);
+    }
+
+    #[test]
+    fn key_action_lifestyle() {
+        let mut game = CareerGame::new();
+        game.handle_input(&InputEvent::Key('9')); // go to lifestyle
+        assert_eq!(game.state.screen, Screen::Lifestyle);
+
+        game.handle_input(&InputEvent::Key('2')); // Normal
+        assert_eq!(game.state.lifestyle, state::LifestyleLevel::Normal);
+        assert_eq!(game.state.screen, Screen::Main);
+    }
+
+    #[test]
+    fn monthly_cycle_integration() {
+        let mut game = CareerGame::new();
+        game.tick(300); // 1 month
+        assert_eq!(game.state.months_elapsed, 1);
+        // Money should be positive but less than gross (due to deductions)
+        assert!(game.state.money > 0.0);
+        assert!(game.state.money < 2_400.0); // less than gross 8*300
     }
 }

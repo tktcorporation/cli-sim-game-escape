@@ -1,8 +1,8 @@
 //! Career Simulator — pure game logic (no rendering / IO).
 
 use super::state::{
-    invest_info, job_info, CareerState, InvestKind, JobKind, Screen, ALL_JOBS, SKILL_CAP,
-    TRAININGS,
+    invest_info, job_info, lifestyle_info, CareerState, InvestKind, JobKind, MonthlyReport, Screen,
+    ALL_JOBS, ALL_LIFESTYLES, SKILL_CAP, TICKS_PER_MONTH, TRAININGS,
 };
 
 // ── Tick ───────────────────────────────────────────────────────────────
@@ -14,26 +14,42 @@ pub fn tick(state: &mut CareerState, delta_ticks: u32) {
 }
 
 fn tick_once(state: &mut CareerState) {
-    state.total_ticks += 1;
+    if state.won {
+        return;
+    }
 
-    // Salary
+    state.total_ticks += 1;
+    state.month_ticks += 1;
+
+    // Salary (accumulates per tick)
     let info = job_info(state.job);
     state.money += info.salary;
     state.total_earned += info.salary;
+    state.month_gross_earned += info.salary;
 
-    // Passive skill gains from working
-    add_skill(&mut state.technical, info.gain_technical);
-    add_skill(&mut state.social, info.gain_social);
-    add_skill(&mut state.management, info.gain_management);
-    add_skill(&mut state.knowledge, info.gain_knowledge);
+    // Passive skill gains from working (with lifestyle efficiency bonus)
+    let ls = lifestyle_info(state.lifestyle);
+    let eff = 1.0 + ls.skill_efficiency;
+    add_skill(&mut state.technical, info.gain_technical * eff);
+    add_skill(&mut state.social, info.gain_social * eff);
+    add_skill(&mut state.management, info.gain_management * eff);
+    add_skill(&mut state.knowledge, info.gain_knowledge * eff);
 
-    // Reputation from working
-    add_skill(&mut state.reputation, CareerState::base_rep_gain());
+    // Reputation from working + lifestyle bonus
+    add_skill(
+        &mut state.reputation,
+        CareerState::base_rep_gain() + ls.rep_bonus,
+    );
 
-    // Investment returns
+    // Investment returns (per tick)
     let inv_return = investment_return(state);
     state.money += inv_return;
     state.total_earned += inv_return;
+
+    // Monthly cycle: payday processing
+    if state.month_ticks >= TICKS_PER_MONTH {
+        process_payday(state);
+    }
 }
 
 fn add_skill(skill: &mut f64, amount: f64) {
@@ -44,7 +60,126 @@ fn investment_return(state: &CareerState) -> f64 {
     let s = invest_info(InvestKind::Savings);
     let st = invest_info(InvestKind::Stocks);
     let r = invest_info(InvestKind::RealEstate);
-    state.savings * s.return_rate + state.stocks * st.return_rate + state.real_estate * r.return_rate
+    state.savings * s.return_rate
+        + state.stocks * st.return_rate
+        + state.real_estate * r.return_rate
+}
+
+// ── Monthly Payday ────────────────────────────────────────────────────
+
+fn process_payday(state: &mut CareerState) {
+    state.months_elapsed += 1;
+    state.month_ticks = 0;
+
+    let gross = state.month_gross_earned;
+    state.month_gross_earned = 0.0;
+
+    // Tax and insurance calculation
+    let (tax_rate, insurance_rate) = tax_rates(gross);
+    let tax = gross * tax_rate;
+    let insurance = gross * insurance_rate;
+    let net_salary = gross - tax - insurance;
+
+    // Investment passive income (monthly total)
+    let monthly_passive = monthly_investment_return(state);
+    // Tax on investment income (20%)
+    let inv_tax = monthly_passive * 0.20;
+    let net_passive = monthly_passive - inv_tax;
+
+    // Living expenses
+    let ls = lifestyle_info(state.lifestyle);
+    let living_cost = ls.living_cost;
+    let rent = ls.rent;
+    let total_expenses = living_cost + rent;
+
+    // Deduct monthly expenses from money
+    let deductions = tax + insurance + living_cost + rent + inv_tax;
+    state.money -= deductions;
+
+    // Monthly cashflow
+    let cashflow = net_salary + net_passive - total_expenses;
+
+    // Update monthly report
+    state.last_report = MonthlyReport {
+        gross_salary: gross,
+        tax: tax + inv_tax,
+        insurance,
+        net_salary,
+        passive_income: net_passive,
+        living_cost,
+        rent,
+        cashflow,
+    };
+
+    // Log the payday summary
+    state.add_log(&format!(
+        "【{}ヶ月目】給与¥{} 税¥{} 生活費¥{} → 手残¥{}",
+        state.months_elapsed,
+        format_money(gross),
+        format_money(tax + insurance + inv_tax),
+        format_money(total_expenses),
+        format_money_signed(cashflow),
+    ));
+
+    // Check economic freedom
+    check_economic_freedom(state, net_passive, total_expenses);
+}
+
+/// Calculate tax and insurance rates based on monthly gross income.
+pub fn tax_rates(monthly_gross: f64) -> (f64, f64) {
+    if monthly_gross <= 6_000.0 {
+        (0.10, 0.05)
+    } else if monthly_gross <= 20_000.0 {
+        (0.15, 0.08)
+    } else if monthly_gross <= 40_000.0 {
+        (0.20, 0.10)
+    } else if monthly_gross <= 80_000.0 {
+        (0.25, 0.10)
+    } else {
+        (0.30, 0.10)
+    }
+}
+
+/// Calculate monthly investment return.
+pub fn monthly_investment_return(state: &CareerState) -> f64 {
+    investment_return(state) * TICKS_PER_MONTH as f64
+}
+
+fn check_economic_freedom(state: &mut CareerState, passive: f64, expenses: f64) {
+    if passive >= expenses && expenses > 0.0 && !state.won {
+        state.won = true;
+        state.won_message = Some(format!(
+            "経済的自由を達成！不労所得¥{}/月 ≥ 支出¥{}/月 ({}ヶ月目)",
+            format_money(passive),
+            format_money(expenses),
+            state.months_elapsed
+        ));
+        state.add_log("★★★ 経済的自由を達成しました！ ★★★");
+        state.add_log("不労所得が支出を上回り、ラットレースを脱出！");
+    }
+}
+
+// ── Lifestyle ─────────────────────────────────────────────────────────
+
+pub fn change_lifestyle(state: &mut CareerState, index: usize) -> bool {
+    if index >= ALL_LIFESTYLES.len() {
+        return false;
+    }
+    let level = ALL_LIFESTYLES[index];
+    if level == state.lifestyle {
+        state.add_log("既に同じ生活水準です");
+        return false;
+    }
+    let info = lifestyle_info(level);
+    state.lifestyle = level;
+    state.screen = Screen::Main;
+    state.add_log(&format!(
+        "生活水準をLv.{} {}に変更 (月額¥{})",
+        info.level,
+        info.name,
+        format_money(info.living_cost + info.rent),
+    ));
+    true
 }
 
 // ── Training ───────────────────────────────────────────────────────────
@@ -55,28 +190,35 @@ pub fn buy_training(state: &mut CareerState, index: usize) -> bool {
     }
     let t = &TRAININGS[index];
     if state.money < t.cost {
-        state.add_log(&format!("お金が足りません (必要: ¥{})", format_money(t.cost)));
+        state.add_log(&format!(
+            "お金が足りません (必要: ¥{})",
+            format_money(t.cost)
+        ));
         return false;
     }
     state.money -= t.cost;
-    add_skill(&mut state.technical, t.technical);
-    add_skill(&mut state.social, t.social);
-    add_skill(&mut state.management, t.management);
-    add_skill(&mut state.knowledge, t.knowledge);
+
+    // Apply skill gains with lifestyle efficiency bonus
+    let ls = lifestyle_info(state.lifestyle);
+    let eff = 1.0 + ls.skill_efficiency;
+    add_skill(&mut state.technical, t.technical * eff);
+    add_skill(&mut state.social, t.social * eff);
+    add_skill(&mut state.management, t.management * eff);
+    add_skill(&mut state.knowledge, t.knowledge * eff);
     add_skill(&mut state.reputation, t.reputation);
 
     let mut parts = Vec::new();
     if t.technical > 0.0 {
-        parts.push(format!("技術+{}", t.technical as u32));
+        parts.push(format!("技術+{}", (t.technical * eff) as u32));
     }
     if t.social > 0.0 {
-        parts.push(format!("営業+{}", t.social as u32));
+        parts.push(format!("営業+{}", (t.social * eff) as u32));
     }
     if t.management > 0.0 {
-        parts.push(format!("管理+{}", t.management as u32));
+        parts.push(format!("管理+{}", (t.management * eff) as u32));
     }
     if t.knowledge > 0.0 {
-        parts.push(format!("知識+{}", t.knowledge as u32));
+        parts.push(format!("知識+{}", (t.knowledge * eff) as u32));
     }
     if t.reputation > 0.0 {
         parts.push(format!("評判+{}", t.reputation as u32));
@@ -113,7 +255,13 @@ pub fn apply_job(state: &mut CareerState, index: usize) -> bool {
     let info = job_info(kind);
     state.job = kind;
     state.screen = Screen::Main;
-    state.add_log(&format!("{}に転職しました！ (給料 ¥{}/tick)", info.name, info.salary as u64));
+
+    let monthly = info.salary * TICKS_PER_MONTH as f64;
+    state.add_log(&format!(
+        "{}に転職しました！ (月給 ¥{})",
+        info.name,
+        format_money(monthly)
+    ));
     true
 }
 
@@ -145,7 +293,7 @@ pub fn invest(state: &mut CareerState, kind: InvestKind) -> bool {
 // ── Formatting ─────────────────────────────────────────────────────────
 
 pub fn format_money(amount: f64) -> String {
-    let n = amount as u64;
+    let n = amount.abs() as u64;
     if n >= 1_000_000 {
         format!("{}M", n / 1_000_000)
     } else if n >= 10_000 {
@@ -157,6 +305,14 @@ pub fn format_money(amount: f64) -> String {
 
 pub fn format_money_exact(amount: f64) -> String {
     format_with_commas(amount as u64)
+}
+
+fn format_money_signed(amount: f64) -> String {
+    if amount >= 0.0 {
+        format!("+{}", format_money(amount))
+    } else {
+        format!("-{}", format_money(-amount))
+    }
 }
 
 fn format_with_commas(n: u64) -> String {
@@ -173,10 +329,34 @@ fn format_with_commas(n: u64) -> String {
 
 // ── Queries ────────────────────────────────────────────────────────────
 
+#[cfg(test)]
 pub fn income_per_tick(state: &CareerState) -> f64 {
     let salary = job_info(state.job).salary;
     let inv = investment_return(state);
     salary + inv
+}
+
+pub fn monthly_salary(state: &CareerState) -> f64 {
+    job_info(state.job).salary * TICKS_PER_MONTH as f64
+}
+
+pub fn monthly_expenses(state: &CareerState) -> f64 {
+    let ls = lifestyle_info(state.lifestyle);
+    ls.living_cost + ls.rent
+}
+
+pub fn monthly_passive(state: &CareerState) -> f64 {
+    let gross = monthly_investment_return(state);
+    gross * 0.80 // after 20% tax
+}
+
+pub fn freedom_progress(state: &CareerState) -> f64 {
+    let expenses = monthly_expenses(state);
+    if expenses <= 0.0 {
+        return 0.0;
+    }
+    let passive = monthly_passive(state);
+    (passive / expenses).min(1.0)
 }
 
 pub fn next_available_job(state: &CareerState) -> Option<(JobKind, &'static str)> {
@@ -195,6 +375,7 @@ pub fn next_available_job(state: &CareerState) -> Option<(JobKind, &'static str)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::state::LifestyleLevel;
 
     #[test]
     fn tick_earns_salary() {
@@ -218,6 +399,36 @@ mod tests {
         s.job = JobKind::Programmer;
         tick(&mut s, 100);
         assert!((s.technical - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn lifestyle_boosts_skill_gain() {
+        let mut s1 = CareerState::new();
+        s1.job = JobKind::Programmer;
+        s1.lifestyle = LifestyleLevel::Frugal;
+        tick(&mut s1, 100);
+
+        let mut s2 = CareerState::new();
+        s2.job = JobKind::Programmer;
+        s2.lifestyle = LifestyleLevel::Normal; // +15%
+        tick(&mut s2, 100);
+
+        assert!(s2.technical > s1.technical);
+    }
+
+    #[test]
+    fn lifestyle_boosts_training() {
+        let mut s1 = CareerState::new();
+        s1.money = 10_000.0;
+        s1.lifestyle = LifestyleLevel::Frugal;
+        buy_training(&mut s1, 0); // tech +3
+
+        let mut s2 = CareerState::new();
+        s2.money = 10_000.0;
+        s2.lifestyle = LifestyleLevel::Normal; // +15%
+        buy_training(&mut s2, 0); // tech +3 * 1.15
+
+        assert!(s2.technical > s1.technical);
     }
 
     #[test]
@@ -361,5 +572,114 @@ mod tests {
         let s = CareerState::new(); // freeter, all skills 0
         let next = next_available_job(&s);
         assert!(next.is_some());
+    }
+
+    // ── Monthly cycle tests ──────────────────────────────────────
+
+    #[test]
+    fn monthly_cycle_triggers_at_300_ticks() {
+        let mut s = CareerState::new();
+        tick(&mut s, 299);
+        assert_eq!(s.months_elapsed, 0);
+        tick(&mut s, 1);
+        assert_eq!(s.months_elapsed, 1);
+        assert_eq!(s.month_ticks, 0);
+    }
+
+    #[test]
+    fn payday_deducts_expenses() {
+        let mut s = CareerState::new();
+        // Frugal lifestyle: living ¥600 + rent ¥400 = ¥1,000/month
+        // Freeter: 8/tick * 300 = ¥2,400 gross
+        // Tax 10% = ¥240, Insurance 5% = ¥120
+        // Total deductions = ¥240 + ¥120 + ¥1,000 = ¥1,360
+        // Money after month = ¥2,400 - ¥1,360 = ¥1,040
+        tick(&mut s, 300);
+        assert_eq!(s.months_elapsed, 1);
+        let expected = 2_400.0 - (2_400.0 * 0.10) - (2_400.0 * 0.05) - 600.0 - 400.0;
+        assert!((s.money - expected).abs() < 0.01, "money: {}, expected: {}", s.money, expected);
+    }
+
+    #[test]
+    fn payday_report_is_updated() {
+        let mut s = CareerState::new();
+        tick(&mut s, 300);
+        assert!(s.last_report.gross_salary > 0.0);
+        assert!(s.last_report.tax > 0.0);
+        assert!(s.last_report.living_cost > 0.0);
+    }
+
+    #[test]
+    fn tax_rate_tiers() {
+        assert_eq!(tax_rates(2_000.0), (0.10, 0.05));
+        assert_eq!(tax_rates(10_000.0), (0.15, 0.08));
+        assert_eq!(tax_rates(30_000.0), (0.20, 0.10));
+        assert_eq!(tax_rates(50_000.0), (0.25, 0.10));
+        assert_eq!(tax_rates(100_000.0), (0.30, 0.10));
+    }
+
+    #[test]
+    fn change_lifestyle_success() {
+        let mut s = CareerState::new();
+        assert_eq!(s.lifestyle, LifestyleLevel::Frugal);
+        assert!(change_lifestyle(&mut s, 1)); // Normal
+        assert_eq!(s.lifestyle, LifestyleLevel::Normal);
+        assert_eq!(s.screen, Screen::Main);
+    }
+
+    #[test]
+    fn change_lifestyle_same_fails() {
+        let mut s = CareerState::new();
+        assert!(!change_lifestyle(&mut s, 0)); // already Frugal
+    }
+
+    #[test]
+    fn change_lifestyle_invalid_index() {
+        let mut s = CareerState::new();
+        assert!(!change_lifestyle(&mut s, 99));
+    }
+
+    #[test]
+    fn freedom_progress_zero_with_no_investments() {
+        let s = CareerState::new();
+        assert_eq!(freedom_progress(&s), 0.0);
+    }
+
+    #[test]
+    fn freedom_progress_increases_with_investments() {
+        let mut s = CareerState::new();
+        s.stocks = 100_000.0;
+        let progress = freedom_progress(&s);
+        assert!(progress > 0.0);
+        assert!(progress <= 1.0);
+    }
+
+    #[test]
+    fn economic_freedom_is_detected() {
+        let mut s = CareerState::new();
+        s.lifestyle = LifestyleLevel::Frugal; // expenses = ¥1,000/month
+        // Need passive >= ¥1,000/month (after 20% tax)
+        // ¥1,000 / 0.80 = ¥1,250 gross monthly passive needed
+        // At 0.5%/month from stocks: need ¥250,000 in stocks
+        s.stocks = 300_000.0;
+        tick(&mut s, 300); // trigger payday
+        assert!(s.won);
+        assert!(s.won_message.is_some());
+    }
+
+    #[test]
+    fn game_stops_ticking_after_win() {
+        let mut s = CareerState::new();
+        s.won = true;
+        let money_before = s.money;
+        tick(&mut s, 100);
+        assert_eq!(s.money, money_before);
+    }
+
+    #[test]
+    fn monthly_expenses_calculation() {
+        let mut s = CareerState::new();
+        s.lifestyle = LifestyleLevel::Normal;
+        assert_eq!(monthly_expenses(&s), 2_000.0); // 1200 + 800
     }
 }
