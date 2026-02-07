@@ -56,6 +56,7 @@ impl CareerGame {
             // Main screen
             ADVANCE_MONTH if !game_over => {
                 logic::advance_month(&mut self.state);
+                self.state.screen = Screen::Report;
                 true
             }
             GO_TRAINING if !game_over => {
@@ -100,7 +101,8 @@ impl CareerGame {
                 logic::apply_job(&mut self.state, (id - APPLY_JOB_BASE) as usize);
                 true
             }
-            BACK_FROM_JOBS | BACK_FROM_INVEST | BACK_FROM_BUDGET | BACK_FROM_LIFESTYLE => {
+            BACK_FROM_JOBS | BACK_FROM_INVEST | BACK_FROM_BUDGET | BACK_FROM_LIFESTYLE
+            | BACK_FROM_REPORT => {
                 self.state.screen = Screen::Main;
                 true
             }
@@ -148,7 +150,11 @@ impl CareerGame {
                 '7' => { self.state.screen = Screen::Invest; true }
                 '8' => { self.state.screen = Screen::Budget; true }
                 '9' => { self.state.screen = Screen::Lifestyle; true }
-                '0' if !game_over => { logic::advance_month(&mut self.state); true }
+                '0' if !game_over => { logic::advance_month(&mut self.state); self.state.screen = Screen::Report; true }
+                _ => false,
+            },
+            Screen::Report => match key {
+                '0' | '-' => { self.state.screen = Screen::Main; true }
                 _ => false,
             },
             Screen::Training => match key {
@@ -335,6 +341,7 @@ mod tests {
     fn career_game_advance_month_earns_money() {
         let mut game = CareerGame::new();
         game.handle_input(&InputEvent::Key('0')); // advance month
+        assert_eq!(game.state.screen, Screen::Report);
         assert!(game.state.money > 0.0);
         assert_eq!(game.state.months_elapsed, 1);
     }
@@ -343,6 +350,7 @@ mod tests {
     fn career_game_advance_month_via_click() {
         let mut game = CareerGame::new();
         game.handle_input(&InputEvent::Click(ADVANCE_MONTH));
+        assert_eq!(game.state.screen, Screen::Report);
         assert!(game.state.money > 0.0);
         assert_eq!(game.state.months_elapsed, 1);
     }
@@ -365,11 +373,13 @@ mod tests {
         game.handle_input(&InputEvent::Key('4')); // 独学 (AP: 1→0)
         game.handle_input(&InputEvent::Key('-')); // back to main
         game.handle_input(&InputEvent::Key('0')); // advance month (AP reset)
+        game.handle_input(&InputEvent::Key('0')); // close report
         game.handle_input(&InputEvent::Key('1')); // training screen
         game.handle_input(&InputEvent::Key('4')); // 独学 (AP: 2→1)
         game.handle_input(&InputEvent::Key('4')); // 独学 (AP: 1→0)
         game.handle_input(&InputEvent::Key('-')); // back to main
         game.handle_input(&InputEvent::Key('0')); // advance month
+        game.handle_input(&InputEvent::Key('0')); // close report
         game.handle_input(&InputEvent::Key('1')); // training screen
         game.handle_input(&InputEvent::Key('4')); // 独学 (AP: 2→1)
         game.handle_input(&InputEvent::Key('-')); // back
@@ -390,6 +400,7 @@ mod tests {
         game.handle_input(&InputEvent::Key('1')); // tech+3 (no AP left)
         game.handle_input(&InputEvent::Key('-')); // back
         game.handle_input(&InputEvent::Key('0')); // advance month
+        game.handle_input(&InputEvent::Key('0')); // close report
         game.state.money = 15_000.0;
         game.handle_input(&InputEvent::Key('1')); // training screen
         game.handle_input(&InputEvent::Key('1')); // tech+3
@@ -399,6 +410,7 @@ mod tests {
 
         // Need AP for job change — advance month to reset
         game.handle_input(&InputEvent::Key('0'));
+        game.handle_input(&InputEvent::Key('0')); // close report
 
         // Switch to programmer
         game.handle_input(&InputEvent::Key('6'));

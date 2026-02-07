@@ -30,3 +30,6 @@ pub const BACK_FROM_BUDGET: u16 = 80;
 // ── Lifestyle screen ─────────────────────────────────────────
 pub const LIFESTYLE_BASE: u16 = 90; // +index 0..4
 pub const BACK_FROM_LIFESTYLE: u16 = 99;
+
+// ── Report screen ───────────────────────────────────────────
+pub const BACK_FROM_REPORT: u16 = 110;

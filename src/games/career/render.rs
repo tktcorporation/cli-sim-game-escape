@@ -36,6 +36,7 @@ pub fn render(
         Screen::Invest => render_invest(state, f, area, click_state),
         Screen::Budget => render_budget(state, f, area, click_state),
         Screen::Lifestyle => render_lifestyle(state, f, area, click_state),
+        Screen::Report => render_report(state, f, area, click_state),
     }
 }
 
@@ -1175,6 +1176,221 @@ fn render_budget_wide(
         .border_style(Style::default().fg(Color::Green))
         .title(" バランスシート ");
     f.render_widget(Paragraph::new(bs_lines).block(bs_block), cols[1]);
+}
+
+// ── Report Screen (after advancing a month) ────────────────────────────
+
+fn render_report(
+    state: &CareerState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let is_narrow = is_narrow_layout(area.width);
+    let borders = if is_narrow {
+        Borders::TOP | Borders::BOTTOM
+    } else {
+        Borders::ALL
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(16), // Report content
+            Constraint::Length(4), // Footer
+        ])
+        .split(area);
+
+    let r = &state.last_report;
+    let info = job_info(state.job);
+    let m_passive = monthly_passive(state);
+    let m_expenses = monthly_expenses(state);
+
+    let mut lines = Vec::new();
+
+    // Month header
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {}ヶ月目 完了", state.months_elapsed),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  (残{}月)", months_remaining(state)),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // Income
+    lines.push(Line::from(Span::styled(
+        " 【収入】",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(format!(
+        "  給与 ({})    ¥{}",
+        info.name,
+        format_money(r.gross_salary)
+    )));
+    lines.push(Line::from(format!(
+        "  所得税      ▲¥{}",
+        format_money(r.tax)
+    )));
+    lines.push(Line::from(format!(
+        "  社会保険    ▲¥{}",
+        format_money(r.insurance)
+    )));
+    lines.push(Line::from(vec![
+        Span::styled("  手取り       ", Style::default().fg(Color::White)),
+        Span::styled(
+            format!("¥{}", format_money(r.net_salary)),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // Passive income
+    if r.passive_income > 0.0 {
+        lines.push(Line::from(Span::styled(
+            " 【不労所得】",
+            Style::default().fg(Color::Green),
+        )));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  投資収入     ¥{}", format_money(r.passive_income)),
+                Style::default().fg(Color::Green),
+            ),
+        ]));
+        lines.push(Line::from(""));
+    }
+
+    // Expenses
+    lines.push(Line::from(Span::styled(
+        format!(" 【支出】 ({})", lifestyle_info(state.lifestyle).name),
+        Style::default().fg(Color::Red),
+    )));
+    lines.push(Line::from(format!(
+        "  生活費      ▲¥{}",
+        format_money(r.living_cost)
+    )));
+    lines.push(Line::from(format!(
+        "  家賃        ▲¥{}",
+        format_money(r.rent)
+    )));
+    lines.push(Line::from(""));
+
+    // Cash flow
+    let cf_color = if r.cashflow >= 0.0 {
+        Color::Green
+    } else {
+        Color::Red
+    };
+    lines.push(Line::from(vec![
+        Span::styled(" 月間キャッシュフロー ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("¥{}", format_money(r.cashflow)),
+            Style::default().fg(cf_color).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Current balance
+    lines.push(Line::from(vec![
+        Span::styled(" 所持金 ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("¥{}", format_money_exact(state.money)),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Freedom progress
+    let progress = freedom_progress(state);
+    let bar_width = if is_narrow { 15 } else { 25 };
+    let filled = ((progress * bar_width as f64).round() as usize).min(bar_width);
+    let empty = bar_width - filled;
+    let bar = "█".repeat(filled) + &"░".repeat(empty);
+    let pct = (progress * 100.0) as u32;
+
+    lines.push(Line::from(vec![
+        Span::styled(" 自由: ", Style::default().fg(Color::Gray)),
+        Span::styled(bar, Style::default().fg(Color::Green)),
+        Span::styled(
+            format!(" {}% (¥{}/¥{})", pct, format_money(m_passive), format_money(m_expenses)),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+
+    // Win/game over message
+    if state.won {
+        lines.push(Line::from(Span::styled(
+            " ★ 経済的自由を達成しました！ ★",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else if is_game_over(state) {
+        lines.push(Line::from(Span::styled(
+            " ✖ 120ヶ月経過 - GAME OVER",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    // Event info
+    if let Some(event) = state.current_event {
+        let (icon, color) = match event {
+            super::state::MonthEvent::TrainingSale
+            | super::state::MonthEvent::BullMarket
+            | super::state::MonthEvent::SkillBoom
+            | super::state::MonthEvent::WindfallBonus
+            | super::state::MonthEvent::TaxRefund => ("▲", Color::Green),
+            super::state::MonthEvent::Recession
+            | super::state::MonthEvent::MarketCrash
+            | super::state::MonthEvent::ExpenseSpike => ("▼", Color::Red),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {} 来月イベント: {} ", icon, event_name(event)),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" 月次レポート ");
+    f.render_widget(Paragraph::new(lines).block(block), chunks[0]);
+
+    // Footer: continue button
+    let mut cs = click_state.borrow_mut();
+    let footer_lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                " ▶ 続ける ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("[0]", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+    cs.add_row_target(chunks[1], chunks[1].y + 2, BACK_FROM_REPORT);
+    let footer_block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::DarkGray));
+    f.render_widget(
+        Paragraph::new(footer_lines).block(footer_block),
+        chunks[1],
+    );
 }
 
 // ── Lifestyle Screen ───────────────────────────────────────────────────

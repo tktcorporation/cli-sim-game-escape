@@ -369,6 +369,7 @@ pub enum Screen {
     Invest,
     Budget,
     Lifestyle,
+    Report,
 }
 
 /// Maximum skill level.
