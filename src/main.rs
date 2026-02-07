@@ -5,7 +5,7 @@ mod time;
 use std::{cell::RefCell, io, rc::Rc};
 
 use games::{create_game, AppState, GameChoice};
-use input::{is_narrow_layout, ClickState, InputEvent};
+use input::{is_narrow_layout, ClickState, ClickableList, InputEvent};
 use time::GameTime;
 
 use ratzilla::event::{KeyCode, MouseButton, MouseEventKind};
@@ -278,73 +278,69 @@ fn render_menu(
     .alignment(Alignment::Center);
     f.render_widget(title_widget, chunks[0]);
 
-    // Menu items
-    let menu_lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                " ▶ ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Cookie Factory", Style::default().fg(Color::White)),
-        ]),
-        Line::from(Span::styled(
-            "    クッキーをクリックして増やす放置ゲーム",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                " ▶ ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Tiny Factory", Style::default().fg(Color::White)),
-        ]),
-        Line::from(Span::styled(
-            "    工場を作って生産ラインを最適化する放置ゲーム",
-            Style::default().fg(Color::DarkGray),
-        )),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                " ▶ ",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("Career Simulator", Style::default().fg(Color::White)),
-        ]),
-        Line::from(Span::styled(
-            "    スキルを磨いて転職・投資でキャリアを築くシミュレーション",
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+    // Menu items — title + description rows share the same action ID
+    let mut cl = ClickableList::new();
 
-    let menu_widget = Paragraph::new(menu_lines).block(
+    cl.push(Line::from(""));
+    cl.push_clickable(Line::from(vec![
+        Span::styled(
+            " ▶ ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Cookie Factory", Style::default().fg(Color::White)),
+    ]), MENU_SELECT_COOKIE);
+    cl.push_clickable(Line::from(Span::styled(
+        "    クッキーをクリックして増やす放置ゲーム",
+        Style::default().fg(Color::DarkGray),
+    )), MENU_SELECT_COOKIE);
+
+    cl.push(Line::from(""));
+    cl.push_clickable(Line::from(vec![
+        Span::styled(
+            " ▶ ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Tiny Factory", Style::default().fg(Color::White)),
+    ]), MENU_SELECT_FACTORY);
+    cl.push_clickable(Line::from(Span::styled(
+        "    工場を作って生産ラインを最適化する放置ゲーム",
+        Style::default().fg(Color::DarkGray),
+    )), MENU_SELECT_FACTORY);
+
+    cl.push(Line::from(""));
+    cl.push_clickable(Line::from(vec![
+        Span::styled(
+            " ▶ ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Career Simulator", Style::default().fg(Color::White)),
+    ]), MENU_SELECT_CAREER);
+    cl.push_clickable(Line::from(Span::styled(
+        "    スキルを磨いて転職・投資でキャリアを築くシミュレーション",
+        Style::default().fg(Color::DarkGray),
+    )), MENU_SELECT_CAREER);
+
+    // Register click targets (borders → top=1, bottom=1)
+    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
+    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
+    {
+        let mut cs = click_state.borrow_mut();
+        cl.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0);
+    }
+
+    let menu_widget = Paragraph::new(cl.into_lines()).block(
         Block::default()
             .borders(borders)
             .border_style(Style::default().fg(Color::Green))
             .title(" Games "),
     );
     f.render_widget(menu_widget, chunks[1]);
-
-    // Register click targets with semantic action IDs
-    {
-        let mut cs = click_state.borrow_mut();
-        // Cookie Factory: title + description rows
-        cs.add_row_target(chunks[1], chunks[1].y + 2, MENU_SELECT_COOKIE);
-        cs.add_row_target(chunks[1], chunks[1].y + 3, MENU_SELECT_COOKIE);
-        // Tiny Factory: title + description rows
-        cs.add_row_target(chunks[1], chunks[1].y + 5, MENU_SELECT_FACTORY);
-        cs.add_row_target(chunks[1], chunks[1].y + 6, MENU_SELECT_FACTORY);
-        // Career Simulator: title + description rows
-        cs.add_row_target(chunks[1], chunks[1].y + 8, MENU_SELECT_CAREER);
-        cs.add_row_target(chunks[1], chunks[1].y + 9, MENU_SELECT_CAREER);
-    }
 
     // Footer
     let footer_widget = Paragraph::new(Line::from(Span::styled(

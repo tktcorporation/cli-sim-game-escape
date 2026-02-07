@@ -9,7 +9,7 @@ use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
-use crate::input::{is_narrow_layout, ClickState};
+use crate::input::{is_narrow_layout, ClickState, ClickableList};
 
 use super::actions::*;
 use super::grid::{anchor_of, machine_at, Cell, MachineKind, MinerMode, GRID_H, GRID_W, VIEW_H, VIEW_W};
@@ -722,11 +722,10 @@ fn render_tool_panel(
         (PlacementTool::Delete, "Delete", "---".into(), SELECT_DELETE),
     ];
 
-    let mut lines: Vec<Line> = Vec::new();
-    let mut miner_toggle_row: Option<u16> = None;
+    let mut cl = ClickableList::new();
 
-    // Tool selection rows
-    for (tool, label, cost, _action_id) in &tools {
+    // Tool selection rows (all clickable)
+    for (tool, label, cost, action_id) in &tools {
         let is_selected = std::mem::discriminant(&state.tool) == std::mem::discriminant(tool);
         let color = tool_color(tool);
 
@@ -747,50 +746,44 @@ fn render_tool_panel(
             Style::default().fg(Color::DarkGray)
         };
 
-        lines.push(Line::from(vec![
+        cl.push_clickable(Line::from(vec![
             Span::styled(format!(" {} ", marker), marker_style),
             Span::styled(format!("{:<10}", label), label_style),
             Span::styled(format!("{:<6}", cost), label_style),
-        ]));
+        ]), *action_id);
     }
 
-    // Description of selected tool
+    // Description of selected tool (not clickable)
     let desc = tool_description(&state.tool);
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
+    cl.push(Line::from(""));
+    cl.push(Line::from(Span::styled(
         format!(" {}", desc),
         Style::default()
             .fg(tool_color(&state.tool))
             .add_modifier(Modifier::BOLD),
     )));
 
-    // Miner mode toggle button (when miner is selected or cursor is on a miner)
+    // Miner mode toggle button (clickable, when miner is selected)
     if matches!(state.tool, PlacementTool::Miner) {
-        miner_toggle_row = Some(area.y + 1 + lines.len() as u16);
-        lines.push(Line::from(Span::styled(
+        cl.push_clickable(Line::from(Span::styled(
             " ▶鉄/銅切替",
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
-        )));
+        )), TOGGLE_MINER_MODE);
     }
 
-    let widget = Paragraph::new(lines).block(
+    // Register click targets (Borders::ALL → top=1, bottom=1)
+    let mut cs = click_state.borrow_mut();
+    cl.register_targets(area, &mut cs, 1, 1, 0);
+    drop(cs);
+
+    let widget = Paragraph::new(cl.into_lines()).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
             .title(" ツール "),
     );
     f.render_widget(widget, area);
-
-    // Register click targets for each tool row
-    let mut cs = click_state.borrow_mut();
-    for (i, (_tool, _label, _cost, action_id)) in tools.iter().enumerate() {
-        cs.add_row_target(area, area.y + 1 + i as u16, *action_id);
-    }
-    // Miner mode toggle
-    if let Some(row) = miner_toggle_row {
-        cs.add_row_target(area, row, TOGGLE_MINER_MODE);
-    }
 }
 
