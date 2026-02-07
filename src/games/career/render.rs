@@ -54,14 +54,12 @@ fn render_main(
         Borders::ALL
     };
 
-    let event_height = if state.current_event.is_some() { 3 } else { 0 };
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(6),  // Header (expanded for freedom progress)
             Constraint::Length(6),  // Skills
-            Constraint::Length(event_height), // Event (if any)
+            Constraint::Length(3),  // Event (always reserved)
             Constraint::Length(if is_narrow { 12 } else { 13 }), // Actions
             Constraint::Min(4),    // Log
         ])
@@ -69,9 +67,7 @@ fn render_main(
 
     render_header(state, f, chunks[0], borders, is_narrow);
     render_skills(state, f, chunks[1], borders, is_narrow);
-    if state.current_event.is_some() {
-        render_event(state, f, chunks[2], borders);
-    }
+    render_event(state, f, chunks[2], borders);
     render_actions(state, f, chunks[3], borders, is_narrow, click_state);
     render_log(state, f, chunks[4], borders);
 }
@@ -266,6 +262,15 @@ fn render_event(state: &CareerState, f: &mut Frame, area: Rect, borders: Borders
             .border_style(Style::default().fg(color))
             .title(" イベント ");
         f.render_widget(Paragraph::new(lines).block(block), area);
+    } else {
+        let block = Block::default()
+            .borders(borders)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(" イベント ");
+        f.render_widget(Paragraph::new(vec![Line::from(Span::styled(
+            " なし",
+            Style::default().fg(Color::DarkGray),
+        ))]).block(block), area);
     }
 }
 
@@ -378,7 +383,7 @@ fn render_actions(
     cs.add_row_target(area, nav_row, GO_LIFESTYLE);
     nav_row += 1;
 
-    // Spacer + Advance Month
+    // Spacer + Advance Month (always 3 lines: spacer + 2 content lines)
     lines.push(Line::from(""));
     nav_row += 1;
 
@@ -389,6 +394,7 @@ fn render_actions(
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )));
+        lines.push(Line::from(""));
     } else if is_game_over(state) {
         lines.push(Line::from(Span::styled(
             " ✖ 120ヶ月経過 - GAME OVER",
@@ -411,6 +417,7 @@ fn render_actions(
             Span::styled("[0]", Style::default().fg(Color::DarkGray)),
         ]));
         cs.add_row_target(area, nav_row, ADVANCE_MONTH);
+        lines.push(Line::from(""));
     }
 
     let block = Block::default()
