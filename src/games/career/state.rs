@@ -364,6 +364,7 @@ pub fn invest_info(kind: InvestKind) -> InvestInfo {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Screen {
     Main,
+    Training,
     JobMarket,
     Invest,
     Budget,
@@ -382,6 +383,58 @@ pub const TICKS_PER_MONTH: u32 = 300;
 
 /// Reputation gain per tick from working.
 const BASE_REP_GAIN: f64 = 0.002;
+
+// ── Monthly Events ─────────────────────────────────────────────
+
+/// Monthly event types that affect gameplay.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MonthEvent {
+    TrainingSale,
+    BullMarket,
+    Recession,
+    SkillBoom,
+    WindfallBonus,
+    MarketCrash,
+    TaxRefund,
+    ExpenseSpike,
+}
+
+pub fn event_name(event: MonthEvent) -> &'static str {
+    match event {
+        MonthEvent::TrainingSale => "研修セール",
+        MonthEvent::BullMarket => "好景気",
+        MonthEvent::Recession => "不景気",
+        MonthEvent::SkillBoom => "学習ブースト",
+        MonthEvent::WindfallBonus => "臨時ボーナス",
+        MonthEvent::MarketCrash => "市場暴落",
+        MonthEvent::TaxRefund => "税還付",
+        MonthEvent::ExpenseSpike => "物価高騰",
+    }
+}
+
+pub fn event_description(event: MonthEvent) -> &'static str {
+    match event {
+        MonthEvent::TrainingSale => "研修費用が50%オフ！",
+        MonthEvent::BullMarket => "投資リターンが2倍！",
+        MonthEvent::Recession => "今月の給与が20%減…",
+        MonthEvent::SkillBoom => "スキル獲得量が2倍！",
+        MonthEvent::WindfallBonus => "今月の給与が50%増！",
+        MonthEvent::MarketCrash => "今月の投資リターンなし…",
+        MonthEvent::TaxRefund => "今月の税率が半分！",
+        MonthEvent::ExpenseSpike => "今月の生活費が50%増…",
+    }
+}
+
+// ── Action Points ──────────────────────────────────────────────
+
+/// Returns max AP for a given job kind.
+pub fn ap_for_job(kind: JobKind) -> u8 {
+    match kind {
+        JobKind::Freeter | JobKind::OfficeClerk => 2,
+        JobKind::Programmer | JobKind::Designer | JobKind::Sales | JobKind::Accountant => 3,
+        JobKind::Manager | JobKind::Consultant | JobKind::Director | JobKind::Entrepreneur => 4,
+    }
+}
 
 /// Monthly snapshot for the budget display.
 #[derive(Clone, Debug)]
@@ -444,10 +497,19 @@ pub struct CareerState {
     // Economic freedom tracking
     pub won: bool,
     pub won_message: Option<String>,
+
+    // Action Points system
+    pub ap: u8,
+    pub ap_max: u8,
+
+    // Event system
+    pub current_event: Option<MonthEvent>,
+    pub event_seed: u64,
 }
 
 impl CareerState {
     pub fn new() -> Self {
+        let initial_job = JobKind::Freeter;
         Self {
             money: 0.0,
             total_earned: 0.0,
@@ -457,7 +519,7 @@ impl CareerState {
             management: 0.0,
             knowledge: 0.0,
             reputation: 0.0,
-            job: JobKind::Freeter,
+            job: initial_job,
             savings: 0.0,
             stocks: 0.0,
             real_estate: 0.0,
@@ -470,6 +532,10 @@ impl CareerState {
             last_report: MonthlyReport::empty(),
             won: false,
             won_message: None,
+            ap: ap_for_job(initial_job),
+            ap_max: ap_for_job(initial_job),
+            current_event: None,
+            event_seed: 42,
         }
     }
 
@@ -505,6 +571,32 @@ mod tests {
         assert_eq!(s.lifestyle, LifestyleLevel::Frugal);
         assert_eq!(s.months_elapsed, 0);
         assert!(!s.won);
+        assert_eq!(s.ap, 2);
+        assert_eq!(s.ap_max, 2);
+        assert_eq!(s.current_event, None);
+    }
+
+    #[test]
+    fn ap_for_job_tiers() {
+        assert_eq!(ap_for_job(JobKind::Freeter), 2);
+        assert_eq!(ap_for_job(JobKind::OfficeClerk), 2);
+        assert_eq!(ap_for_job(JobKind::Programmer), 3);
+        assert_eq!(ap_for_job(JobKind::Sales), 3);
+        assert_eq!(ap_for_job(JobKind::Manager), 4);
+        assert_eq!(ap_for_job(JobKind::Entrepreneur), 4);
+    }
+
+    #[test]
+    fn event_info_valid() {
+        let events = [
+            MonthEvent::TrainingSale, MonthEvent::BullMarket, MonthEvent::Recession,
+            MonthEvent::SkillBoom, MonthEvent::WindfallBonus, MonthEvent::MarketCrash,
+            MonthEvent::TaxRefund, MonthEvent::ExpenseSpike,
+        ];
+        for e in events {
+            assert!(!event_name(e).is_empty());
+            assert!(!event_description(e).is_empty());
+        }
     }
 
     #[test]

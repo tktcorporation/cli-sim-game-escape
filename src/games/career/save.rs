@@ -11,10 +11,10 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
-use super::state::{CareerState, JobKind, LifestyleLevel, MonthlyReport};
+use super::state::{CareerState, JobKind, LifestyleLevel, MonthEvent, MonthlyReport};
 
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 1;
+const SAVE_VERSION: u32 = 2;
 
 #[cfg(any(target_arch = "wasm32", test))]
 const MIN_COMPATIBLE_VERSION: u32 = 1;
@@ -66,6 +66,21 @@ struct CareerSave {
     report_living_cost: f64,
     report_rent: f64,
     report_cashflow: f64,
+
+    // Action Points (v2)
+    ap: u8,
+    ap_max: u8,
+
+    // Event system (v2)
+    /// MonthEvent as u8 index (0=TrainingSale..7=ExpenseSpike), 255=None
+    #[serde(default = "default_no_event")]
+    current_event: u8,
+    event_seed: u64,
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+fn default_no_event() -> u8 {
+    255
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -118,6 +133,20 @@ fn extract_save(state: &CareerState) -> SaveData {
             report_living_cost: state.last_report.living_cost,
             report_rent: state.last_report.rent,
             report_cashflow: state.last_report.cashflow,
+            ap: state.ap,
+            ap_max: state.ap_max,
+            current_event: match state.current_event {
+                Some(MonthEvent::TrainingSale) => 0,
+                Some(MonthEvent::BullMarket) => 1,
+                Some(MonthEvent::Recession) => 2,
+                Some(MonthEvent::SkillBoom) => 3,
+                Some(MonthEvent::WindfallBonus) => 4,
+                Some(MonthEvent::MarketCrash) => 5,
+                Some(MonthEvent::TaxRefund) => 6,
+                Some(MonthEvent::ExpenseSpike) => 7,
+                None => 255,
+            },
+            event_seed: state.event_seed,
         },
     }
 }
@@ -174,6 +203,21 @@ fn apply_save(state: &mut CareerState, save: &CareerSave) {
         rent: save.report_rent,
         cashflow: save.report_cashflow,
     };
+
+    state.ap = save.ap;
+    state.ap_max = save.ap_max;
+    state.current_event = match save.current_event {
+        0 => Some(MonthEvent::TrainingSale),
+        1 => Some(MonthEvent::BullMarket),
+        2 => Some(MonthEvent::Recession),
+        3 => Some(MonthEvent::SkillBoom),
+        4 => Some(MonthEvent::WindfallBonus),
+        5 => Some(MonthEvent::MarketCrash),
+        6 => Some(MonthEvent::TaxRefund),
+        7 => Some(MonthEvent::ExpenseSpike),
+        _ => None,
+    };
+    state.event_seed = save.event_seed;
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -279,6 +323,10 @@ mod tests {
         original.months_elapsed = 3;
         original.won = false;
         original.won_message = None;
+        original.ap = 2;
+        original.ap_max = 3;
+        original.current_event = Some(MonthEvent::BullMarket);
+        original.event_seed = 999;
         original.last_report = MonthlyReport {
             gross_salary: 15000.0,
             tax: 2250.0,
@@ -315,6 +363,10 @@ mod tests {
         assert_eq!(restored.months_elapsed, 3);
         assert!(!restored.won);
         assert!(restored.won_message.is_none());
+        assert_eq!(restored.ap, 2);
+        assert_eq!(restored.ap_max, 3);
+        assert_eq!(restored.current_event, Some(MonthEvent::BullMarket));
+        assert_eq!(restored.event_seed, 999);
 
         // Report
         assert!((restored.last_report.gross_salary - 15000.0).abs() < 0.001);
@@ -429,6 +481,77 @@ mod tests {
             apply_save(&mut restored, &save.game);
             assert_eq!(restored.job, kind);
         }
+    }
+
+    #[test]
+    fn all_events_roundtrip() {
+        use super::super::state::MonthEvent;
+        let events: [Option<MonthEvent>; 9] = [
+            None,
+            Some(MonthEvent::TrainingSale),
+            Some(MonthEvent::BullMarket),
+            Some(MonthEvent::Recession),
+            Some(MonthEvent::SkillBoom),
+            Some(MonthEvent::WindfallBonus),
+            Some(MonthEvent::MarketCrash),
+            Some(MonthEvent::TaxRefund),
+            Some(MonthEvent::ExpenseSpike),
+        ];
+
+        for event in events {
+            let mut state = CareerState::new();
+            state.current_event = event;
+            let save = extract_save(&state);
+
+            let mut restored = CareerState::new();
+            apply_save(&mut restored, &save.game);
+            assert_eq!(restored.current_event, event);
+        }
+    }
+
+    #[test]
+    fn v1_save_without_ap_fields_uses_defaults() {
+        // Simulate a v1 save that doesn't have AP/event fields
+        let json = r#"{
+            "version": 1,
+            "game": {
+                "money": 5000.0,
+                "total_earned": 10000.0,
+                "total_ticks": 600,
+                "technical": 10.0,
+                "social": 5.0,
+                "management": 0.0,
+                "knowledge": 15.0,
+                "reputation": 5.0,
+                "job": 2,
+                "savings": 1000.0,
+                "stocks": 0.0,
+                "real_estate": 0.0,
+                "lifestyle": 1,
+                "months_elapsed": 2,
+                "won": false,
+                "report_gross_salary": 0.0,
+                "report_tax": 0.0,
+                "report_insurance": 0.0,
+                "report_net_salary": 0.0,
+                "report_passive_income": 0.0,
+                "report_living_cost": 0.0,
+                "report_rent": 0.0,
+                "report_cashflow": 0.0
+            }
+        }"#;
+
+        let loaded: SaveData = serde_json::from_str(json).unwrap();
+        assert!(loaded.version >= MIN_COMPATIBLE_VERSION);
+
+        let mut restored = CareerState::new();
+        apply_save(&mut restored, &loaded.game);
+
+        // AP fields should have defaults (0 from serde default)
+        // This is fine since advance_month() will reset them
+        assert_eq!(restored.job, JobKind::Programmer);
+        assert_eq!(restored.months_elapsed, 2);
+        assert_eq!(restored.current_event, None); // 0 maps to TrainingSale but default is 0
     }
 
     #[test]

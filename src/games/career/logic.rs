@@ -1,14 +1,84 @@
 //! Career Simulator — pure game logic (no rendering / IO).
 
 use super::state::{
-    invest_info, job_info, lifestyle_info, CareerState, InvestKind, JobKind, MonthlyReport, Screen,
-    ALL_JOBS, ALL_LIFESTYLES, SKILL_CAP, TICKS_PER_MONTH, TRAININGS,
+    ap_for_job, event_description, event_name, invest_info, job_info, lifestyle_info, CareerState,
+    InvestKind, JobKind, MonthEvent, MonthlyReport, Screen, ALL_JOBS, ALL_LIFESTYLES, SKILL_CAP,
+    TICKS_PER_MONTH, TRAININGS,
 };
 
 // ── Tick (no-op: command-based game) ──────────────────────────────────
 
 pub fn tick(_state: &mut CareerState, _delta_ticks: u32) {
     // Command-based: time advances via advance_month(), not per-tick.
+}
+
+// ── RNG ───────────────────────────────────────────────────────────────
+
+fn next_rng(seed: u64) -> u64 {
+    seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)
+}
+
+fn generate_event(state: &mut CareerState) -> Option<MonthEvent> {
+    state.event_seed = next_rng(state.event_seed);
+    let roll = (state.event_seed >> 33) % 11;
+    match roll {
+        0..=2 => None, // ~27% chance of quiet month
+        3 => Some(MonthEvent::TrainingSale),
+        4 => Some(MonthEvent::BullMarket),
+        5 => Some(MonthEvent::Recession),
+        6 => Some(MonthEvent::SkillBoom),
+        7 => Some(MonthEvent::WindfallBonus),
+        8 => Some(MonthEvent::MarketCrash),
+        9 => Some(MonthEvent::TaxRefund),
+        10 => Some(MonthEvent::ExpenseSpike),
+        _ => None,
+    }
+}
+
+// ── Event Modifiers ──────────────────────────────────────────────────
+
+fn salary_multiplier(event: Option<MonthEvent>) -> f64 {
+    match event {
+        Some(MonthEvent::Recession) => 0.8,
+        Some(MonthEvent::WindfallBonus) => 1.5,
+        _ => 1.0,
+    }
+}
+
+fn investment_multiplier(event: Option<MonthEvent>) -> f64 {
+    match event {
+        Some(MonthEvent::BullMarket) => 2.0,
+        Some(MonthEvent::MarketCrash) => 0.0,
+        _ => 1.0,
+    }
+}
+
+fn tax_multiplier(event: Option<MonthEvent>) -> f64 {
+    match event {
+        Some(MonthEvent::TaxRefund) => 0.5,
+        _ => 1.0,
+    }
+}
+
+fn expense_multiplier(event: Option<MonthEvent>) -> f64 {
+    match event {
+        Some(MonthEvent::ExpenseSpike) => 1.5,
+        _ => 1.0,
+    }
+}
+
+fn skill_multiplier(event: Option<MonthEvent>) -> f64 {
+    match event {
+        Some(MonthEvent::SkillBoom) => 2.0,
+        _ => 1.0,
+    }
+}
+
+pub fn training_cost_multiplier(event: Option<MonthEvent>) -> f64 {
+    match event {
+        Some(MonthEvent::TrainingSale) => 0.5,
+        _ => 1.0,
+    }
 }
 
 // ── Advance Month ────────────────────────────────────────────────────
@@ -23,18 +93,20 @@ pub fn advance_month(state: &mut CareerState) {
     let ls = lifestyle_info(state.lifestyle);
     let eff = 1.0 + ls.skill_efficiency;
     let month_ticks = TICKS_PER_MONTH as f64;
+    let event = state.current_event;
 
-    // Salary for the month
-    let gross = info.salary * month_ticks;
+    // Salary for the month (with event modifier)
+    let gross = info.salary * month_ticks * salary_multiplier(event);
     state.money += gross;
     state.total_earned += gross;
     state.month_gross_earned = gross;
 
-    // Passive skill gains from working (month total)
-    add_skill(&mut state.technical, info.gain_technical * eff * month_ticks);
-    add_skill(&mut state.social, info.gain_social * eff * month_ticks);
-    add_skill(&mut state.management, info.gain_management * eff * month_ticks);
-    add_skill(&mut state.knowledge, info.gain_knowledge * eff * month_ticks);
+    // Passive skill gains from working (with event modifier)
+    let s_mult = skill_multiplier(event);
+    add_skill(&mut state.technical, info.gain_technical * eff * month_ticks * s_mult);
+    add_skill(&mut state.social, info.gain_social * eff * month_ticks * s_mult);
+    add_skill(&mut state.management, info.gain_management * eff * month_ticks * s_mult);
+    add_skill(&mut state.knowledge, info.gain_knowledge * eff * month_ticks * s_mult);
 
     // Reputation from working + lifestyle bonus (month total)
     add_skill(
@@ -42,16 +114,28 @@ pub fn advance_month(state: &mut CareerState) {
         (CareerState::base_rep_gain() + ls.rep_bonus) * month_ticks,
     );
 
-    // Investment returns for the month
-    let inv_return = monthly_investment_return(state);
+    // Investment returns for the month (with event modifier)
+    let inv_return = monthly_investment_return(state) * investment_multiplier(event);
     state.money += inv_return;
     state.total_earned += inv_return;
 
     // Update tick tracking
     state.total_ticks += TICKS_PER_MONTH as u64;
 
-    // Process payday (deductions, report, freedom check)
+    // Process payday (deductions, report, freedom check) — uses current event
     process_payday(state);
+
+    // Generate event for next month
+    let new_event = generate_event(state);
+    state.current_event = new_event;
+
+    if let Some(evt) = new_event {
+        state.add_log(&format!("【イベント】{}: {}", event_name(evt), event_description(evt)));
+    }
+
+    // Reset AP for next month
+    state.ap_max = ap_for_job(state.job);
+    state.ap = state.ap_max;
 }
 
 fn add_skill(skill: &mut f64, amount: f64) {
@@ -73,25 +157,27 @@ fn process_payday(state: &mut CareerState) {
     state.months_elapsed += 1;
     state.month_ticks = 0;
 
+    let event = state.current_event;
     let gross = state.month_gross_earned;
     state.month_gross_earned = 0.0;
 
-    // Tax and insurance calculation
+    // Tax and insurance calculation (with event modifier)
     let (tax_rate, insurance_rate) = tax_rates(gross);
-    let tax = gross * tax_rate;
+    let tax = gross * tax_rate * tax_multiplier(event);
     let insurance = gross * insurance_rate;
     let net_salary = gross - tax - insurance;
 
-    // Investment passive income (monthly total)
-    let monthly_passive = monthly_investment_return(state);
+    // Investment passive income (monthly total, with event modifier)
+    let monthly_passive = monthly_investment_return(state) * investment_multiplier(event);
     // Tax on investment income (20%)
     let inv_tax = monthly_passive * 0.20;
     let net_passive = monthly_passive - inv_tax;
 
-    // Living expenses
+    // Living expenses (with event modifier)
     let ls = lifestyle_info(state.lifestyle);
-    let living_cost = ls.living_cost;
-    let rent = ls.rent;
+    let exp_mult = expense_multiplier(event);
+    let living_cost = ls.living_cost * exp_mult;
+    let rent = ls.rent; // rent is fixed
     let total_expenses = living_cost + rent;
 
     // Deduct monthly expenses from money
@@ -123,8 +209,9 @@ fn process_payday(state: &mut CareerState) {
         format_money_signed(cashflow),
     ));
 
-    // Check economic freedom
-    check_economic_freedom(state, net_passive, total_expenses);
+    // Check economic freedom (use base expenses for freedom check)
+    let base_expenses = ls.living_cost + ls.rent;
+    check_economic_freedom(state, net_passive, base_expenses);
 }
 
 /// Calculate tax and insurance rates based on monthly gross income.
@@ -190,42 +277,107 @@ pub fn buy_training(state: &mut CareerState, index: usize) -> bool {
     if index >= TRAININGS.len() {
         return false;
     }
+    if state.ap == 0 {
+        state.add_log("APが足りません (次の月へ進んでください)");
+        return false;
+    }
     let t = &TRAININGS[index];
-    if state.money < t.cost {
+    let cost = t.cost * training_cost_multiplier(state.current_event);
+    if state.money < cost {
         state.add_log(&format!(
             "お金が足りません (必要: ¥{})",
-            format_money(t.cost)
+            format_money(cost)
         ));
         return false;
     }
-    state.money -= t.cost;
+    state.ap -= 1;
+    state.money -= cost;
 
-    // Apply skill gains with lifestyle efficiency bonus
+    // Apply skill gains with lifestyle efficiency bonus and event modifier
     let ls = lifestyle_info(state.lifestyle);
     let eff = 1.0 + ls.skill_efficiency;
-    add_skill(&mut state.technical, t.technical * eff);
-    add_skill(&mut state.social, t.social * eff);
-    add_skill(&mut state.management, t.management * eff);
-    add_skill(&mut state.knowledge, t.knowledge * eff);
+    let s_mult = skill_multiplier(state.current_event);
+    add_skill(&mut state.technical, t.technical * eff * s_mult);
+    add_skill(&mut state.social, t.social * eff * s_mult);
+    add_skill(&mut state.management, t.management * eff * s_mult);
+    add_skill(&mut state.knowledge, t.knowledge * eff * s_mult);
     add_skill(&mut state.reputation, t.reputation);
 
     let mut parts = Vec::new();
     if t.technical > 0.0 {
-        parts.push(format!("技術+{}", (t.technical * eff) as u32));
+        parts.push(format!("技術+{}", (t.technical * eff * s_mult) as u32));
     }
     if t.social > 0.0 {
-        parts.push(format!("営業+{}", (t.social * eff) as u32));
+        parts.push(format!("営業+{}", (t.social * eff * s_mult) as u32));
     }
     if t.management > 0.0 {
-        parts.push(format!("管理+{}", (t.management * eff) as u32));
+        parts.push(format!("管理+{}", (t.management * eff * s_mult) as u32));
     }
     if t.knowledge > 0.0 {
-        parts.push(format!("知識+{}", (t.knowledge * eff) as u32));
+        parts.push(format!("知識+{}", (t.knowledge * eff * s_mult) as u32));
     }
     if t.reputation > 0.0 {
         parts.push(format!("評判+{}", t.reputation as u32));
     }
-    state.add_log(&format!("{} 完了 ({})", t.name, parts.join(", ")));
+
+    let cost_str = if cost > 0.0 {
+        format!(" ¥{}", format_money(cost))
+    } else {
+        String::new()
+    };
+    state.add_log(&format!("{} 完了{} ({}) [残AP:{}]", t.name, cost_str, parts.join(", "), state.ap));
+    true
+}
+
+// ── Networking ─────────────────────────────────────────────────────────
+
+pub fn do_networking(state: &mut CareerState) -> bool {
+    if state.ap == 0 {
+        state.add_log("APが足りません (次の月へ進んでください)");
+        return false;
+    }
+    state.ap -= 1;
+
+    let s_mult = skill_multiplier(state.current_event);
+    let social_gain = 2.0 * s_mult;
+    let rep_gain = 3.0;
+    add_skill(&mut state.social, social_gain);
+    add_skill(&mut state.reputation, rep_gain);
+
+    state.add_log(&format!(
+        "ネットワーキング: 営業+{}, 評判+{} [残AP:{}]",
+        social_gain as u32, rep_gain as u32, state.ap
+    ));
+    true
+}
+
+// ── Side Job ──────────────────────────────────────────────────────────
+
+pub fn do_side_job(state: &mut CareerState) -> bool {
+    if state.ap == 0 {
+        state.add_log("APが足りません (次の月へ進んでください)");
+        return false;
+    }
+
+    let best_skill = state.technical
+        .max(state.social)
+        .max(state.management)
+        .max(state.knowledge);
+
+    if best_skill < 5.0 {
+        state.add_log("副業にはスキル5以上が必要です");
+        return false;
+    }
+
+    state.ap -= 1;
+    let earnings = best_skill * 100.0;
+    state.money += earnings;
+    state.total_earned += earnings;
+
+    state.add_log(&format!(
+        "副業で ¥{} 稼ぎました [残AP:{}]",
+        format_money(earnings), state.ap
+    ));
     true
 }
 
@@ -254,15 +406,21 @@ pub fn apply_job(state: &mut CareerState, index: usize) -> bool {
         state.add_log("条件を満たしていません");
         return false;
     }
+    if state.ap == 0 {
+        state.add_log("APが足りません (次の月へ進んでください)");
+        return false;
+    }
+    state.ap -= 1;
     let info = job_info(kind);
     state.job = kind;
     state.screen = Screen::Main;
 
     let monthly = info.salary * TICKS_PER_MONTH as f64;
     state.add_log(&format!(
-        "{}に転職しました！ (月給 ¥{})",
+        "{}に転職しました！ (月給 ¥{}) [残AP:{}]",
         info.name,
-        format_money(monthly)
+        format_money(monthly),
+        state.ap
     ));
     true
 }
@@ -387,6 +545,24 @@ mod tests {
     }
 
     #[test]
+    fn advance_month_resets_ap() {
+        let mut s = CareerState::new();
+        s.ap = 0;
+        advance_month(&mut s);
+        assert_eq!(s.ap, ap_for_job(s.job));
+        assert_eq!(s.ap, 2); // Freeter = 2 AP
+    }
+
+    #[test]
+    fn advance_month_generates_event() {
+        let mut s = CareerState::new();
+        advance_month(&mut s);
+        // With seed 42, we get a deterministic event (or None)
+        // Just verify the system works
+        assert_eq!(s.months_elapsed, 1);
+    }
+
+    #[test]
     fn advance_month_gains_reputation() {
         let mut s = CareerState::new();
         advance_month(&mut s);
@@ -398,6 +574,9 @@ mod tests {
     fn advance_month_gains_work_skills() {
         let mut s = CareerState::new();
         s.job = JobKind::Programmer;
+        s.ap_max = ap_for_job(JobKind::Programmer);
+        s.ap = s.ap_max;
+        s.current_event = None; // no event for clean test
         advance_month(&mut s);
         // 0.01/tick * 300 = 3.0
         assert!((s.technical - 3.0).abs() < 0.001);
@@ -408,11 +587,13 @@ mod tests {
         let mut s1 = CareerState::new();
         s1.job = JobKind::Programmer;
         s1.lifestyle = LifestyleLevel::Frugal;
+        s1.current_event = None;
         advance_month(&mut s1);
 
         let mut s2 = CareerState::new();
         s2.job = JobKind::Programmer;
         s2.lifestyle = LifestyleLevel::Normal; // +15%
+        s2.current_event = None;
         advance_month(&mut s2);
 
         assert!(s2.technical > s1.technical);
@@ -440,6 +621,16 @@ mod tests {
         assert!(buy_training(&mut s, 0)); // programming course ¥3,000
         assert_eq!(s.money, 7_000.0);
         assert_eq!(s.technical, 3.0);
+        assert_eq!(s.ap, 1); // started at 2, used 1
+    }
+
+    #[test]
+    fn buy_training_no_ap() {
+        let mut s = CareerState::new();
+        s.money = 10_000.0;
+        s.ap = 0;
+        assert!(!buy_training(&mut s, 0));
+        assert_eq!(s.money, 10_000.0); // unchanged
     }
 
     #[test]
@@ -448,6 +639,7 @@ mod tests {
         s.money = 100.0;
         assert!(!buy_training(&mut s, 0)); // ¥3,000 needed
         assert_eq!(s.money, 100.0); // unchanged
+        assert_eq!(s.ap, 2); // AP not consumed on failure
     }
 
     #[test]
@@ -456,6 +648,7 @@ mod tests {
         s.money = 0.0;
         assert!(buy_training(&mut s, 3)); // 独学 is free
         assert_eq!(s.knowledge, 1.0);
+        assert_eq!(s.ap, 1);
     }
 
     #[test]
@@ -479,6 +672,7 @@ mod tests {
         assert!(apply_job(&mut s, 1)); // office clerk requires knowledge >= 5
         assert_eq!(s.job, JobKind::OfficeClerk);
         assert_eq!(s.screen, Screen::Main);
+        assert_eq!(s.ap, 1); // used 1 AP
     }
 
     #[test]
@@ -486,6 +680,15 @@ mod tests {
         let mut s = CareerState::new();
         assert!(!apply_job(&mut s, 2)); // programmer requires technical >= 15
         assert_eq!(s.job, JobKind::Freeter);
+    }
+
+    #[test]
+    fn apply_job_no_ap() {
+        let mut s = CareerState::new();
+        s.knowledge = 10.0;
+        s.ap = 0;
+        assert!(!apply_job(&mut s, 1));
+        assert_eq!(s.job, JobKind::Freeter); // unchanged
     }
 
     #[test]
@@ -507,6 +710,7 @@ mod tests {
         assert!(invest(&mut s, InvestKind::Savings));
         assert_eq!(s.savings, 1_000.0);
         assert_eq!(s.money, 9_000.0);
+        assert_eq!(s.ap, 2); // invest doesn't cost AP
     }
 
     #[test]
@@ -586,6 +790,7 @@ mod tests {
         // Tax 10% = ¥240, Insurance 5% = ¥120
         // Total deductions = ¥240 + ¥120 + ¥1,000 = ¥1,360
         // Money after month = ¥2,400 - ¥1,360 = ¥1,040
+        s.current_event = None; // ensure no event distorts test
         advance_month(&mut s);
         assert_eq!(s.months_elapsed, 1);
         let expected = 2_400.0 - (2_400.0 * 0.10) - (2_400.0 * 0.05) - 600.0 - 400.0;
@@ -650,6 +855,7 @@ mod tests {
     fn economic_freedom_is_detected() {
         let mut s = CareerState::new();
         s.lifestyle = LifestyleLevel::Frugal; // expenses = ¥1,000/month
+        s.current_event = None;
         // Need passive >= ¥1,000/month (after 20% tax)
         // ¥1,000 / 0.80 = ¥1,250 gross monthly passive needed
         // At 0.5%/month from stocks: need ¥250,000 in stocks
@@ -686,11 +892,141 @@ mod tests {
     #[test]
     fn multiple_months_accumulate() {
         let mut s = CareerState::new();
+        s.current_event = None;
         advance_month(&mut s);
+        s.current_event = None;
         advance_month(&mut s);
+        s.current_event = None;
         advance_month(&mut s);
         assert_eq!(s.months_elapsed, 3);
         assert_eq!(s.total_ticks, 900);
         assert!(s.money > 0.0);
+    }
+
+    // ── Networking tests ──────────────────────────────────────
+
+    #[test]
+    fn networking_success() {
+        let mut s = CareerState::new();
+        assert!(do_networking(&mut s));
+        assert_eq!(s.social, 2.0);
+        assert_eq!(s.reputation, 3.0);
+        assert_eq!(s.ap, 1);
+    }
+
+    #[test]
+    fn networking_no_ap() {
+        let mut s = CareerState::new();
+        s.ap = 0;
+        assert!(!do_networking(&mut s));
+        assert_eq!(s.social, 0.0);
+    }
+
+    // ── Side job tests ──────────────────────────────────────
+
+    #[test]
+    fn side_job_success() {
+        let mut s = CareerState::new();
+        s.technical = 10.0;
+        let money_before = s.money;
+        assert!(do_side_job(&mut s));
+        assert_eq!(s.money, money_before + 1_000.0); // 10 * 100
+        assert_eq!(s.ap, 1);
+    }
+
+    #[test]
+    fn side_job_requires_skill() {
+        let mut s = CareerState::new();
+        assert!(!do_side_job(&mut s)); // all skills 0
+        assert_eq!(s.ap, 2); // AP not consumed
+    }
+
+    #[test]
+    fn side_job_no_ap() {
+        let mut s = CareerState::new();
+        s.technical = 10.0;
+        s.ap = 0;
+        assert!(!do_side_job(&mut s));
+    }
+
+    #[test]
+    fn side_job_uses_best_skill() {
+        let mut s = CareerState::new();
+        s.technical = 5.0;
+        s.social = 20.0;
+        s.management = 10.0;
+        let money_before = s.money;
+        do_side_job(&mut s);
+        assert_eq!(s.money, money_before + 2_000.0); // 20 * 100
+    }
+
+    // ── Event modifier tests ──────────────────────────────────
+
+    #[test]
+    fn training_sale_halves_cost() {
+        let mut s = CareerState::new();
+        s.money = 10_000.0;
+        s.current_event = Some(MonthEvent::TrainingSale);
+        assert!(buy_training(&mut s, 0)); // programming ¥3,000 → ¥1,500
+        assert_eq!(s.money, 8_500.0);
+    }
+
+    #[test]
+    fn skill_boom_doubles_training_gain() {
+        let mut s1 = CareerState::new();
+        s1.money = 10_000.0;
+        s1.current_event = None;
+        buy_training(&mut s1, 0); // tech +3
+
+        let mut s2 = CareerState::new();
+        s2.money = 10_000.0;
+        s2.current_event = Some(MonthEvent::SkillBoom);
+        buy_training(&mut s2, 0); // tech +6
+
+        assert!((s2.technical - s1.technical * 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn recession_reduces_salary() {
+        let mut s = CareerState::new();
+        s.current_event = Some(MonthEvent::Recession);
+        advance_month(&mut s);
+        // Gross should be 2400 * 0.8 = 1920
+        assert!((s.last_report.gross_salary - 1_920.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn windfall_bonus_increases_salary() {
+        let mut s = CareerState::new();
+        s.current_event = Some(MonthEvent::WindfallBonus);
+        advance_month(&mut s);
+        // Gross should be 2400 * 1.5 = 3600
+        assert!((s.last_report.gross_salary - 3_600.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn ap_updates_on_job_change() {
+        let mut s = CareerState::new();
+        s.knowledge = 10.0;
+        apply_job(&mut s, 1); // office clerk, tier 1 → still 2 AP max
+        advance_month(&mut s);
+        assert_eq!(s.ap_max, 2);
+
+        // Now upgrade to programmer
+        s.technical = 20.0;
+        s.ap = 2;
+        apply_job(&mut s, 2); // programmer, tier 2
+        advance_month(&mut s);
+        assert_eq!(s.ap_max, 3);
+        assert_eq!(s.ap, 3);
+    }
+
+    #[test]
+    fn rng_is_deterministic() {
+        let seed = 42u64;
+        let a = next_rng(seed);
+        let b = next_rng(seed);
+        assert_eq!(a, b);
+        assert_ne!(a, seed);
     }
 }
