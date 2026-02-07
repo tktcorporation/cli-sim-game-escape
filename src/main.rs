@@ -1,11 +1,13 @@
 mod games;
 mod input;
 mod time;
+mod widgets;
 
 use std::{cell::RefCell, io, rc::Rc};
 
 use games::{create_game, AppState, GameChoice};
-use input::{is_narrow_layout, ClickState, ClickableList, InputEvent};
+use input::{is_narrow_layout, ClickState, InputEvent};
+use widgets::ClickableList;
 use time::GameTime;
 
 use ratzilla::event::{KeyCode, MouseButton, MouseEventKind};

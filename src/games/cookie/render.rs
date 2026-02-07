@@ -9,7 +9,8 @@ use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
-use crate::input::{ClickState, ClickableList};
+use crate::input::ClickState;
+use crate::widgets::{ClickableList, TabBar};
 
 use super::actions::*;
 use super::logic::format_number;
@@ -173,36 +174,16 @@ fn render_tab_bar(
         "転生".to_string()
     };
 
-    let tabs: [(String, Style, u16); 5] = [
-        ("生産".to_string(), tab_style(0, Color::Green), TAB_PRODUCERS),
-        ("強化".to_string(), tab_style(1, Color::Magenta), TAB_UPGRADES),
-        ("研究".to_string(), tab_style(2, Color::Cyan), TAB_RESEARCH),
-        (milestone_label, tab_style(3, milestone_color), TAB_MILESTONES),
-        (prestige_label, tab_style(4, prestige_color), TAB_PRESTIGE),
-    ];
-
-    // Render all tabs on a single horizontal row, collecting display widths
-    let mut spans: Vec<Span> = Vec::new();
     let separator = if is_narrow { "|" } else { " │ " };
-    let sep_width = Line::from(separator).width() as u16;
-    let mut tab_widths: Vec<(u16, u16)> = Vec::new();
 
-    for (i, (label, style, action_id)) in tabs.iter().enumerate() {
-        if i > 0 {
-            spans.push(Span::styled(separator, Style::default().fg(Color::DarkGray)));
-        }
-        let padded = format!(" {} ", label);
-        tab_widths.push((Line::from(padded.as_str()).width() as u16, *action_id));
-        spans.push(Span::styled(padded, *style));
-    }
-
-    let line = Line::from(spans);
-    let widget = Paragraph::new(line);
-    f.render_widget(widget, area);
-
-    // Register click targets based on actual text widths
     let mut cs = click_state.borrow_mut();
-    cs.register_tab_targets(&tab_widths, sep_width, area.x, area.y, area.width, 1);
+    TabBar::new(separator)
+        .tab("生産", tab_style(0, Color::Green), TAB_PRODUCERS)
+        .tab("強化", tab_style(1, Color::Magenta), TAB_UPGRADES)
+        .tab("研究", tab_style(2, Color::Cyan), TAB_RESEARCH)
+        .tab(milestone_label, tab_style(3, milestone_color), TAB_MILESTONES)
+        .tab(prestige_label, tab_style(4, prestige_color), TAB_PRESTIGE)
+        .render(f, area, &mut cs);
 }
 
 fn render_cookie_display(
@@ -1382,45 +1363,26 @@ fn render_prestige(
             }
         };
 
-        let sec_tabs: [(& str, Style, u16); 4] = [
-            ("転生UP", sec_style(0, Color::Yellow), PRESTIGE_SEC_UPGRADES),
-            ("ブースト", sec_style(1, Color::Rgb(255, 182, 193)), PRESTIGE_SEC_BOOSTS),
-            ("ドラゴン", sec_style(2, Color::Red), PRESTIGE_SEC_DRAGON),
-            ("統計", sec_style(3, Color::White), PRESTIGE_SEC_STATS),
-        ];
-
-        let mut spans: Vec<Span> = Vec::new();
-        let mut tab_widths: Vec<(u16, u16)> = Vec::new();
-
-        for (i, (label, style, action_id)) in sec_tabs.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::styled("|", Style::default().fg(Color::DarkGray)));
-            }
-            let padded = format!(" {} ", label);
-            tab_widths.push((Line::from(padded.as_str()).width() as u16, *action_id));
-            spans.push(Span::styled(padded, *style));
-        }
-
-        let tab_widget = Paragraph::new(Line::from(spans)).block(
-            Block::default()
-                .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(border_color))
-                .title(format!(
-                    " Prestige{} ",
-                    if state.prestige_count > 0 {
-                        format!(" {}回目", state.prestige_count)
-                    } else {
-                        String::new()
-                    }
-                )),
-        );
-        f.render_widget(tab_widget, chunks[0]);
-
-        // Register click targets based on actual text widths
-        let content_x = chunks[0].x + 1; // +1 for left border
-        let content_w = chunks[0].width.saturating_sub(2); // -2 for borders
         let mut cs = click_state.borrow_mut();
-        cs.register_tab_targets(&tab_widths, 1, content_x, chunks[0].y, content_w, chunks[0].height);
+        TabBar::new("|")
+            .tab("転生UP", sec_style(0, Color::Yellow), PRESTIGE_SEC_UPGRADES)
+            .tab("ブースト", sec_style(1, Color::Rgb(255, 182, 193)), PRESTIGE_SEC_BOOSTS)
+            .tab("ドラゴン", sec_style(2, Color::Red), PRESTIGE_SEC_DRAGON)
+            .tab("統計", sec_style(3, Color::White), PRESTIGE_SEC_STATS)
+            .block(
+                Block::default()
+                    .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+                    .border_style(Style::default().fg(border_color))
+                    .title(format!(
+                        " Prestige{} ",
+                        if state.prestige_count > 0 {
+                            format!(" {}回目", state.prestige_count)
+                        } else {
+                            String::new()
+                        }
+                    )),
+            )
+            .render(f, chunks[0], &mut cs);
     }
 
     // === Header: chips info + prestige reset (2 rows) ===

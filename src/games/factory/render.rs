@@ -9,7 +9,8 @@ use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
-use crate::input::{is_narrow_layout, ClickState, ClickableList};
+use crate::input::{is_narrow_layout, ClickState};
+use crate::widgets::ClickableList;
 
 use super::actions::*;
 use super::grid::{anchor_of, machine_at, Cell, MachineKind, MinerMode, GRID_H, GRID_W, VIEW_H, VIEW_W};
