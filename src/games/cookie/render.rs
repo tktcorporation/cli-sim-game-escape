@@ -35,6 +35,26 @@ const SPARKLINE_CHARS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆'
 /// Spinner characters for production indicator.
 const SPINNER: &[char] = &['◐', '◓', '◑', '◒'];
 
+/// Estimate the number of visual rows a set of Lines will occupy when wrapped
+/// to the given inner width (content area excluding left/right borders).
+fn estimate_wrapped_lines(lines: &[Line], inner_width: u16) -> u16 {
+    if inner_width == 0 {
+        return lines.len() as u16;
+    }
+    let w = inner_width as usize;
+    let mut total = 0u16;
+    for line in lines {
+        let display_width = line.width();
+        if display_width <= w {
+            total += 1;
+        } else {
+            // ceil division
+            total += display_width.div_ceil(w) as u16;
+        }
+    }
+    total
+}
+
 pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
     let width = area.width;
     let is_narrow = width < 60;
@@ -1531,7 +1551,8 @@ fn render_prestige(
     };
 
     // Render scroll indicators as overlay + click targets
-    let visible_rows = content_area.height.saturating_sub(2); // minus borders
+    // Border is BOTTOM | LEFT | RIGHT (no TOP), so inner height = height - 1
+    let visible_rows = content_area.height.saturating_sub(1);
     let can_scroll_up = scroll > 0;
     let can_scroll_down = total_lines > scroll + visible_rows;
 
@@ -1542,13 +1563,13 @@ fn render_prestige(
         )));
         let indicator_area = Rect::new(
             content_area.x + 1,
-            content_area.y + 1, // +1 for top of content (inside border area)
+            content_area.y, // no top border, content starts at y
             content_area.width.saturating_sub(2),
             1,
         );
         f.render_widget(indicator, indicator_area);
         let mut cs = click_state.borrow_mut();
-        cs.add_row_target(content_area, content_area.y + 1, PRESTIGE_SCROLL_UP);
+        cs.add_row_target(content_area, content_area.y, PRESTIGE_SCROLL_UP);
     }
 
     if can_scroll_down {
@@ -1662,7 +1683,8 @@ fn render_prestige_upgrades(
         }
     }
 
-    let total_lines = lines.len() as u16;
+    let inner_width = area.width.saturating_sub(2); // minus left+right borders
+    let total_lines = estimate_wrapped_lines(&lines, inner_width);
     let widget = Paragraph::new(lines)
         .block(
             Block::default()
@@ -1834,7 +1856,8 @@ fn render_prestige_boosts(
         ]));
     }
 
-    let total_lines = lines.len() as u16;
+    let inner_width = area.width.saturating_sub(2);
+    let total_lines = estimate_wrapped_lines(&lines, inner_width);
     let widget = Paragraph::new(lines)
         .block(
             Block::default()
@@ -1962,7 +1985,8 @@ fn render_prestige_dragon(
         )));
     }
 
-    let total_lines = lines.len() as u16;
+    let inner_width = area.width.saturating_sub(2);
+    let total_lines = estimate_wrapped_lines(&lines, inner_width);
     let widget = Paragraph::new(lines)
         .block(
             Block::default()
@@ -2043,7 +2067,8 @@ fn render_prestige_stats(
         )),
     ];
 
-    let total_lines = lines.len() as u16;
+    let inner_width = area.width.saturating_sub(2);
+    let total_lines = estimate_wrapped_lines(&lines, inner_width);
     let widget = Paragraph::new(lines)
         .block(
             Block::default()
