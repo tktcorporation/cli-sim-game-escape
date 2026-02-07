@@ -54,10 +54,14 @@
         }
       }
 
-      // Only override width — height stays original so Ratzilla keeps
-      // the correct number of rows and row spacing isn't compressed.
+      // Override both width and height so Ratzilla creates fewer
+      // columns AND rows.  fitGridToViewport() scales font to fill the
+      // viewport width; with height:auto on <pre>, rows grow taller.
+      // Without the height override the grid overflows on mobile.
       override(window, Window.prototype, 'innerWidth');
+      override(window, Window.prototype, 'innerHeight');
       override(screen, Screen.prototype, 'width');
+      override(screen, Screen.prototype, 'height');
     })();
   </script>
   <script>
@@ -71,6 +75,13 @@
       var applied = false;
       var lastViewportWidth = 0;
 
+      function applyFontSize(preElements, fontSize) {
+        var px = Math.floor(fontSize * 100) / 100 + 'px';
+        for (var i = 0; i < preElements.length; i++) {
+          preElements[i].style.fontSize = px;
+        }
+      }
+
       function fitGridToViewport() {
         var grid = document.getElementById('grid') || document.querySelector('body > div');
         if (!grid) return false;
@@ -78,6 +89,7 @@
         if (!pre) return false;
 
         var viewportWidth = document.documentElement.clientWidth;
+        var viewportHeight = document.documentElement.clientHeight;
 
         // <pre> is a block element so scrollWidth always equals the
         // container width, not the actual text width.  Temporarily switch
@@ -90,11 +102,21 @@
         if (contentWidth <= 0 || contentWidth >= viewportWidth) return true;
 
         var currentFontSize = parseFloat(getComputedStyle(pre).fontSize);
-        var scaledFontSize = Math.floor(currentFontSize * (viewportWidth / contentWidth) * 100) / 100;
+        var widthScale = viewportWidth / contentWidth;
+        var scaledFontSize = currentFontSize * widthScale;
+
         var preElements = document.querySelectorAll('pre');
-        for (var i = 0; i < preElements.length; i++) {
-          preElements[i].style.fontSize = scaledFontSize + 'px';
+        applyFontSize(preElements, scaledFontSize);
+
+        // After width-fitting, check if grid overflows viewport height.
+        // With height:auto on <pre>, larger font → taller rows → overflow.
+        var gridHeight = grid.offsetHeight;
+        if (gridHeight > viewportHeight + 2) {
+          var heightScale = viewportHeight / gridHeight;
+          scaledFontSize = scaledFontSize * heightScale;
+          applyFontSize(preElements, scaledFontSize);
         }
+
         applied = true;
         lastViewportWidth = viewportWidth;
         return true;
