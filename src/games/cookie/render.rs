@@ -163,34 +163,34 @@ fn render_tab_bar(
 
     // Render all tabs on a single horizontal row
     let mut spans: Vec<Span> = Vec::new();
-    let mut tab_positions: Vec<(u16, u16, u16)> = Vec::new(); // (start_col, width, action_id)
-    let mut col_offset: u16 = 0;
     let separator = if is_narrow { "|" } else { " │ " };
-    let sep_width = separator.len() as u16;
 
-    for (i, (label, style, action_id)) in tabs.iter().enumerate() {
+    for (i, (label, style, _)) in tabs.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(separator, Style::default().fg(Color::DarkGray)));
-            col_offset += sep_width;
         }
         let padded = format!(" {} ", label);
-        let label_width = padded.len() as u16;
-        tab_positions.push((col_offset, label_width, *action_id));
         spans.push(Span::styled(padded, *style));
-        col_offset += label_width;
     }
 
     let line = Line::from(spans);
     let widget = Paragraph::new(line);
     f.render_widget(widget, area);
 
-    // Register column-based click targets for each tab
+    // Register click targets using equal-width segments across the full row.
+    // This is more robust than character-position-based targets because:
+    // - No character width calculation needed (CJK width issues eliminated)
+    // - No gaps between targets (continuous coverage)
+    // - Works regardless of font rendering or CSS scaling differences
+    let num_tabs = tabs.len() as u16;
     let mut cs = click_state.borrow_mut();
-    for (start_col, width, action_id) in &tab_positions {
+    for (i, (_, _, action_id)) in tabs.iter().enumerate() {
+        let seg_start = area.width * i as u16 / num_tabs;
+        let seg_end = area.width * (i as u16 + 1) / num_tabs;
         let rect = Rect::new(
-            area.x + start_col,
+            area.x + seg_start,
             area.y,
-            (*width).min(area.width.saturating_sub(*start_col)),
+            seg_end - seg_start,
             1,
         );
         cs.targets.push(crate::input::ClickTarget {
@@ -1414,19 +1414,13 @@ fn render_prestige(
         ];
 
         let mut spans: Vec<Span> = Vec::new();
-        let mut tab_positions: Vec<(u16, u16, u16)> = Vec::new();
-        let mut col_offset: u16 = 0;
 
-        for (i, (label, style, action_id)) in sec_tabs.iter().enumerate() {
+        for (i, (label, style, _)) in sec_tabs.iter().enumerate() {
             if i > 0 {
                 spans.push(Span::styled("|", Style::default().fg(Color::DarkGray)));
-                col_offset += 1;
             }
             let padded = format!(" {} ", label);
-            let label_width = padded.len() as u16;
-            tab_positions.push((col_offset, label_width, *action_id));
             spans.push(Span::styled(padded, *style));
-            col_offset += label_width;
         }
 
         let tab_widget = Paragraph::new(Line::from(spans)).block(
@@ -1444,13 +1438,19 @@ fn render_prestige(
         );
         f.render_widget(tab_widget, chunks[0]);
 
+        // Equal-width segment click targets (robust against CJK width issues)
+        let content_x = chunks[0].x + 1; // +1 for left border
+        let content_w = chunks[0].width.saturating_sub(2); // -2 for borders
+        let num_secs = sec_tabs.len() as u16;
         let mut cs = click_state.borrow_mut();
-        for (start_col, width, action_id) in &tab_positions {
+        for (i, (_, _, action_id)) in sec_tabs.iter().enumerate() {
+            let seg_start = content_w * i as u16 / num_secs;
+            let seg_end = content_w * (i as u16 + 1) / num_secs;
             let rect = Rect::new(
-                chunks[0].x + 1 + start_col, // +1 for left border
+                content_x + seg_start,
                 chunks[0].y,
-                (*width).min(chunks[0].width.saturating_sub(2 + *start_col)),
-                1,
+                seg_end - seg_start,
+                chunks[0].height,
             );
             cs.targets.push(crate::input::ClickTarget {
                 rect,
