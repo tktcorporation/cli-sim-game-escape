@@ -14,8 +14,9 @@ use crate::input::{is_narrow_layout, ClickState};
 use super::actions::*;
 
 use super::logic::{
-    can_apply, format_money, format_money_exact, freedom_progress, monthly_expenses,
-    monthly_passive, monthly_salary, next_available_job, training_cost_multiplier,
+    can_apply, format_money, format_money_exact, freedom_progress, is_game_over, monthly_expenses,
+    monthly_passive, monthly_salary, months_remaining, next_available_job,
+    training_cost_multiplier,
 };
 use super::state::{
     event_description, event_name, invest_info, job_info, lifestyle_info, CareerState, InvestKind,
@@ -120,6 +121,20 @@ fn render_header(
                 format!("  {}ヶ月目", state.months_elapsed + 1),
                 Style::default().fg(Color::White),
             ),
+            {
+                let remaining = months_remaining(state);
+                let color = if remaining <= 12 {
+                    Color::Red
+                } else if remaining <= 36 {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                };
+                Span::styled(
+                    format!("  残{}月", remaining),
+                    Style::default().fg(color),
+                )
+            },
             Span::styled("  評判: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format_reputation(state.reputation),
@@ -373,6 +388,17 @@ fn render_actions(
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
+        )));
+    } else if is_game_over(state) {
+        lines.push(Line::from(Span::styled(
+            " ✖ 120ヶ月経過 - GAME OVER",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            "   経済的自由は達成できませんでした…",
+            Style::default().fg(Color::Red),
         )));
     } else {
         lines.push(Line::from(vec![

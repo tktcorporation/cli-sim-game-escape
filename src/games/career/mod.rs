@@ -16,6 +16,7 @@ use crate::games::Game;
 use crate::input::{ClickState, InputEvent};
 
 use actions::*;
+use logic::is_game_over;
 use state::{CareerState, InvestKind, Screen};
 
 pub struct CareerGame {
@@ -39,21 +40,22 @@ impl CareerGame {
     }
 
     fn handle_click(&mut self, action_id: u16) -> bool {
+        let game_over = is_game_over(&self.state);
         match action_id {
             // Main screen
-            ADVANCE_MONTH => {
+            ADVANCE_MONTH if !game_over => {
                 logic::advance_month(&mut self.state);
                 true
             }
-            GO_TRAINING => {
+            GO_TRAINING if !game_over => {
                 self.state.screen = Screen::Training;
                 true
             }
-            DO_NETWORKING => {
+            DO_NETWORKING if !game_over => {
                 logic::do_networking(&mut self.state);
                 true
             }
-            DO_SIDE_JOB => {
+            DO_SIDE_JOB if !game_over => {
                 logic::do_side_job(&mut self.state);
                 true
             }
@@ -74,7 +76,7 @@ impl CareerGame {
                 true
             }
             // Training screen
-            id if (TRAINING_BASE..TRAINING_BASE + 5).contains(&id) => {
+            id if (TRAINING_BASE..TRAINING_BASE + 5).contains(&id) && !game_over => {
                 logic::buy_training(&mut self.state, (id - TRAINING_BASE) as usize);
                 true
             }
@@ -83,7 +85,7 @@ impl CareerGame {
                 true
             }
             // Job Market screen
-            id if (APPLY_JOB_BASE..APPLY_JOB_BASE + 10).contains(&id) => {
+            id if (APPLY_JOB_BASE..APPLY_JOB_BASE + 10).contains(&id) && !game_over => {
                 logic::apply_job(&mut self.state, (id - APPLY_JOB_BASE) as usize);
                 true
             }
@@ -114,38 +116,39 @@ impl CareerGame {
     }
 
     fn handle_key(&mut self, key: char) -> bool {
+        let game_over = is_game_over(&self.state);
         match self.state.screen {
             Screen::Main => match key {
-                '1' => { self.state.screen = Screen::Training; true }
-                '2' => { logic::do_networking(&mut self.state); true }
-                '3' => { logic::do_side_job(&mut self.state); true }
+                '1' if !game_over => { self.state.screen = Screen::Training; true }
+                '2' if !game_over => { logic::do_networking(&mut self.state); true }
+                '3' if !game_over => { logic::do_side_job(&mut self.state); true }
                 '6' => { self.state.screen = Screen::JobMarket; true }
                 '7' => { self.state.screen = Screen::Invest; true }
                 '8' => { self.state.screen = Screen::Budget; true }
                 '9' => { self.state.screen = Screen::Lifestyle; true }
-                '0' => { logic::advance_month(&mut self.state); true }
+                '0' if !game_over => { logic::advance_month(&mut self.state); true }
                 _ => false,
             },
             Screen::Training => match key {
-                '1' => { logic::buy_training(&mut self.state, 0); true }
-                '2' => { logic::buy_training(&mut self.state, 1); true }
-                '3' => { logic::buy_training(&mut self.state, 2); true }
-                '4' => { logic::buy_training(&mut self.state, 3); true }
-                '5' => { logic::buy_training(&mut self.state, 4); true }
+                '1' if !game_over => { logic::buy_training(&mut self.state, 0); true }
+                '2' if !game_over => { logic::buy_training(&mut self.state, 1); true }
+                '3' if !game_over => { logic::buy_training(&mut self.state, 2); true }
+                '4' if !game_over => { logic::buy_training(&mut self.state, 3); true }
+                '5' if !game_over => { logic::buy_training(&mut self.state, 4); true }
                 '-' => { self.state.screen = Screen::Main; true }
                 _ => false,
             },
             Screen::JobMarket => match key {
-                '1' => { logic::apply_job(&mut self.state, 0); true }
-                '2' => { logic::apply_job(&mut self.state, 1); true }
-                '3' => { logic::apply_job(&mut self.state, 2); true }
-                '4' => { logic::apply_job(&mut self.state, 3); true }
-                '5' => { logic::apply_job(&mut self.state, 4); true }
-                '6' => { logic::apply_job(&mut self.state, 5); true }
-                '7' => { logic::apply_job(&mut self.state, 6); true }
-                '8' => { logic::apply_job(&mut self.state, 7); true }
-                '9' => { logic::apply_job(&mut self.state, 8); true }
-                '0' => { logic::apply_job(&mut self.state, 9); true }
+                '1' if !game_over => { logic::apply_job(&mut self.state, 0); true }
+                '2' if !game_over => { logic::apply_job(&mut self.state, 1); true }
+                '3' if !game_over => { logic::apply_job(&mut self.state, 2); true }
+                '4' if !game_over => { logic::apply_job(&mut self.state, 3); true }
+                '5' if !game_over => { logic::apply_job(&mut self.state, 4); true }
+                '6' if !game_over => { logic::apply_job(&mut self.state, 5); true }
+                '7' if !game_over => { logic::apply_job(&mut self.state, 6); true }
+                '8' if !game_over => { logic::apply_job(&mut self.state, 7); true }
+                '9' if !game_over => { logic::apply_job(&mut self.state, 8); true }
+                '0' if !game_over => { logic::apply_job(&mut self.state, 9); true }
                 '-' => { self.state.screen = Screen::Main; true }
                 _ => false,
             },

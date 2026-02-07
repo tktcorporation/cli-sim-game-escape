@@ -381,6 +381,15 @@ pub const TICKS_PER_DAY: u64 = 100;
 /// Ticks per month (game pay period: 300 ticks = 30 seconds).
 pub const TICKS_PER_MONTH: u32 = 300;
 
+/// Maximum months before game over (10 years).
+pub const MAX_MONTHS: u32 = 120;
+
+/// Monthly expense inflation rate (0.5% per month, compounding).
+pub const INFLATION_RATE: f64 = 0.005;
+
+/// Monthly reputation decay (must actively network to maintain).
+pub const REP_DECAY_PER_MONTH: f64 = 0.3;
+
 /// Reputation gain per tick from working.
 const BASE_REP_GAIN: f64 = 0.002;
 

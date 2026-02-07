@@ -2,8 +2,8 @@
 
 use super::state::{
     ap_for_job, event_description, event_name, invest_info, job_info, lifestyle_info, CareerState,
-    InvestKind, JobKind, MonthEvent, MonthlyReport, Screen, ALL_JOBS, ALL_LIFESTYLES, SKILL_CAP,
-    TICKS_PER_MONTH, TRAININGS,
+    InvestKind, JobKind, MonthEvent, MonthlyReport, Screen, ALL_JOBS, ALL_LIFESTYLES,
+    INFLATION_RATE, MAX_MONTHS, REP_DECAY_PER_MONTH, SKILL_CAP, TICKS_PER_MONTH, TRAININGS,
 };
 
 // ── Tick (no-op: command-based game) ──────────────────────────────────
@@ -81,11 +81,29 @@ pub fn training_cost_multiplier(event: Option<MonthEvent>) -> f64 {
     }
 }
 
+// ── Inflation & Time Limit ────────────────────────────────────────────
+
+/// Expense inflation multiplier based on months elapsed.
+/// 0.5% per month compounding: (1 + 0.005)^months
+pub fn expense_inflation(months: u32) -> f64 {
+    (1.0 + INFLATION_RATE).powi(months as i32)
+}
+
+/// Check if the game has ended (won or lost).
+pub fn is_game_over(state: &CareerState) -> bool {
+    state.won || state.months_elapsed >= MAX_MONTHS
+}
+
+/// Remaining months before deadline.
+pub fn months_remaining(state: &CareerState) -> u32 {
+    MAX_MONTHS.saturating_sub(state.months_elapsed)
+}
+
 // ── Advance Month ────────────────────────────────────────────────────
 
 /// Advance the game by one full month. This is the core turn action.
 pub fn advance_month(state: &mut CareerState) {
-    if state.won {
+    if is_game_over(state) {
         return;
     }
 
@@ -114,6 +132,9 @@ pub fn advance_month(state: &mut CareerState) {
         (CareerState::base_rep_gain() + ls.rep_bonus) * month_ticks,
     );
 
+    // Reputation decay (must actively network to maintain high reputation)
+    state.reputation = (state.reputation - REP_DECAY_PER_MONTH).max(0.0);
+
     // Investment returns for the month (with event modifier)
     let inv_return = monthly_investment_return(state) * investment_multiplier(event);
     state.money += inv_return;
@@ -136,6 +157,12 @@ pub fn advance_month(state: &mut CareerState) {
     // Reset AP for next month
     state.ap_max = ap_for_job(state.job);
     state.ap = state.ap_max;
+
+    // Check time limit
+    if state.months_elapsed >= MAX_MONTHS && !state.won {
+        state.add_log("━━━ 120ヶ月が経過しました ━━━");
+        state.add_log("経済的自由は達成できませんでした…");
+    }
 }
 
 fn add_skill(skill: &mut f64, amount: f64) {
@@ -173,11 +200,12 @@ fn process_payday(state: &mut CareerState) {
     let inv_tax = monthly_passive * 0.20;
     let net_passive = monthly_passive - inv_tax;
 
-    // Living expenses (with event modifier)
+    // Living expenses (with event modifier + inflation)
     let ls = lifestyle_info(state.lifestyle);
     let exp_mult = expense_multiplier(event);
-    let living_cost = ls.living_cost * exp_mult;
-    let rent = ls.rent; // rent is fixed
+    let inflation = expense_inflation(state.months_elapsed);
+    let living_cost = ls.living_cost * exp_mult * inflation;
+    let rent = ls.rent * inflation;
     let total_expenses = living_cost + rent;
 
     // Deduct monthly expenses from money
@@ -209,9 +237,9 @@ fn process_payday(state: &mut CareerState) {
         format_money_signed(cashflow),
     ));
 
-    // Check economic freedom (use base expenses for freedom check)
-    let base_expenses = ls.living_cost + ls.rent;
-    check_economic_freedom(state, net_passive, base_expenses);
+    // Check economic freedom (use inflated expenses — the real cost of living)
+    let inflated_expenses = (ls.living_cost + ls.rent) * inflation;
+    check_economic_freedom(state, net_passive, inflated_expenses);
 }
 
 /// Calculate tax and insurance rates based on monthly gross income.
@@ -495,7 +523,7 @@ pub fn monthly_salary(state: &CareerState) -> f64 {
 
 pub fn monthly_expenses(state: &CareerState) -> f64 {
     let ls = lifestyle_info(state.lifestyle);
-    ls.living_cost + ls.rent
+    (ls.living_cost + ls.rent) * expense_inflation(state.months_elapsed)
 }
 
 pub fn monthly_passive(state: &CareerState) -> f64 {
@@ -535,9 +563,10 @@ mod tests {
         let mut s = CareerState::new();
         advance_month(&mut s);
         // Freeter: 8/tick * 300 ticks = 2,400 gross
-        // After deductions (tax 10%, insurance 5%, living 600, rent 400)
+        // After deductions (tax 10%, insurance 5%, living 600*inflation, rent 400*inflation)
         let gross = 2_400.0;
-        let deductions = gross * 0.10 + gross * 0.05 + 600.0 + 400.0;
+        let inflation = expense_inflation(1);
+        let deductions = gross * 0.10 + gross * 0.05 + 600.0 * inflation + 400.0 * inflation;
         let expected = gross - deductions;
         assert!((s.money - expected).abs() < 0.01);
         assert_eq!(s.months_elapsed, 1);
@@ -563,11 +592,11 @@ mod tests {
     }
 
     #[test]
-    fn advance_month_gains_reputation() {
+    fn advance_month_gains_reputation_with_decay() {
         let mut s = CareerState::new();
         advance_month(&mut s);
-        // 0.002/tick * 300 ticks = 0.6
-        assert!((s.reputation - 0.6).abs() < 0.001);
+        // 0.002/tick * 300 ticks = 0.6, minus decay 0.3 = 0.3
+        assert!((s.reputation - 0.3).abs() < 0.001);
     }
 
     #[test]
@@ -783,17 +812,18 @@ mod tests {
     }
 
     #[test]
-    fn payday_deducts_expenses() {
+    fn payday_deducts_expenses_with_inflation() {
         let mut s = CareerState::new();
-        // Frugal lifestyle: living ¥600 + rent ¥400 = ¥1,000/month
+        // Frugal lifestyle: base living ¥600 + rent ¥400 = ¥1,000/month
+        // After 1 month inflation (1.005^1): ¥1,005
         // Freeter: 8/tick * 300 = ¥2,400 gross
         // Tax 10% = ¥240, Insurance 5% = ¥120
-        // Total deductions = ¥240 + ¥120 + ¥1,000 = ¥1,360
-        // Money after month = ¥2,400 - ¥1,360 = ¥1,040
-        s.current_event = None; // ensure no event distorts test
+        // Total deductions = ¥240 + ¥120 + ¥1,005 = ¥1,365
+        s.current_event = None;
         advance_month(&mut s);
         assert_eq!(s.months_elapsed, 1);
-        let expected = 2_400.0 - (2_400.0 * 0.10) - (2_400.0 * 0.05) - 600.0 - 400.0;
+        let inflation = expense_inflation(1);
+        let expected = 2_400.0 - (2_400.0 * 0.10) - (2_400.0 * 0.05) - 600.0 * inflation - 400.0 * inflation;
         assert!((s.money - expected).abs() < 0.01, "money: {}, expected: {}", s.money, expected);
     }
 
@@ -875,6 +905,75 @@ mod tests {
     }
 
     #[test]
+    fn game_stops_at_max_months() {
+        let mut s = CareerState::new();
+        s.months_elapsed = MAX_MONTHS;
+        let money_before = s.money;
+        advance_month(&mut s);
+        assert_eq!(s.money, money_before);
+        assert!(is_game_over(&s));
+    }
+
+    #[test]
+    fn is_game_over_conditions() {
+        let mut s = CareerState::new();
+        assert!(!is_game_over(&s));
+
+        s.won = true;
+        assert!(is_game_over(&s));
+
+        let mut s2 = CareerState::new();
+        s2.months_elapsed = MAX_MONTHS;
+        assert!(is_game_over(&s2));
+    }
+
+    #[test]
+    fn months_remaining_decreases() {
+        let mut s = CareerState::new();
+        assert_eq!(months_remaining(&s), 120);
+        s.months_elapsed = 50;
+        assert_eq!(months_remaining(&s), 70);
+        s.months_elapsed = 120;
+        assert_eq!(months_remaining(&s), 0);
+    }
+
+    #[test]
+    fn reputation_decays_each_month() {
+        let mut s = CareerState::new();
+        s.reputation = 10.0;
+        s.current_event = None;
+        advance_month(&mut s);
+        // Working gains: 0.002 * 300 = 0.6, decay: -0.3, net: +0.3
+        assert!((s.reputation - 10.3).abs() < 0.001);
+    }
+
+    #[test]
+    fn reputation_does_not_go_negative() {
+        let mut s = CareerState::new();
+        s.reputation = 0.1;
+        s.current_event = None;
+        advance_month(&mut s);
+        // gains 0.6, decay 0.3 → 0.1 + 0.6 - 0.3 = 0.4 (fine)
+        // But test with very low rep:
+        let mut s2 = CareerState::new();
+        s2.reputation = 0.0;
+        // Working gain 0.6, capped at 100, then decay 0.3 → 0.3
+        s2.current_event = None;
+        advance_month(&mut s2);
+        assert!(s2.reputation >= 0.0);
+    }
+
+    #[test]
+    fn inflation_compounds_over_time() {
+        let m0 = expense_inflation(0);
+        let m60 = expense_inflation(60);
+        let m120 = expense_inflation(120);
+        assert!((m0 - 1.0).abs() < 0.001);
+        assert!(m60 > 1.3); // ~1.349
+        assert!(m120 > 1.8); // ~1.819
+    }
+
+    #[test]
     fn tick_is_noop() {
         let mut s = CareerState::new();
         let money_before = s.money;
@@ -886,7 +985,20 @@ mod tests {
     fn monthly_expenses_calculation() {
         let mut s = CareerState::new();
         s.lifestyle = LifestyleLevel::Normal;
-        assert_eq!(monthly_expenses(&s), 2_000.0); // 1200 + 800
+        // At month 0, inflation = 1.0
+        assert_eq!(monthly_expenses(&s), 2_000.0); // (1200 + 800) * 1.0
+    }
+
+    #[test]
+    fn monthly_expenses_increase_with_inflation() {
+        let mut s = CareerState::new();
+        let initial = monthly_expenses(&s);
+        s.months_elapsed = 60; // 5 years
+        let after_60 = monthly_expenses(&s);
+        assert!(after_60 > initial);
+        // 1.005^60 ≈ 1.349
+        let ratio = after_60 / initial;
+        assert!((ratio - 1.349).abs() < 0.01);
     }
 
     #[test]
