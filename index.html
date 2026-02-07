@@ -39,25 +39,45 @@
     // Reduce the viewport dimensions reported to Ratzilla so it calculates
     // fewer terminal columns/rows, resulting in larger text that fills the
     // real viewport via the fitGridToViewport scaler below.
-    // SCALE < 1 → bigger text.  0.85 ≈ 18 % larger characters.
+    // SCALE_W < 1 → bigger text.  0.85 ≈ 18 % larger characters.
     (function() {
-      var SCALE = 0.85;
+      var SCALE_W = 0.85;
 
-      function override(obj, proto, prop) {
+      // Capture originals before any overrides.
+      var origW = window.innerWidth || screen.width || 375;
+      var origH = window.innerHeight || screen.height || 667;
+
+      // Estimate how many rows will fit after font-width scaling.
+      // Ratzilla: cols ≈ floor(scaledWidth / 10), assumes 15px/row.
+      // fitGridToViewport scales font by: realWidth / gridContentWidth.
+      // gridContentWidth ≈ cols × charWidth (monospace char ≈ 8.4px at 14px).
+      // After scaling, row height = baseFontSize × fontScale × lineHeight.
+      var cols = Math.floor(origW * SCALE_W / 10);
+      var charWidth = 8.4;
+      var fontScale = origW / (cols * charWidth);
+      var rowHeight = 14 * fontScale * 1.15;
+      var maxRows = Math.floor(origH / rowHeight);
+      // Ratzilla creates rows = floor(innerHeight / 15).
+      // SCALE_H gives us exactly maxRows.
+      var SCALE_H = Math.min((maxRows * 15) / origH, SCALE_W);
+
+      function overrideWith(obj, proto, prop, scale) {
         var desc = Object.getOwnPropertyDescriptor(proto, prop);
         if (desc && desc.get) {
           var orig = desc.get;
           Object.defineProperty(obj, prop, {
-            get: function() { return Math.floor(orig.call(obj) * SCALE); },
+            get: function() { return Math.floor(orig.call(obj) * scale); },
             configurable: true
           });
         }
       }
 
-      // Only override width — height stays original so Ratzilla keeps
-      // the correct number of rows and row spacing isn't compressed.
-      override(window, Window.prototype, 'innerWidth');
-      override(screen, Screen.prototype, 'width');
+      // Width: fixed scale for bigger font.
+      // Height: computed scale so rows × scaled-row-height ≈ viewport height.
+      overrideWith(window, Window.prototype, 'innerWidth', SCALE_W);
+      overrideWith(window, Window.prototype, 'innerHeight', SCALE_H);
+      overrideWith(screen, Screen.prototype, 'width', SCALE_W);
+      overrideWith(screen, Screen.prototype, 'height', SCALE_H);
     })();
   </script>
   <script>
@@ -95,6 +115,7 @@
         for (var i = 0; i < preElements.length; i++) {
           preElements[i].style.fontSize = scaledFontSize + 'px';
         }
+
         applied = true;
         lastViewportWidth = viewportWidth;
         return true;
