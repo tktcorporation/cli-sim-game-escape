@@ -5,51 +5,53 @@ use super::state::{
     ALL_JOBS, ALL_LIFESTYLES, SKILL_CAP, TICKS_PER_MONTH, TRAININGS,
 };
 
-// ── Tick ───────────────────────────────────────────────────────────────
+// ── Tick (no-op: command-based game) ──────────────────────────────────
 
-pub fn tick(state: &mut CareerState, delta_ticks: u32) {
-    for _ in 0..delta_ticks {
-        tick_once(state);
-    }
+pub fn tick(_state: &mut CareerState, _delta_ticks: u32) {
+    // Command-based: time advances via advance_month(), not per-tick.
 }
 
-fn tick_once(state: &mut CareerState) {
+// ── Advance Month ────────────────────────────────────────────────────
+
+/// Advance the game by one full month. This is the core turn action.
+pub fn advance_month(state: &mut CareerState) {
     if state.won {
         return;
     }
 
-    state.total_ticks += 1;
-    state.month_ticks += 1;
-
-    // Salary (accumulates per tick)
     let info = job_info(state.job);
-    state.money += info.salary;
-    state.total_earned += info.salary;
-    state.month_gross_earned += info.salary;
-
-    // Passive skill gains from working (with lifestyle efficiency bonus)
     let ls = lifestyle_info(state.lifestyle);
     let eff = 1.0 + ls.skill_efficiency;
-    add_skill(&mut state.technical, info.gain_technical * eff);
-    add_skill(&mut state.social, info.gain_social * eff);
-    add_skill(&mut state.management, info.gain_management * eff);
-    add_skill(&mut state.knowledge, info.gain_knowledge * eff);
+    let month_ticks = TICKS_PER_MONTH as f64;
 
-    // Reputation from working + lifestyle bonus
+    // Salary for the month
+    let gross = info.salary * month_ticks;
+    state.money += gross;
+    state.total_earned += gross;
+    state.month_gross_earned = gross;
+
+    // Passive skill gains from working (month total)
+    add_skill(&mut state.technical, info.gain_technical * eff * month_ticks);
+    add_skill(&mut state.social, info.gain_social * eff * month_ticks);
+    add_skill(&mut state.management, info.gain_management * eff * month_ticks);
+    add_skill(&mut state.knowledge, info.gain_knowledge * eff * month_ticks);
+
+    // Reputation from working + lifestyle bonus (month total)
     add_skill(
         &mut state.reputation,
-        CareerState::base_rep_gain() + ls.rep_bonus,
+        (CareerState::base_rep_gain() + ls.rep_bonus) * month_ticks,
     );
 
-    // Investment returns (per tick)
-    let inv_return = investment_return(state);
+    // Investment returns for the month
+    let inv_return = monthly_investment_return(state);
     state.money += inv_return;
     state.total_earned += inv_return;
 
-    // Monthly cycle: payday processing
-    if state.month_ticks >= TICKS_PER_MONTH {
-        process_payday(state);
-    }
+    // Update tick tracking
+    state.total_ticks += TICKS_PER_MONTH as u64;
+
+    // Process payday (deductions, report, freedom check)
+    process_payday(state);
 }
 
 fn add_skill(skill: &mut f64, amount: f64) {
@@ -329,13 +331,6 @@ fn format_with_commas(n: u64) -> String {
 
 // ── Queries ────────────────────────────────────────────────────────────
 
-#[cfg(test)]
-pub fn income_per_tick(state: &CareerState) -> f64 {
-    let salary = job_info(state.job).salary;
-    let inv = investment_return(state);
-    salary + inv
-}
-
 pub fn monthly_salary(state: &CareerState) -> f64 {
     job_info(state.job).salary * TICKS_PER_MONTH as f64
 }
@@ -378,27 +373,34 @@ mod tests {
     use super::super::state::LifestyleLevel;
 
     #[test]
-    fn tick_earns_salary() {
+    fn advance_month_earns_salary() {
         let mut s = CareerState::new();
-        tick(&mut s, 10);
-        assert_eq!(s.money, 80.0); // freeter: 8 × 10
-        assert_eq!(s.total_ticks, 10);
+        advance_month(&mut s);
+        // Freeter: 8/tick * 300 ticks = 2,400 gross
+        // After deductions (tax 10%, insurance 5%, living 600, rent 400)
+        let gross = 2_400.0;
+        let deductions = gross * 0.10 + gross * 0.05 + 600.0 + 400.0;
+        let expected = gross - deductions;
+        assert!((s.money - expected).abs() < 0.01);
+        assert_eq!(s.months_elapsed, 1);
+        assert_eq!(s.total_ticks, 300);
     }
 
     #[test]
-    fn tick_gains_reputation() {
+    fn advance_month_gains_reputation() {
         let mut s = CareerState::new();
-        tick(&mut s, 100);
-        assert!(s.reputation > 0.0);
-        assert!((s.reputation - 0.2).abs() < 0.001);
+        advance_month(&mut s);
+        // 0.002/tick * 300 ticks = 0.6
+        assert!((s.reputation - 0.6).abs() < 0.001);
     }
 
     #[test]
-    fn tick_gains_work_skills() {
+    fn advance_month_gains_work_skills() {
         let mut s = CareerState::new();
         s.job = JobKind::Programmer;
-        tick(&mut s, 100);
-        assert!((s.technical - 1.0).abs() < 0.001);
+        advance_month(&mut s);
+        // 0.01/tick * 300 = 3.0
+        assert!((s.technical - 3.0).abs() < 0.001);
     }
 
     #[test]
@@ -406,12 +408,12 @@ mod tests {
         let mut s1 = CareerState::new();
         s1.job = JobKind::Programmer;
         s1.lifestyle = LifestyleLevel::Frugal;
-        tick(&mut s1, 100);
+        advance_month(&mut s1);
 
         let mut s2 = CareerState::new();
         s2.job = JobKind::Programmer;
         s2.lifestyle = LifestyleLevel::Normal; // +15%
-        tick(&mut s2, 100);
+        advance_month(&mut s2);
 
         assert!(s2.technical > s1.technical);
     }
@@ -520,7 +522,7 @@ mod tests {
         let mut s = CareerState::new();
         s.savings = 10_000.0;
         s.stocks = 10_000.0;
-        let ret = investment_return(&s);
+        let ret = monthly_investment_return(&s);
         assert!(ret > 0.0);
     }
 
@@ -542,14 +544,6 @@ mod tests {
         assert_eq!(format_with_commas(999), "999");
         assert_eq!(format_with_commas(1_000), "1,000");
         assert_eq!(format_with_commas(1_234_567), "1,234,567");
-    }
-
-    #[test]
-    fn income_per_tick_includes_investments() {
-        let mut s = CareerState::new();
-        s.savings = 50_000.0;
-        let income = income_per_tick(&s);
-        assert!(income > job_info(JobKind::Freeter).salary);
     }
 
     #[test]
@@ -577,11 +571,9 @@ mod tests {
     // ── Monthly cycle tests ──────────────────────────────────────
 
     #[test]
-    fn monthly_cycle_triggers_at_300_ticks() {
+    fn advance_month_processes_payday() {
         let mut s = CareerState::new();
-        tick(&mut s, 299);
-        assert_eq!(s.months_elapsed, 0);
-        tick(&mut s, 1);
+        advance_month(&mut s);
         assert_eq!(s.months_elapsed, 1);
         assert_eq!(s.month_ticks, 0);
     }
@@ -594,7 +586,7 @@ mod tests {
         // Tax 10% = ¥240, Insurance 5% = ¥120
         // Total deductions = ¥240 + ¥120 + ¥1,000 = ¥1,360
         // Money after month = ¥2,400 - ¥1,360 = ¥1,040
-        tick(&mut s, 300);
+        advance_month(&mut s);
         assert_eq!(s.months_elapsed, 1);
         let expected = 2_400.0 - (2_400.0 * 0.10) - (2_400.0 * 0.05) - 600.0 - 400.0;
         assert!((s.money - expected).abs() < 0.01, "money: {}, expected: {}", s.money, expected);
@@ -603,7 +595,7 @@ mod tests {
     #[test]
     fn payday_report_is_updated() {
         let mut s = CareerState::new();
-        tick(&mut s, 300);
+        advance_month(&mut s);
         assert!(s.last_report.gross_salary > 0.0);
         assert!(s.last_report.tax > 0.0);
         assert!(s.last_report.living_cost > 0.0);
@@ -662,17 +654,25 @@ mod tests {
         // ¥1,000 / 0.80 = ¥1,250 gross monthly passive needed
         // At 0.5%/month from stocks: need ¥250,000 in stocks
         s.stocks = 300_000.0;
-        tick(&mut s, 300); // trigger payday
+        advance_month(&mut s);
         assert!(s.won);
         assert!(s.won_message.is_some());
     }
 
     #[test]
-    fn game_stops_ticking_after_win() {
+    fn game_stops_after_win() {
         let mut s = CareerState::new();
         s.won = true;
         let money_before = s.money;
-        tick(&mut s, 100);
+        advance_month(&mut s);
+        assert_eq!(s.money, money_before);
+    }
+
+    #[test]
+    fn tick_is_noop() {
+        let mut s = CareerState::new();
+        let money_before = s.money;
+        tick(&mut s, 1000);
         assert_eq!(s.money, money_before);
     }
 
@@ -681,5 +681,16 @@ mod tests {
         let mut s = CareerState::new();
         s.lifestyle = LifestyleLevel::Normal;
         assert_eq!(monthly_expenses(&s), 2_000.0); // 1200 + 800
+    }
+
+    #[test]
+    fn multiple_months_accumulate() {
+        let mut s = CareerState::new();
+        advance_month(&mut s);
+        advance_month(&mut s);
+        advance_month(&mut s);
+        assert_eq!(s.months_elapsed, 3);
+        assert_eq!(s.total_ticks, 900);
+        assert!(s.money > 0.0);
     }
 }

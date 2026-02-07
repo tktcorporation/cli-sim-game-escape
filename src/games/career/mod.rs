@@ -3,6 +3,7 @@
 pub mod actions;
 pub mod logic;
 pub mod render;
+pub mod save;
 pub mod state;
 
 use std::cell::RefCell;
@@ -23,13 +24,27 @@ pub struct CareerGame {
 
 impl CareerGame {
     pub fn new() -> Self {
-        Self {
-            state: CareerState::new(),
-        }
+        let state = CareerState::new();
+
+        #[cfg(target_arch = "wasm32")]
+        let state = {
+            let mut s = state;
+            if save::load_game(&mut s) {
+                s.add_log("セーブデータをロードしました");
+            }
+            s
+        };
+
+        Self { state }
     }
 
     fn handle_click(&mut self, action_id: u16) -> bool {
         match action_id {
+            // Main screen: advance month
+            ADVANCE_MONTH => {
+                logic::advance_month(&mut self.state);
+                true
+            }
             // Main screen: training
             id if (TRAINING_BASE..TRAINING_BASE + 5).contains(&id) => {
                 logic::buy_training(&mut self.state, (id - TRAINING_BASE) as usize);
@@ -94,6 +109,7 @@ impl CareerGame {
                 '7' => { self.state.screen = Screen::Invest; true }
                 '8' => { self.state.screen = Screen::Budget; true }
                 '9' => { self.state.screen = Screen::Lifestyle; true }
+                '0' => { logic::advance_month(&mut self.state); true }
                 _ => false,
             },
             Screen::JobMarket => match key {
@@ -136,10 +152,15 @@ impl CareerGame {
 
 impl Game for CareerGame {
     fn handle_input(&mut self, event: &InputEvent) -> bool {
-        match event {
+        let consumed = match event {
             InputEvent::Key(c) => self.handle_key(*c),
             InputEvent::Click(id) => self.handle_click(*id),
+        };
+        if consumed {
+            #[cfg(target_arch = "wasm32")]
+            save::save_game(&self.state);
         }
+        consumed
     }
 
     fn tick(&mut self, delta_ticks: u32) {
@@ -222,10 +243,27 @@ mod tests {
     }
 
     #[test]
-    fn career_game_tick_earns_money() {
+    fn career_game_advance_month_earns_money() {
         let mut game = CareerGame::new();
-        game.tick(10);
+        game.handle_input(&InputEvent::Key('0')); // advance month
         assert!(game.state.money > 0.0);
+        assert_eq!(game.state.months_elapsed, 1);
+    }
+
+    #[test]
+    fn career_game_advance_month_via_click() {
+        let mut game = CareerGame::new();
+        game.handle_input(&InputEvent::Click(ADVANCE_MONTH));
+        assert!(game.state.money > 0.0);
+        assert_eq!(game.state.months_elapsed, 1);
+    }
+
+    #[test]
+    fn career_game_tick_is_noop() {
+        let mut game = CareerGame::new();
+        game.tick(1000);
+        assert_eq!(game.state.money, 0.0);
+        assert_eq!(game.state.months_elapsed, 0);
     }
 
     #[test]
@@ -338,7 +376,7 @@ mod tests {
     #[test]
     fn monthly_cycle_integration() {
         let mut game = CareerGame::new();
-        game.tick(300); // 1 month
+        game.handle_input(&InputEvent::Key('0')); // advance 1 month
         assert_eq!(game.state.months_elapsed, 1);
         // Money should be positive but less than gross (due to deductions)
         assert!(game.state.money > 0.0);

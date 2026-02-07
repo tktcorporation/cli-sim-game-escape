@@ -57,7 +57,7 @@ fn render_main(
         .constraints([
             Constraint::Length(6), // Header (expanded for freedom progress)
             Constraint::Length(6), // Skills
-            Constraint::Length(if is_narrow { 12 } else { 13 }), // Actions
+            Constraint::Length(if is_narrow { 14 } else { 15 }), // Actions
             Constraint::Min(4),   // Log
         ])
         .split(area);
@@ -288,6 +288,31 @@ fn render_actions(
         ),
     ]));
     cs.add_row_target(area, nav_row, GO_LIFESTYLE);
+    nav_row += 1;
+
+    // Spacer + Advance Month
+    lines.push(Line::from(""));
+    nav_row += 1;
+
+    if state.won {
+        lines.push(Line::from(Span::styled(
+            " ★ 経済的自由を達成しました！",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(
+                " ▶▶ 次の月へ ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("[0]", Style::default().fg(Color::DarkGray)),
+        ]));
+        cs.add_row_target(area, nav_row, ADVANCE_MONTH);
+    }
 
     let block = Block::default()
         .borders(borders)
