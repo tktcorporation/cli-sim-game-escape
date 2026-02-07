@@ -758,6 +758,8 @@ pub struct CookieState {
     pub show_prestige: bool,
     /// Active sub-section within the Prestige tab (0=upgrades, 1=boosts, 2=dragon, 3=stats).
     pub prestige_section: u8,
+    /// Scroll offset within the active Prestige sub-section (in lines).
+    pub prestige_scroll: u16,
     /// Prestige upgrades purchased.
     pub prestige_upgrades: Vec<PrestigeUpgrade>,
     /// Flash timer for prestige action.
@@ -882,6 +884,7 @@ impl CookieState {
             cookies_all_runs: 0.0,
             show_prestige: false,
             prestige_section: 0,
+            prestige_scroll: 0,
             prestige_upgrades: Self::create_prestige_upgrades(),
             prestige_flash: 0,
             // Sugar system

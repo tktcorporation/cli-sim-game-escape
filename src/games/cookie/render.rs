@@ -1517,14 +1517,55 @@ fn render_prestige(
         }
     }
 
-    // === Section content ===
+    // === Section content with scroll ===
     let content_area = chunks[2];
-    match section {
-        0 => render_prestige_upgrades(state, f, content_area, click_state, available, border_color),
-        1 => render_prestige_boosts(state, f, content_area, click_state, border_color),
-        2 => render_prestige_dragon(state, f, content_area, click_state, border_color),
-        3 => render_prestige_stats(state, f, content_area, border_color),
-        _ => render_prestige_upgrades(state, f, content_area, click_state, available, border_color),
+    let scroll = state.prestige_scroll;
+
+    // Render section content with scroll offset, get total line count back
+    let total_lines = match section {
+        0 => render_prestige_upgrades(state, f, content_area, click_state, available, border_color, scroll),
+        1 => render_prestige_boosts(state, f, content_area, click_state, border_color, scroll),
+        2 => render_prestige_dragon(state, f, content_area, click_state, border_color, scroll),
+        3 => render_prestige_stats(state, f, content_area, border_color, scroll),
+        _ => render_prestige_upgrades(state, f, content_area, click_state, available, border_color, scroll),
+    };
+
+    // Render scroll indicators as overlay + click targets
+    let visible_rows = content_area.height.saturating_sub(2); // minus borders
+    let can_scroll_up = scroll > 0;
+    let can_scroll_down = total_lines > scroll + visible_rows;
+
+    if can_scroll_up {
+        let indicator = Paragraph::new(Line::from(Span::styled(
+            "  ▲ 上へスクロール",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+        let indicator_area = Rect::new(
+            content_area.x + 1,
+            content_area.y + 1, // +1 for top of content (inside border area)
+            content_area.width.saturating_sub(2),
+            1,
+        );
+        f.render_widget(indicator, indicator_area);
+        let mut cs = click_state.borrow_mut();
+        cs.add_row_target(content_area, content_area.y + 1, PRESTIGE_SCROLL_UP);
+    }
+
+    if can_scroll_down {
+        let indicator = Paragraph::new(Line::from(Span::styled(
+            "  ▼ 下へスクロール",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+        let bottom_row = content_area.y + content_area.height.saturating_sub(2);
+        let indicator_area = Rect::new(
+            content_area.x + 1,
+            bottom_row,
+            content_area.width.saturating_sub(2),
+            1,
+        );
+        f.render_widget(indicator, indicator_area);
+        let mut cs = click_state.borrow_mut();
+        cs.add_row_target(content_area, bottom_row, PRESTIGE_SCROLL_DOWN);
     }
 }
 
@@ -1536,7 +1577,8 @@ fn render_prestige_upgrades(
     click_state: &Rc<RefCell<ClickState>>,
     available: u64,
     border_color: Color,
-) {
+    scroll: u16,
+) -> u16 {
     let mut lines: Vec<Line> = Vec::new();
     let mut prestige_upgrade_lines: Vec<(usize, u16)> = Vec::new();
 
@@ -1620,23 +1662,29 @@ fn render_prestige_upgrades(
         }
     }
 
+    let total_lines = lines.len() as u16;
     let widget = Paragraph::new(lines)
         .block(
             Block::default()
                 .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
                 .border_style(Style::default().fg(border_color)),
         )
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     f.render_widget(widget, area);
 
     let mut cs = click_state.borrow_mut();
     let content_end = area.y + area.height.saturating_sub(1);
     for (upgrade_idx, line_idx) in &prestige_upgrade_lines {
-        let row = area.y + line_idx;
+        if *line_idx < scroll {
+            continue;
+        }
+        let row = area.y + (line_idx - scroll);
         if row < content_end {
             cs.add_row_target(area, row, BUY_PRESTIGE_UPGRADE_BASE + *upgrade_idx as u16);
         }
     }
+    total_lines
 }
 
 /// Prestige sub-section: sugar boosts + auto-clicker
@@ -1646,7 +1694,8 @@ fn render_prestige_boosts(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
     border_color: Color,
-) {
+    scroll: u16,
+) -> u16 {
     let mut lines: Vec<Line> = Vec::new();
     let mut sugar_boost_lines: Vec<(u16, u16)> = Vec::new();
     let mut auto_clicker_line: Option<u16> = None;
@@ -1785,29 +1834,37 @@ fn render_prestige_boosts(
         ]));
     }
 
+    let total_lines = lines.len() as u16;
     let widget = Paragraph::new(lines)
         .block(
             Block::default()
                 .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
                 .border_style(Style::default().fg(border_color)),
         )
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     f.render_widget(widget, area);
 
     let mut cs = click_state.borrow_mut();
     let content_end = area.y + area.height.saturating_sub(1);
     for (action_id, line_idx) in &sugar_boost_lines {
-        let row = area.y + line_idx;
+        if *line_idx < scroll {
+            continue;
+        }
+        let row = area.y + (line_idx - scroll);
         if row < content_end {
             cs.add_row_target(area, row, *action_id);
         }
     }
     if let Some(line_idx) = auto_clicker_line {
-        let row = area.y + line_idx;
-        if row < content_end {
-            cs.add_row_target(area, row, TOGGLE_AUTO_CLICKER);
+        if line_idx >= scroll {
+            let row = area.y + (line_idx - scroll);
+            if row < content_end {
+                cs.add_row_target(area, row, TOGGLE_AUTO_CLICKER);
+            }
         }
     }
+    total_lines
 }
 
 /// Prestige sub-section: dragon
@@ -1817,7 +1874,8 @@ fn render_prestige_dragon(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
     border_color: Color,
-) {
+    scroll: u16,
+) -> u16 {
     let mut lines: Vec<Line> = Vec::new();
     let mut dragon_feed_lines: Vec<(usize, u16)> = Vec::new();
     let mut dragon_aura_line: Option<u16> = None;
@@ -1904,29 +1962,37 @@ fn render_prestige_dragon(
         )));
     }
 
+    let total_lines = lines.len() as u16;
     let widget = Paragraph::new(lines)
         .block(
             Block::default()
                 .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
                 .border_style(Style::default().fg(border_color)),
         )
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     f.render_widget(widget, area);
 
     let mut cs = click_state.borrow_mut();
     let content_end = area.y + area.height.saturating_sub(1);
     for (producer_idx, line_idx) in &dragon_feed_lines {
-        let row = area.y + line_idx;
+        if *line_idx < scroll {
+            continue;
+        }
+        let row = area.y + (line_idx - scroll);
         if row < content_end {
             cs.add_row_target(area, row, DRAGON_FEED_BASE + *producer_idx as u16);
         }
     }
     if let Some(line_idx) = dragon_aura_line {
-        let row = area.y + line_idx;
-        if row < content_end {
-            cs.add_row_target(area, row, DRAGON_CYCLE_AURA);
+        if line_idx >= scroll {
+            let row = area.y + (line_idx - scroll);
+            if row < content_end {
+                cs.add_row_target(area, row, DRAGON_CYCLE_AURA);
+            }
         }
     }
+    total_lines
 }
 
 /// Prestige sub-section: statistics
@@ -1935,7 +2001,8 @@ fn render_prestige_stats(
     f: &mut Frame,
     area: Rect,
     border_color: Color,
-) {
+    scroll: u16,
+) -> u16 {
     let play_seconds = state.total_ticks / 10;
     let hours = play_seconds / 3600;
     let minutes = (play_seconds % 3600) / 60;
@@ -1976,14 +2043,17 @@ fn render_prestige_stats(
         )),
     ];
 
+    let total_lines = lines.len() as u16;
     let widget = Paragraph::new(lines)
         .block(
             Block::default()
                 .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
                 .border_style(Style::default().fg(border_color)),
         )
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .scroll((scroll, 0));
     f.render_widget(widget, area);
+    total_lines
 }
 
 fn render_log(state: &CookieState, f: &mut Frame, area: Rect) {

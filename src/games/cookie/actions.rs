@@ -40,6 +40,8 @@ pub const PRESTIGE_SEC_UPGRADES: u16 = 520;
 pub const PRESTIGE_SEC_BOOSTS: u16 = 521;
 pub const PRESTIGE_SEC_DRAGON: u16 = 522;
 pub const PRESTIGE_SEC_STATS: u16 = 523;
+pub const PRESTIGE_SCROLL_UP: u16 = 530;
+pub const PRESTIGE_SCROLL_DOWN: u16 = 531;
 
 // ── Sugar boost / auto-clicker ──────────────────────────────────
 pub const SUGAR_RUSH: u16 = 800;
