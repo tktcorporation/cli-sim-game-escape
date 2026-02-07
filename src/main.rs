@@ -127,7 +127,11 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
         }
         AppState::Playing { game } => {
             if matches!(event, InputEvent::Key('q') | InputEvent::Click(BACK_TO_MENU)) {
-                *state = AppState::Menu;
+                // Let the game handle back first (e.g., sub-screen → main screen).
+                // Only go to menu if the game didn't consume it.
+                if !game.handle_input(event) {
+                    *state = AppState::Menu;
+                }
             } else {
                 game.handle_input(event);
             }

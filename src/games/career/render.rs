@@ -14,12 +14,13 @@ use crate::input::{is_narrow_layout, ClickState};
 use super::actions::*;
 
 use super::logic::{
-    can_apply, format_money, format_money_exact, freedom_progress, monthly_expenses,
-    monthly_passive, monthly_salary, next_available_job,
+    can_apply, format_money, format_money_exact, freedom_progress, is_game_over, monthly_expenses,
+    monthly_passive, monthly_salary, months_remaining, next_available_job,
+    training_cost_multiplier,
 };
 use super::state::{
-    invest_info, job_info, lifestyle_info, CareerState, InvestKind, LifestyleLevel, Screen,
-    ALL_JOBS, ALL_LIFESTYLES, SKILL_CAP, TRAININGS,
+    event_description, event_name, invest_info, job_info, lifestyle_info, CareerState, InvestKind,
+    LifestyleLevel, Screen, ALL_JOBS, ALL_LIFESTYLES, SKILL_CAP, TRAININGS,
 };
 
 pub fn render(
@@ -30,10 +31,12 @@ pub fn render(
 ) {
     match state.screen {
         Screen::Main => render_main(state, f, area, click_state),
+        Screen::Training => render_training(state, f, area, click_state),
         Screen::JobMarket => render_job_market(state, f, area, click_state),
         Screen::Invest => render_invest(state, f, area, click_state),
         Screen::Budget => render_budget(state, f, area, click_state),
         Screen::Lifestyle => render_lifestyle(state, f, area, click_state),
+        Screen::Report => render_report(state, f, area, click_state),
     }
 }
 
@@ -55,17 +58,19 @@ fn render_main(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6), // Header (expanded for freedom progress)
-            Constraint::Length(6), // Skills
+            Constraint::Length(6),  // Header (expanded for freedom progress)
+            Constraint::Length(6),  // Skills
+            Constraint::Length(3),  // Event (always reserved)
             Constraint::Length(if is_narrow { 12 } else { 13 }), // Actions
-            Constraint::Min(4),   // Log
+            Constraint::Min(4),    // Log
         ])
         .split(area);
 
     render_header(state, f, chunks[0], borders, is_narrow);
     render_skills(state, f, chunks[1], borders, is_narrow);
-    render_actions(state, f, chunks[2], borders, is_narrow, click_state);
-    render_log(state, f, chunks[3], borders);
+    render_event(state, f, chunks[2], borders);
+    render_actions(state, f, chunks[3], borders, is_narrow, click_state);
+    render_log(state, f, chunks[4], borders);
 }
 
 fn render_header(
@@ -113,6 +118,20 @@ fn render_header(
                 format!("  {}ヶ月目", state.months_elapsed + 1),
                 Style::default().fg(Color::White),
             ),
+            {
+                let remaining = months_remaining(state);
+                let color = if remaining <= 12 {
+                    Color::Red
+                } else if remaining <= 36 {
+                    Color::Yellow
+                } else {
+                    Color::DarkGray
+                };
+                Span::styled(
+                    format!("  残{}月", remaining),
+                    Style::default().fg(color),
+                )
+            },
             Span::styled("  評判: ", Style::default().fg(Color::Gray)),
             Span::styled(
                 format_reputation(state.reputation),
@@ -127,6 +146,12 @@ fn render_header(
             Span::styled(
                 format!("  不労所得: ¥{}/月", format_money(m_passive)),
                 Style::default().fg(Color::Green),
+            ),
+            Span::styled(
+                format!("  AP: {}/{}", state.ap, state.ap_max),
+                Style::default()
+                    .fg(if state.ap > 0 { Color::Cyan } else { Color::DarkGray })
+                    .add_modifier(Modifier::BOLD),
             ),
         ]),
     ];
@@ -209,6 +234,47 @@ fn skill_line(label: &str, value: f64, bar_width: usize, color: Color) -> Line<'
     ])
 }
 
+fn render_event(state: &CareerState, f: &mut Frame, area: Rect, borders: Borders) {
+    if let Some(event) = state.current_event {
+        let (icon, color) = match event {
+            super::state::MonthEvent::TrainingSale
+            | super::state::MonthEvent::BullMarket
+            | super::state::MonthEvent::SkillBoom
+            | super::state::MonthEvent::WindfallBonus
+            | super::state::MonthEvent::TaxRefund => ("▲", Color::Green),
+            super::state::MonthEvent::Recession
+            | super::state::MonthEvent::MarketCrash
+            | super::state::MonthEvent::ExpenseSpike => ("▼", Color::Red),
+        };
+
+        let lines = vec![Line::from(vec![
+            Span::styled(
+                format!(" {} {} - ", icon, event_name(event)),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                event_description(event),
+                Style::default().fg(color),
+            ),
+        ])];
+
+        let block = Block::default()
+            .borders(borders)
+            .border_style(Style::default().fg(color))
+            .title(" イベント ");
+        f.render_widget(Paragraph::new(lines).block(block), area);
+    } else {
+        let block = Block::default()
+            .borders(borders)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(" イベント ");
+        f.render_widget(Paragraph::new(vec![Line::from(Span::styled(
+            " なし",
+            Style::default().fg(Color::DarkGray),
+        ))]).block(block), area);
+    }
+}
+
 fn render_actions(
     state: &CareerState,
     f: &mut Frame,
@@ -219,41 +285,69 @@ fn render_actions(
 ) {
     let mut lines = Vec::new();
     let mut cs = click_state.borrow_mut();
+    let has_ap = state.ap > 0;
+    let ap_color = if has_ap { Color::Cyan } else { Color::DarkGray };
 
-    // Training options
-    for (i, t) in TRAININGS.iter().enumerate() {
-        let affordable = state.money >= t.cost;
-        let cost_str = if t.cost > 0.0 {
-            format!("¥{}", format_money(t.cost))
-        } else {
-            "無料".to_string()
-        };
+    // AP-consuming actions
+    let training_label = if is_narrow { "研修" } else { "研修する" };
+    lines.push(Line::from(vec![
+        Span::styled(" ▶ ", Style::default().fg(ap_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{} [1]", training_label),
+            Style::default().fg(if has_ap { Color::White } else { Color::DarkGray }),
+        ),
+        Span::styled(" (1AP)", Style::default().fg(Color::DarkGray)),
+    ]));
+    cs.add_row_target(area, area.y + 1, GO_TRAINING);
 
-        let effect = training_effect_str(t, state.lifestyle);
-        let label = if is_narrow {
-            format!(" ▶{} {}", t.name, cost_str)
-        } else {
-            format!(" ▶{:　<9} {:　<7} {}", t.name, effect, cost_str)
-        };
+    let net_label = if is_narrow { "人脈作り" } else { "ネットワーキング" };
+    lines.push(Line::from(vec![
+        Span::styled(" ▶ ", Style::default().fg(ap_color).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{} [2]", net_label),
+            Style::default().fg(if has_ap { Color::White } else { Color::DarkGray }),
+        ),
+        Span::styled(" (1AP) 営業+2 評判+3", Style::default().fg(Color::DarkGray)),
+    ]));
+    cs.add_row_target(area, area.y + 2, DO_NETWORKING);
 
-        let color = if affordable {
-            Color::White
-        } else {
-            Color::DarkGray
-        };
-        lines.push(Line::from(Span::styled(label, Style::default().fg(color))));
-        cs.add_row_target(area, area.y + 1 + i as u16, TRAINING_BASE + i as u16);
-    }
+    let side_label = if is_narrow { "副業" } else { "副業する" };
+    let best_skill = state.technical
+        .max(state.social)
+        .max(state.management)
+        .max(state.knowledge);
+    let side_available = has_ap && best_skill >= 5.0;
+    lines.push(Line::from(vec![
+        Span::styled(
+            " ▶ ",
+            Style::default()
+                .fg(if side_available { Color::Cyan } else { Color::DarkGray })
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("{} [3]", side_label),
+            Style::default().fg(if side_available { Color::White } else { Color::DarkGray }),
+        ),
+        Span::styled(
+            if best_skill >= 5.0 {
+                format!(" (1AP) ¥{}", format_money(best_skill * 100.0))
+            } else {
+                " (スキル5以上必要)".to_string()
+            },
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    cs.add_row_target(area, area.y + 3, DO_SIDE_JOB);
 
     // Spacer + navigation
     lines.push(Line::from(""));
 
-    let mut nav_row = area.y + 1 + TRAININGS.len() as u16 + 1;
+    let mut nav_row = area.y + 5;
 
     // Job Market
     lines.push(Line::from(vec![
         Span::styled(" ▶ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("転職する", Style::default().fg(Color::White)),
+        Span::styled("転職する [6]", Style::default().fg(Color::White)),
         next_job_hint(state),
     ]));
     cs.add_row_target(area, nav_row, GO_JOB_MARKET);
@@ -262,7 +356,7 @@ fn render_actions(
     // Invest
     lines.push(Line::from(vec![
         Span::styled(" ▶ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("投資する", Style::default().fg(Color::White)),
+        Span::styled("投資する [7]", Style::default().fg(Color::White)),
     ]));
     cs.add_row_target(area, nav_row, GO_INVEST);
     nav_row += 1;
@@ -270,7 +364,7 @@ fn render_actions(
     // Budget
     lines.push(Line::from(vec![
         Span::styled(" ▶ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("家計簿", Style::default().fg(Color::White)),
+        Span::styled("家計簿 [8]", Style::default().fg(Color::White)),
     ]));
     cs.add_row_target(area, nav_row, GO_BUDGET);
     nav_row += 1;
@@ -280,7 +374,7 @@ fn render_actions(
         Span::styled(" ▶ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!(
-                "生活水準 (Lv.{} {})",
+                "生活水準 [9] (Lv.{} {})",
                 lifestyle_info(state.lifestyle).level,
                 lifestyle_info(state.lifestyle).name
             ),
@@ -288,35 +382,51 @@ fn render_actions(
         ),
     ]));
     cs.add_row_target(area, nav_row, GO_LIFESTYLE);
+    nav_row += 1;
+
+    // Spacer + Advance Month (always 3 lines: spacer + 2 content lines)
+    lines.push(Line::from(""));
+    nav_row += 1;
+
+    if state.won {
+        lines.push(Line::from(Span::styled(
+            " ★ 経済的自由を達成しました！",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(""));
+    } else if is_game_over(state) {
+        lines.push(Line::from(Span::styled(
+            " ✖ 120ヶ月経過 - GAME OVER",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(Span::styled(
+            "   経済的自由は達成できませんでした…",
+            Style::default().fg(Color::Red),
+        )));
+    } else {
+        lines.push(Line::from(vec![
+            Span::styled(
+                " ▶▶ 次の月へ ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("[0]", Style::default().fg(Color::DarkGray)),
+        ]));
+        cs.add_row_target(area, nav_row, ADVANCE_MONTH);
+        lines.push(Line::from(""));
+    }
 
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Yellow))
-        .title(" アクション ");
+        .title(format!(" アクション (AP: {}/{}) ", state.ap, state.ap_max));
     let widget = Paragraph::new(lines).block(block);
     f.render_widget(widget, area);
-}
-
-fn training_effect_str(t: &super::state::TrainingInfo, lifestyle: LifestyleLevel) -> String {
-    let ls = lifestyle_info(lifestyle);
-    let eff = 1.0 + ls.skill_efficiency;
-    let mut parts = Vec::new();
-    if t.technical > 0.0 {
-        parts.push(format!("技+{}", (t.technical * eff) as u32));
-    }
-    if t.social > 0.0 {
-        parts.push(format!("営+{}", (t.social * eff) as u32));
-    }
-    if t.management > 0.0 {
-        parts.push(format!("管+{}", (t.management * eff) as u32));
-    }
-    if t.knowledge > 0.0 {
-        parts.push(format!("知+{}", (t.knowledge * eff) as u32));
-    }
-    if t.reputation > 0.0 {
-        parts.push(format!("評+{}", t.reputation as u32));
-    }
-    parts.join(",")
 }
 
 fn next_job_hint(state: &CareerState) -> Span<'static> {
@@ -349,6 +459,142 @@ fn render_log(state: &CareerState, f: &mut Frame, area: Rect, borders: Borders) 
         .title(" ログ ");
     let widget = Paragraph::new(lines).block(block).wrap(Wrap { trim: false });
     f.render_widget(widget, area);
+}
+
+// ── Training Screen ───────────────────────────────────────────────────
+
+fn render_training(
+    state: &CareerState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let is_narrow = is_narrow_layout(area.width);
+    let borders = if is_narrow {
+        Borders::TOP | Borders::BOTTOM
+    } else {
+        Borders::ALL
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(10), // Training list
+            Constraint::Length(4), // Footer
+        ])
+        .split(area);
+
+    let mut lines = Vec::new();
+    let mut cs = click_state.borrow_mut();
+    let has_ap = state.ap > 0;
+    let cost_mult = training_cost_multiplier(state.current_event);
+    let is_sale = cost_mult < 1.0;
+
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" AP: {}/{}", state.ap, state.ap_max),
+            Style::default()
+                .fg(if has_ap { Color::Cyan } else { Color::DarkGray })
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  各研修: 1AP消費", Style::default().fg(Color::DarkGray)),
+        if is_sale {
+            Span::styled("  ★セール中！50%オフ★", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        } else {
+            Span::raw("")
+        },
+    ]));
+    lines.push(Line::from(""));
+
+    for (i, t) in TRAININGS.iter().enumerate() {
+        let cost = t.cost * cost_mult;
+        let affordable = state.money >= cost && has_ap;
+        let cost_str = if cost > 0.0 {
+            if is_sale && t.cost > 0.0 {
+                format!("¥{} (¥{})", format_money(cost), format_money(t.cost))
+            } else {
+                format!("¥{}", format_money(cost))
+            }
+        } else {
+            "無料".to_string()
+        };
+
+        let effect = training_effect_str(t, state.lifestyle, state.current_event);
+        let label = if is_narrow {
+            format!(" [{}] {} {}", i + 1, t.name, cost_str)
+        } else {
+            format!(
+                " [{}] {:　<9} {:　<10} {}",
+                i + 1, t.name, effect, cost_str
+            )
+        };
+
+        let color = if affordable {
+            Color::White
+        } else {
+            Color::DarkGray
+        };
+        lines.push(Line::from(Span::styled(label, Style::default().fg(color))));
+        cs.add_row_target(chunks[0], chunks[0].y + 3 + i as u16, TRAINING_BASE + i as u16);
+    }
+
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" 研修 ");
+    let widget = Paragraph::new(lines).block(block);
+    f.render_widget(widget, chunks[0]);
+
+    // Footer: back button
+    let footer_lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            " ◀ 戻る [-]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
+    cs.add_row_target(chunks[1], chunks[1].y + 2, BACK_FROM_TRAINING);
+    let footer_block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let footer_widget = Paragraph::new(footer_lines).block(footer_block);
+    f.render_widget(footer_widget, chunks[1]);
+}
+
+fn training_effect_str(
+    t: &super::state::TrainingInfo,
+    lifestyle: LifestyleLevel,
+    event: Option<super::state::MonthEvent>,
+) -> String {
+    let ls = lifestyle_info(lifestyle);
+    let eff = 1.0 + ls.skill_efficiency;
+    let s_mult = super::logic::training_cost_multiplier(event);
+    // s_mult is cost mult; for skill we use skill_multiplier logic
+    let skill_mult = match event {
+        Some(super::state::MonthEvent::SkillBoom) => 2.0,
+        _ => 1.0,
+    };
+    let total_mult = eff * skill_mult;
+    let mut parts = Vec::new();
+    if t.technical > 0.0 {
+        parts.push(format!("技+{}", (t.technical * total_mult) as u32));
+    }
+    if t.social > 0.0 {
+        parts.push(format!("営+{}", (t.social * total_mult) as u32));
+    }
+    if t.management > 0.0 {
+        parts.push(format!("管+{}", (t.management * total_mult) as u32));
+    }
+    if t.knowledge > 0.0 {
+        parts.push(format!("知+{}", (t.knowledge * total_mult) as u32));
+    }
+    if t.reputation > 0.0 {
+        parts.push(format!("評+{}", t.reputation as u32));
+    }
+    let _ = s_mult; // cost multiplier used elsewhere
+    parts.join(",")
 }
 
 // ── Job Market Screen ──────────────────────────────────────────────────
@@ -411,9 +657,9 @@ fn render_job_market(
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         if is_narrow {
-            " ▶=応募可 ●=現職"
+            " ▶=応募可 ●=現職 (1AP)"
         } else {
-            " (▶=応募可能  ●=現在の職業)"
+            " (▶=応募可能  ●=現在の職業  転職: 1AP)"
         },
         Style::default().fg(Color::DarkGray),
     )));
@@ -421,7 +667,7 @@ fn render_job_market(
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Green))
-        .title(" 求人情報 ");
+        .title(format!(" 求人情報 (AP: {}/{}) ", state.ap, state.ap_max));
     let widget = Paragraph::new(lines).block(block);
     f.render_widget(widget, chunks[0]);
 
@@ -429,7 +675,7 @@ fn render_job_market(
     let footer_lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            " ◀ 戻る",
+            " ◀ 戻る [-]",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -631,7 +877,7 @@ fn render_invest(
     let action_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Green))
-        .title(" 投資する ");
+        .title(" 投資する (APなし) ");
     f.render_widget(
         Paragraph::new(action_lines).block(action_block),
         chunks[1],
@@ -641,7 +887,7 @@ fn render_invest(
     let footer_lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            " ◀ 戻る",
+            " ◀ 戻る [-]",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -719,7 +965,7 @@ fn render_budget(
             Span::styled(format!(" {}%", pct), Style::default().fg(Color::White)),
         ]),
         Line::from(Span::styled(
-            " ◀ 戻る",
+            " ◀ 戻る [-]",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -932,6 +1178,221 @@ fn render_budget_wide(
     f.render_widget(Paragraph::new(bs_lines).block(bs_block), cols[1]);
 }
 
+// ── Report Screen (after advancing a month) ────────────────────────────
+
+fn render_report(
+    state: &CareerState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let is_narrow = is_narrow_layout(area.width);
+    let borders = if is_narrow {
+        Borders::TOP | Borders::BOTTOM
+    } else {
+        Borders::ALL
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(16), // Report content
+            Constraint::Length(4), // Footer
+        ])
+        .split(area);
+
+    let r = &state.last_report;
+    let info = job_info(state.job);
+    let m_passive = monthly_passive(state);
+    let m_expenses = monthly_expenses(state);
+
+    let mut lines = Vec::new();
+
+    // Month header
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {}ヶ月目 完了", state.months_elapsed),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  (残{}月)", months_remaining(state)),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // Income
+    lines.push(Line::from(Span::styled(
+        " 【収入】",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(format!(
+        "  給与 ({})    ¥{}",
+        info.name,
+        format_money(r.gross_salary)
+    )));
+    lines.push(Line::from(format!(
+        "  所得税      ▲¥{}",
+        format_money(r.tax)
+    )));
+    lines.push(Line::from(format!(
+        "  社会保険    ▲¥{}",
+        format_money(r.insurance)
+    )));
+    lines.push(Line::from(vec![
+        Span::styled("  手取り       ", Style::default().fg(Color::White)),
+        Span::styled(
+            format!("¥{}", format_money(r.net_salary)),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // Passive income
+    if r.passive_income > 0.0 {
+        lines.push(Line::from(Span::styled(
+            " 【不労所得】",
+            Style::default().fg(Color::Green),
+        )));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  投資収入     ¥{}", format_money(r.passive_income)),
+                Style::default().fg(Color::Green),
+            ),
+        ]));
+        lines.push(Line::from(""));
+    }
+
+    // Expenses
+    lines.push(Line::from(Span::styled(
+        format!(" 【支出】 ({})", lifestyle_info(state.lifestyle).name),
+        Style::default().fg(Color::Red),
+    )));
+    lines.push(Line::from(format!(
+        "  生活費      ▲¥{}",
+        format_money(r.living_cost)
+    )));
+    lines.push(Line::from(format!(
+        "  家賃        ▲¥{}",
+        format_money(r.rent)
+    )));
+    lines.push(Line::from(""));
+
+    // Cash flow
+    let cf_color = if r.cashflow >= 0.0 {
+        Color::Green
+    } else {
+        Color::Red
+    };
+    lines.push(Line::from(vec![
+        Span::styled(" 月間キャッシュフロー ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("¥{}", format_money(r.cashflow)),
+            Style::default().fg(cf_color).add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Current balance
+    lines.push(Line::from(vec![
+        Span::styled(" 所持金 ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("¥{}", format_money_exact(state.money)),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Freedom progress
+    let progress = freedom_progress(state);
+    let bar_width = if is_narrow { 15 } else { 25 };
+    let filled = ((progress * bar_width as f64).round() as usize).min(bar_width);
+    let empty = bar_width - filled;
+    let bar = "█".repeat(filled) + &"░".repeat(empty);
+    let pct = (progress * 100.0) as u32;
+
+    lines.push(Line::from(vec![
+        Span::styled(" 自由: ", Style::default().fg(Color::Gray)),
+        Span::styled(bar, Style::default().fg(Color::Green)),
+        Span::styled(
+            format!(" {}% (¥{}/¥{})", pct, format_money(m_passive), format_money(m_expenses)),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+
+    // Win/game over message
+    if state.won {
+        lines.push(Line::from(Span::styled(
+            " ★ 経済的自由を達成しました！ ★",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else if is_game_over(state) {
+        lines.push(Line::from(Span::styled(
+            " ✖ 120ヶ月経過 - GAME OVER",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    // Event info
+    if let Some(event) = state.current_event {
+        let (icon, color) = match event {
+            super::state::MonthEvent::TrainingSale
+            | super::state::MonthEvent::BullMarket
+            | super::state::MonthEvent::SkillBoom
+            | super::state::MonthEvent::WindfallBonus
+            | super::state::MonthEvent::TaxRefund => ("▲", Color::Green),
+            super::state::MonthEvent::Recession
+            | super::state::MonthEvent::MarketCrash
+            | super::state::MonthEvent::ExpenseSpike => ("▼", Color::Red),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {} 来月イベント: {} ", icon, event_name(event)),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    }
+
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" 月次レポート ");
+    f.render_widget(Paragraph::new(lines).block(block), chunks[0]);
+
+    // Footer: continue button
+    let mut cs = click_state.borrow_mut();
+    let footer_lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                " ▶ 続ける ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("[0]", Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+    cs.add_row_target(chunks[1], chunks[1].y + 2, BACK_FROM_REPORT);
+    let footer_block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::DarkGray));
+    f.render_widget(
+        Paragraph::new(footer_lines).block(footer_block),
+        chunks[1],
+    );
+}
+
 // ── Lifestyle Screen ───────────────────────────────────────────────────
 
 fn render_lifestyle(
@@ -1029,7 +1490,7 @@ fn render_lifestyle(
     let footer_lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            " ◀ 戻る",
+            " ◀ 戻る [-]",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
