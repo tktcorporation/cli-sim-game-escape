@@ -181,15 +181,18 @@ fn render_tab_bar(
         (prestige_label, tab_style(4, prestige_color), TAB_PRESTIGE),
     ];
 
-    // Render all tabs on a single horizontal row
+    // Render all tabs on a single horizontal row, collecting display widths
     let mut spans: Vec<Span> = Vec::new();
     let separator = if is_narrow { "|" } else { " │ " };
+    let sep_width = Line::from(separator).width() as u16;
+    let mut tab_widths: Vec<(u16, u16)> = Vec::new();
 
-    for (i, (label, style, _)) in tabs.iter().enumerate() {
+    for (i, (label, style, action_id)) in tabs.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(separator, Style::default().fg(Color::DarkGray)));
         }
         let padded = format!(" {} ", label);
+        tab_widths.push((Line::from(padded.as_str()).width() as u16, *action_id));
         spans.push(Span::styled(padded, *style));
     }
 
@@ -197,24 +200,9 @@ fn render_tab_bar(
     let widget = Paragraph::new(line);
     f.render_widget(widget, area);
 
-    // Register click targets using equal-width segments across the full row.
-    // This is more robust than character-position-based targets because:
-    // - No character width calculation needed (CJK width issues eliminated)
-    // - No gaps between targets (continuous coverage)
-    // - Works regardless of font rendering or CSS scaling differences
-    let num_tabs = tabs.len() as u16;
+    // Register click targets based on actual text widths
     let mut cs = click_state.borrow_mut();
-    for (i, (_, _, action_id)) in tabs.iter().enumerate() {
-        let seg_start = area.width * i as u16 / num_tabs;
-        let seg_end = area.width * (i as u16 + 1) / num_tabs;
-        let rect = Rect::new(
-            area.x + seg_start,
-            area.y,
-            seg_end - seg_start,
-            1,
-        );
-        cs.add_click_target(rect, *action_id);
-    }
+    cs.register_tab_targets(&tab_widths, sep_width, area.x, area.y, area.width, 1);
 }
 
 fn render_cookie_display(
@@ -1402,12 +1390,14 @@ fn render_prestige(
         ];
 
         let mut spans: Vec<Span> = Vec::new();
+        let mut tab_widths: Vec<(u16, u16)> = Vec::new();
 
-        for (i, (label, style, _)) in sec_tabs.iter().enumerate() {
+        for (i, (label, style, action_id)) in sec_tabs.iter().enumerate() {
             if i > 0 {
                 spans.push(Span::styled("|", Style::default().fg(Color::DarkGray)));
             }
             let padded = format!(" {} ", label);
+            tab_widths.push((Line::from(padded.as_str()).width() as u16, *action_id));
             spans.push(Span::styled(padded, *style));
         }
 
@@ -1426,22 +1416,11 @@ fn render_prestige(
         );
         f.render_widget(tab_widget, chunks[0]);
 
-        // Equal-width segment click targets (robust against CJK width issues)
+        // Register click targets based on actual text widths
         let content_x = chunks[0].x + 1; // +1 for left border
         let content_w = chunks[0].width.saturating_sub(2); // -2 for borders
-        let num_secs = sec_tabs.len() as u16;
         let mut cs = click_state.borrow_mut();
-        for (i, (_, _, action_id)) in sec_tabs.iter().enumerate() {
-            let seg_start = content_w * i as u16 / num_secs;
-            let seg_end = content_w * (i as u16 + 1) / num_secs;
-            let rect = Rect::new(
-                content_x + seg_start,
-                chunks[0].y,
-                seg_end - seg_start,
-                chunks[0].height,
-            );
-            cs.add_click_target(rect, *action_id);
-        }
+        cs.register_tab_targets(&tab_widths, 1, content_x, chunks[0].y, content_w, chunks[0].height);
     }
 
     // === Header: chips info + prestige reset (2 rows) ===

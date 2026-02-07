@@ -59,6 +59,68 @@ impl ClickState {
         }
     }
 
+    /// Register click targets for a horizontal tab bar based on actual text widths.
+    ///
+    /// Each entry in `tab_widths` is `(display_width, action_id)` for the **padded**
+    /// label text of that tab (e.g. `" 生産 "` → display_width = 6).
+    /// `separator_width` is the display width of the separator string between tabs.
+    ///
+    /// Click targets are computed from the actual text positions so each target
+    /// covers its label plus half of the adjacent separator(s).  The first tab
+    /// extends to the left edge and the last tab extends to the right edge of
+    /// the area, ensuring full coverage with no gaps.
+    pub fn register_tab_targets(
+        &mut self,
+        tab_widths: &[(u16, u16)],
+        separator_width: u16,
+        x: u16,
+        y: u16,
+        total_width: u16,
+        height: u16,
+    ) {
+        let n = tab_widths.len();
+        if n == 0 || total_width == 0 {
+            return;
+        }
+
+        // Compute the starting column of each tab label
+        let mut starts: Vec<u16> = Vec::with_capacity(n);
+        let mut cursor: u16 = 0;
+        for (i, &(w, _)) in tab_widths.iter().enumerate() {
+            if i > 0 {
+                cursor += separator_width;
+            }
+            starts.push(cursor);
+            cursor += w;
+        }
+
+        for i in 0..n {
+            let (_, action_id) = tab_widths[i];
+
+            // Left boundary: first tab from 0, others from midpoint of left separator
+            let left = if i == 0 {
+                0
+            } else {
+                let prev_end = starts[i - 1] + tab_widths[i - 1].0;
+                prev_end + (starts[i] - prev_end) / 2
+            };
+
+            // Right boundary: last tab to total_width, others to midpoint of right sep
+            let right = if i == n - 1 {
+                total_width
+            } else {
+                let cur_end = starts[i] + tab_widths[i].0;
+                let next_start = starts[i + 1];
+                cur_end + (next_start - cur_end) / 2
+            };
+
+            let w = right.saturating_sub(left);
+            if w > 0 {
+                self.add_click_target(Rect::new(x + left, y, w, height), action_id);
+            }
+        }
+    }
+
     /// Hit-test a terminal cell coordinate against all registered targets.
     /// Returns the action ID of the first matching target (last registered takes priority
     /// when targets overlap, matching typical UI layering where later elements are on top).
@@ -527,6 +589,92 @@ mod tests {
         // "buy item" is line 2 → row = 0 + 1 + 2 = 3
         assert_eq!(cs.hit_test(10, 3), Some(42));
         assert_eq!(cs.hit_test(10, 2), None); // header 2, not clickable
+    }
+
+    // ── register_tab_targets tests ────────────────────────────────
+
+    #[test]
+    fn tab_targets_equal_width_labels() {
+        // 3 tabs, each label 6 cols wide, separator 3 cols (" │ ")
+        // Layout: [6][3][6][3][6] = 24 cols of content in 80-wide area
+        let mut cs = ClickState::new();
+        let tabs: Vec<(u16, u16)> = vec![(6, 10), (6, 11), (6, 12)];
+        cs.register_tab_targets(&tabs, 3, 0, 5, 80, 1);
+
+        assert_eq!(cs.targets.len(), 3);
+
+        // Tab 0: left=0, right = 6 + (9-6)/2 = 7 → cols 0..7
+        assert_eq!(cs.hit_test(0, 5), Some(10));
+        assert_eq!(cs.hit_test(5, 5), Some(10)); // inside label
+        assert_eq!(cs.hit_test(6, 5), Some(10)); // first separator col → tab 0
+
+        // Tab 1: left = 6 + (9-6)/2 = 7, right = 15 + (18-15)/2 = 16 → cols 7..16
+        assert_eq!(cs.hit_test(7, 5), Some(11));
+        assert_eq!(cs.hit_test(14, 5), Some(11)); // inside label
+        assert_eq!(cs.hit_test(15, 5), Some(11)); // separator col → tab 1
+
+        // Tab 2: left = 15 + (18-15)/2 = 16, right = 80 (last tab) → cols 16..80
+        assert_eq!(cs.hit_test(16, 5), Some(12));
+        assert_eq!(cs.hit_test(23, 5), Some(12)); // inside label
+        assert_eq!(cs.hit_test(79, 5), Some(12)); // last tab extends to edge
+    }
+
+    #[test]
+    fn tab_targets_unequal_width_labels() {
+        // Simulates dynamic labels: "生産"(6), "目標(3)"(11), "転生(+5)"(12)
+        // Separator "|" = 1 col
+        // Layout: [6][1][11][1][12] = 31 cols
+        let mut cs = ClickState::new();
+        let tabs: Vec<(u16, u16)> = vec![(6, 10), (11, 11), (12, 12)];
+        cs.register_tab_targets(&tabs, 1, 0, 0, 60, 1);
+
+        assert_eq!(cs.targets.len(), 3);
+
+        // Tab 0: left=0, right = 6 + (7-6)/2 = 6 → cols 0..6
+        assert_eq!(cs.hit_test(0, 0), Some(10));
+        assert_eq!(cs.hit_test(5, 0), Some(10));
+
+        // Tab 1: left = 6, right = 18 + (19-18)/2 = 18 → cols 6..18
+        assert_eq!(cs.hit_test(6, 0), Some(11));
+        assert_eq!(cs.hit_test(17, 0), Some(11));
+
+        // Tab 2: left = 18, right = 60 → cols 18..60
+        assert_eq!(cs.hit_test(18, 0), Some(12));
+        assert_eq!(cs.hit_test(59, 0), Some(12));
+    }
+
+    #[test]
+    fn tab_targets_single_tab() {
+        let mut cs = ClickState::new();
+        let tabs: Vec<(u16, u16)> = vec![(8, 42)];
+        cs.register_tab_targets(&tabs, 3, 5, 10, 40, 1);
+
+        assert_eq!(cs.targets.len(), 1);
+        // Single tab covers full width
+        assert_eq!(cs.hit_test(5, 10), Some(42));
+        assert_eq!(cs.hit_test(44, 10), Some(42));
+    }
+
+    #[test]
+    fn tab_targets_empty() {
+        let mut cs = ClickState::new();
+        let tabs: Vec<(u16, u16)> = vec![];
+        cs.register_tab_targets(&tabs, 3, 0, 0, 80, 1);
+        assert_eq!(cs.targets.len(), 0);
+    }
+
+    #[test]
+    fn tab_targets_with_offset() {
+        // Tab bar starting at x=5 (e.g. inside a bordered block)
+        let mut cs = ClickState::new();
+        let tabs: Vec<(u16, u16)> = vec![(6, 10), (6, 11)];
+        cs.register_tab_targets(&tabs, 1, 5, 3, 30, 2);
+
+        assert_eq!(cs.targets.len(), 2);
+        // Tab 0: x=5, y=3, height=2
+        assert_eq!(cs.hit_test(5, 3), Some(10));
+        assert_eq!(cs.hit_test(5, 4), Some(10)); // height=2
+        assert_eq!(cs.hit_test(4, 3), None);     // before x offset
     }
 
     #[test]
