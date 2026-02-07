@@ -35,6 +35,12 @@ pub const BUY_PRESTIGE_UPGRADE_BASE: u16 = 600;
 pub const DRAGON_FEED_BASE: u16 = 700;
 pub const DRAGON_CYCLE_AURA: u16 = 799;
 
+// ── Prestige sub-section navigation ─────────────────────────────
+pub const PRESTIGE_SEC_UPGRADES: u16 = 520;
+pub const PRESTIGE_SEC_BOOSTS: u16 = 521;
+pub const PRESTIGE_SEC_DRAGON: u16 = 522;
+pub const PRESTIGE_SEC_STATS: u16 = 523;
+
 // ── Sugar boost / auto-clicker ──────────────────────────────────
 pub const SUGAR_RUSH: u16 = 800;
 pub const SUGAR_FEVER: u16 = 801;

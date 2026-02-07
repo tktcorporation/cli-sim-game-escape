@@ -37,6 +37,7 @@ const SPINNER: &[char] = &['◐', '◓', '◑', '◒'];
 
 pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
     let width = area.width;
+    let is_narrow = width < 60;
 
     // Horizontal split: show log panel on the right when wide enough (>= 80 cols)
     let (main_area, log_area) = if width >= 80 {
@@ -58,16 +59,17 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
         if n > 0 { n.min(4) } else { 0 }
     };
 
-    // Cookie display height — unified for all screen widths
-    let cookie_height: u16 = 12;
+    // Cookie display height — adaptive: compact on narrow screens
+    let cookie_height: u16 = if is_narrow { 8 } else { 12 };
 
-    let tab_rows = 5; // Producers | Upgrades | Research | Milestones | Prestige
+    // Tab bar: horizontal (1 row) on all screen sizes
+    let tab_rows = 1;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(cookie_height),
             Constraint::Length(buff_height),
-            Constraint::Length(tab_rows), // tab bar
+            Constraint::Length(tab_rows), // tab bar (horizontal)
             Constraint::Min(5),          // content
         ])
         .split(main_area);
@@ -95,8 +97,8 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
     }
 }
 
-/// Render tab bar for switching between Producers / Upgrades / Milestones.
-/// Each tab occupies one row; click targets are row-wide for reliability.
+/// Render horizontal tab bar for switching between Producers / Upgrades / Research / Milestones / Prestige.
+/// All tabs fit in a single row with short labels; click targets use column regions.
 fn render_tab_bar(
     state: &CookieState,
     f: &mut Frame,
@@ -104,6 +106,7 @@ fn render_tab_bar(
     click_state: &Rc<RefCell<ClickState>>,
 ) {
     let ready_count = state.ready_milestone_count();
+    let is_narrow = area.width < 60;
 
     // Determine active tab index
     let active = if state.show_prestige {
@@ -130,41 +133,70 @@ fn render_tab_bar(
     };
 
     let milestone_color = if ready_count > 0 { Color::Green } else { Color::Cyan };
-
-    // Build labels
-    let milestone_label = if ready_count > 0 {
-        format!(" ▸ Milestones ({}) ", ready_count)
-    } else {
-        " ▸ Milestones ".to_string()
-    };
-
     let pending_chips = state.pending_heavenly_chips();
-    let prestige_label = if pending_chips > 0 {
-        format!(" ▸ Prestige (+{}) ", pending_chips)
-    } else {
-        " ▸ Prestige ".to_string()
-    };
     let prestige_color = if pending_chips > 0 { Color::Yellow } else { Color::Blue };
 
+    // Build short labels for horizontal layout
+    let milestone_label = if is_narrow {
+        if ready_count > 0 { format!("目標{}", ready_count) } else { "目標".to_string() }
+    } else if ready_count > 0 {
+        format!("目標({})", ready_count)
+    } else {
+        "目標".to_string()
+    };
+
+    let prestige_label = if is_narrow {
+        if pending_chips > 0 { format!("転生+{}", pending_chips) } else { "転生".to_string() }
+    } else if pending_chips > 0 {
+        format!("転生(+{})", pending_chips)
+    } else {
+        "転生".to_string()
+    };
+
     let tabs: [(String, Style, u16); 5] = [
-        (" ▸ Producers ".to_string(), tab_style(0, Color::Green), TAB_PRODUCERS),
-        (" ▸ Upgrades ".to_string(), tab_style(1, Color::Magenta), TAB_UPGRADES),
-        (" ▸ Research ".to_string(), tab_style(2, Color::Cyan), TAB_RESEARCH),
+        ("生産".to_string(), tab_style(0, Color::Green), TAB_PRODUCERS),
+        ("強化".to_string(), tab_style(1, Color::Magenta), TAB_UPGRADES),
+        ("研究".to_string(), tab_style(2, Color::Cyan), TAB_RESEARCH),
         (milestone_label, tab_style(3, milestone_color), TAB_MILESTONES),
         (prestige_label, tab_style(4, prestige_color), TAB_PRESTIGE),
     ];
 
-    // Render each tab on its own row
-    let mut cs = click_state.borrow_mut();
+    // Render all tabs on a single horizontal row
+    let mut spans: Vec<Span> = Vec::new();
+    let mut tab_positions: Vec<(u16, u16, u16)> = Vec::new(); // (start_col, width, action_id)
+    let mut col_offset: u16 = 0;
+    let separator = if is_narrow { "|" } else { " │ " };
+    let sep_width = separator.len() as u16;
+
     for (i, (label, style, action_id)) in tabs.iter().enumerate() {
-        let row_y = area.y + i as u16;
-        if row_y >= area.y + area.height {
-            break;
+        if i > 0 {
+            spans.push(Span::styled(separator, Style::default().fg(Color::DarkGray)));
+            col_offset += sep_width;
         }
-        let row_area = Rect::new(area.x, row_y, area.width, 1);
-        let widget = Paragraph::new(Line::from(Span::styled(label.as_str(), *style)));
-        f.render_widget(widget, row_area);
-        cs.add_row_target(area, row_y, *action_id);
+        let padded = format!(" {} ", label);
+        let label_width = padded.len() as u16;
+        tab_positions.push((col_offset, label_width, *action_id));
+        spans.push(Span::styled(padded, *style));
+        col_offset += label_width;
+    }
+
+    let line = Line::from(spans);
+    let widget = Paragraph::new(line);
+    f.render_widget(widget, area);
+
+    // Register column-based click targets for each tab
+    let mut cs = click_state.borrow_mut();
+    for (start_col, width, action_id) in &tab_positions {
+        let rect = Rect::new(
+            area.x + start_col,
+            area.y,
+            (*width).min(area.width.saturating_sub(*start_col)),
+            1,
+        );
+        cs.targets.push(crate::input::ClickTarget {
+            rect,
+            action_id: *action_id,
+        });
     }
 }
 
@@ -320,93 +352,98 @@ fn render_cookie_display(
         spans
     }));
 
-    // --- Row 4: CPS Trend sparkline + best CPS ---
-    let sparkline_width = (w as usize).saturating_sub(22).clamp(6, 20);
-    let sparkline = build_sparkline(&state.cps_history, sparkline_width);
-    let sparkline_color = cycling_color(state.anim_frame, 30);
+    // --- Wide-only rows: sparkline and production bars ---
+    if w >= 60 {
+        // --- Row 4: CPS Trend sparkline + best CPS ---
+        let sparkline_width = (w as usize).saturating_sub(22).clamp(6, 20);
+        let sparkline = build_sparkline(&state.cps_history, sparkline_width);
+        let sparkline_color = cycling_color(state.anim_frame, 30);
 
-    lines.push(Line::from({
-        let mut spans = vec![
-            Span::styled(
-                " ┄┄ CPS ",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(sparkline, Style::default().fg(sparkline_color)),
-            Span::styled(
-                format!(" {}/s", cps_str),
-                Style::default().fg(Color::White),
-            ),
-        ];
-        if state.best_cps > 0.0 {
-            spans.push(Span::styled(
-                format!(" 最高:{}/s", format_number(state.best_cps)),
-                Style::default().fg(Color::DarkGray),
-            ));
-        }
-        spans
-    }));
-
-    // --- Row 5: Production header ---
-    lines.push(Line::from(Span::styled(
-        " ┄┄ PRODUCTION ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
-        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-    )));
-
-    // --- Rows 6+: Producer contribution bars (dynamically sized) ---
-    let contributions = state.producer_contributions();
-    // Reserve 1 line for status bar; borders take 2 lines
-    let max_bar_rows = (h.saturating_sub(2) as usize).saturating_sub(lines.len() + 1).max(1);
-
-    if contributions.is_empty() {
-        lines.push(Line::from(Span::styled(
-            " (生産者を購入しましょう)",
-            Style::default().fg(Color::DarkGray),
-        )));
-    } else {
-        let bar_width = 6usize;
-        let entry_approx = 14usize; // "Name:██░░░12% " ≈ 14 chars
-        let items_per_row = (w.saturating_sub(2) as usize / entry_approx).max(1);
-        let colors = [Color::Cyan, Color::Green, Color::Magenta, Color::Yellow,
-                     Color::Blue, Color::Red, Color::White, Color::LightCyan];
-        let anim_offset = (state.anim_frame / 2) as usize;
-
-        for (bar_rows, chunk) in contributions.chunks(items_per_row).enumerate() {
-            if bar_rows >= max_bar_rows {
-                break;
-            }
-            let mut row_spans: Vec<Span> = vec![Span::styled(" ", Style::default())];
-            for (i, (name, _cps, frac)) in chunk.iter().enumerate() {
-                let filled = ((*frac * bar_width as f64).round() as usize).min(bar_width);
-                let ci = contributions.iter().position(|(n, _, _)| *n == *name).unwrap_or(i);
-                let color = colors[ci % colors.len()];
-                let pulse = if filled > 0 && (anim_offset + ci).is_multiple_of(8) { "█" } else { "▓" };
-                let bar: String = pulse.repeat(filled) + &"░".repeat(bar_width - filled);
-                row_spans.push(Span::styled(
-                    format!("{}:", name),
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                ));
-                row_spans.push(Span::styled(bar, Style::default().fg(color)));
-                row_spans.push(Span::styled(
-                    format!("{:.0}% ", frac * 100.0),
+        lines.push(Line::from({
+            let mut spans = vec![
+                Span::styled(
+                    " ┄┄ CPS ",
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(sparkline, Style::default().fg(sparkline_color)),
+                Span::styled(
+                    format!(" {}/s", cps_str),
+                    Style::default().fg(Color::White),
+                ),
+            ];
+            if state.best_cps > 0.0 {
+                spans.push(Span::styled(
+                    format!(" 最高:{}/s", format_number(state.best_cps)),
                     Style::default().fg(Color::DarkGray),
                 ));
             }
-            lines.push(Line::from(row_spans));
+            spans
+        }));
+
+        // --- Row 5: Production header ---
+        lines.push(Line::from(Span::styled(
+            " ┄┄ PRODUCTION ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        )));
+
+        // --- Rows 6+: Producer contribution bars (dynamically sized) ---
+        let contributions = state.producer_contributions();
+        // Reserve 1 line for status bar; borders take 2 lines
+        let max_bar_rows = (h.saturating_sub(2) as usize).saturating_sub(lines.len() + 1).max(1);
+
+        if contributions.is_empty() {
+            lines.push(Line::from(Span::styled(
+                " (生産者を購入しましょう)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            let bar_width = 6usize;
+            let entry_approx = 14usize; // "Name:██░░░12% " ≈ 14 chars
+            let items_per_row = (w.saturating_sub(2) as usize / entry_approx).max(1);
+            let colors = [Color::Cyan, Color::Green, Color::Magenta, Color::Yellow,
+                         Color::Blue, Color::Red, Color::White, Color::LightCyan];
+            let anim_offset = (state.anim_frame / 2) as usize;
+
+            for (bar_rows, chunk) in contributions.chunks(items_per_row).enumerate() {
+                if bar_rows >= max_bar_rows {
+                    break;
+                }
+                let mut row_spans: Vec<Span> = vec![Span::styled(" ", Style::default())];
+                for (i, (name, _cps, frac)) in chunk.iter().enumerate() {
+                    let filled = ((*frac * bar_width as f64).round() as usize).min(bar_width);
+                    let ci = contributions.iter().position(|(n, _, _)| *n == *name).unwrap_or(i);
+                    let color = colors[ci % colors.len()];
+                    let pulse = if filled > 0 && (anim_offset + ci).is_multiple_of(8) { "█" } else { "▓" };
+                    let bar: String = pulse.repeat(filled) + &"░".repeat(bar_width - filled);
+                    row_spans.push(Span::styled(
+                        format!("{}:", name),
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ));
+                    row_spans.push(Span::styled(bar, Style::default().fg(color)));
+                    row_spans.push(Span::styled(
+                        format!("{:.0}% ", frac * 100.0),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                lines.push(Line::from(row_spans));
+            }
         }
     }
 
     // --- Status bar (always last line) ---
-    let play_secs = state.total_ticks / 10;
-    let play_h = play_secs / 3600;
-    let play_m = (play_secs % 3600) / 60;
-    let play_s = play_secs % 60;
+    // On narrow screens, show only the most important status items
+    let mut status_spans: Vec<Span> = Vec::new();
 
-    let mut status_spans: Vec<Span> = vec![
-        Span::styled(
+    if w >= 60 {
+        let play_secs = state.total_ticks / 10;
+        let play_h = play_secs / 3600;
+        let play_m = (play_secs % 3600) / 60;
+        let play_s = play_secs % 60;
+        status_spans.push(Span::styled(
             format!(" ⏱{}h{}m{}s", play_h, play_m, play_s),
             Style::default().fg(Color::DarkGray),
-        ),
-    ];
+        ));
+    }
     if !state.active_buffs.is_empty() {
         let buff_blink = (state.anim_frame / 3).is_multiple_of(2);
         status_spans.push(Span::styled(
@@ -442,16 +479,27 @@ fn render_cookie_display(
         } else {
             Style::default().fg(market_color)
         };
-        status_spans.push(Span::styled(
-            format!(" {}{}({}s)", state.market_phase.symbol(), state.market_phase.name(), secs_left),
-            style,
-        ));
+        if w >= 60 {
+            status_spans.push(Span::styled(
+                format!(" {}{}({}s)", state.market_phase.symbol(), state.market_phase.name(), secs_left),
+                style,
+            ));
+        } else {
+            // Compact: just symbol + seconds
+            status_spans.push(Span::styled(
+                format!(" {}{}s", state.market_phase.symbol(), secs_left),
+                style,
+            ));
+        }
     }
     if state.dragon_level > 0 {
         status_spans.push(Span::styled(
-            format!(" 🐉Lv.{}", state.dragon_level),
+            format!(" 🐉{}", state.dragon_level),
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ));
+    }
+    if status_spans.is_empty() {
+        status_spans.push(Span::styled(" ", Style::default()));
     }
     lines.push(Line::from(status_spans));
 
@@ -683,6 +731,8 @@ fn render_producers(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let is_narrow = area.width < 60;
+
     // Find the best ROI (lowest payback time) among affordable producers, using synergy
     let best_payback = state
         .producers
@@ -724,27 +774,12 @@ fn render_producers(
                     .map(|pb| (pb - best_payback).abs() < 0.01)
                     .unwrap_or(false);
 
-            // Production indicator animation
-            let prod_indicator = if p.count > 0 {
-                let idx = (state.anim_frame as usize / 5 + p.kind.key() as usize) % SPINNER.len();
-                format!("{} ", SPINNER[idx])
-            } else {
-                "  ".to_string()
-            };
-
             // Format payback time
             let payback_str = match payback {
                 Some(s) if s < 60.0 => format!("{}s", s.round() as u32),
                 Some(s) if s < 3600.0 => format!("{}m", (s / 60.0).round() as u32),
                 Some(s) => format!("{}h", (s / 3600.0).round() as u32),
                 None => "---".to_string(),
-            };
-
-            // Bonus indicator (synergy + count scaling)
-            let syn_str = if total_bonus > 0.001 {
-                format!("+{:.0}%", total_bonus * 100.0)
-            } else {
-                String::new()
             };
 
             let key_style = if is_best_roi {
@@ -777,39 +812,78 @@ fn render_producers(
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            let syn_style = Style::default().fg(Color::Magenta);
 
-            // 3-level rating based on payback time
-            let rating = match payback {
-                Some(s) if s <= 60.0 => "★★★",   // Excellent: ≤1 min
-                Some(s) if s <= 300.0 => "★★☆",  // Good: ≤5 min
-                Some(s) if s <= 900.0 => "★☆☆",  // Okay: ≤15 min
-                _ => "☆☆☆",                       // Poor or N/A
-            };
-            let rating_display = if !can_afford { "   " } else { rating };
-            let best_marker = if is_best_roi { "◆" } else { " " };
+            if is_narrow {
+                // Compact format for narrow screens: "◆Name 2x $15 +0.1/s 30s"
+                let best_marker = if is_best_roi { "◆" } else { " " };
+                let prod_indicator = if p.count > 0 {
+                    let idx = (state.anim_frame as usize / 5 + p.kind.key() as usize) % SPINNER.len();
+                    format!("{}", SPINNER[idx])
+                } else {
+                    " ".to_string()
+                };
+                let spans = vec![
+                    Span::styled(best_marker, key_style),
+                    Span::styled(
+                        format!("{} {:>2}x", p.kind.name(), p.count),
+                        text_style,
+                    ),
+                    Span::styled(prod_indicator, active_style),
+                    Span::styled(format!(" ${}", cost_str), text_style),
+                    Span::styled(
+                        format!(" +{}/s", format_number(next_cps)),
+                        roi_style,
+                    ),
+                    Span::styled(format!(" {}", payback_str), roi_style),
+                ];
+                ListItem::new(Line::from(spans))
+            } else {
+                // Full format for wide screens
+                let prod_indicator = if p.count > 0 {
+                    let idx = (state.anim_frame as usize / 5 + p.kind.key() as usize) % SPINNER.len();
+                    format!("{} ", SPINNER[idx])
+                } else {
+                    "  ".to_string()
+                };
 
-            let mut spans = vec![
-                Span::styled(format!("{}{} ", best_marker, rating_display), key_style),
-                Span::styled(
-                    format!("{:<8} {:>2}x ", p.kind.name(), p.count),
-                    text_style,
-                ),
-                Span::styled(prod_indicator, active_style),
-                Span::styled(format!("{}/s ", cps_str), active_style),
-                Span::styled(format!("${} ", cost_str), text_style),
-                Span::styled(
-                    format!("+{}/s ", format_number(next_cps)),
-                    roi_style,
-                ),
-                Span::styled(format!("回収{}", payback_str), roi_style),
-            ];
+                let syn_str = if total_bonus > 0.001 {
+                    format!("+{:.0}%", total_bonus * 100.0)
+                } else {
+                    String::new()
+                };
+                let syn_style = Style::default().fg(Color::Magenta);
 
-            if !syn_str.is_empty() {
-                spans.push(Span::styled(format!(" {}", syn_str), syn_style));
+                let rating = match payback {
+                    Some(s) if s <= 60.0 => "★★★",
+                    Some(s) if s <= 300.0 => "★★☆",
+                    Some(s) if s <= 900.0 => "★☆☆",
+                    _ => "☆☆☆",
+                };
+                let rating_display = if !can_afford { "   " } else { rating };
+                let best_marker = if is_best_roi { "◆" } else { " " };
+
+                let mut spans = vec![
+                    Span::styled(format!("{}{} ", best_marker, rating_display), key_style),
+                    Span::styled(
+                        format!("{:<8} {:>2}x ", p.kind.name(), p.count),
+                        text_style,
+                    ),
+                    Span::styled(prod_indicator, active_style),
+                    Span::styled(format!("{}/s ", cps_str), active_style),
+                    Span::styled(format!("${} ", cost_str), text_style),
+                    Span::styled(
+                        format!("+{}/s ", format_number(next_cps)),
+                        roi_style,
+                    ),
+                    Span::styled(format!("回収{}", payback_str), roi_style),
+                ];
+
+                if !syn_str.is_empty() {
+                    spans.push(Span::styled(format!(" {}", syn_str), syn_style));
+                }
+
+                ListItem::new(Line::from(spans))
             }
-
-            ListItem::new(Line::from(spans))
         })
         .collect();
 
@@ -818,11 +892,12 @@ fn render_producers(
     } else {
         Color::Green
     };
+    let title = if is_narrow { " 生産者 ◆=最高効率 " } else { " Producers ◆=最高効率 ★=回収速度 " };
     let widget = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(producer_border_color))
-            .title(" Producers ◆=最高効率 ★=回収速度 "),
+            .title(title),
     );
     f.render_widget(widget, area);
 
@@ -1293,75 +1368,178 @@ fn render_prestige(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let mut lines: Vec<Line> = Vec::new();
     let pending = state.pending_heavenly_chips();
     let available = state.available_chips();
+    let section = state.prestige_section;
 
-    // Header: prestige info
-    lines.push(Line::from(vec![
-        Span::styled(
-            format!(" 👼 天国チップ: {} ", available),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            format!("(合計{}) ", state.heavenly_chips),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled(
-            format!("転生{}回目 ", state.prestige_count),
-            Style::default().fg(Color::Cyan),
-        ),
-        Span::styled(
-            format!("CPS×{:.2}", state.prestige_multiplier),
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]));
+    // Split area: sub-section selector (1 row) + header (2 rows) + content
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // sub-section tabs
+            Constraint::Length(2), // header (chips + reset)
+            Constraint::Min(3),   // section content
+        ])
+        .split(area);
 
-    // Track line indices for click targets (line index within the lines vec)
-    let mut prestige_reset_line: Option<u16> = None;
-    let mut prestige_upgrade_lines: Vec<(usize, u16)> = Vec::new(); // (upgrade_idx, line_idx)
-    let mut sugar_boost_lines: Vec<(u16, u16)> = Vec::new(); // (action_id, line_idx)
-    let mut auto_clicker_line: Option<u16> = None;
-    let mut dragon_feed_lines: Vec<(usize, u16)> = Vec::new(); // (producer_idx, line_idx)
-    let mut dragon_aura_line: Option<u16> = None;
-
-    // Pending chips preview
-    if pending > 0 {
-        let blink = (state.anim_frame / 3).is_multiple_of(2);
-        let style = if blink {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-        } else {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        };
-        prestige_reset_line = Some(lines.len() as u16);
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" 🌟 ▶転生で +{} チップ獲得！", pending),
-                style,
-            ),
-        ]));
+    let border_color = if state.prestige_flash > 0 {
+        let phase = state.prestige_flash % 4;
+        match phase {
+            0 => Color::Yellow,
+            1 => Color::Magenta,
+            2 => Color::Cyan,
+            _ => Color::White,
+        }
+    } else if pending > 0 {
+        Color::Yellow
     } else {
-        lines.push(Line::from(Span::styled(
-            " (10億クッキーで転生可能になります)",
-            Style::default().fg(Color::DarkGray),
-        )));
+        Color::Blue
+    };
+
+    // === Sub-section tab selector (1 row, horizontal) ===
+    {
+        let sec_style = |idx: u8, color: Color| -> Style {
+            if idx == section {
+                Style::default().fg(Color::Black).bg(color).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(color)
+            }
+        };
+
+        let sec_tabs: [(& str, Style, u16); 4] = [
+            ("転生UP", sec_style(0, Color::Yellow), PRESTIGE_SEC_UPGRADES),
+            ("ブースト", sec_style(1, Color::Rgb(255, 182, 193)), PRESTIGE_SEC_BOOSTS),
+            ("ドラゴン", sec_style(2, Color::Red), PRESTIGE_SEC_DRAGON),
+            ("統計", sec_style(3, Color::White), PRESTIGE_SEC_STATS),
+        ];
+
+        let mut spans: Vec<Span> = Vec::new();
+        let mut tab_positions: Vec<(u16, u16, u16)> = Vec::new();
+        let mut col_offset: u16 = 0;
+
+        for (i, (label, style, action_id)) in sec_tabs.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled("|", Style::default().fg(Color::DarkGray)));
+                col_offset += 1;
+            }
+            let padded = format!(" {} ", label);
+            let label_width = padded.len() as u16;
+            tab_positions.push((col_offset, label_width, *action_id));
+            spans.push(Span::styled(padded, *style));
+            col_offset += label_width;
+        }
+
+        let tab_widget = Paragraph::new(Line::from(spans)).block(
+            Block::default()
+                .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+                .border_style(Style::default().fg(border_color))
+                .title(format!(
+                    " Prestige{} ",
+                    if state.prestige_count > 0 {
+                        format!(" {}回目", state.prestige_count)
+                    } else {
+                        String::new()
+                    }
+                )),
+        );
+        f.render_widget(tab_widget, chunks[0]);
+
+        let mut cs = click_state.borrow_mut();
+        for (start_col, width, action_id) in &tab_positions {
+            let rect = Rect::new(
+                chunks[0].x + 1 + start_col, // +1 for left border
+                chunks[0].y,
+                (*width).min(chunks[0].width.saturating_sub(2 + *start_col)),
+                1,
+            );
+            cs.targets.push(crate::input::ClickTarget {
+                rect,
+                action_id: *action_id,
+            });
+        }
     }
 
-    // Separator
-    lines.push(Line::from(Span::styled(
-        " ─── 転生アップグレード ─────────────",
-        Style::default().fg(Color::DarkGray),
-    )));
+    // === Header: chips info + prestige reset (2 rows) ===
+    {
+        let mut header_lines: Vec<Line> = Vec::new();
 
-    // Prestige upgrades grouped by path
+        // Row 0: chip info
+        header_lines.push(Line::from(vec![
+            Span::styled(
+                format!(" 👼 {} ", available),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("(計{}) ", state.heavenly_chips),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("CPS×{:.2}", state.prestige_multiplier),
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+
+        // Row 1: reset button or hint
+        let mut prestige_reset_line: Option<u16> = None;
+        if pending > 0 {
+            let blink = (state.anim_frame / 3).is_multiple_of(2);
+            let style = if blink {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD | Modifier::REVERSED)
+            } else {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            };
+            prestige_reset_line = Some(1);
+            header_lines.push(Line::from(Span::styled(
+                format!(" 🌟 ▶転生で +{} チップ獲得！", pending),
+                style,
+            )));
+        } else {
+            header_lines.push(Line::from(Span::styled(
+                " (10億クッキーで転生可能)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        let header_widget = Paragraph::new(header_lines).block(
+            Block::default()
+                .borders(Borders::LEFT | Borders::RIGHT)
+                .border_style(Style::default().fg(border_color)),
+        );
+        f.render_widget(header_widget, chunks[1]);
+
+        // Click target for prestige reset
+        if let Some(line_idx) = prestige_reset_line {
+            let mut cs = click_state.borrow_mut();
+            let row = chunks[1].y + line_idx;
+            if row < chunks[1].y + chunks[1].height {
+                cs.add_row_target(chunks[1], row, PRESTIGE_RESET);
+            }
+        }
+    }
+
+    // === Section content ===
+    let content_area = chunks[2];
+    match section {
+        0 => render_prestige_upgrades(state, f, content_area, click_state, available, border_color),
+        1 => render_prestige_boosts(state, f, content_area, click_state, border_color),
+        2 => render_prestige_dragon(state, f, content_area, click_state, border_color),
+        3 => render_prestige_stats(state, f, content_area, border_color),
+        _ => render_prestige_upgrades(state, f, content_area, click_state, available, border_color),
+    }
+}
+
+/// Prestige sub-section: upgrade tree
+fn render_prestige_upgrades(
+    state: &CookieState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+    available: u64,
+    border_color: Color,
+) {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut prestige_upgrade_lines: Vec<(usize, u16)> = Vec::new();
+
     use super::state::PrestigePath;
     let paths = [
         (PrestigePath::Root, "🌟 共通", Color::Yellow),
@@ -1382,16 +1560,12 @@ fn render_prestige(
             continue;
         }
 
-        // Path header
         lines.push(Line::from(Span::styled(
             format!(" {} ", path_name),
-            Style::default()
-                .fg(*path_color)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(*path_color).add_modifier(Modifier::BOLD),
         )));
 
         for (i, upgrade) in path_upgrades {
-            // Check prerequisite
             let prereq_met = upgrade.requires.is_none()
                 || state
                     .prestige_upgrades
@@ -1419,7 +1593,7 @@ fn render_prestige(
                         Style::default().fg(Color::DarkGray),
                     ),
                     Span::styled(
-                        "(前提アップグレードが必要)",
+                        "(前提UP必要)",
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]));
@@ -1446,15 +1620,38 @@ fn render_prestige(
         }
     }
 
-    // === Sugar section ===
-    lines.push(Line::from(Span::styled(
-        " ─── 🍬 砂糖ブースト ─────────────────",
-        Style::default()
-            .fg(Color::Rgb(255, 182, 193))
-            .add_modifier(Modifier::BOLD),
-    )));
+    let widget = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                .border_style(Style::default().fg(border_color)),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(widget, area);
 
-    // Sugar amount
+    let mut cs = click_state.borrow_mut();
+    let content_end = area.y + area.height.saturating_sub(1);
+    for (upgrade_idx, line_idx) in &prestige_upgrade_lines {
+        let row = area.y + line_idx;
+        if row < content_end {
+            cs.add_row_target(area, row, BUY_PRESTIGE_UPGRADE_BASE + *upgrade_idx as u16);
+        }
+    }
+}
+
+/// Prestige sub-section: sugar boosts + auto-clicker
+fn render_prestige_boosts(
+    state: &CookieState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+    border_color: Color,
+) {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut sugar_boost_lines: Vec<(u16, u16)> = Vec::new();
+    let mut auto_clicker_line: Option<u16> = None;
+
+    // Sugar header
     lines.push(Line::from(vec![
         Span::styled(
             format!(" 🍬 砂糖: {} ", state.sugar),
@@ -1543,7 +1740,7 @@ fn render_prestige(
         }
     }
 
-    // === Auto-clicker section ===
+    // Separator
     lines.push(Line::from(Span::styled(
         " ─── 🤖 オートクリッカー ─────────────",
         Style::default()
@@ -1553,29 +1750,17 @@ fn render_prestige(
 
     if state.is_auto_clicker_unlocked() {
         let rate = state.auto_clicker_rate();
-        let status = if state.auto_clicker_enabled {
-            "ON"
-        } else {
-            "OFF"
-        };
-        let status_color = if state.auto_clicker_enabled {
-            Color::Green
-        } else {
-            Color::Red
-        };
+        let status = if state.auto_clicker_enabled { "ON" } else { "OFF" };
+        let status_color = if state.auto_clicker_enabled { Color::Green } else { Color::Red };
         auto_clicker_line = Some(lines.len() as u16);
         lines.push(Line::from(vec![
             Span::styled(
                 " 🤖 オートクリッカー ",
-                Style::default()
-                    .fg(Color::Rgb(100, 149, 237))
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Rgb(100, 149, 237)).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("[{}] ", status),
-                Style::default()
-                    .fg(status_color)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(status_color).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("({}回/秒)", rate),
@@ -1595,31 +1780,52 @@ fn render_prestige(
         }
     } else {
         lines.push(Line::from(vec![
-            Span::styled(
-                " 🔒 オートクリッカー ",
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(
-                "(転生1回で解放)",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(" 🔒 オートクリッカー ", Style::default().fg(Color::DarkGray)),
+            Span::styled("(転生1回で解放)", Style::default().fg(Color::DarkGray)),
         ]));
     }
 
-    // === Dragon section ===
-    lines.push(Line::from(Span::styled(
-        " ─── 🐉 ドラゴン ──────────────────",
-        Style::default()
-            .fg(Color::Red)
-            .add_modifier(Modifier::BOLD),
-    )));
+    let widget = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                .border_style(Style::default().fg(border_color)),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(widget, area);
+
+    let mut cs = click_state.borrow_mut();
+    let content_end = area.y + area.height.saturating_sub(1);
+    for (action_id, line_idx) in &sugar_boost_lines {
+        let row = area.y + line_idx;
+        if row < content_end {
+            cs.add_row_target(area, row, *action_id);
+        }
+    }
+    if let Some(line_idx) = auto_clicker_line {
+        let row = area.y + line_idx;
+        if row < content_end {
+            cs.add_row_target(area, row, TOGGLE_AUTO_CLICKER);
+        }
+    }
+}
+
+/// Prestige sub-section: dragon
+fn render_prestige_dragon(
+    state: &CookieState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+    border_color: Color,
+) {
+    let mut lines: Vec<Line> = Vec::new();
+    let mut dragon_feed_lines: Vec<(usize, u16)> = Vec::new();
+    let mut dragon_aura_line: Option<u16> = None;
 
     if state.dragon_level >= 7 {
         lines.push(Line::from(Span::styled(
             " 🐉 ドラゴン Lv.MAX！",
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )));
     } else {
         let feed_cost = state.dragon_feed_cost();
@@ -1635,9 +1841,7 @@ fn render_prestige(
         lines.push(Line::from(vec![
             Span::styled(
                 format!(" 🐉 Lv.{} ", state.dragon_level),
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
             Span::styled(bar, Style::default().fg(Color::Red)),
             Span::styled(
@@ -1645,41 +1849,43 @@ fn render_prestige(
                 Style::default().fg(Color::White),
             ),
         ]));
-        // Dragon feed rows — show producers with count > 0
+
+        lines.push(Line::from(Span::styled(
+            " エサ用の生産者をタップ:",
+            Style::default().fg(Color::DarkGray),
+        )));
+
         for p in &state.producers {
             if p.count > 0 {
                 let line_idx = lines.len() as u16;
                 dragon_feed_lines.push((p.kind.index(), line_idx));
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        format!("   ▶{} ({}台)", p.kind.name(), p.count),
-                        Style::default().fg(Color::Red),
-                    ),
-                ]));
+                lines.push(Line::from(Span::styled(
+                    format!("   ▶{} ({}台)", p.kind.name(), p.count),
+                    Style::default().fg(Color::Red),
+                )));
             }
         }
     }
 
     // Dragon aura selection
     if state.dragon_level >= 1 {
+        lines.push(Line::from(Span::styled(
+            " ─── 🔮 オーラ ─────────────",
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+        )));
         dragon_aura_line = Some(lines.len() as u16);
         lines.push(Line::from(vec![
             Span::styled(
-                format!(" 🔮 オーラ: {} ", state.dragon_aura.name()),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
+                format!(" {} ", state.dragon_aura.name()),
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("({}) ", state.dragon_aura.description()),
                 Style::default().fg(Color::Magenta),
             ),
-            Span::styled(
-                "▶切替",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled("▶切替", Style::default().fg(Color::DarkGray)),
         ]));
-        // Show all aura options compactly
+        // All aura options
         let mut aura_spans: Vec<Span> = vec![Span::styled("   ", Style::default())];
         for aura in super::state::DragonAura::all().iter() {
             let is_active = *aura == state.dragon_aura;
@@ -1691,116 +1897,93 @@ fn render_prestige(
             ));
         }
         lines.push(Line::from(aura_spans));
-    }
-
-    // Separator
-    lines.push(Line::from(Span::styled(
-        " ─── 統計 ──────────────────────────",
-        Style::default().fg(Color::DarkGray),
-    )));
-
-    // Statistics
-    let play_seconds = state.total_ticks / 10;
-    let hours = play_seconds / 3600;
-    let minutes = (play_seconds % 3600) / 60;
-    let secs = play_seconds % 60;
-    lines.push(Line::from(Span::styled(
-        format!(" ⏱ プレイ時間: {}h {}m {}s", hours, minutes, secs),
-        Style::default().fg(Color::White),
-    )));
-    lines.push(Line::from(Span::styled(
-        format!(" 🍪 全ラン合計: {}", format_number(state.cookies_all_runs + state.cookies_all_time)),
-        Style::default().fg(Color::White),
-    )));
-    lines.push(Line::from(Span::styled(
-        format!(" 📈 最高CPS: {}/s", format_number(state.best_cps)),
-        Style::default().fg(Color::White),
-    )));
-    lines.push(Line::from(Span::styled(
-        format!(" 🏅 単一ラン最高: {}", format_number(state.best_cookies_single_run)),
-        Style::default().fg(Color::White),
-    )));
-    lines.push(Line::from(Span::styled(
-        format!(" 👆 今回のクリック: {}", state.total_clicks),
-        Style::default().fg(Color::White),
-    )));
-
-    let border_color = if state.prestige_flash > 0 {
-        let phase = state.prestige_flash % 4;
-        match phase {
-            0 => Color::Yellow,
-            1 => Color::Magenta,
-            2 => Color::Cyan,
-            _ => Color::White,
-        }
-    } else if pending > 0 {
-        Color::Yellow
     } else {
-        Color::Blue
-    };
+        lines.push(Line::from(Span::styled(
+            " 🔒 ドラゴンはまだ目覚めていません",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
 
     let widget = Paragraph::new(lines)
         .block(
             Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color))
-                .title(format!(
-                    " Prestige — 転生{} ",
-                    if state.prestige_count > 0 {
-                        format!("({}回目)", state.prestige_count)
-                    } else {
-                        String::new()
-                    }
-                )),
+                .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                .border_style(Style::default().fg(border_color)),
         )
         .wrap(Wrap { trim: false });
     f.render_widget(widget, area);
 
-    // Click targets — use tracked line indices for accurate positioning
     let mut cs = click_state.borrow_mut();
     let content_end = area.y + area.height.saturating_sub(1);
-    // Prestige reset
-    if let Some(line_idx) = prestige_reset_line {
-        let row = area.y + 1 + line_idx;
-        if row < content_end {
-            cs.add_row_target(area, row, PRESTIGE_RESET);
-        }
-    }
-    // Prestige upgrades
-    for (upgrade_idx, line_idx) in &prestige_upgrade_lines {
-        let row = area.y + 1 + line_idx;
-        if row < content_end {
-            cs.add_row_target(area, row, BUY_PRESTIGE_UPGRADE_BASE + *upgrade_idx as u16);
-        }
-    }
-    // Sugar boosts
-    for (action_id, line_idx) in &sugar_boost_lines {
-        let row = area.y + 1 + line_idx;
-        if row < content_end {
-            cs.add_row_target(area, row, *action_id);
-        }
-    }
-    // Auto-clicker toggle
-    if let Some(line_idx) = auto_clicker_line {
-        let row = area.y + 1 + line_idx;
-        if row < content_end {
-            cs.add_row_target(area, row, TOGGLE_AUTO_CLICKER);
-        }
-    }
-    // Dragon feed
     for (producer_idx, line_idx) in &dragon_feed_lines {
-        let row = area.y + 1 + line_idx;
+        let row = area.y + line_idx;
         if row < content_end {
             cs.add_row_target(area, row, DRAGON_FEED_BASE + *producer_idx as u16);
         }
     }
-    // Dragon aura cycle
     if let Some(line_idx) = dragon_aura_line {
-        let row = area.y + 1 + line_idx;
+        let row = area.y + line_idx;
         if row < content_end {
             cs.add_row_target(area, row, DRAGON_CYCLE_AURA);
         }
     }
+}
+
+/// Prestige sub-section: statistics
+fn render_prestige_stats(
+    state: &CookieState,
+    f: &mut Frame,
+    area: Rect,
+    border_color: Color,
+) {
+    let play_seconds = state.total_ticks / 10;
+    let hours = play_seconds / 3600;
+    let minutes = (play_seconds % 3600) / 60;
+    let secs = play_seconds % 60;
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" ⏱ プレイ時間: {}h {}m {}s", hours, minutes, secs),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            format!(" 🍪 全ラン合計: {}", format_number(state.cookies_all_runs + state.cookies_all_time)),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            format!(" 📈 最高CPS: {}/s", format_number(state.best_cps)),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            format!(" 🏅 単一ラン最高: {}", format_number(state.best_cookies_single_run)),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            format!(" 👆 今回のクリック: {}", state.total_clicks),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            format!(" 👼 転生回数: {}", state.prestige_count),
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::from(Span::styled(
+            format!(" 🐉 ドラゴンLv: {}", state.dragon_level),
+            Style::default().fg(Color::Red),
+        )),
+        Line::from(Span::styled(
+            format!(" 🍬 砂糖(累計): {}", state.sugar_all_time),
+            Style::default().fg(Color::Rgb(255, 182, 193)),
+        )),
+    ];
+
+    let widget = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+                .border_style(Style::default().fg(border_color)),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(widget, area);
 }
 
 fn render_log(state: &CookieState, f: &mut Frame, area: Rect) {

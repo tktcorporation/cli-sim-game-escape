@@ -146,6 +146,22 @@ impl CookieGame {
                 logic::perform_prestige(&mut self.state);
                 true
             }
+            PRESTIGE_SEC_UPGRADES => {
+                self.state.prestige_section = 0;
+                true
+            }
+            PRESTIGE_SEC_BOOSTS => {
+                self.state.prestige_section = 1;
+                true
+            }
+            PRESTIGE_SEC_DRAGON => {
+                self.state.prestige_section = 2;
+                true
+            }
+            PRESTIGE_SEC_STATS => {
+                self.state.prestige_section = 3;
+                true
+            }
             id if (BUY_PRESTIGE_UPGRADE_BASE..BUY_PRESTIGE_UPGRADE_BASE + 26).contains(&id) => {
                 let idx = (id - BUY_PRESTIGE_UPGRADE_BASE) as usize;
                 logic::buy_prestige_upgrade(&mut self.state, idx);
