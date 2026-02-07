@@ -213,10 +213,7 @@ fn render_tab_bar(
             seg_end - seg_start,
             1,
         );
-        cs.targets.push(crate::input::ClickTarget {
-            rect,
-            action_id: *action_id,
-        });
+        cs.add_click_target(rect, *action_id);
     }
 }
 
@@ -1443,19 +1440,16 @@ fn render_prestige(
                 seg_end - seg_start,
                 chunks[0].height,
             );
-            cs.targets.push(crate::input::ClickTarget {
-                rect,
-                action_id: *action_id,
-            });
+            cs.add_click_target(rect, *action_id);
         }
     }
 
     // === Header: chips info + prestige reset (2 rows) ===
     {
-        let mut header_lines: Vec<Line> = Vec::new();
+        let mut cl = ClickableList::new();
 
-        // Row 0: chip info
-        header_lines.push(Line::from(vec![
+        // Row 0: chip info (not clickable)
+        cl.push(Line::from(vec![
             Span::styled(
                 format!(" 👼 {} ", available),
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
@@ -1471,7 +1465,6 @@ fn render_prestige(
         ]));
 
         // Row 1: reset button or hint
-        let mut prestige_reset_line: Option<u16> = None;
         if pending > 0 {
             let blink = (state.anim_frame / 3).is_multiple_of(2);
             let style = if blink {
@@ -1479,33 +1472,28 @@ fn render_prestige(
             } else {
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
             };
-            prestige_reset_line = Some(1);
-            header_lines.push(Line::from(Span::styled(
+            cl.push_clickable(Line::from(Span::styled(
                 format!(" 🌟 ▶転生で +{} チップ獲得！", pending),
                 style,
-            )));
+            )), PRESTIGE_RESET);
         } else {
-            header_lines.push(Line::from(Span::styled(
+            cl.push(Line::from(Span::styled(
                 " (10億クッキーで転生可能)",
                 Style::default().fg(Color::DarkGray),
             )));
         }
 
-        let header_widget = Paragraph::new(header_lines).block(
+        // Borders::LEFT | RIGHT → no top/bottom border
+        let mut cs = click_state.borrow_mut();
+        cl.register_targets(chunks[1], &mut cs, 0, 0, 0);
+        drop(cs);
+
+        let header_widget = Paragraph::new(cl.into_lines()).block(
             Block::default()
                 .borders(Borders::LEFT | Borders::RIGHT)
                 .border_style(Style::default().fg(border_color)),
         );
         f.render_widget(header_widget, chunks[1]);
-
-        // Click target for prestige reset
-        if let Some(line_idx) = prestige_reset_line {
-            let mut cs = click_state.borrow_mut();
-            let row = chunks[1].y + line_idx;
-            if row < chunks[1].y + chunks[1].height {
-                cs.add_row_target(chunks[1], row, PRESTIGE_RESET);
-            }
-        }
     }
 
     // === Section content with scroll ===
