@@ -22,6 +22,7 @@ use ratzilla::{DomBackend, WebRenderer};
 pub const MENU_SELECT_COOKIE: u16 = 1;
 pub const MENU_SELECT_FACTORY: u16 = 2;
 pub const MENU_SELECT_CAREER: u16 = 3;
+pub const MENU_SELECT_RPG: u16 = 4;
 pub const BACK_TO_MENU: u16 = 65535;
 
 /// Use `elementFromPoint` to find which grid cell was clicked.
@@ -119,6 +120,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 }
                 InputEvent::Key('3') | InputEvent::Click(MENU_SELECT_CAREER) => {
                     Some(GameChoice::Career)
+                }
+                InputEvent::Key('4') | InputEvent::Click(MENU_SELECT_RPG) => {
+                    Some(GameChoice::Rpg)
                 }
                 _ => None,
             };
@@ -328,6 +332,21 @@ fn render_menu(
         "    スキルを磨いて転職・投資でキャリアを築くシミュレーション",
         Style::default().fg(Color::DarkGray),
     )), MENU_SELECT_CAREER);
+
+    cl.push(Line::from(""));
+    cl.push_clickable(Line::from(vec![
+        Span::styled(
+            " ▶ ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("RPG Quest", Style::default().fg(Color::White)),
+    ]), MENU_SELECT_RPG);
+    cl.push_clickable(Line::from(Span::styled(
+        "    魔王を倒す短編RPG。クエストで冒険の世界を探索",
+        Style::default().fg(Color::DarkGray),
+    )), MENU_SELECT_RPG);
 
     // Register click targets (borders → top=1, bottom=1)
     let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
