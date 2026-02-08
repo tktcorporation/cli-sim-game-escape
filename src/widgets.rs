@@ -258,7 +258,6 @@ impl<'a> ClickableList<'a> {
     /// * `scroll` — vertical scroll offset in visual rows (0 if not scrollable).
     /// * `inner_width` — content width for wrap calculation. Pass `0` when the
     ///   widget does **not** use `Wrap`.
-    #[allow(dead_code)] // public API for future use per ARCHITECTURE.md Rule 4
     pub fn register_targets_with_block(
         &self,
         area: Rect,

@@ -403,18 +403,15 @@ fn render_actions(
         cl.push(Line::from(""));
     }
 
-    // Determine top_offset based on border style
-    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
-    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
-
-    let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, top_offset, bottom_offset, 0, 0);
-    drop(cs);
-
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Yellow))
         .title(format!(" アクション (AP: {}/{}) ", state.ap, state.ap_max));
+
+    let mut cs = click_state.borrow_mut();
+    cl.register_targets_with_block(area, &block, &mut cs, 0, 0);
+    drop(cs);
+
     let widget = Paragraph::new(cl.into_lines()).block(block);
     f.render_widget(widget, area);
 }
@@ -526,17 +523,10 @@ fn render_training(
         cl.push_clickable(Line::from(Span::styled(label, Style::default().fg(color))), TRAINING_BASE + i as u16);
     }
 
-    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
-    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
-    let mut cs = click_state.borrow_mut();
-    cl.register_targets(chunks[0], &mut cs, top_offset, bottom_offset, 0, 0);
-
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Yellow))
         .title(" 研修 ");
-    let widget = Paragraph::new(cl.into_lines()).block(block);
-    f.render_widget(widget, chunks[0]);
 
     // Footer: back button
     let mut cl_footer = ClickableList::new();
@@ -547,12 +537,19 @@ fn render_training(
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     )), BACK_FROM_TRAINING);
-    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0, 0);
-    drop(cs);
 
     let footer_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
+
+    let mut cs = click_state.borrow_mut();
+    cl.register_targets_with_block(chunks[0], &block, &mut cs, 0, 0);
+    cl_footer.register_targets_with_block(chunks[1], &footer_block, &mut cs, 0, 0);
+    drop(cs);
+
+    let widget = Paragraph::new(cl.into_lines()).block(block);
+    f.render_widget(widget, chunks[0]);
+
     let footer_widget = Paragraph::new(cl_footer.into_lines()).block(footer_block);
     f.render_widget(footer_widget, chunks[1]);
 }
@@ -656,17 +653,10 @@ fn render_job_market(
         Style::default().fg(Color::DarkGray),
     )));
 
-    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
-    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
-    let mut cs = click_state.borrow_mut();
-    cl.register_targets(chunks[0], &mut cs, top_offset, bottom_offset, 0, 0);
-
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Green))
         .title(format!(" 求人情報 (AP: {}/{}) ", state.ap, state.ap_max));
-    let widget = Paragraph::new(cl.into_lines()).block(block);
-    f.render_widget(widget, chunks[0]);
 
     // Footer: back button
     let mut cl_footer = ClickableList::new();
@@ -677,12 +667,19 @@ fn render_job_market(
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     )), BACK_FROM_JOBS);
-    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0, 0);
-    drop(cs);
 
     let footer_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
+
+    let mut cs = click_state.borrow_mut();
+    cl.register_targets_with_block(chunks[0], &block, &mut cs, 0, 0);
+    cl_footer.register_targets_with_block(chunks[1], &footer_block, &mut cs, 0, 0);
+    drop(cs);
+
+    let widget = Paragraph::new(cl.into_lines()).block(block);
+    f.render_widget(widget, chunks[0]);
+
     let footer_widget = Paragraph::new(cl_footer.into_lines()).block(footer_block);
     f.render_widget(footer_widget, chunks[1]);
 }
@@ -866,19 +863,10 @@ fn render_invest(
         cl.push_clickable(Line::from(Span::styled(label, Style::default().fg(color))), action_id);
     }
 
-    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
-    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
-    let mut cs = click_state.borrow_mut();
-    cl.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0, 0);
-
     let action_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Green))
         .title(" 投資する (APなし) ");
-    f.render_widget(
-        Paragraph::new(cl.into_lines()).block(action_block),
-        chunks[1],
-    );
 
     // Footer: back button
     let mut cl_footer = ClickableList::new();
@@ -889,12 +877,20 @@ fn render_invest(
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     )), BACK_FROM_INVEST);
-    cl_footer.register_targets(chunks[2], &mut cs, top_offset, bottom_offset, 0, 0);
-    drop(cs);
 
     let footer_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
+
+    let mut cs = click_state.borrow_mut();
+    cl.register_targets_with_block(chunks[1], &action_block, &mut cs, 0, 0);
+    cl_footer.register_targets_with_block(chunks[2], &footer_block, &mut cs, 0, 0);
+    drop(cs);
+
+    f.render_widget(
+        Paragraph::new(cl.into_lines()).block(action_block),
+        chunks[1],
+    );
     f.render_widget(
         Paragraph::new(cl_footer.into_lines()).block(footer_block),
         chunks[2],
@@ -979,15 +975,14 @@ fn render_budget(
             .add_modifier(Modifier::BOLD),
     )), BACK_FROM_BUDGET);
 
-    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
-    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
-    let mut cs = click_state.borrow_mut();
-    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0, 0);
-    drop(cs);
-
     let footer_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
+
+    let mut cs = click_state.borrow_mut();
+    cl_footer.register_targets_with_block(chunks[1], &footer_block, &mut cs, 0, 0);
+    drop(cs);
+
     f.render_widget(
         Paragraph::new(cl_footer.into_lines()).block(footer_block),
         chunks[1],
@@ -1379,15 +1374,14 @@ fn render_report(
         Span::styled("[0]", Style::default().fg(Color::DarkGray)),
     ]), BACK_FROM_REPORT);
 
-    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
-    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
-    let mut cs = click_state.borrow_mut();
-    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0, 0);
-    drop(cs);
-
     let footer_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
+
+    let mut cs = click_state.borrow_mut();
+    cl_footer.register_targets_with_block(chunks[1], &footer_block, &mut cs, 0, 0);
+    drop(cs);
+
     f.render_widget(
         Paragraph::new(cl_footer.into_lines()).block(footer_block),
         chunks[1],
@@ -1479,16 +1473,10 @@ fn render_lifestyle(
         cl.push_clickable(Line::from(Span::styled(label, Style::default().fg(fg))), LIFESTYLE_BASE + i as u16);
     }
 
-    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
-    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
-    let mut cs = click_state.borrow_mut();
-    cl.register_targets(chunks[0], &mut cs, top_offset, bottom_offset, 0, 0);
-
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Magenta))
         .title(" 生活水準 ");
-    f.render_widget(Paragraph::new(cl.into_lines()).block(block), chunks[0]);
 
     // Footer
     let mut cl_footer = ClickableList::new();
@@ -1499,12 +1487,17 @@ fn render_lifestyle(
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     )), BACK_FROM_LIFESTYLE);
-    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0, 0);
-    drop(cs);
 
     let footer_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
+
+    let mut cs = click_state.borrow_mut();
+    cl.register_targets_with_block(chunks[0], &block, &mut cs, 0, 0);
+    cl_footer.register_targets_with_block(chunks[1], &footer_block, &mut cs, 0, 0);
+    drop(cs);
+
+    f.render_widget(Paragraph::new(cl.into_lines()).block(block), chunks[0]);
     f.render_widget(
         Paragraph::new(cl_footer.into_lines()).block(footer_block),
         chunks[1],
