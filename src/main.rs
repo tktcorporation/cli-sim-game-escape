@@ -333,7 +333,7 @@ fn render_menu(
     let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
     {
         let mut cs = click_state.borrow_mut();
-        cl.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0);
+        cl.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0, 0);
     }
 
     let menu_widget = Paragraph::new(cl.into_lines()).block(

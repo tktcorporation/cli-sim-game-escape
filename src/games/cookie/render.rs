@@ -881,7 +881,7 @@ fn render_producers(
 
     // Register click targets (Borders::ALL → top=1, bottom=1)
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, 1, 1, 0);
+    cl.register_targets(area, &mut cs, 1, 1, 0, 0);
     drop(cs);
 
     let items: Vec<ListItem> = cl.into_lines().into_iter().map(ListItem::new).collect();
@@ -950,7 +950,7 @@ fn render_upgrades(
 
     // Register click targets (Borders::ALL → top=1, bottom=1)
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, 1, 1, 0);
+    cl.register_targets(area, &mut cs, 1, 1, 0, 0);
     drop(cs);
 
     let items: Vec<ListItem> = if cl.len() == 0 {
@@ -1060,7 +1060,7 @@ fn render_research(
 
     // Register click targets before consuming lines (Borders::ALL → top=1, bottom=1)
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, 1, 1, 0);
+    cl.register_targets(area, &mut cs, 1, 1, 0, 0);
     drop(cs);
 
     let items: Vec<ListItem> = cl.into_lines().into_iter().map(ListItem::new).collect();
@@ -1302,7 +1302,7 @@ fn render_milestones(
 
     // Register click targets before consuming lines (Borders::ALL → top=1, bottom=1)
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, 1, 1, 0);
+    cl.register_targets(area, &mut cs, 1, 1, 0, 0);
     drop(cs);
 
     let widget = Paragraph::new(cl.into_lines())
@@ -1426,7 +1426,7 @@ fn render_prestige(
 
         // Borders::LEFT | RIGHT → no top/bottom border
         let mut cs = click_state.borrow_mut();
-        cl.register_targets(chunks[1], &mut cs, 0, 0, 0);
+        cl.register_targets(chunks[1], &mut cs, 0, 0, 0, 0);
         drop(cs);
 
         let header_widget = Paragraph::new(cl.into_lines()).block(
@@ -1531,51 +1531,74 @@ fn render_prestige_upgrades(
             let action_id = BUY_PRESTIGE_UPGRADE_BASE + i as u16;
 
             if upgrade.purchased {
-                cl.push_clickable(Line::from(vec![
-                    Span::styled(
-                        format!("  ✅ {} ", upgrade.name),
+                cl.push_clickable(
+                    Line::from(Span::styled(
+                        format!("  ✅ {}", upgrade.name),
                         Style::default().fg(Color::Green),
-                    ),
-                    Span::styled(
-                        format!("- {}", upgrade.description),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]), action_id);
+                    )),
+                    action_id,
+                );
+                cl.push(Line::from(Span::styled(
+                    format!("     {}", upgrade.description),
+                    Style::default().fg(Color::DarkGray),
+                )));
             } else if upgrade.requires.is_some()
                 && !state
                     .prestige_upgrades
                     .iter()
                     .any(|u| Some(u.id) == upgrade.requires && u.purchased)
             {
-                cl.push_clickable(Line::from(vec![
-                    Span::styled(
-                        format!("  🔒 {} ", upgrade.name),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::styled(
-                        "(前提UP必要)",
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]), action_id);
+                cl.push_clickable(
+                    Line::from(vec![
+                        Span::styled(
+                            format!("  🔒 {}", upgrade.name),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::styled(
+                            format!(" ({}チップ)", upgrade.cost),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]),
+                    action_id,
+                );
+                cl.push(Line::from(Span::styled(
+                    "     (前提UP必要)",
+                    Style::default().fg(Color::DarkGray),
+                )));
             } else {
                 let can_afford = available >= upgrade.cost;
-                let text_style = if can_afford {
-                    Style::default().fg(Color::White)
+                let name_style = if can_afford {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
-                cl.push_clickable(Line::from(vec![
-                    Span::styled(format!("  {} ", upgrade.name), text_style),
-                    Span::styled(format!("- {} ", upgrade.description), text_style),
-                    Span::styled(
-                        format!("({}チップ)", upgrade.cost),
-                        if can_afford {
-                            Style::default().fg(Color::Cyan)
-                        } else {
-                            Style::default().fg(Color::DarkGray)
-                        },
-                    ),
-                ]), action_id);
+                cl.push_clickable(
+                    Line::from(vec![
+                        Span::styled(
+                            format!("  ▶{}", upgrade.name),
+                            name_style,
+                        ),
+                        Span::styled(
+                            format!(" ({}チップ)", upgrade.cost),
+                            if can_afford {
+                                Style::default().fg(Color::Cyan)
+                            } else {
+                                Style::default().fg(Color::DarkGray)
+                            },
+                        ),
+                    ]),
+                    action_id,
+                );
+                cl.push(Line::from(Span::styled(
+                    format!("     {}", upgrade.description),
+                    if can_afford {
+                        Style::default().fg(Color::White)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                )));
             }
         }
     }
@@ -1585,7 +1608,7 @@ fn render_prestige_upgrades(
 
     // Register click targets (no top border, 1 bottom border, with scroll)
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, 0, 1, scroll);
+    cl.register_targets(area, &mut cs, 0, 1, scroll, inner_width);
     drop(cs);
 
     let widget = Paragraph::new(cl.into_lines())
@@ -1664,37 +1687,49 @@ fn render_prestige_boosts(
         let can_afford = state.sugar >= cost && state.active_sugar_boost.is_none();
 
         if !is_unlocked {
-            cl.push_clickable(Line::from(vec![
-                Span::styled(
-                    format!(" 🔒 {} ", kind.name()),
-                    Style::default().fg(Color::DarkGray),
-                ),
-                Span::styled(
-                    format!("(転生{}回で解放)", required_prestige),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]), *action_id);
+            cl.push_clickable(
+                Line::from(vec![
+                    Span::styled(
+                        format!(" 🔒 {}", kind.name()),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled(
+                        format!(" (転生{}回で解放)", required_prestige),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]),
+                *action_id,
+            );
         } else {
-            let text_style = if can_afford {
-                Style::default().fg(Color::White)
+            let name_style = if can_afford {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            cl.push_clickable(Line::from(vec![
-                Span::styled(format!(" {} ", kind.name()), text_style),
-                Span::styled(
-                    format!("CPS×{:.1} {:.0}秒 ", mult, duration),
-                    text_style,
-                ),
-                Span::styled(
-                    format!("({}砂糖)", cost),
-                    if can_afford {
-                        Style::default().fg(Color::Rgb(255, 182, 193))
-                    } else {
-                        Style::default().fg(Color::DarkGray)
-                    },
-                ),
-            ]), *action_id);
+            cl.push_clickable(
+                Line::from(vec![
+                    Span::styled(format!(" ▶{}", kind.name()), name_style),
+                    Span::styled(
+                        format!(" ({}砂糖)", cost),
+                        if can_afford {
+                            Style::default().fg(Color::Rgb(255, 182, 193))
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        },
+                    ),
+                ]),
+                *action_id,
+            );
+            cl.push(Line::from(Span::styled(
+                format!("    CPS×{:.1} / {:.0}秒間", mult, duration),
+                if can_afford {
+                    Style::default().fg(Color::White)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            )));
         }
     }
 
@@ -1749,7 +1784,7 @@ fn render_prestige_boosts(
 
     // Register click targets (no top border, 1 bottom border, with scroll)
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, 0, 1, scroll);
+    cl.register_targets(area, &mut cs, 0, 1, scroll, inner_width);
     drop(cs);
 
     let widget = Paragraph::new(cl.into_lines())
@@ -1824,32 +1859,42 @@ fn render_prestige_dragon(
     if state.dragon_level >= 1 {
         cl.push(Line::from(Span::styled(
             " ─── 🔮 オーラ ─────────────",
-            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
         )));
         // Aura toggle (clickable)
-        cl.push_clickable(Line::from(vec![
-            Span::styled(
-                format!(" {} ", state.dragon_aura.name()),
-                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("({}) ", state.dragon_aura.description()),
-                Style::default().fg(Color::Magenta),
-            ),
-            Span::styled("▶切替", Style::default().fg(Color::DarkGray)),
-        ]), DRAGON_CYCLE_AURA);
-        // All aura options (not clickable)
-        let mut aura_spans: Vec<Span> = vec![Span::styled("   ", Style::default())];
+        cl.push_clickable(
+            Line::from(vec![
+                Span::styled(
+                    format!(" ▶{}", state.dragon_aura.name()),
+                    Style::default()
+                        .fg(Color::Magenta)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" ▶切替", Style::default().fg(Color::DarkGray)),
+            ]),
+            DRAGON_CYCLE_AURA,
+        );
+        // Current aura effect description (not clickable)
+        cl.push(Line::from(Span::styled(
+            format!("    {}", state.dragon_aura.description()),
+            Style::default().fg(Color::Magenta),
+        )));
+        // All aura options (not clickable, one per line)
         for aura in super::state::DragonAura::all().iter() {
             let is_active = *aura == state.dragon_aura;
             let marker = if is_active { "●" } else { "○" };
-            let color = if is_active { Color::Magenta } else { Color::DarkGray };
-            aura_spans.push(Span::styled(
-                format!("{}{} ", marker, aura.name()),
+            let color = if is_active {
+                Color::Magenta
+            } else {
+                Color::DarkGray
+            };
+            cl.push(Line::from(Span::styled(
+                format!("   {}{}", marker, aura.name()),
                 Style::default().fg(color),
-            ));
+            )));
         }
-        cl.push(Line::from(aura_spans));
     } else {
         cl.push(Line::from(Span::styled(
             " 🔒 ドラゴンはまだ目覚めていません",
@@ -1862,7 +1907,7 @@ fn render_prestige_dragon(
 
     // Register click targets (no top border, 1 bottom border, with scroll)
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, 0, 1, scroll);
+    cl.register_targets(area, &mut cs, 0, 1, scroll, inner_width);
     drop(cs);
 
     let widget = Paragraph::new(cl.into_lines())
