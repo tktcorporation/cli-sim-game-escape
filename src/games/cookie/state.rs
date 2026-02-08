@@ -2575,6 +2575,46 @@ impl CookieState {
             .collect()
     }
 
+    // ── Shared filter methods (used by both render and input) ──
+
+    /// Unpurchased upgrades with their real index.
+    /// Both render (to display) and input (to map display_idx→real_idx) use this.
+    pub fn available_upgrades(&self) -> Vec<usize> {
+        self.upgrades
+            .iter()
+            .enumerate()
+            .filter(|(_, u)| !u.purchased)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Visible (unpurchased, path-matching) research nodes with their real index.
+    pub fn visible_research(&self) -> Vec<usize> {
+        self.research_nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| {
+                if self.research_path != ResearchPath::None
+                    && n.path != self.research_path
+                {
+                    return false;
+                }
+                !n.purchased
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Ready-to-claim milestones with their real index.
+    pub fn ready_milestones(&self) -> Vec<usize> {
+        self.milestones
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.status == MilestoneStatus::Ready)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     pub fn add_log(&mut self, text: &str, is_important: bool) {
         self.log.push(CookieLogEntry {
             text: text.to_string(),
