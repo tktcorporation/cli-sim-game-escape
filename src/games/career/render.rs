@@ -10,6 +10,7 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
+use crate::widgets::ClickableList;
 
 use super::actions::*;
 
@@ -283,33 +284,30 @@ fn render_actions(
     is_narrow: bool,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let mut lines = Vec::new();
-    let mut cs = click_state.borrow_mut();
+    let mut cl = ClickableList::new();
     let has_ap = state.ap > 0;
     let ap_color = if has_ap { Color::Cyan } else { Color::DarkGray };
 
-    // AP-consuming actions
+    // AP-consuming actions (clickable)
     let training_label = if is_narrow { "研修" } else { "研修する" };
-    lines.push(Line::from(vec![
+    cl.push_clickable(Line::from(vec![
         Span::styled(" ▶ ", Style::default().fg(ap_color).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!("{} [1]", training_label),
             Style::default().fg(if has_ap { Color::White } else { Color::DarkGray }),
         ),
         Span::styled(" (1AP)", Style::default().fg(Color::DarkGray)),
-    ]));
-    cs.add_row_target(area, area.y + 1, GO_TRAINING);
+    ]), GO_TRAINING);
 
     let net_label = if is_narrow { "人脈作り" } else { "ネットワーキング" };
-    lines.push(Line::from(vec![
+    cl.push_clickable(Line::from(vec![
         Span::styled(" ▶ ", Style::default().fg(ap_color).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!("{} [2]", net_label),
             Style::default().fg(if has_ap { Color::White } else { Color::DarkGray }),
         ),
         Span::styled(" (1AP) 営業+2 評判+3", Style::default().fg(Color::DarkGray)),
-    ]));
-    cs.add_row_target(area, area.y + 2, DO_NETWORKING);
+    ]), DO_NETWORKING);
 
     let side_label = if is_narrow { "副業" } else { "副業する" };
     let best_skill = state.technical
@@ -317,7 +315,7 @@ fn render_actions(
         .max(state.management)
         .max(state.knowledge);
     let side_available = has_ap && best_skill >= 5.0;
-    lines.push(Line::from(vec![
+    cl.push_clickable(Line::from(vec![
         Span::styled(
             " ▶ ",
             Style::default()
@@ -336,41 +334,29 @@ fn render_actions(
             },
             Style::default().fg(Color::DarkGray),
         ),
-    ]));
-    cs.add_row_target(area, area.y + 3, DO_SIDE_JOB);
+    ]), DO_SIDE_JOB);
 
-    // Spacer + navigation
-    lines.push(Line::from(""));
+    // Spacer
+    cl.push(Line::from(""));
 
-    let mut nav_row = area.y + 5;
-
-    // Job Market
-    lines.push(Line::from(vec![
+    // Navigation (clickable)
+    cl.push_clickable(Line::from(vec![
         Span::styled(" ▶ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::styled("転職する [6]", Style::default().fg(Color::White)),
         next_job_hint(state),
-    ]));
-    cs.add_row_target(area, nav_row, GO_JOB_MARKET);
-    nav_row += 1;
+    ]), GO_JOB_MARKET);
 
-    // Invest
-    lines.push(Line::from(vec![
+    cl.push_clickable(Line::from(vec![
         Span::styled(" ▶ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::styled("投資する [7]", Style::default().fg(Color::White)),
-    ]));
-    cs.add_row_target(area, nav_row, GO_INVEST);
-    nav_row += 1;
+    ]), GO_INVEST);
 
-    // Budget
-    lines.push(Line::from(vec![
+    cl.push_clickable(Line::from(vec![
         Span::styled(" ▶ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::styled("家計簿 [8]", Style::default().fg(Color::White)),
-    ]));
-    cs.add_row_target(area, nav_row, GO_BUDGET);
-    nav_row += 1;
+    ]), GO_BUDGET);
 
-    // Lifestyle
-    lines.push(Line::from(vec![
+    cl.push_clickable(Line::from(vec![
         Span::styled(" ▶ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!(
@@ -380,35 +366,32 @@ fn render_actions(
             ),
             Style::default().fg(Color::White),
         ),
-    ]));
-    cs.add_row_target(area, nav_row, GO_LIFESTYLE);
-    nav_row += 1;
+    ]), GO_LIFESTYLE);
 
-    // Spacer + Advance Month (always 3 lines: spacer + 2 content lines)
-    lines.push(Line::from(""));
-    nav_row += 1;
+    // Spacer + Advance Month
+    cl.push(Line::from(""));
 
     if state.won {
-        lines.push(Line::from(Span::styled(
+        cl.push(Line::from(Span::styled(
             " ★ 経済的自由を達成しました！",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         )));
-        lines.push(Line::from(""));
+        cl.push(Line::from(""));
     } else if is_game_over(state) {
-        lines.push(Line::from(Span::styled(
+        cl.push(Line::from(Span::styled(
             " ✖ 120ヶ月経過 - GAME OVER",
             Style::default()
                 .fg(Color::Red)
                 .add_modifier(Modifier::BOLD),
         )));
-        lines.push(Line::from(Span::styled(
+        cl.push(Line::from(Span::styled(
             "   経済的自由は達成できませんでした…",
             Style::default().fg(Color::Red),
         )));
     } else {
-        lines.push(Line::from(vec![
+        cl.push_clickable(Line::from(vec![
             Span::styled(
                 " ▶▶ 次の月へ ",
                 Style::default()
@@ -416,16 +399,23 @@ fn render_actions(
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("[0]", Style::default().fg(Color::DarkGray)),
-        ]));
-        cs.add_row_target(area, nav_row, ADVANCE_MONTH);
-        lines.push(Line::from(""));
+        ]), ADVANCE_MONTH);
+        cl.push(Line::from(""));
     }
+
+    // Determine top_offset based on border style
+    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
+    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
+
+    let mut cs = click_state.borrow_mut();
+    cl.register_targets(area, &mut cs, top_offset, bottom_offset, 0);
+    drop(cs);
 
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Yellow))
         .title(format!(" アクション (AP: {}/{}) ", state.ap, state.ap_max));
-    let widget = Paragraph::new(lines).block(block);
+    let widget = Paragraph::new(cl.into_lines()).block(block);
     f.render_widget(widget, area);
 }
 
@@ -484,13 +474,12 @@ fn render_training(
         ])
         .split(area);
 
-    let mut lines = Vec::new();
-    let mut cs = click_state.borrow_mut();
+    let mut cl = ClickableList::new();
     let has_ap = state.ap > 0;
     let cost_mult = training_cost_multiplier(state.current_event);
     let is_sale = cost_mult < 1.0;
 
-    lines.push(Line::from(vec![
+    cl.push(Line::from(vec![
         Span::styled(
             format!(" AP: {}/{}", state.ap, state.ap_max),
             Style::default()
@@ -504,7 +493,7 @@ fn render_training(
             Span::raw("")
         },
     ]));
-    lines.push(Line::from(""));
+    cl.push(Line::from(""));
 
     for (i, t) in TRAININGS.iter().enumerate() {
         let cost = t.cost * cost_mult;
@@ -534,32 +523,37 @@ fn render_training(
         } else {
             Color::DarkGray
         };
-        lines.push(Line::from(Span::styled(label, Style::default().fg(color))));
-        cs.add_row_target(chunks[0], chunks[0].y + 3 + i as u16, TRAINING_BASE + i as u16);
+        cl.push_clickable(Line::from(Span::styled(label, Style::default().fg(color))), TRAINING_BASE + i as u16);
     }
+
+    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
+    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
+    let mut cs = click_state.borrow_mut();
+    cl.register_targets(chunks[0], &mut cs, top_offset, bottom_offset, 0);
 
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Yellow))
         .title(" 研修 ");
-    let widget = Paragraph::new(lines).block(block);
+    let widget = Paragraph::new(cl.into_lines()).block(block);
     f.render_widget(widget, chunks[0]);
 
     // Footer: back button
-    let footer_lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            " ◀ 戻る [-]",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-    ];
-    cs.add_row_target(chunks[1], chunks[1].y + 2, BACK_FROM_TRAINING);
+    let mut cl_footer = ClickableList::new();
+    cl_footer.push(Line::from(""));
+    cl_footer.push_clickable(Line::from(Span::styled(
+        " ◀ 戻る [-]",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )), BACK_FROM_TRAINING);
+    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0);
+    drop(cs);
+
     let footer_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
-    let footer_widget = Paragraph::new(footer_lines).block(footer_block);
+    let footer_widget = Paragraph::new(cl_footer.into_lines()).block(footer_block);
     f.render_widget(footer_widget, chunks[1]);
 }
 
@@ -620,8 +614,7 @@ fn render_job_market(
         ])
         .split(area);
 
-    let mut lines = Vec::new();
-    let mut cs = click_state.borrow_mut();
+    let mut cl = ClickableList::new();
 
     for (i, &kind) in ALL_JOBS.iter().enumerate() {
         let info = job_info(kind);
@@ -650,12 +643,11 @@ fn render_job_market(
             )
         };
 
-        lines.push(Line::from(Span::styled(label, Style::default().fg(fg))));
-        cs.add_row_target(chunks[0], chunks[0].y + 1 + i as u16, APPLY_JOB_BASE + i as u16);
+        cl.push_clickable(Line::from(Span::styled(label, Style::default().fg(fg))), APPLY_JOB_BASE + i as u16);
     }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
+    cl.push(Line::from(""));
+    cl.push(Line::from(Span::styled(
         if is_narrow {
             " ▶=応募可 ●=現職 (1AP)"
         } else {
@@ -664,28 +656,34 @@ fn render_job_market(
         Style::default().fg(Color::DarkGray),
     )));
 
+    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
+    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
+    let mut cs = click_state.borrow_mut();
+    cl.register_targets(chunks[0], &mut cs, top_offset, bottom_offset, 0);
+
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Green))
         .title(format!(" 求人情報 (AP: {}/{}) ", state.ap, state.ap_max));
-    let widget = Paragraph::new(lines).block(block);
+    let widget = Paragraph::new(cl.into_lines()).block(block);
     f.render_widget(widget, chunks[0]);
 
     // Footer: back button
-    let footer_lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            " ◀ 戻る [-]",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-    ];
-    cs.add_row_target(chunks[1], chunks[1].y + 2, BACK_FROM_JOBS);
+    let mut cl_footer = ClickableList::new();
+    cl_footer.push(Line::from(""));
+    cl_footer.push_clickable(Line::from(Span::styled(
+        " ◀ 戻る [-]",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )), BACK_FROM_JOBS);
+    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0);
+    drop(cs);
+
     let footer_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
-    let footer_widget = Paragraph::new(footer_lines).block(footer_block);
+    let footer_widget = Paragraph::new(cl_footer.into_lines()).block(footer_block);
     f.render_widget(footer_widget, chunks[1]);
 }
 
@@ -836,8 +834,7 @@ fn render_invest(
     );
 
     // Investment actions
-    let mut action_lines = Vec::new();
-    let mut cs = click_state.borrow_mut();
+    let mut cl = ClickableList::new();
 
     let investments = [
         (InvestKind::Savings, "低リスク 月利0.05%"),
@@ -845,7 +842,8 @@ fn render_invest(
         (InvestKind::RealEstate, "高リスク 月利1.5%"),
     ];
 
-    for (kind, desc) in &investments {
+    let invest_action_ids = [INVEST_SAVINGS, INVEST_STOCKS, INVEST_REAL_ESTATE];
+    for ((kind, desc), &action_id) in investments.iter().zip(invest_action_ids.iter()) {
         let info = invest_info(*kind);
         let affordable = state.money >= info.increment;
         let color = if affordable {
@@ -865,40 +863,40 @@ fn render_invest(
             )
         };
 
-        action_lines.push(Line::from(Span::styled(label, Style::default().fg(color))));
+        cl.push_clickable(Line::from(Span::styled(label, Style::default().fg(color))), action_id);
     }
 
-    // Register click targets for investment actions
-    let invest_action_ids = [INVEST_SAVINGS, INVEST_STOCKS, INVEST_REAL_ESTATE];
-    for (i, &action_id) in invest_action_ids.iter().enumerate() {
-        cs.add_row_target(chunks[1], chunks[1].y + 1 + i as u16, action_id);
-    }
+    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
+    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
+    let mut cs = click_state.borrow_mut();
+    cl.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0);
 
     let action_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Green))
         .title(" 投資する (APなし) ");
     f.render_widget(
-        Paragraph::new(action_lines).block(action_block),
+        Paragraph::new(cl.into_lines()).block(action_block),
         chunks[1],
     );
 
     // Footer: back button
-    let footer_lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            " ◀ 戻る [-]",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-    ];
-    cs.add_row_target(chunks[2], chunks[2].y + 2, BACK_FROM_INVEST);
+    let mut cl_footer = ClickableList::new();
+    cl_footer.push(Line::from(""));
+    cl_footer.push_clickable(Line::from(Span::styled(
+        " ◀ 戻る [-]",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )), BACK_FROM_INVEST);
+    cl_footer.register_targets(chunks[2], &mut cs, top_offset, bottom_offset, 0);
+    drop(cs);
+
     let footer_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
     f.render_widget(
-        Paragraph::new(footer_lines).block(footer_block),
+        Paragraph::new(cl_footer.into_lines()).block(footer_block),
         chunks[2],
     );
 }
@@ -945,54 +943,53 @@ fn render_budget(
     let bar = "█".repeat(filled) + &"░".repeat(empty);
     let pct = (progress * 100.0) as u32;
 
-    let mut footer_lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" 不労所得 ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("¥{}", format_money(m_passive)),
-                Style::default().fg(Color::Green),
-            ),
-            Span::styled(" / 支出 ", Style::default().fg(Color::Gray)),
-            Span::styled(
-                format!("¥{}", format_money(m_expenses)),
-                Style::default().fg(Color::Red),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(" 経済的自由: ", Style::default().fg(Color::Gray)),
-            Span::styled(bar, Style::default().fg(Color::Green)),
-            Span::styled(format!(" {}%", pct), Style::default().fg(Color::White)),
-        ]),
-        Line::from(Span::styled(
-            " ◀ 戻る [-]",
+    let mut cl_footer = ClickableList::new();
+    cl_footer.push(Line::from(""));
+
+    if state.won {
+        cl_footer.push(Line::from(Span::styled(
+            " ★★★ 経済的自由達成！ ★★★",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
-        )),
-    ];
-
-    if state.won {
-        footer_lines.insert(
-            1,
-            Line::from(Span::styled(
-                " ★★★ 経済的自由達成！ ★★★",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            )),
-        );
+        )));
     }
 
+    cl_footer.push(Line::from(vec![
+        Span::styled(" 不労所得 ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("¥{}", format_money(m_passive)),
+            Style::default().fg(Color::Green),
+        ),
+        Span::styled(" / 支出 ", Style::default().fg(Color::Gray)),
+        Span::styled(
+            format!("¥{}", format_money(m_expenses)),
+            Style::default().fg(Color::Red),
+        ),
+    ]));
+    cl_footer.push(Line::from(vec![
+        Span::styled(" 経済的自由: ", Style::default().fg(Color::Gray)),
+        Span::styled(bar, Style::default().fg(Color::Green)),
+        Span::styled(format!(" {}%", pct), Style::default().fg(Color::White)),
+    ]));
+    cl_footer.push_clickable(Line::from(Span::styled(
+        " ◀ 戻る [-]",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )), BACK_FROM_BUDGET);
+
+    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
+    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
     let mut cs = click_state.borrow_mut();
-    let back_row = chunks[1].y + chunks[1].height.saturating_sub(2);
-    cs.add_row_target(chunks[1], back_row, BACK_FROM_BUDGET);
+    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0);
+    drop(cs);
 
     let footer_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
     f.render_widget(
-        Paragraph::new(footer_lines).block(footer_block),
+        Paragraph::new(cl_footer.into_lines()).block(footer_block),
         chunks[1],
     );
 }
@@ -1370,25 +1367,29 @@ fn render_report(
     f.render_widget(Paragraph::new(lines).block(block), chunks[0]);
 
     // Footer: continue button
+    let mut cl_footer = ClickableList::new();
+    cl_footer.push(Line::from(""));
+    cl_footer.push_clickable(Line::from(vec![
+        Span::styled(
+            " ▶ 続ける ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("[0]", Style::default().fg(Color::DarkGray)),
+    ]), BACK_FROM_REPORT);
+
+    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
+    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
     let mut cs = click_state.borrow_mut();
-    let footer_lines = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                " ▶ 続ける ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("[0]", Style::default().fg(Color::DarkGray)),
-        ]),
-    ];
-    cs.add_row_target(chunks[1], chunks[1].y + 2, BACK_FROM_REPORT);
+    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0);
+    drop(cs);
+
     let footer_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
     f.render_widget(
-        Paragraph::new(footer_lines).block(footer_block),
+        Paragraph::new(cl_footer.into_lines()).block(footer_block),
         chunks[1],
     );
 }
@@ -1416,10 +1417,9 @@ fn render_lifestyle(
         ])
         .split(area);
 
-    let mut lines = Vec::new();
-    let mut cs = click_state.borrow_mut();
+    let mut cl = ClickableList::new();
 
-    lines.push(Line::from(vec![
+    cl.push(Line::from(vec![
         Span::styled(
             format!(
                 " 現在: Lv.{} {}",
@@ -1431,7 +1431,7 @@ fn render_lifestyle(
                 .add_modifier(Modifier::BOLD),
         ),
     ]));
-    lines.push(Line::from(""));
+    cl.push(Line::from(""));
 
     for (i, &level) in ALL_LIFESTYLES.iter().enumerate() {
         let info = lifestyle_info(level);
@@ -1476,32 +1476,37 @@ fn render_lifestyle(
             )
         };
 
-        lines.push(Line::from(Span::styled(label, Style::default().fg(fg))));
-        cs.add_row_target(chunks[0], chunks[0].y + 3 + i as u16, LIFESTYLE_BASE + i as u16);
+        cl.push_clickable(Line::from(Span::styled(label, Style::default().fg(fg))), LIFESTYLE_BASE + i as u16);
     }
+
+    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
+    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
+    let mut cs = click_state.borrow_mut();
+    cl.register_targets(chunks[0], &mut cs, top_offset, bottom_offset, 0);
 
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Magenta))
         .title(" 生活水準 ");
-    f.render_widget(Paragraph::new(lines).block(block), chunks[0]);
+    f.render_widget(Paragraph::new(cl.into_lines()).block(block), chunks[0]);
 
     // Footer
-    let footer_lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            " ◀ 戻る [-]",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )),
-    ];
-    cs.add_row_target(chunks[1], chunks[1].y + 2, BACK_FROM_LIFESTYLE);
+    let mut cl_footer = ClickableList::new();
+    cl_footer.push(Line::from(""));
+    cl_footer.push_clickable(Line::from(Span::styled(
+        " ◀ 戻る [-]",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )), BACK_FROM_LIFESTYLE);
+    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0);
+    drop(cs);
+
     let footer_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
     f.render_widget(
-        Paragraph::new(footer_lines).block(footer_block),
+        Paragraph::new(cl_footer.into_lines()).block(footer_block),
         chunks[1],
     );
 }
