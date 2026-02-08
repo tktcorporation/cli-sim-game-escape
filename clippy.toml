@@ -1,0 +1,5 @@
+disallowed-methods = [
+    { path = "cli_sim_game_escape::input::ClickState::add_click_target", reason = "Use TabBar, ClickableList, or ClickableGrid builders instead. See ARCHITECTURE.md Rule 1." },
+    { path = "cli_sim_game_escape::input::ClickState::add_row_target", reason = "Use ClickableList builder instead. See ARCHITECTURE.md Rule 1." },
+    { path = "cli_sim_game_escape::input::ClickState::register_tab_targets", reason = "Use TabBar builder instead. See ARCHITECTURE.md Rule 1." },
+]

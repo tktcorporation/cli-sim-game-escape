@@ -228,6 +228,7 @@ fn main() -> io::Result<()> {
                         Style::default().fg(Color::DarkGray),
                     ));
                     f.render_widget(back, back_area);
+                    #[allow(clippy::disallowed_methods)] // single back button
                     click_state
                         .borrow_mut()
                         .add_click_target(back_area, BACK_TO_MENU);

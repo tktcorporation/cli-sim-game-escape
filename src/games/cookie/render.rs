@@ -502,6 +502,7 @@ fn render_cookie_display(
 
     // Register the whole cookie display area as a click target
     let mut cs = click_state.borrow_mut();
+    #[allow(clippy::disallowed_methods)] // full-area single target, no builder needed
     cs.add_click_target(area, CLICK_COOKIE);
 }
 
@@ -658,6 +659,7 @@ fn render_buffs_and_golden(
 
         // Register golden cookie click target
         let mut cs = click_state.borrow_mut();
+        #[allow(clippy::disallowed_methods)] // transient single target
         cs.add_click_target(area, CLAIM_GOLDEN);
     }
 
@@ -901,12 +903,11 @@ fn render_upgrades(
     click_state: &Rc<RefCell<ClickState>>,
 ) {
     // Show unpurchased upgrades, distinguishing unlocked vs locked
+    // Uses shared filter method (ARCHITECTURE.md Rule 2)
     let available: Vec<(usize, &super::state::Upgrade, bool)> = state
-        .upgrades
-        .iter()
-        .enumerate()
-        .filter(|(_, u)| !u.purchased)
-        .map(|(i, u)| (i, u, state.is_upgrade_unlocked(u)))
+        .available_upgrades()
+        .into_iter()
+        .map(|i| (i, &state.upgrades[i], state.is_upgrade_unlocked(&state.upgrades[i])))
         .collect();
 
     let mut cl = ClickableList::new();
@@ -997,6 +998,8 @@ fn render_research(
     )));
 
     let max_tier = state.research_max_tier();
+    // NOTE: key_idx below enumerates the same set as state.visible_research()
+    // (ARCHITECTURE.md Rule 2). If this filter changes, update visible_research() too.
     for node in &state.research_nodes {
         // Skip nodes from the wrong path (if path already chosen)
         if state.research_path != ResearchPath::None && node.path != state.research_path {
@@ -1137,8 +1140,11 @@ fn render_milestones(
     let avail = area.height.saturating_sub(2 + header_lines + effects_lines) as usize;
 
     // === Ready milestones (show all, top priority — clickable) ===
-    let ready_milestones: Vec<&super::state::Milestone> = state.milestones.iter()
-        .filter(|m| m.status == MilestoneStatus::Ready)
+    // Uses shared filter method (ARCHITECTURE.md Rule 2)
+    let ready_indices = state.ready_milestones();
+    let ready_milestones: Vec<&super::state::Milestone> = ready_indices
+        .iter()
+        .map(|&i| &state.milestones[i])
         .collect();
     for (i, milestone) in ready_milestones.iter().enumerate() {
         cl.push_clickable(Line::from(vec![
@@ -1469,6 +1475,7 @@ fn render_prestige(
         );
         f.render_widget(indicator, indicator_area);
         let mut cs = click_state.borrow_mut();
+        #[allow(clippy::disallowed_methods)] // scroll indicator, single row target
         cs.add_row_target(content_area, content_area.y, PRESTIGE_SCROLL_UP);
     }
 
@@ -1486,6 +1493,7 @@ fn render_prestige(
         );
         f.render_widget(indicator, indicator_area);
         let mut cs = click_state.borrow_mut();
+        #[allow(clippy::disallowed_methods)] // scroll indicator, single row target
         cs.add_row_target(content_area, bottom_row, PRESTIGE_SCROLL_DOWN);
     }
 }

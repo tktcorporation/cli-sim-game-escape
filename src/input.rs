@@ -68,6 +68,7 @@ impl ClickState {
     /// covers its label plus half of the adjacent separator(s).  The first tab
     /// extends to the left edge and the last tab extends to the right edge of
     /// the area, ensuring full coverage with no gaps.
+    #[allow(clippy::disallowed_methods)] // builder internals
     pub fn register_tab_targets(
         &mut self,
         tab_widths: &[(u16, u16)],

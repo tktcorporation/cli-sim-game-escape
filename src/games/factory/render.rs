@@ -10,7 +10,7 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
-use crate::widgets::ClickableList;
+use crate::widgets::{ClickableGrid, ClickableList};
 
 use super::actions::*;
 use super::grid::{anchor_of, machine_at, Cell, MachineKind, MinerMode, GRID_H, GRID_W, VIEW_H, VIEW_W};
@@ -491,26 +491,18 @@ fn render_grid(
         " Grid ({},{}) {}×{} ",
         state.cursor_x, state.cursor_y, GRID_W, GRID_H
     );
-    let widget = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Green))
-            .title(title),
-    );
-    f.render_widget(widget, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green))
+        .title(title);
 
-    // Register click targets for each grid cell in viewport
+    // Register click targets via ClickableGrid builder (co-located with render)
+    let grid = ClickableGrid::new(VIEW_W, VIEW_H, GRID_CLICK_BASE, 2);
     let mut cs = click_state.borrow_mut();
-    let vx = state.viewport_x;
-    let vy = state.viewport_y;
-    for gy in vy..(vy + VIEW_H).min(GRID_H) {
-        for gx in vx..(vx + VIEW_W).min(GRID_W) {
-            let term_col = area.x + 1 + 1 + (gx - vx) as u16 * 2; // border + padding + 2 chars per cell
-            let term_row = area.y + 1 + (gy - vy) as u16; // border
-            let action_id = GRID_CLICK_BASE + ((gy - vy) * VIEW_W + (gx - vx)) as u16;
-            cs.add_click_target(Rect::new(term_col, term_row, 2, 1), action_id);
-        }
-    }
+    grid.register_targets(area, &block, &mut cs, 1); // padding_left=1 for leading space
+
+    let widget = Paragraph::new(lines).block(block);
+    f.render_widget(widget, area);
 }
 
 /// Per-kind aggregated stats for display.

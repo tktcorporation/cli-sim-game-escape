@@ -16,8 +16,9 @@ use crate::games::Game;
 use crate::input::{ClickState, InputEvent};
 
 use actions::*;
-use grid::VIEW_W;
 use state::{FactoryState, PlacementTool};
+
+use crate::widgets::ClickableGrid;
 
 pub struct FactoryGame {
     pub state: FactoryState,
@@ -65,14 +66,13 @@ impl FactoryGame {
                 true
             }
             id if id >= GRID_CLICK_BASE => {
-                let offset = (id - GRID_CLICK_BASE) as usize;
-                let vy_offset = offset / VIEW_W;
-                let vx_offset = offset % VIEW_W;
-                let target_x = self.state.viewport_x + vx_offset;
-                let target_y = self.state.viewport_y + vy_offset;
-                self.state.cursor_x = target_x;
-                self.state.cursor_y = target_y;
-                logic::place(&mut self.state);
+                if let Some((vx_offset, vy_offset)) =
+                    ClickableGrid::decode(GRID_CLICK_BASE, grid::VIEW_W, id)
+                {
+                    self.state.cursor_x = self.state.viewport_x + vx_offset;
+                    self.state.cursor_y = self.state.viewport_y + vy_offset;
+                    logic::place(&mut self.state);
+                }
                 true
             }
             _ => false,

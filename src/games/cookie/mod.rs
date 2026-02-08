@@ -100,10 +100,7 @@ impl CookieGame {
             }
             id if (BUY_UPGRADE_BASE..BUY_UPGRADE_BASE + 26).contains(&id) => {
                 let display_idx = (id - BUY_UPGRADE_BASE) as usize;
-                let available: Vec<usize> = self.state.upgrades.iter().enumerate()
-                    .filter(|(_, u)| !u.purchased)
-                    .map(|(i, _)| i)
-                    .collect();
+                let available = self.state.available_upgrades();
                 if let Some(&real_idx) = available.get(display_idx) {
                     logic::buy_upgrade(&mut self.state, real_idx);
                 }
@@ -111,17 +108,7 @@ impl CookieGame {
             }
             id if (BUY_RESEARCH_BASE..BUY_RESEARCH_BASE + 26).contains(&id) => {
                 let display_idx = (id - BUY_RESEARCH_BASE) as usize;
-                let visible: Vec<usize> = self.state.research_nodes.iter().enumerate()
-                    .filter(|(_, n)| {
-                        if self.state.research_path != state::ResearchPath::None
-                            && n.path != self.state.research_path
-                        {
-                            return false;
-                        }
-                        !n.purchased
-                    })
-                    .map(|(i, _)| i)
-                    .collect();
+                let visible = self.state.visible_research();
                 if let Some(&real_idx) = visible.get(display_idx) {
                     logic::buy_research(&mut self.state, real_idx);
                 }
@@ -129,10 +116,7 @@ impl CookieGame {
             }
             id if (CLAIM_MILESTONE_BASE..CLAIM_MILESTONE_BASE + 26).contains(&id) => {
                 let display_idx = (id - CLAIM_MILESTONE_BASE) as usize;
-                let ready: Vec<usize> = self.state.milestones.iter().enumerate()
-                    .filter(|(_, m)| m.status == state::MilestoneStatus::Ready)
-                    .map(|(i, _)| i)
-                    .collect();
+                let ready = self.state.ready_milestones();
                 if let Some(&real_idx) = ready.get(display_idx) {
                     logic::claim_milestone(&mut self.state, real_idx);
                 }
@@ -357,14 +341,7 @@ impl CookieGame {
             }
             'a'..='z' if self.state.show_milestones => {
                 let display_idx = (key as u8 - b'a') as usize;
-                let ready: Vec<usize> = self
-                    .state
-                    .milestones
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, m)| m.status == state::MilestoneStatus::Ready)
-                    .map(|(i, _)| i)
-                    .collect();
+                let ready = self.state.ready_milestones();
                 if let Some(&real_idx) = ready.get(display_idx) {
                     logic::claim_milestone(&mut self.state, real_idx);
                 }
@@ -376,39 +353,16 @@ impl CookieGame {
             }
             'a'..='z' if self.state.show_upgrades => {
                 let display_idx = (key as u8 - b'a') as usize;
-                let available_upgrades: Vec<usize> = self
-                    .state
-                    .upgrades
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, u)| !u.purchased)
-                    .map(|(i, _)| i)
-                    .collect();
-
-                if let Some(&real_idx) = available_upgrades.get(display_idx) {
+                let available = self.state.available_upgrades();
+                if let Some(&real_idx) = available.get(display_idx) {
                     logic::buy_upgrade(&mut self.state, real_idx);
                 }
                 true
             }
             'a'..='z' if self.state.show_research => {
                 let display_idx = (key as u8 - b'a') as usize;
-                let visible_research: Vec<usize> = self
-                    .state
-                    .research_nodes
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, n)| {
-                        if self.state.research_path != state::ResearchPath::None
-                            && n.path != self.state.research_path
-                        {
-                            return false;
-                        }
-                        !n.purchased
-                    })
-                    .map(|(i, _)| i)
-                    .collect();
-
-                if let Some(&real_idx) = visible_research.get(display_idx) {
+                let visible = self.state.visible_research();
+                if let Some(&real_idx) = visible.get(display_idx) {
                     logic::buy_research(&mut self.state, real_idx);
                 }
                 true

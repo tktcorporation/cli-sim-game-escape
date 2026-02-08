@@ -8,6 +8,12 @@
 //!
 //! - [`TabBar`] — Horizontal tab navigation (rendering + click targets).
 //! - [`ClickableList`] — Vertical list with per-row click targets.
+//! - [`ClickableGrid`] — 2D grid with per-cell click targets.
+//!
+//! These builders are the **only** sanctioned way to register click targets.
+//! Direct calls to `ClickState::add_click_target` / `add_row_target` are
+//! banned by clippy (see `clippy.toml`).
+#![allow(clippy::disallowed_methods)]
 
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::style::{Color, Style};
@@ -240,6 +246,105 @@ impl<'a> ClickableList<'a> {
             }
         }
     }
+
+    /// Register click targets using a [`Block`] to automatically derive offsets.
+    ///
+    /// This eliminates the need to manually calculate `top_offset` and
+    /// `bottom_offset` — they are computed from the block's borders.
+    ///
+    /// * `area` — the widget area (including borders).
+    /// * `block` — the block wrapping the content (used to compute inner area).
+    /// * `cs` — mutable reference to the shared click state.
+    /// * `scroll` — vertical scroll offset in visual rows (0 if not scrollable).
+    /// * `inner_width` — content width for wrap calculation. Pass `0` when the
+    ///   widget does **not** use `Wrap`.
+    #[allow(dead_code)] // public API for future use per ARCHITECTURE.md Rule 4
+    pub fn register_targets_with_block(
+        &self,
+        area: Rect,
+        block: &Block,
+        cs: &mut ClickState,
+        scroll: u16,
+        inner_width: u16,
+    ) {
+        let inner = block.inner(area);
+        let top_offset = inner.y.saturating_sub(area.y);
+        let bottom_offset = (area.y + area.height).saturating_sub(inner.y + inner.height);
+        self.register_targets(area, cs, top_offset, bottom_offset, scroll, inner_width);
+    }
+}
+
+// ── ClickableGrid ─────────────────────────────────────────────
+
+/// A builder for 2D grids with per-cell click targets.
+///
+/// Encapsulates the coordinate→action_id mapping so that render and input
+/// use the same formula.  The action ID for cell `(col, row)` in the
+/// viewport is `base + row * view_w + col`.
+///
+/// # Example
+/// ```ignore
+/// let mut grid = ClickableGrid::new(VIEW_W, VIEW_H, GRID_CLICK_BASE, 2);
+/// // ... render cells ...
+/// grid.register_targets(area, &block, &mut cs);
+/// ```
+pub struct ClickableGrid {
+    view_w: usize,
+    view_h: usize,
+    action_base: u16,
+    /// Display width of each cell in terminal columns.
+    cell_display_width: u16,
+}
+
+impl ClickableGrid {
+    pub fn new(view_w: usize, view_h: usize, action_base: u16, cell_display_width: u16) -> Self {
+        Self {
+            view_w,
+            view_h,
+            action_base,
+            cell_display_width,
+        }
+    }
+
+    /// Decode an action_id back into viewport-relative `(col, row)`.
+    ///
+    /// Returns `None` if the action_id is not in the grid range.
+    pub fn decode(action_base: u16, view_w: usize, action_id: u16) -> Option<(usize, usize)> {
+        if action_id < action_base {
+            return None;
+        }
+        let offset = (action_id - action_base) as usize;
+        let row = offset / view_w;
+        let col = offset % view_w;
+        Some((col, row))
+    }
+
+    /// Register click targets for all cells in the viewport.
+    ///
+    /// * `area` — the widget area (including borders).
+    /// * `block` — the block wrapping the grid (used to compute inner area).
+    /// * `cs` — mutable reference to the shared click state.
+    /// * `padding_left` — left padding columns before grid content starts.
+    pub fn register_targets(
+        &self,
+        area: Rect,
+        block: &Block,
+        cs: &mut ClickState,
+        padding_left: u16,
+    ) {
+        let inner = block.inner(area);
+        for gy in 0..self.view_h {
+            for gx in 0..self.view_w {
+                let term_col = inner.x + padding_left + gx as u16 * self.cell_display_width;
+                let term_row = inner.y + gy as u16;
+                let action_id = self.action_base + (gy * self.view_w + gx) as u16;
+                cs.add_click_target(
+                    Rect::new(term_col, term_row, self.cell_display_width, 1),
+                    action_id,
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -432,5 +537,74 @@ mod tests {
         assert_eq!(cs.hit_test(5, 0), Some(10));
         // Line 1 at visual row 2, screen row = 2-1 = 1
         assert_eq!(cs.hit_test(5, 1), Some(11));
+    }
+
+    // ── register_targets_with_block tests ─────────────────────
+
+    #[test]
+    fn register_targets_with_block_borders_all() {
+        let mut cl = ClickableList::new();
+        cl.push_clickable(Line::from("item 0"), 10);
+        cl.push_clickable(Line::from("item 1"), 11);
+
+        let block = Block::default().borders(ratzilla::ratatui::widgets::Borders::ALL);
+        let area = Rect::new(0, 5, 80, 10);
+        let mut cs = ClickState::new();
+        cl.register_targets_with_block(area, &block, &mut cs, 0, 0);
+
+        // Borders::ALL → top_offset=1, bottom_offset=1
+        // item 0 → row 6, item 1 → row 7
+        assert_eq!(cs.hit_test(10, 6), Some(10));
+        assert_eq!(cs.hit_test(10, 7), Some(11));
+        assert_eq!(cs.hit_test(10, 5), None); // top border
+    }
+
+    #[test]
+    fn register_targets_with_block_no_borders() {
+        let mut cl = ClickableList::new();
+        cl.push_clickable(Line::from("item 0"), 10);
+
+        let block = Block::default();
+        let area = Rect::new(0, 0, 80, 10);
+        let mut cs = ClickState::new();
+        cl.register_targets_with_block(area, &block, &mut cs, 0, 0);
+
+        // No borders → top_offset=0
+        assert_eq!(cs.hit_test(10, 0), Some(10));
+    }
+
+    // ── ClickableGrid tests ───────────────────────────────────
+
+    #[test]
+    fn clickable_grid_register_targets() {
+        let grid = ClickableGrid::new(3, 2, 100, 2);
+        let block = Block::default().borders(ratzilla::ratatui::widgets::Borders::ALL);
+        let area = Rect::new(0, 0, 20, 10);
+        let mut cs = ClickState::new();
+        grid.register_targets(area, &block, &mut cs, 1);
+
+        // 3×2 grid = 6 targets
+        assert_eq!(cs.targets.len(), 6);
+
+        // inner = (1, 1, 18, 8) with Borders::ALL
+        // cell (0,0): term_col = 1 + 1 + 0*2 = 2, term_row = 1 + 0 = 1, action_id = 100
+        assert_eq!(cs.hit_test(2, 1), Some(100));
+        // cell (1,0): term_col = 1 + 1 + 1*2 = 4, action_id = 101
+        assert_eq!(cs.hit_test(4, 1), Some(101));
+        // cell (0,1): term_row = 1 + 1 = 2, action_id = 103
+        assert_eq!(cs.hit_test(2, 2), Some(103));
+    }
+
+    #[test]
+    fn clickable_grid_decode() {
+        let view_w = 5;
+        let base = 100;
+
+        // cell (2, 3) → action_id = 100 + 3*5 + 2 = 117
+        assert_eq!(ClickableGrid::decode(base, view_w, 117), Some((2, 3)));
+        // cell (0, 0) → action_id = 100
+        assert_eq!(ClickableGrid::decode(base, view_w, 100), Some((0, 0)));
+        // Below base → None
+        assert_eq!(ClickableGrid::decode(base, view_w, 99), None);
     }
 }
