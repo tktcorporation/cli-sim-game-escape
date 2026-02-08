@@ -776,7 +776,7 @@ fn render_tool_panel(
 
     // Register click targets (Borders::ALL → top=1, bottom=1)
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, 1, 1, 0);
+    cl.register_targets(area, &mut cs, 1, 1, 0, 0);
     drop(cs);
 
     let widget = Paragraph::new(cl.into_lines()).block(

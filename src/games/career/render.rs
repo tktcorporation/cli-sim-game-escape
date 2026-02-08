@@ -408,7 +408,7 @@ fn render_actions(
     let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
 
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, top_offset, bottom_offset, 0);
+    cl.register_targets(area, &mut cs, top_offset, bottom_offset, 0, 0);
     drop(cs);
 
     let block = Block::default()
@@ -529,7 +529,7 @@ fn render_training(
     let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
     let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(chunks[0], &mut cs, top_offset, bottom_offset, 0);
+    cl.register_targets(chunks[0], &mut cs, top_offset, bottom_offset, 0, 0);
 
     let block = Block::default()
         .borders(borders)
@@ -547,7 +547,7 @@ fn render_training(
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     )), BACK_FROM_TRAINING);
-    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0);
+    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0, 0);
     drop(cs);
 
     let footer_block = Block::default()
@@ -659,7 +659,7 @@ fn render_job_market(
     let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
     let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(chunks[0], &mut cs, top_offset, bottom_offset, 0);
+    cl.register_targets(chunks[0], &mut cs, top_offset, bottom_offset, 0, 0);
 
     let block = Block::default()
         .borders(borders)
@@ -677,7 +677,7 @@ fn render_job_market(
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     )), BACK_FROM_JOBS);
-    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0);
+    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0, 0);
     drop(cs);
 
     let footer_block = Block::default()
@@ -869,7 +869,7 @@ fn render_invest(
     let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
     let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0);
+    cl.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0, 0);
 
     let action_block = Block::default()
         .borders(borders)
@@ -889,7 +889,7 @@ fn render_invest(
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     )), BACK_FROM_INVEST);
-    cl_footer.register_targets(chunks[2], &mut cs, top_offset, bottom_offset, 0);
+    cl_footer.register_targets(chunks[2], &mut cs, top_offset, bottom_offset, 0, 0);
     drop(cs);
 
     let footer_block = Block::default()
@@ -982,7 +982,7 @@ fn render_budget(
     let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
     let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
     let mut cs = click_state.borrow_mut();
-    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0);
+    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0, 0);
     drop(cs);
 
     let footer_block = Block::default()
@@ -1382,7 +1382,7 @@ fn render_report(
     let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
     let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
     let mut cs = click_state.borrow_mut();
-    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0);
+    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0, 0);
     drop(cs);
 
     let footer_block = Block::default()
@@ -1482,7 +1482,7 @@ fn render_lifestyle(
     let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
     let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(chunks[0], &mut cs, top_offset, bottom_offset, 0);
+    cl.register_targets(chunks[0], &mut cs, top_offset, bottom_offset, 0, 0);
 
     let block = Block::default()
         .borders(borders)
@@ -1499,7 +1499,7 @@ fn render_lifestyle(
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     )), BACK_FROM_LIFESTYLE);
-    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0);
+    cl_footer.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0, 0);
     drop(cs);
 
     let footer_block = Block::default()

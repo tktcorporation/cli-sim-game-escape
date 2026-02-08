@@ -120,7 +120,7 @@ impl<'a> TabBar<'a> {
 /// let mut cl = ClickableList::new();
 /// cl.push(Line::from("Header (not clickable)"));
 /// cl.push_clickable(Line::from("Buy item"), BUY_ITEM_ACTION);
-/// cl.register_targets(area, &mut cs, 1, 1, 0);
+/// cl.register_targets(area, &mut cs, 1, 1, 0, 0);
 /// let widget = Paragraph::new(cl.into_lines()).block(block);
 /// f.render_widget(widget, area);
 /// ```
@@ -174,7 +174,10 @@ impl<'a> ClickableList<'a> {
     /// * `cs` — mutable reference to the shared click state.
     /// * `top_offset` — rows before content (e.g. 1 for a top border).
     /// * `bottom_offset` — rows after content (e.g. 1 for a bottom border).
-    /// * `scroll` — vertical scroll offset (0 if not scrollable).
+    /// * `scroll` — vertical scroll offset in visual rows (0 if not scrollable).
+    /// * `inner_width` — content width for wrap calculation. Pass `0` when the
+    ///   widget does **not** use `Wrap`, in which case each logical line is
+    ///   assumed to occupy exactly one visual row.
     pub fn register_targets(
         &self,
         area: Rect,
@@ -182,19 +185,59 @@ impl<'a> ClickableList<'a> {
         top_offset: u16,
         bottom_offset: u16,
         scroll: u16,
+        inner_width: u16,
     ) {
         let content_y = area.y + top_offset;
         let content_end = area.y + area.height.saturating_sub(bottom_offset);
 
+        if inner_width == 0 {
+            // Legacy path: 1 logical line = 1 visual row (no wrapping).
+            for &(line_idx, action_id) in &self.actions {
+                if line_idx < scroll {
+                    continue;
+                }
+                let row = content_y + (line_idx - scroll);
+                if row >= content_end {
+                    continue;
+                }
+                cs.add_row_target(area, row, action_id);
+            }
+            return;
+        }
+
+        // Wrap-aware path: compute the visual row offset for each logical line.
+        let w = inner_width as usize;
+        let mut visual_starts: Vec<u16> = Vec::with_capacity(self.lines.len());
+        let mut visual_heights: Vec<u16> = Vec::with_capacity(self.lines.len());
+        let mut cumulative: u16 = 0;
+        for line in &self.lines {
+            visual_starts.push(cumulative);
+            let lw = line.width();
+            let h = if lw <= w { 1 } else { lw.div_ceil(w) as u16 };
+            visual_heights.push(h);
+            cumulative += h;
+        }
+
         for &(line_idx, action_id) in &self.actions {
-            if line_idx < scroll {
+            let li = line_idx as usize;
+            if li >= self.lines.len() {
                 continue;
             }
-            let row = content_y + (line_idx - scroll);
-            if row >= content_end {
-                continue;
+            let vstart = visual_starts[li];
+            let vheight = visual_heights[li];
+
+            // Register a click target for every visual row this line spans.
+            for r in 0..vheight {
+                let vr = vstart + r;
+                if vr < scroll {
+                    continue;
+                }
+                let screen_row = content_y + (vr - scroll);
+                if screen_row >= content_end {
+                    break;
+                }
+                cs.add_row_target(area, screen_row, action_id);
             }
-            cs.add_row_target(area, row, action_id);
         }
     }
 }
@@ -235,7 +278,7 @@ mod tests {
         // area with Borders::ALL → top_offset=1, bottom_offset=1
         let area = Rect::new(0, 5, 80, 10);
         let mut cs = ClickState::new();
-        cl.register_targets(area, &mut cs, 1, 1, 0);
+        cl.register_targets(area, &mut cs, 1, 1, 0, 0);
 
         // "header" is line 0, not clickable
         // "item 0" is line 1 → row = 5 + 1 + 1 = 7
@@ -260,7 +303,7 @@ mod tests {
         let area = Rect::new(0, 10, 80, 5);
         let mut cs = ClickState::new();
         // scroll=2: items 0 and 1 are scrolled out of view
-        cl.register_targets(area, &mut cs, 0, 1, 2);
+        cl.register_targets(area, &mut cs, 0, 1, 2, 0);
 
         // item 2 (line_idx=2) → row = 10 + 0 + (2-2) = 10
         // item 3 (line_idx=3) → row = 10 + 0 + (3-2) = 11
@@ -282,7 +325,7 @@ mod tests {
         // Small area with borders: only 3 content rows (height=5, border top+bottom)
         let area = Rect::new(0, 0, 80, 5);
         let mut cs = ClickState::new();
-        cl.register_targets(area, &mut cs, 1, 1, 0);
+        cl.register_targets(area, &mut cs, 1, 1, 0, 0);
 
         // content rows: y=1, y=2, y=3 (3 rows)
         assert_eq!(cs.targets.len(), 3);
@@ -299,7 +342,7 @@ mod tests {
 
         let area = Rect::new(0, 0, 80, 10);
         let mut cs = ClickState::new();
-        cl.register_targets(area, &mut cs, 1, 1, 0);
+        cl.register_targets(area, &mut cs, 1, 1, 0, 0);
         assert_eq!(cs.targets.len(), 0);
     }
 
@@ -325,10 +368,69 @@ mod tests {
 
         let area = Rect::new(0, 0, 80, 10);
         let mut cs = ClickState::new();
-        cl.register_targets(area, &mut cs, 1, 1, 0);
+        cl.register_targets(area, &mut cs, 1, 1, 0, 0);
 
         // "buy item" is line 2 → row = 0 + 1 + 2 = 3
         assert_eq!(cs.hit_test(10, 3), Some(42));
         assert_eq!(cs.hit_test(10, 2), None); // header 2, not clickable
+    }
+
+    #[test]
+    fn clickable_list_wrap_aware_targets() {
+        // When inner_width is specified, lines wider than inner_width occupy
+        // multiple visual rows and push subsequent targets down.
+        let mut cl = ClickableList::new();
+        // Line 0: 20 chars, fits in 10-wide → 2 visual rows when wrapped
+        cl.push(Line::from("12345678901234567890"));
+        // Line 1: clickable, 5 chars, fits in 1 row
+        cl.push_clickable(Line::from("item0"), 10);
+
+        // area: y=0, height=10, no borders
+        let area = Rect::new(0, 0, 12, 10); // inner_width = 12 - 2 = 10
+        let mut cs = ClickState::new();
+        cl.register_targets(area, &mut cs, 0, 0, 0, 10);
+
+        // Line 0 wraps to 2 visual rows (row 0, row 1)
+        // Line 1 starts at visual row 2
+        assert_eq!(cs.hit_test(5, 2), Some(10));
+        assert_eq!(cs.hit_test(5, 0), None); // header row 1
+        assert_eq!(cs.hit_test(5, 1), None); // header row 2 (wrapped)
+    }
+
+    #[test]
+    fn clickable_list_wrap_covers_all_rows() {
+        // A clickable line that wraps should be clickable on all its visual rows.
+        let mut cl = ClickableList::new();
+        // 30 chars wide, wraps to 3 rows in 10-wide area
+        cl.push_clickable(Line::from("123456789012345678901234567890"), 42);
+
+        let area = Rect::new(0, 0, 12, 10);
+        let mut cs = ClickState::new();
+        cl.register_targets(area, &mut cs, 0, 0, 0, 10);
+
+        // All 3 visual rows should be clickable
+        assert_eq!(cs.hit_test(5, 0), Some(42));
+        assert_eq!(cs.hit_test(5, 1), Some(42));
+        assert_eq!(cs.hit_test(5, 2), Some(42));
+        assert_eq!(cs.hit_test(5, 3), None);
+    }
+
+    #[test]
+    fn clickable_list_wrap_with_scroll() {
+        let mut cl = ClickableList::new();
+        // Line 0: 20 chars → 2 visual rows in 10-wide
+        cl.push_clickable(Line::from("12345678901234567890"), 10);
+        // Line 1: 5 chars → 1 visual row
+        cl.push_clickable(Line::from("item1"), 11);
+
+        let area = Rect::new(0, 0, 12, 10);
+        let mut cs = ClickState::new();
+        // scroll=1: skip first visual row
+        cl.register_targets(area, &mut cs, 0, 0, 1, 10);
+
+        // Line 0 row 0 scrolled out, row 1 at screen row 0
+        assert_eq!(cs.hit_test(5, 0), Some(10));
+        // Line 1 at visual row 2, screen row = 2-1 = 1
+        assert_eq!(cs.hit_test(5, 1), Some(11));
     }
 }
