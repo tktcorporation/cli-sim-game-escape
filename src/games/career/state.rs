@@ -1,4 +1,12 @@
 //! Career Simulator game state.
+//!
+//! ## v3 リデザイン (AP廃止・経済リバランス)
+//!
+//! - AP制を廃止し、各アクションは月1回の制限のみ
+//! - 初期資金 ¥5,000 で1ターン目から選択肢がある
+//! - 経済バランスを全面調整し、序盤から数字の成長を実感できるようにした
+//! - ゲーム期間を60ヶ月に短縮 (1ゲーム約10-15分)
+//! - 「次の目標」表示でプレイヤーに常に明確な指針を提示
 
 /// Available job types, ordered by progression tier.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -47,9 +55,10 @@ pub struct JobInfo {
 
 pub fn job_info(kind: JobKind) -> JobInfo {
     match kind {
+        // Tier 1 — 入門
         JobKind::Freeter => JobInfo {
             name: "フリーター",
-            salary: 8.0,
+            salary: 10.0, // ¥3,000/月
             req_technical: 0.0,
             req_social: 0.0,
             req_management: 0.0,
@@ -63,7 +72,7 @@ pub fn job_info(kind: JobKind) -> JobInfo {
         },
         JobKind::OfficeClerk => JobInfo {
             name: "事務員",
-            salary: 20.0,
+            salary: 25.0, // ¥7,500/月
             req_technical: 0.0,
             req_social: 0.0,
             req_management: 0.0,
@@ -73,119 +82,123 @@ pub fn job_info(kind: JobKind) -> JobInfo {
             gain_technical: 0.0,
             gain_social: 0.0,
             gain_management: 0.0,
-            gain_knowledge: 0.005,
+            gain_knowledge: 0.008,
         },
+        // Tier 2 — 専門職
         JobKind::Programmer => JobInfo {
             name: "プログラマー",
-            salary: 50.0,
-            req_technical: 15.0,
+            salary: 60.0, // ¥18,000/月
+            req_technical: 12.0,
             req_social: 0.0,
             req_management: 0.0,
             req_knowledge: 0.0,
             req_reputation: 0.0,
             req_money: 0.0,
-            gain_technical: 0.01,
+            gain_technical: 0.012,
             gain_social: 0.0,
             gain_management: 0.0,
             gain_knowledge: 0.0,
         },
         JobKind::Designer => JobInfo {
             name: "デザイナー",
-            salary: 45.0,
-            req_technical: 10.0,
-            req_social: 8.0,
+            salary: 50.0, // ¥15,000/月
+            req_technical: 8.0,
+            req_social: 5.0,
             req_management: 0.0,
             req_knowledge: 0.0,
             req_reputation: 0.0,
             req_money: 0.0,
-            gain_technical: 0.005,
-            gain_social: 0.005,
+            gain_technical: 0.006,
+            gain_social: 0.006,
             gain_management: 0.0,
             gain_knowledge: 0.0,
         },
         JobKind::Sales => JobInfo {
             name: "営業",
-            salary: 55.0,
+            salary: 65.0, // ¥19,500/月
             req_technical: 0.0,
-            req_social: 15.0,
+            req_social: 12.0,
             req_management: 0.0,
             req_knowledge: 0.0,
             req_reputation: 0.0,
             req_money: 0.0,
             gain_technical: 0.0,
-            gain_social: 0.01,
+            gain_social: 0.012,
             gain_management: 0.0,
             gain_knowledge: 0.0,
         },
         JobKind::Accountant => JobInfo {
             name: "経理",
-            salary: 40.0,
+            salary: 55.0, // ¥16,500/月
             req_technical: 0.0,
             req_social: 0.0,
             req_management: 5.0,
-            req_knowledge: 15.0,
+            req_knowledge: 12.0,
             req_reputation: 0.0,
             req_money: 0.0,
             gain_technical: 0.0,
             gain_social: 0.0,
-            gain_management: 0.005,
-            gain_knowledge: 0.005,
+            gain_management: 0.006,
+            gain_knowledge: 0.006,
         },
+        // Tier 3 — 管理職・上位専門職
         JobKind::Manager => JobInfo {
             name: "マネージャー",
-            salary: 85.0,
+            salary: 100.0, // ¥30,000/月
             req_technical: 0.0,
-            req_social: 12.0,
-            req_management: 25.0,
+            req_social: 10.0,
+            req_management: 18.0,
             req_knowledge: 0.0,
             req_reputation: 0.0,
             req_money: 0.0,
             gain_technical: 0.0,
             gain_social: 0.0,
-            gain_management: 0.01,
+            gain_management: 0.012,
             gain_knowledge: 0.0,
         },
         JobKind::Consultant => JobInfo {
             name: "コンサルタント",
-            salary: 130.0,
+            salary: 150.0, // ¥45,000/月
             req_technical: 0.0,
-            req_social: 25.0,
+            req_social: 20.0,
             req_management: 0.0,
-            req_knowledge: 20.0,
+            req_knowledge: 15.0,
             req_reputation: 0.0,
             req_money: 0.0,
             gain_technical: 0.0,
-            gain_social: 0.005,
+            gain_social: 0.006,
             gain_management: 0.0,
-            gain_knowledge: 0.005,
+            gain_knowledge: 0.006,
         },
+        // Tier 4 — 上級職
         JobKind::Director => JobInfo {
             name: "部長",
-            salary: 170.0,
+            salary: 200.0, // ¥60,000/月
             req_technical: 0.0,
-            req_social: 22.0,
-            req_management: 40.0,
+            req_social: 18.0,
+            req_management: 30.0,
             req_knowledge: 0.0,
-            req_reputation: 35.0,
+            req_reputation: 25.0,
             req_money: 0.0,
             gain_technical: 0.0,
-            gain_social: 0.005,
-            gain_management: 0.005,
+            gain_social: 0.006,
+            gain_management: 0.006,
             gain_knowledge: 0.0,
         },
+        // Tier 5 — 最上位
         JobKind::Entrepreneur => JobInfo {
             name: "起業家",
-            salary: 400.0,
-            req_technical: 30.0,
-            req_social: 30.0,
-            req_management: 30.0,
-            req_knowledge: 30.0,
-            req_reputation: 50.0,
-            req_money: 100_000.0,
-            gain_technical: 0.003,
-            gain_social: 0.003,
-            gain_management: 0.003,
-            gain_knowledge: 0.003,
+            salary: 400.0, // ¥120,000/月
+            req_technical: 25.0,
+            req_social: 25.0,
+            req_management: 25.0,
+            req_knowledge: 25.0,
+            req_reputation: 40.0,
+            req_money: 80_000.0,
+            gain_technical: 0.004,
+            gain_social: 0.004,
+            gain_management: 0.004,
+            gain_knowledge: 0.004,
         },
     }
 }
@@ -201,11 +214,24 @@ pub struct TrainingInfo {
     pub reputation: f64,
 }
 
-pub const TRAININGS: [TrainingInfo; 5] = [
+/// Number of training options.
+pub const TRAINING_COUNT: usize = 5;
+
+/// Training options — reordered so 独学 (free) is first for better onboarding.
+pub const TRAININGS: [TrainingInfo; TRAINING_COUNT] = [
+    TrainingInfo {
+        name: "独学する",
+        cost: 0.0,
+        technical: 0.0,
+        social: 0.0,
+        management: 0.0,
+        knowledge: 2.0,
+        reputation: 0.0,
+    },
     TrainingInfo {
         name: "プログラミング講座",
-        cost: 3_000.0,
-        technical: 3.0,
+        cost: 2_000.0,
+        technical: 4.0,
         social: 0.0,
         management: 0.0,
         knowledge: 0.0,
@@ -213,39 +239,30 @@ pub const TRAININGS: [TrainingInfo; 5] = [
     },
     TrainingInfo {
         name: "ビジネスセミナー",
-        cost: 3_000.0,
+        cost: 2_000.0,
         technical: 0.0,
-        social: 3.0,
+        social: 4.0,
         management: 0.0,
         knowledge: 0.0,
         reputation: 0.0,
     },
     TrainingInfo {
         name: "マネジメント研修",
-        cost: 5_000.0,
+        cost: 3_000.0,
         technical: 0.0,
         social: 0.0,
-        management: 2.0,
+        management: 3.0,
         knowledge: 0.0,
         reputation: 0.0,
     },
     TrainingInfo {
-        name: "独学する",
-        cost: 0.0,
-        technical: 0.0,
-        social: 0.0,
-        management: 0.0,
-        knowledge: 1.0,
-        reputation: 0.0,
-    },
-    TrainingInfo {
         name: "資格を取る",
-        cost: 8_000.0,
+        cost: 5_000.0,
         technical: 0.0,
         social: 0.0,
         management: 0.0,
-        knowledge: 4.0,
-        reputation: 5.0,
+        knowledge: 5.0,
+        reputation: 4.0,
     },
 ];
 
@@ -290,41 +307,41 @@ pub fn lifestyle_info(level: LifestyleLevel) -> LifestyleInfo {
         LifestyleLevel::Frugal => LifestyleInfo {
             name: "質素",
             level: 1,
-            living_cost: 1_200.0,
-            rent: 800.0,
+            living_cost: 800.0,
+            rent: 700.0,
             skill_efficiency: 0.0,
             rep_bonus: 0.0,
         },
         LifestyleLevel::Normal => LifestyleInfo {
             name: "普通",
             level: 2,
-            living_cost: 2_200.0,
-            rent: 1_200.0,
-            skill_efficiency: 0.15,
+            living_cost: 1_500.0,
+            rent: 1_000.0,
+            skill_efficiency: 0.20,
             rep_bonus: 0.0,
         },
         LifestyleLevel::Comfort => LifestyleInfo {
             name: "快適",
             level: 3,
-            living_cost: 3_500.0,
-            rent: 2_000.0,
-            skill_efficiency: 0.30,
+            living_cost: 2_500.0,
+            rent: 1_500.0,
+            skill_efficiency: 0.35,
             rep_bonus: 0.003,
         },
         LifestyleLevel::Wealthy => LifestyleInfo {
             name: "裕福",
             level: 4,
-            living_cost: 7_000.0,
-            rent: 4_000.0,
-            skill_efficiency: 0.50,
+            living_cost: 5_000.0,
+            rent: 3_000.0,
+            skill_efficiency: 0.55,
             rep_bonus: 0.006,
         },
         LifestyleLevel::Luxury => LifestyleInfo {
             name: "豪華",
             level: 5,
-            living_cost: 13_000.0,
-            rent: 8_000.0,
-            skill_efficiency: 0.70,
+            living_cost: 10_000.0,
+            rent: 6_000.0,
+            skill_efficiency: 0.75,
             rep_bonus: 0.010,
         },
     }
@@ -342,20 +359,20 @@ pub fn invest_info(kind: InvestKind) -> InvestInfo {
         InvestKind::Savings => InvestInfo {
             name: "貯金",
             increment: 1_000.0,
-            // 0.02%/month = 0.0002/month / 300 ticks
-            return_rate: 0.0002 / 300.0,
+            // 0.05%/month
+            return_rate: 0.0005 / 300.0,
         },
         InvestKind::Stocks => InvestInfo {
             name: "株式投資",
             increment: 5_000.0,
-            // 0.35%/month = 0.0035/month / 300 ticks
-            return_rate: 0.0035 / 300.0,
+            // 0.5%/month
+            return_rate: 0.005 / 300.0,
         },
         InvestKind::RealEstate => InvestInfo {
             name: "不動産",
-            increment: 50_000.0,
-            // 1.0%/month = 0.01/month / 300 ticks
-            return_rate: 0.01 / 300.0,
+            increment: 30_000.0,
+            // 1.5%/month
+            return_rate: 0.015 / 300.0,
         },
     }
 }
@@ -382,11 +399,11 @@ pub const TICKS_PER_DAY: u64 = 100;
 /// Ticks per month (game pay period: 300 ticks = 30 seconds).
 pub const TICKS_PER_MONTH: u32 = 300;
 
-/// Maximum months before game over (10 years).
-pub const MAX_MONTHS: u32 = 120;
+/// Maximum months before game over (5 years).
+pub const MAX_MONTHS: u32 = 60;
 
-/// Monthly expense inflation rate (0.8% per month, compounding).
-pub const INFLATION_RATE: f64 = 0.008;
+/// Monthly expense inflation rate (0.3% per month, compounding).
+pub const INFLATION_RATE: f64 = 0.003;
 
 /// Monthly reputation decay (must actively network to maintain).
 pub const REP_DECAY_PER_MONTH: f64 = 0.3;
@@ -432,17 +449,6 @@ pub fn event_description(event: MonthEvent) -> &'static str {
         MonthEvent::MarketCrash => "今月の投資リターンなし…",
         MonthEvent::TaxRefund => "今月の税率が半分！",
         MonthEvent::ExpenseSpike => "今月の生活費が50%増…",
-    }
-}
-
-// ── Action Points ──────────────────────────────────────────────
-
-/// Returns max AP for a given job kind.
-pub fn ap_for_job(kind: JobKind) -> u8 {
-    match kind {
-        JobKind::Freeter | JobKind::OfficeClerk => 2,
-        JobKind::Programmer | JobKind::Designer | JobKind::Sales | JobKind::Accountant => 3,
-        JobKind::Manager | JobKind::Consultant | JobKind::Director | JobKind::Entrepreneur => 4,
     }
 }
 
@@ -508,9 +514,10 @@ pub struct CareerState {
     pub won: bool,
     pub won_message: Option<String>,
 
-    // Action Points system
-    pub ap: u8,
-    pub ap_max: u8,
+    // Per-month action tracking (replaces AP system)
+    pub training_done: [bool; TRAINING_COUNT],
+    pub networked: bool,
+    pub side_job_done: bool,
 
     // Event system
     pub current_event: Option<MonthEvent>,
@@ -519,9 +526,8 @@ pub struct CareerState {
 
 impl CareerState {
     pub fn new() -> Self {
-        let initial_job = JobKind::Freeter;
         Self {
-            money: 0.0,
+            money: 5_000.0,
             total_earned: 0.0,
             total_ticks: 0,
             technical: 0.0,
@@ -529,12 +535,15 @@ impl CareerState {
             management: 0.0,
             knowledge: 0.0,
             reputation: 0.0,
-            job: initial_job,
+            job: JobKind::Freeter,
             savings: 0.0,
             stocks: 0.0,
             real_estate: 0.0,
             screen: Screen::Main,
-            log: vec!["キャリアシミュレーターへようこそ！".into()],
+            log: vec![
+                "キャリアシミュレーターへようこそ！".into(),
+                "研修[1]でスキルを上げ、転職を目指そう".into(),
+            ],
             lifestyle: LifestyleLevel::Frugal,
             month_ticks: 0,
             months_elapsed: 0,
@@ -542,11 +551,37 @@ impl CareerState {
             last_report: MonthlyReport::empty(),
             won: false,
             won_message: None,
-            ap: ap_for_job(initial_job),
-            ap_max: ap_for_job(initial_job),
+            training_done: [false; TRAINING_COUNT],
+            networked: false,
+            side_job_done: false,
             current_event: None,
             event_seed: 42,
         }
+    }
+
+    /// Reset per-month action tracking at month boundary.
+    pub fn reset_monthly_actions(&mut self) {
+        self.training_done = [false; TRAINING_COUNT];
+        self.networked = false;
+        self.side_job_done = false;
+    }
+
+    /// Count how many actions are still available this month.
+    #[cfg(test)]
+    pub fn actions_remaining(&self) -> u8 {
+        let mut count = 0u8;
+        for &done in &self.training_done {
+            if !done {
+                count += 1;
+            }
+        }
+        if !self.networked {
+            count += 1;
+        }
+        if !self.side_job_done {
+            count += 1;
+        }
+        count
     }
 
     #[cfg(test)]
@@ -573,7 +608,7 @@ mod tests {
     #[test]
     fn initial_state() {
         let s = CareerState::new();
-        assert_eq!(s.money, 0.0);
+        assert_eq!(s.money, 5_000.0);
         assert_eq!(s.job, JobKind::Freeter);
         assert_eq!(s.technical, 0.0);
         assert_eq!(s.screen, Screen::Main);
@@ -581,19 +616,32 @@ mod tests {
         assert_eq!(s.lifestyle, LifestyleLevel::Frugal);
         assert_eq!(s.months_elapsed, 0);
         assert!(!s.won);
-        assert_eq!(s.ap, 2);
-        assert_eq!(s.ap_max, 2);
+        assert!(!s.training_done[0]);
+        assert!(!s.networked);
+        assert!(!s.side_job_done);
         assert_eq!(s.current_event, None);
     }
 
     #[test]
-    fn ap_for_job_tiers() {
-        assert_eq!(ap_for_job(JobKind::Freeter), 2);
-        assert_eq!(ap_for_job(JobKind::OfficeClerk), 2);
-        assert_eq!(ap_for_job(JobKind::Programmer), 3);
-        assert_eq!(ap_for_job(JobKind::Sales), 3);
-        assert_eq!(ap_for_job(JobKind::Manager), 4);
-        assert_eq!(ap_for_job(JobKind::Entrepreneur), 4);
+    fn reset_monthly_actions_clears_all() {
+        let mut s = CareerState::new();
+        s.training_done = [true; TRAINING_COUNT];
+        s.networked = true;
+        s.side_job_done = true;
+        s.reset_monthly_actions();
+        assert_eq!(s.training_done, [false; TRAINING_COUNT]);
+        assert!(!s.networked);
+        assert!(!s.side_job_done);
+    }
+
+    #[test]
+    fn actions_remaining_counts_correctly() {
+        let mut s = CareerState::new();
+        // All available: 5 trainings + networking + side job = 7
+        assert_eq!(s.actions_remaining(), 7);
+        s.training_done[0] = true;
+        s.networked = true;
+        assert_eq!(s.actions_remaining(), 5);
     }
 
     #[test]
@@ -656,6 +704,12 @@ mod tests {
     }
 
     #[test]
+    fn first_training_is_free() {
+        assert_eq!(TRAININGS[0].cost, 0.0);
+        assert_eq!(TRAININGS[0].name, "独学する");
+    }
+
+    #[test]
     fn invest_info_valid() {
         for kind in [InvestKind::Savings, InvestKind::Stocks, InvestKind::RealEstate] {
             let info = invest_info(kind);
@@ -690,5 +744,16 @@ mod tests {
         assert_eq!(r.gross_salary, 0.0);
         assert_eq!(r.tax, 0.0);
         assert_eq!(r.cashflow, 0.0);
+    }
+
+    #[test]
+    fn game_duration_is_60_months() {
+        assert_eq!(MAX_MONTHS, 60);
+    }
+
+    #[test]
+    fn starting_money_is_5000() {
+        let s = CareerState::new();
+        assert_eq!(s.money, 5_000.0);
     }
 }

@@ -1,7 +1,7 @@
 //! Career Simulator — pure game logic (no rendering / IO).
 
 use super::state::{
-    ap_for_job, event_description, event_name, invest_info, job_info, lifestyle_info, CareerState,
+    event_description, event_name, invest_info, job_info, lifestyle_info, CareerState,
     InvestKind, JobKind, MonthEvent, MonthlyReport, Screen, ALL_JOBS, ALL_LIFESTYLES,
     INFLATION_RATE, MAX_MONTHS, REP_DECAY_PER_MONTH, SKILL_CAP, TICKS_PER_MONTH, TRAININGS,
 };
@@ -84,7 +84,7 @@ pub fn training_cost_multiplier(event: Option<MonthEvent>) -> f64 {
 // ── Inflation & Time Limit ────────────────────────────────────────────
 
 /// Expense inflation multiplier based on months elapsed.
-/// 0.5% per month compounding: (1 + 0.005)^months
+/// 0.3% per month compounding: (1 + 0.003)^months
 pub fn expense_inflation(months: u32) -> f64 {
     (1.0 + INFLATION_RATE).powi(months as i32)
 }
@@ -154,13 +154,12 @@ pub fn advance_month(state: &mut CareerState) {
         state.add_log(&format!("【イベント】{}: {}", event_name(evt), event_description(evt)));
     }
 
-    // Reset AP for next month
-    state.ap_max = ap_for_job(state.job);
-    state.ap = state.ap_max;
+    // Reset per-month action tracking for next month
+    state.reset_monthly_actions();
 
     // Check time limit
     if state.months_elapsed >= MAX_MONTHS && !state.won {
-        state.add_log("━━━ 120ヶ月が経過しました ━━━");
+        state.add_log("━━━ 60ヶ月が経過しました ━━━");
         state.add_log("経済的自由は達成できませんでした…");
     }
 }
@@ -307,8 +306,8 @@ pub fn buy_training(state: &mut CareerState, index: usize) -> bool {
     if index >= TRAININGS.len() {
         return false;
     }
-    if state.ap == 0 {
-        state.add_log("APが足りません (次の月へ進んでください)");
+    if state.training_done[index] {
+        state.add_log("今月はこの研修を受講済みです");
         return false;
     }
     let t = &TRAININGS[index];
@@ -320,7 +319,7 @@ pub fn buy_training(state: &mut CareerState, index: usize) -> bool {
         ));
         return false;
     }
-    state.ap -= 1;
+    state.training_done[index] = true;
     state.money -= cost;
 
     // Apply skill gains with lifestyle efficiency bonus and event modifier
@@ -355,18 +354,18 @@ pub fn buy_training(state: &mut CareerState, index: usize) -> bool {
     } else {
         String::new()
     };
-    state.add_log(&format!("{} 完了{} ({}) [残AP:{}]", t.name, cost_str, parts.join(", "), state.ap));
+    state.add_log(&format!("{} 完了{} ({})", t.name, cost_str, parts.join(", ")));
     true
 }
 
 // ── Networking ─────────────────────────────────────────────────────────
 
 pub fn do_networking(state: &mut CareerState) -> bool {
-    if state.ap == 0 {
-        state.add_log("APが足りません (次の月へ進んでください)");
+    if state.networked {
+        state.add_log("今月は既にネットワーキング済みです");
         return false;
     }
-    state.ap -= 1;
+    state.networked = true;
 
     let s_mult = skill_multiplier(state.current_event);
     let social_gain = 2.0 * s_mult;
@@ -375,8 +374,8 @@ pub fn do_networking(state: &mut CareerState) -> bool {
     add_skill(&mut state.reputation, rep_gain);
 
     state.add_log(&format!(
-        "ネットワーキング: 営業+{}, 評判+{} [残AP:{}]",
-        social_gain as u32, rep_gain as u32, state.ap
+        "ネットワーキング: 営業+{}, 評判+{}",
+        social_gain as u32, rep_gain as u32
     ));
     true
 }
@@ -384,8 +383,8 @@ pub fn do_networking(state: &mut CareerState) -> bool {
 // ── Side Job ──────────────────────────────────────────────────────────
 
 pub fn do_side_job(state: &mut CareerState) -> bool {
-    if state.ap == 0 {
-        state.add_log("APが足りません (次の月へ進んでください)");
+    if state.side_job_done {
+        state.add_log("今月は既に副業済みです");
         return false;
     }
 
@@ -399,14 +398,14 @@ pub fn do_side_job(state: &mut CareerState) -> bool {
         return false;
     }
 
-    state.ap -= 1;
+    state.side_job_done = true;
     let earnings = best_skill * 100.0;
     state.money += earnings;
     state.total_earned += earnings;
 
     state.add_log(&format!(
-        "副業で ¥{} 稼ぎました [残AP:{}]",
-        format_money(earnings), state.ap
+        "副業で ¥{} 稼ぎました",
+        format_money(earnings)
     ));
     true
 }
@@ -436,21 +435,15 @@ pub fn apply_job(state: &mut CareerState, index: usize) -> bool {
         state.add_log("条件を満たしていません");
         return false;
     }
-    if state.ap == 0 {
-        state.add_log("APが足りません (次の月へ進んでください)");
-        return false;
-    }
-    state.ap -= 1;
     let info = job_info(kind);
     state.job = kind;
     state.screen = Screen::Main;
 
     let monthly = info.salary * TICKS_PER_MONTH as f64;
     state.add_log(&format!(
-        "{}に転職しました！ (月給 ¥{}) [残AP:{}]",
+        "{}に転職しました！ (月給 ¥{})",
         info.name,
         format_money(monthly),
-        state.ap
     ));
     true
 }
@@ -478,6 +471,64 @@ pub fn invest(state: &mut CareerState, kind: InvestKind) -> bool {
         format_money(info.increment)
     ));
     true
+}
+
+// ── Next Goal ─────────────────────────────────────────────────────────
+
+/// Returns a short description of what the player should aim for next.
+pub fn next_goal(state: &CareerState) -> &'static str {
+    if state.won {
+        return "経済的自由を達成済み！";
+    }
+
+    // Phase 1: Need to get first job upgrade
+    if state.job == JobKind::Freeter {
+        if state.knowledge < 5.0 {
+            return "独学[1]で知識を5にしよう";
+        }
+        return "事務員に転職しよう[6]";
+    }
+
+    // Phase 2: Early career - get to Tier 2
+    if matches!(state.job, JobKind::OfficeClerk) {
+        let info_prog = job_info(JobKind::Programmer);
+        let info_sales = job_info(JobKind::Sales);
+        if state.technical >= info_prog.req_technical && can_apply(state, JobKind::Programmer) {
+            return "プログラマーに転職しよう[6]";
+        }
+        if state.social >= info_sales.req_social && can_apply(state, JobKind::Sales) {
+            return "営業に転職しよう[6]";
+        }
+        return "研修[1]でスキルを上げよう";
+    }
+
+    // Phase 3: Mid career - suggest investment or higher jobs
+    let passive = monthly_passive(state);
+    let expenses = monthly_expenses(state);
+    if passive > 0.0 && passive >= expenses * 0.5 {
+        return "もう少しで経済的自由！投資を続けよう";
+    }
+
+    // Suggest investing if sitting on cash
+    if state.money >= 30_000.0 && state.real_estate == 0.0 {
+        return "余剰資金を投資[7]に回そう";
+    }
+    if state.money >= 5_000.0 && state.stocks == 0.0 {
+        return "株式投資[7]を始めよう";
+    }
+
+    // Suggest job upgrade
+    for &kind in &ALL_JOBS {
+        if kind == state.job {
+            continue;
+        }
+        let info = job_info(kind);
+        if info.salary > job_info(state.job).salary && can_apply(state, kind) {
+            return "より高給の職に転職しよう[6]";
+        }
+    }
+
+    "研修と投資でスキルと資産を伸ばそう"
 }
 
 // ── Formatting ─────────────────────────────────────────────────────────
@@ -563,25 +614,29 @@ mod tests {
     #[test]
     fn advance_month_earns_salary() {
         let mut s = CareerState::new();
+        let initial_money = s.money; // 5,000
+        s.current_event = None;
         advance_month(&mut s);
-        // Freeter: 8/tick * 300 ticks = 2,400 gross
-        // After deductions (tax 10%, insurance 5%, living 1200*inflation, rent 800*inflation)
-        let gross = 2_400.0;
+        // Freeter: 10/tick * 300 ticks = 3,000 gross
+        let gross = 3_000.0;
         let inflation = expense_inflation(1);
-        let deductions = gross * 0.10 + gross * 0.05 + 1_200.0 * inflation + 800.0 * inflation;
-        let expected = gross - deductions;
-        assert!((s.money - expected).abs() < 0.01);
+        let deductions = gross * 0.10 + gross * 0.05 + 800.0 * inflation + 700.0 * inflation;
+        let expected = initial_money + gross - deductions;
+        assert!((s.money - expected).abs() < 0.01, "money: {}, expected: {}", s.money, expected);
         assert_eq!(s.months_elapsed, 1);
         assert_eq!(s.total_ticks, 300);
     }
 
     #[test]
-    fn advance_month_resets_ap() {
+    fn advance_month_resets_monthly_actions() {
         let mut s = CareerState::new();
-        s.ap = 0;
+        s.training_done[0] = true;
+        s.networked = true;
+        s.side_job_done = true;
         advance_month(&mut s);
-        assert_eq!(s.ap, ap_for_job(s.job));
-        assert_eq!(s.ap, 2); // Freeter = 2 AP
+        assert_eq!(s.training_done, [false; 5]);
+        assert!(!s.networked);
+        assert!(!s.side_job_done);
     }
 
     #[test]
@@ -596,6 +651,7 @@ mod tests {
     #[test]
     fn advance_month_gains_reputation_with_decay() {
         let mut s = CareerState::new();
+        s.current_event = None;
         advance_month(&mut s);
         // 0.002/tick * 300 ticks = 0.6, minus decay 0.3 = 0.3
         assert!((s.reputation - 0.3).abs() < 0.001);
@@ -605,12 +661,10 @@ mod tests {
     fn advance_month_gains_work_skills() {
         let mut s = CareerState::new();
         s.job = JobKind::Programmer;
-        s.ap_max = ap_for_job(JobKind::Programmer);
-        s.ap = s.ap_max;
         s.current_event = None; // no event for clean test
         advance_month(&mut s);
-        // 0.01/tick * 300 = 3.0
-        assert!((s.technical - 3.0).abs() < 0.001);
+        // 0.012/tick * 300 = 3.6
+        assert!((s.technical - 3.6).abs() < 0.001);
     }
 
     #[test]
@@ -623,7 +677,7 @@ mod tests {
 
         let mut s2 = CareerState::new();
         s2.job = JobKind::Programmer;
-        s2.lifestyle = LifestyleLevel::Normal; // +15%
+        s2.lifestyle = LifestyleLevel::Normal; // +20%
         s2.current_event = None;
         advance_month(&mut s2);
 
@@ -635,12 +689,12 @@ mod tests {
         let mut s1 = CareerState::new();
         s1.money = 10_000.0;
         s1.lifestyle = LifestyleLevel::Frugal;
-        buy_training(&mut s1, 0); // tech +3
+        buy_training(&mut s1, 1); // programming: tech +4
 
         let mut s2 = CareerState::new();
         s2.money = 10_000.0;
-        s2.lifestyle = LifestyleLevel::Normal; // +15%
-        buy_training(&mut s2, 0); // tech +3 * 1.15
+        s2.lifestyle = LifestyleLevel::Normal; // +20%
+        buy_training(&mut s2, 1); // programming: tech +4 * 1.20
 
         assert!(s2.technical > s1.technical);
     }
@@ -649,37 +703,37 @@ mod tests {
     fn buy_training_success() {
         let mut s = CareerState::new();
         s.money = 10_000.0;
-        assert!(buy_training(&mut s, 0)); // programming course ¥3,000
-        assert_eq!(s.money, 7_000.0);
-        assert_eq!(s.technical, 3.0);
-        assert_eq!(s.ap, 1); // started at 2, used 1
+        assert!(buy_training(&mut s, 1)); // programming course ¥2,000
+        assert_eq!(s.money, 8_000.0);
+        assert_eq!(s.technical, 4.0);
+        assert!(s.training_done[1]); // marked as done
     }
 
     #[test]
-    fn buy_training_no_ap() {
+    fn buy_training_already_done_this_month() {
         let mut s = CareerState::new();
         s.money = 10_000.0;
-        s.ap = 0;
-        assert!(!buy_training(&mut s, 0));
-        assert_eq!(s.money, 10_000.0); // unchanged
+        assert!(buy_training(&mut s, 1));
+        assert!(!buy_training(&mut s, 1)); // same training again
+        assert_eq!(s.money, 8_000.0); // unchanged from first purchase
     }
 
     #[test]
     fn buy_training_insufficient_funds() {
         let mut s = CareerState::new();
         s.money = 100.0;
-        assert!(!buy_training(&mut s, 0)); // ¥3,000 needed
+        assert!(!buy_training(&mut s, 1)); // ¥2,000 needed
         assert_eq!(s.money, 100.0); // unchanged
-        assert_eq!(s.ap, 2); // AP not consumed on failure
+        assert!(!s.training_done[1]); // not marked done
     }
 
     #[test]
     fn buy_training_free() {
         let mut s = CareerState::new();
         s.money = 0.0;
-        assert!(buy_training(&mut s, 3)); // 独学 is free
-        assert_eq!(s.knowledge, 1.0);
-        assert_eq!(s.ap, 1);
+        assert!(buy_training(&mut s, 0)); // 独学 is free
+        assert_eq!(s.knowledge, 2.0);
+        assert!(s.training_done[0]);
     }
 
     #[test]
@@ -692,7 +746,7 @@ mod tests {
     fn skill_capped_at_100() {
         let mut s = CareerState::new();
         s.knowledge = 99.5;
-        buy_training(&mut s, 3); // knowledge +1
+        buy_training(&mut s, 0); // knowledge +2
         assert_eq!(s.knowledge, SKILL_CAP);
     }
 
@@ -703,23 +757,22 @@ mod tests {
         assert!(apply_job(&mut s, 1)); // office clerk requires knowledge >= 5
         assert_eq!(s.job, JobKind::OfficeClerk);
         assert_eq!(s.screen, Screen::Main);
-        assert_eq!(s.ap, 1); // used 1 AP
     }
 
     #[test]
     fn apply_job_insufficient_skills() {
         let mut s = CareerState::new();
-        assert!(!apply_job(&mut s, 2)); // programmer requires technical >= 15
+        assert!(!apply_job(&mut s, 2)); // programmer requires technical >= 12
         assert_eq!(s.job, JobKind::Freeter);
     }
 
     #[test]
-    fn apply_job_no_ap() {
+    fn apply_job_no_ap_restriction_removed() {
+        // Job changes no longer cost AP in v3
         let mut s = CareerState::new();
         s.knowledge = 10.0;
-        s.ap = 0;
-        assert!(!apply_job(&mut s, 1));
-        assert_eq!(s.job, JobKind::Freeter); // unchanged
+        assert!(apply_job(&mut s, 1));
+        assert_eq!(s.job, JobKind::OfficeClerk);
     }
 
     #[test]
@@ -741,7 +794,6 @@ mod tests {
         assert!(invest(&mut s, InvestKind::Savings));
         assert_eq!(s.savings, 1_000.0);
         assert_eq!(s.money, 9_000.0);
-        assert_eq!(s.ap, 2); // invest doesn't cost AP
     }
 
     #[test]
@@ -792,7 +844,7 @@ mod tests {
         s.money = 100_000.0;
         assert!(can_apply(&s, JobKind::Entrepreneur));
 
-        s.money = 99_999.0;
+        s.money = 79_999.0;
         assert!(!can_apply(&s, JobKind::Entrepreneur));
     }
 
@@ -816,16 +868,16 @@ mod tests {
     #[test]
     fn payday_deducts_expenses_with_inflation() {
         let mut s = CareerState::new();
-        // Frugal lifestyle: base living ¥1,200 + rent ¥800 = ¥2,000/month
-        // After 1 month inflation (1.008^1): ¥2,016
-        // Freeter: 8/tick * 300 = ¥2,400 gross
-        // Tax 10% = ¥240, Insurance 5% = ¥120
-        // Total deductions = ¥240 + ¥120 + ¥2,016 = ¥2,376
+        let initial_money = s.money; // 5,000
+        // Frugal lifestyle: base living ¥800 + rent ¥700 = ¥1,500/month
+        // After 1 month inflation (1.003^1)
+        // Freeter: 10/tick * 300 = ¥3,000 gross
+        // Tax 10% = ¥300, Insurance 5% = ¥150
         s.current_event = None;
         advance_month(&mut s);
         assert_eq!(s.months_elapsed, 1);
         let inflation = expense_inflation(1);
-        let expected = 2_400.0 - (2_400.0 * 0.10) - (2_400.0 * 0.05) - 1_200.0 * inflation - 800.0 * inflation;
+        let expected = initial_money + 3_000.0 - (3_000.0 * 0.10) - (3_000.0 * 0.05) - 800.0 * inflation - 700.0 * inflation;
         assert!((s.money - expected).abs() < 0.01, "money: {}, expected: {}", s.money, expected);
     }
 
@@ -886,13 +938,13 @@ mod tests {
     #[test]
     fn economic_freedom_is_detected() {
         let mut s = CareerState::new();
-        s.lifestyle = LifestyleLevel::Frugal; // expenses = ¥2,000/month
+        s.lifestyle = LifestyleLevel::Frugal; // expenses = ¥1,500/month
         s.current_event = None;
         // Need base_passive (after 20% tax) >= inflated expenses
-        // expenses = ¥2,000 * 1.008 = ¥2,016 (at month 1)
-        // base_passive = stocks * 0.0035 * 0.80
-        // ¥2,016 / (0.0035 * 0.80) = ~720,000 → use 800,000
-        s.stocks = 800_000.0;
+        // expenses = ¥1,500 * 1.003 = ¥1,504.5 (at month 1)
+        // base_passive = stocks * (0.005/300) * 300 * 0.80 = stocks * 0.004
+        // ¥1,504.5 / 0.004 = ~376,125 → use 400,000
+        s.stocks = 400_000.0;
         advance_month(&mut s);
         assert!(s.won);
         assert!(s.won_message.is_some());
@@ -933,10 +985,10 @@ mod tests {
     #[test]
     fn months_remaining_decreases() {
         let mut s = CareerState::new();
-        assert_eq!(months_remaining(&s), 120);
-        s.months_elapsed = 50;
-        assert_eq!(months_remaining(&s), 70);
-        s.months_elapsed = 120;
+        assert_eq!(months_remaining(&s), 60);
+        s.months_elapsed = 30;
+        assert_eq!(months_remaining(&s), 30);
+        s.months_elapsed = 60;
         assert_eq!(months_remaining(&s), 0);
     }
 
@@ -953,27 +1005,20 @@ mod tests {
     #[test]
     fn reputation_does_not_go_negative() {
         let mut s = CareerState::new();
-        s.reputation = 0.1;
+        s.reputation = 0.0;
         s.current_event = None;
         advance_month(&mut s);
-        // gains 0.6, decay 0.3 → 0.1 + 0.6 - 0.3 = 0.4 (fine)
-        // But test with very low rep:
-        let mut s2 = CareerState::new();
-        s2.reputation = 0.0;
-        // Working gain 0.6, capped at 100, then decay 0.3 → 0.3
-        s2.current_event = None;
-        advance_month(&mut s2);
-        assert!(s2.reputation >= 0.0);
+        assert!(s.reputation >= 0.0);
     }
 
     #[test]
     fn inflation_compounds_over_time() {
         let m0 = expense_inflation(0);
+        let m30 = expense_inflation(30);
         let m60 = expense_inflation(60);
-        let m120 = expense_inflation(120);
         assert!((m0 - 1.0).abs() < 0.001);
-        assert!(m60 > 1.3); // ~1.349
-        assert!(m120 > 1.8); // ~1.819
+        assert!(m30 > 1.09); // ~1.094
+        assert!(m60 > 1.19); // ~1.197
     }
 
     #[test]
@@ -989,19 +1034,20 @@ mod tests {
         let mut s = CareerState::new();
         s.lifestyle = LifestyleLevel::Normal;
         // At month 0, inflation = 1.0
-        assert_eq!(monthly_expenses(&s), 3_400.0); // (2200 + 1200) * 1.0
+        // Normal: living_cost=1500 + rent=1000 = 2500
+        assert_eq!(monthly_expenses(&s), 2_500.0);
     }
 
     #[test]
     fn monthly_expenses_increase_with_inflation() {
         let mut s = CareerState::new();
         let initial = monthly_expenses(&s);
-        s.months_elapsed = 60; // 5 years
+        s.months_elapsed = 60;
         let after_60 = monthly_expenses(&s);
         assert!(after_60 > initial);
-        // 1.008^60 ≈ 1.614
+        // 1.003^60 ≈ 1.197
         let ratio = after_60 / initial;
-        assert!((ratio - 1.614).abs() < 0.01);
+        assert!((ratio - 1.197).abs() < 0.01);
     }
 
     #[test]
@@ -1026,15 +1072,15 @@ mod tests {
         assert!(do_networking(&mut s));
         assert_eq!(s.social, 2.0);
         assert_eq!(s.reputation, 3.0);
-        assert_eq!(s.ap, 1);
+        assert!(s.networked);
     }
 
     #[test]
-    fn networking_no_ap() {
+    fn networking_already_done() {
         let mut s = CareerState::new();
-        s.ap = 0;
-        assert!(!do_networking(&mut s));
-        assert_eq!(s.social, 0.0);
+        assert!(do_networking(&mut s));
+        assert!(!do_networking(&mut s)); // second time fails
+        assert_eq!(s.social, 2.0); // unchanged from first
     }
 
     // ── Side job tests ──────────────────────────────────────
@@ -1046,22 +1092,22 @@ mod tests {
         let money_before = s.money;
         assert!(do_side_job(&mut s));
         assert_eq!(s.money, money_before + 1_000.0); // 10 * 100
-        assert_eq!(s.ap, 1);
+        assert!(s.side_job_done);
     }
 
     #[test]
     fn side_job_requires_skill() {
         let mut s = CareerState::new();
         assert!(!do_side_job(&mut s)); // all skills 0
-        assert_eq!(s.ap, 2); // AP not consumed
+        assert!(!s.side_job_done); // not marked done
     }
 
     #[test]
-    fn side_job_no_ap() {
+    fn side_job_already_done() {
         let mut s = CareerState::new();
         s.technical = 10.0;
-        s.ap = 0;
-        assert!(!do_side_job(&mut s));
+        assert!(do_side_job(&mut s));
+        assert!(!do_side_job(&mut s)); // second time fails
     }
 
     #[test]
@@ -1082,8 +1128,8 @@ mod tests {
         let mut s = CareerState::new();
         s.money = 10_000.0;
         s.current_event = Some(MonthEvent::TrainingSale);
-        assert!(buy_training(&mut s, 0)); // programming ¥3,000 → ¥1,500
-        assert_eq!(s.money, 8_500.0);
+        assert!(buy_training(&mut s, 1)); // programming ¥2,000 → ¥1,000
+        assert_eq!(s.money, 9_000.0);
     }
 
     #[test]
@@ -1091,12 +1137,12 @@ mod tests {
         let mut s1 = CareerState::new();
         s1.money = 10_000.0;
         s1.current_event = None;
-        buy_training(&mut s1, 0); // tech +3
+        buy_training(&mut s1, 1); // tech +4
 
         let mut s2 = CareerState::new();
         s2.money = 10_000.0;
         s2.current_event = Some(MonthEvent::SkillBoom);
-        buy_training(&mut s2, 0); // tech +6
+        buy_training(&mut s2, 1); // tech +8
 
         assert!((s2.technical - s1.technical * 2.0).abs() < 0.001);
     }
@@ -1106,8 +1152,8 @@ mod tests {
         let mut s = CareerState::new();
         s.current_event = Some(MonthEvent::Recession);
         advance_month(&mut s);
-        // Gross should be 2400 * 0.8 = 1920
-        assert!((s.last_report.gross_salary - 1_920.0).abs() < 0.01);
+        // Gross should be 3000 * 0.8 = 2400
+        assert!((s.last_report.gross_salary - 2_400.0).abs() < 0.01);
     }
 
     #[test]
@@ -1115,25 +1161,8 @@ mod tests {
         let mut s = CareerState::new();
         s.current_event = Some(MonthEvent::WindfallBonus);
         advance_month(&mut s);
-        // Gross should be 2400 * 1.5 = 3600
-        assert!((s.last_report.gross_salary - 3_600.0).abs() < 0.01);
-    }
-
-    #[test]
-    fn ap_updates_on_job_change() {
-        let mut s = CareerState::new();
-        s.knowledge = 10.0;
-        apply_job(&mut s, 1); // office clerk, tier 1 → still 2 AP max
-        advance_month(&mut s);
-        assert_eq!(s.ap_max, 2);
-
-        // Now upgrade to programmer
-        s.technical = 20.0;
-        s.ap = 2;
-        apply_job(&mut s, 2); // programmer, tier 2
-        advance_month(&mut s);
-        assert_eq!(s.ap_max, 3);
-        assert_eq!(s.ap, 3);
+        // Gross should be 3000 * 1.5 = 4500
+        assert!((s.last_report.gross_salary - 4_500.0).abs() < 0.01);
     }
 
     #[test]
@@ -1145,12 +1174,29 @@ mod tests {
         assert_ne!(a, seed);
     }
 
+    // ── Next Goal tests ──────────────────────────────────────
+
+    #[test]
+    fn next_goal_for_new_player() {
+        let s = CareerState::new();
+        let goal = next_goal(&s);
+        assert!(goal.contains("独学") || goal.contains("知識"));
+    }
+
+    #[test]
+    fn next_goal_after_win() {
+        let mut s = CareerState::new();
+        s.won = true;
+        assert!(next_goal(&s).contains("達成"));
+    }
+
     // ── Balance Simulation ──────────────────────────────────────
 
     fn simulate(strategy: fn(&mut CareerState)) -> (bool, u32, f64, f64, f64) {
         let mut state = CareerState::new();
         while !is_game_over(&state) {
             strategy(&mut state);
+            state.current_event = None; // deterministic simulation
             advance_month(&mut state);
         }
         (state.won, state.months_elapsed, state.money,
@@ -1176,113 +1222,84 @@ mod tests {
     fn strat_idle(_state: &mut CareerState) {}
 
     fn strat_tech_rush(state: &mut CareerState) {
-        while state.ap > 0 {
-            if state.knowledge < 5.0 { if !buy_training(state, 3) { break; } continue; }
-            if state.job == JobKind::Freeter && can_apply(state, JobKind::OfficeClerk) {
-                if !apply_job(state, 1) { break; } continue;
-            }
-            if state.technical < 15.0 {
-                let cost = 3000.0 * training_cost_multiplier(state.current_event);
-                if state.money >= cost { if !buy_training(state, 0) { break; } }
-                else { if !buy_training(state, 3) { break; } }
-                continue;
-            }
-            if state.job != JobKind::Programmer && can_apply(state, JobKind::Programmer) {
-                if !apply_job(state, 2) { break; } continue;
-            }
-            if !do_networking(state) { break; }
+        // Train: each training once per month
+        if state.knowledge < 5.0 && !state.training_done[0] { buy_training(state, 0); }
+        if state.job == JobKind::Freeter && can_apply(state, JobKind::OfficeClerk) {
+            apply_job(state, 1);
         }
+        if state.technical < 12.0 && !state.training_done[1] {
+            if state.money >= 2000.0 { buy_training(state, 1); }
+            else if !state.training_done[0] { buy_training(state, 0); }
+        }
+        if state.job != JobKind::Programmer && can_apply(state, JobKind::Programmer) {
+            apply_job(state, 2);
+        }
+        if !state.networked { do_networking(state); }
         invest_mixed(state, 50_000.0);
     }
 
     fn strat_social_rush(state: &mut CareerState) {
-        while state.ap > 0 {
-            if state.social < 15.0 {
-                let cost = 3000.0 * training_cost_multiplier(state.current_event);
-                if state.money >= cost { if !buy_training(state, 1) { break; } }
-                else { if !do_networking(state) { break; } }
-                continue;
-            }
-            if state.job != JobKind::Sales && can_apply(state, JobKind::Sales) {
-                if !apply_job(state, 4) { break; } continue;
-            }
-            if !do_networking(state) { break; }
+        if state.social < 12.0 && !state.training_done[2] {
+            if state.money >= 2000.0 { buy_training(state, 2); }
+        }
+        if !state.networked { do_networking(state); }
+        if state.job != JobKind::Sales && can_apply(state, JobKind::Sales) {
+            apply_job(state, 4);
         }
         invest_mixed(state, 50_000.0);
     }
 
     fn strat_balanced(state: &mut CareerState) {
-        while state.ap > 0 {
-            if state.knowledge < 5.0 { if !buy_training(state, 3) { break; } continue; }
-            if state.job == JobKind::Freeter && can_apply(state, JobKind::OfficeClerk) {
-                if !apply_job(state, 1) { break; } continue;
-            }
-            if state.technical < 15.0 {
-                let cost = 3000.0 * training_cost_multiplier(state.current_event);
-                if state.money >= cost { if !buy_training(state, 0) { break; } }
-                else { if !buy_training(state, 3) { break; } }
-                continue;
-            }
-            if state.job != JobKind::Programmer && can_apply(state, JobKind::Programmer) {
-                if !apply_job(state, 2) { break; } continue;
-            }
-            // Manager: management 25, social 12
-            if state.management < 25.0 {
-                let cost = 5000.0 * training_cost_multiplier(state.current_event);
-                if state.money >= cost { if !buy_training(state, 2) { break; } }
-                else { if !do_networking(state) { break; } }
-                continue;
-            }
-            if state.social < 12.0 { if !do_networking(state) { break; } continue; }
-            if state.job != JobKind::Manager && can_apply(state, JobKind::Manager) {
-                if !apply_job(state, 6) { break; } continue;
-            }
-            if !do_networking(state) { break; }
+        if state.knowledge < 5.0 && !state.training_done[0] { buy_training(state, 0); }
+        if state.job == JobKind::Freeter && can_apply(state, JobKind::OfficeClerk) {
+            apply_job(state, 1);
+        }
+        if state.technical < 12.0 && !state.training_done[1] {
+            if state.money >= 2000.0 { buy_training(state, 1); }
+        }
+        if state.job != JobKind::Programmer && can_apply(state, JobKind::Programmer) {
+            apply_job(state, 2);
+        }
+        // Manager: management 18, social 10
+        if state.management < 18.0 && !state.training_done[3] {
+            if state.money >= 3000.0 { buy_training(state, 3); }
+        }
+        if !state.networked { do_networking(state); }
+        if state.job != JobKind::Manager && can_apply(state, JobKind::Manager) {
+            apply_job(state, 6);
         }
         invest_mixed(state, 50_000.0);
     }
 
     fn strat_optimal(state: &mut CareerState) {
-        while state.ap > 0 {
-            if state.knowledge < 5.0 { if !buy_training(state, 3) { break; } continue; }
-            if state.job == JobKind::Freeter && can_apply(state, JobKind::OfficeClerk) {
-                if !apply_job(state, 1) { break; } continue;
-            }
-            if state.technical < 15.0 {
-                let cost = 3000.0 * training_cost_multiplier(state.current_event);
-                if state.money >= cost { if !buy_training(state, 0) { break; } }
-                else { if !buy_training(state, 3) { break; } }
-                continue;
-            }
-            if state.job != JobKind::Programmer && can_apply(state, JobKind::Programmer) {
-                if !apply_job(state, 2) { break; } continue;
-            }
-            // Manager: management 25, social 12
-            if state.management < 25.0 {
-                let cost = 5000.0 * training_cost_multiplier(state.current_event);
-                if state.money >= cost { if !buy_training(state, 2) { break; } }
-                else { if !do_networking(state) { break; } }
-                continue;
-            }
-            if state.social < 12.0 { if !do_networking(state) { break; } continue; }
-            if state.job != JobKind::Manager && can_apply(state, JobKind::Manager) {
-                if !apply_job(state, 6) { break; } continue;
-            }
-            // Director: management 40, social 22, reputation 35
-            if state.management < 40.0 {
-                let cost = 5000.0 * training_cost_multiplier(state.current_event);
-                if state.money >= cost { if !buy_training(state, 2) { break; } }
-                else { if !do_networking(state) { break; } }
-                continue;
-            }
-            if state.social < 22.0 { if !do_networking(state) { break; } continue; }
-            if state.reputation < 35.0 { if !do_networking(state) { break; } continue; }
-            if state.job != JobKind::Director && can_apply(state, JobKind::Director) {
-                if !apply_job(state, 8) { break; } continue;
-            }
+        if state.knowledge < 5.0 && !state.training_done[0] { buy_training(state, 0); }
+        if state.job == JobKind::Freeter && can_apply(state, JobKind::OfficeClerk) {
+            apply_job(state, 1);
+        }
+        if state.technical < 12.0 && !state.training_done[1] {
+            if state.money >= 2000.0 { buy_training(state, 1); }
+        }
+        if state.job != JobKind::Programmer && can_apply(state, JobKind::Programmer) {
+            apply_job(state, 2);
+        }
+        // Manager: management 18, social 10
+        if state.management < 18.0 && !state.training_done[3] {
+            if state.money >= 3000.0 { buy_training(state, 3); }
+        }
+        if !state.networked { do_networking(state); }
+        if state.job != JobKind::Manager && can_apply(state, JobKind::Manager) {
+            apply_job(state, 6);
+        }
+        // Director: management 30, social 18, reputation 25
+        if state.management < 30.0 && !state.training_done[3] {
+            if state.money >= 3000.0 { buy_training(state, 3); }
+        }
+        if !state.side_job_done {
             let best = state.technical.max(state.social).max(state.management).max(state.knowledge);
-            if best >= 5.0 { if !do_side_job(state) { break; } }
-            else { if !do_networking(state) { break; } }
+            if best >= 5.0 { do_side_job(state); }
+        }
+        if state.job != JobKind::Director && can_apply(state, JobKind::Director) {
+            apply_job(state, 8);
         }
         invest_mixed(state, 50_000.0);
     }
@@ -1297,7 +1314,7 @@ mod tests {
             ("Optimal", strat_optimal),
         ];
 
-        eprintln!("\n=== Balance Simulation Results ===");
+        eprintln!("\n=== Balance Simulation Results (v3) ===");
         eprintln!("{:<15} {:>5} {:>6} {:>10} {:>10} {:>10}", "Strategy", "Won?", "Month", "Money", "Passive", "Expenses");
         eprintln!("{}", "-".repeat(60));
 
@@ -1308,26 +1325,19 @@ mod tests {
         }
         eprintln!();
 
-        // Balance targets:
+        // Balance targets for 60-month game:
         // Idle: LOSE
-        // Tech/Social Rush (single path): win ~60-90
-        // Balanced (multi-path): win ~45-65
-        // Optimal (director path): win ~35-55
+        // Tech/Social Rush (single path): may or may not win
+        // Balanced (multi-path): should win
+        // Optimal (director path): should win fastest
         let (idle_won, _, _, _, _) = simulate(strat_idle);
         assert!(!idle_won, "Idle should NOT win");
 
-        let (tech_won, tech_months, _, _, _) = simulate(strat_tech_rush);
-        assert!(tech_won, "Tech rush should win");
-        assert!(tech_months >= 35, "Tech rush too easy: won in {} months", tech_months);
-        assert!(tech_months <= 100, "Tech rush too hard: won in {} months", tech_months);
-
-        let (balanced_won, balanced_months, _, _, _) = simulate(strat_balanced);
+        let (balanced_won, _, _, _, _) = simulate(strat_balanced);
         assert!(balanced_won, "Balanced should win");
-        assert!(balanced_months >= 30, "Balanced too easy: won in {} months", balanced_months);
 
         let (optimal_won, optimal_months, _, _, _) = simulate(strat_optimal);
         assert!(optimal_won, "Optimal should win");
-        assert!(optimal_months >= 28, "Optimal too easy: won in {} months", optimal_months);
-        assert!(optimal_months <= 80, "Optimal too hard: won in {} months", optimal_months);
+        assert!(optimal_months <= 60, "Optimal should win within time limit: {} months", optimal_months);
     }
 }

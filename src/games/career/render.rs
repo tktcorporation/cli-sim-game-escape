@@ -16,7 +16,7 @@ use super::actions::*;
 
 use super::logic::{
     can_apply, format_money, format_money_exact, freedom_progress, is_game_over, monthly_expenses,
-    monthly_passive, monthly_salary, months_remaining, next_available_job,
+    monthly_passive, monthly_salary, months_remaining, next_available_job, next_goal,
     training_cost_multiplier,
 };
 use super::state::{
@@ -147,12 +147,6 @@ fn render_header(
             Span::styled(
                 format!("  不労所得: ¥{}/月", format_money(m_passive)),
                 Style::default().fg(Color::Green),
-            ),
-            Span::styled(
-                format!("  AP: {}/{}", state.ap, state.ap_max),
-                Style::default()
-                    .fg(if state.ap > 0 { Color::Cyan } else { Color::DarkGray })
-                    .add_modifier(Modifier::BOLD),
             ),
         ]),
     ];
@@ -285,36 +279,42 @@ fn render_actions(
     click_state: &Rc<RefCell<ClickState>>,
 ) {
     let mut cl = ClickableList::new();
-    let has_ap = state.ap > 0;
-    let ap_color = if has_ap { Color::Cyan } else { Color::DarkGray };
 
-    // AP-consuming actions (clickable)
+    // Training action
+    let training_available = !state.training_done.iter().all(|&d| d);
+    let training_color = if training_available { Color::Cyan } else { Color::DarkGray };
     let training_label = if is_narrow { "研修" } else { "研修する" };
     cl.push_clickable(Line::from(vec![
-        Span::styled(" ▶ ", Style::default().fg(ap_color).add_modifier(Modifier::BOLD)),
+        Span::styled(" ▶ ", Style::default().fg(training_color).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!("{} [1]", training_label),
-            Style::default().fg(if has_ap { Color::White } else { Color::DarkGray }),
+            Style::default().fg(if training_available { Color::White } else { Color::DarkGray }),
         ),
-        Span::styled(" (1AP)", Style::default().fg(Color::DarkGray)),
     ]), GO_TRAINING);
 
+    // Networking action
+    let net_available = !state.networked;
+    let net_color = if net_available { Color::Cyan } else { Color::DarkGray };
     let net_label = if is_narrow { "人脈作り" } else { "ネットワーキング" };
     cl.push_clickable(Line::from(vec![
-        Span::styled(" ▶ ", Style::default().fg(ap_color).add_modifier(Modifier::BOLD)),
+        Span::styled(" ▶ ", Style::default().fg(net_color).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!("{} [2]", net_label),
-            Style::default().fg(if has_ap { Color::White } else { Color::DarkGray }),
+            Style::default().fg(if net_available { Color::White } else { Color::DarkGray }),
         ),
-        Span::styled(" (1AP) 営業+2 評判+3", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            if net_available { " 営業+2 評判+3" } else { " (済)" },
+            Style::default().fg(Color::DarkGray),
+        ),
     ]), DO_NETWORKING);
 
-    let side_label = if is_narrow { "副業" } else { "副業する" };
+    // Side job action
     let best_skill = state.technical
         .max(state.social)
         .max(state.management)
         .max(state.knowledge);
-    let side_available = has_ap && best_skill >= 5.0;
+    let side_available = !state.side_job_done && best_skill >= 5.0;
+    let side_label = if is_narrow { "副業" } else { "副業する" };
     cl.push_clickable(Line::from(vec![
         Span::styled(
             " ▶ ",
@@ -327,8 +327,10 @@ fn render_actions(
             Style::default().fg(if side_available { Color::White } else { Color::DarkGray }),
         ),
         Span::styled(
-            if best_skill >= 5.0 {
-                format!(" (1AP) ¥{}", format_money(best_skill * 100.0))
+            if state.side_job_done {
+                " (済)".to_string()
+            } else if best_skill >= 5.0 {
+                format!(" ¥{}", format_money(best_skill * 100.0))
             } else {
                 " (スキル5以上必要)".to_string()
             },
@@ -381,7 +383,7 @@ fn render_actions(
         cl.push(Line::from(""));
     } else if is_game_over(state) {
         cl.push(Line::from(Span::styled(
-            " ✖ 120ヶ月経過 - GAME OVER",
+            " ✖ 60ヶ月経過 - GAME OVER",
             Style::default()
                 .fg(Color::Red)
                 .add_modifier(Modifier::BOLD),
@@ -403,10 +405,14 @@ fn render_actions(
         cl.push(Line::from(""));
     }
 
+    // Next goal hint
+    let goal = next_goal(state);
+    let title = format!(" アクション — 目標: {} ", goal);
+
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Yellow))
-        .title(format!(" アクション (AP: {}/{}) ", state.ap, state.ap_max));
+        .title(Span::styled(title, Style::default().fg(Color::Yellow)));
 
     let mut cs = click_state.borrow_mut();
     cl.register_targets_with_block(area, &block, &mut cs, 0, 0);
@@ -472,18 +478,14 @@ fn render_training(
         .split(area);
 
     let mut cl = ClickableList::new();
-    let has_ap = state.ap > 0;
     let cost_mult = training_cost_multiplier(state.current_event);
     let is_sale = cost_mult < 1.0;
 
     cl.push(Line::from(vec![
         Span::styled(
-            format!(" AP: {}/{}", state.ap, state.ap_max),
-            Style::default()
-                .fg(if has_ap { Color::Cyan } else { Color::DarkGray })
-                .add_modifier(Modifier::BOLD),
+            " 各研修は月1回まで",
+            Style::default().fg(Color::DarkGray),
         ),
-        Span::styled("  各研修: 1AP消費", Style::default().fg(Color::DarkGray)),
         if is_sale {
             Span::styled("  ★セール中！50%オフ★", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
         } else {
@@ -494,7 +496,8 @@ fn render_training(
 
     for (i, t) in TRAININGS.iter().enumerate() {
         let cost = t.cost * cost_mult;
-        let affordable = state.money >= cost && has_ap;
+        let done = state.training_done[i];
+        let affordable = state.money >= cost && !done;
         let cost_str = if cost > 0.0 {
             if is_sale && t.cost > 0.0 {
                 format!("¥{} (¥{})", format_money(cost), format_money(t.cost))
@@ -506,16 +509,19 @@ fn render_training(
         };
 
         let effect = training_effect_str(t, state.lifestyle, state.current_event);
+        let done_marker = if done { " ✓" } else { "" };
         let label = if is_narrow {
-            format!(" [{}] {} {}", i + 1, t.name, cost_str)
+            format!(" [{}] {} {}{}", i + 1, t.name, cost_str, done_marker)
         } else {
             format!(
-                " [{}] {:　<9} {:　<10} {}",
-                i + 1, t.name, effect, cost_str
+                " [{}] {:　<9} {:　<10} {}{}",
+                i + 1, t.name, effect, cost_str, done_marker
             )
         };
 
-        let color = if affordable {
+        let color = if done {
+            Color::DarkGray
+        } else if affordable {
             Color::White
         } else {
             Color::DarkGray
@@ -561,7 +567,6 @@ fn training_effect_str(
 ) -> String {
     let ls = lifestyle_info(lifestyle);
     let eff = 1.0 + ls.skill_efficiency;
-    let s_mult = super::logic::training_cost_multiplier(event);
     // s_mult is cost mult; for skill we use skill_multiplier logic
     let skill_mult = match event {
         Some(super::state::MonthEvent::SkillBoom) => 2.0,
@@ -584,7 +589,6 @@ fn training_effect_str(
     if t.reputation > 0.0 {
         parts.push(format!("評+{}", t.reputation as u32));
     }
-    let _ = s_mult; // cost multiplier used elsewhere
     parts.join(",")
 }
 
@@ -646,9 +650,9 @@ fn render_job_market(
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
         if is_narrow {
-            " ▶=応募可 ●=現職 (1AP)"
+            " ▶=応募可 ●=現職"
         } else {
-            " (▶=応募可能  ●=現在の職業  転職: 1AP)"
+            " (▶=応募可能  ●=現在の職業)"
         },
         Style::default().fg(Color::DarkGray),
     )));
@@ -656,7 +660,7 @@ fn render_job_market(
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Green))
-        .title(format!(" 求人情報 (AP: {}/{}) ", state.ap, state.ap_max));
+        .title(" 求人情報 ");
 
     // Footer: back button
     let mut cl_footer = ClickableList::new();
@@ -866,7 +870,7 @@ fn render_invest(
     let action_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Green))
-        .title(" 投資する (APなし) ");
+        .title(" 投資する ");
 
     // Footer: back button
     let mut cl_footer = ClickableList::new();
@@ -1328,7 +1332,7 @@ fn render_report(
         )));
     } else if is_game_over(state) {
         lines.push(Line::from(Span::styled(
-            " ✖ 120ヶ月経過 - GAME OVER",
+            " ✖ 60ヶ月経過 - GAME OVER",
             Style::default()
                 .fg(Color::Red)
                 .add_modifier(Modifier::BOLD),
