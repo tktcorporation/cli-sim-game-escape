@@ -473,6 +473,27 @@ pub fn invest(state: &mut CareerState, kind: InvestKind) -> bool {
     true
 }
 
+// ── Monthly Action State ──────────────────────────────────────────────
+
+/// Check if all per-month actions have been used or are currently unavailable.
+pub fn monthly_actions_exhausted(state: &CareerState) -> bool {
+    let cost_mult = training_cost_multiplier(state.current_event);
+    let any_training = TRAININGS.iter().enumerate().any(|(i, t)| {
+        !state.training_done[i] && state.money >= t.cost * cost_mult
+    });
+
+    let networking_available = !state.networked;
+
+    let best_skill = state
+        .technical
+        .max(state.social)
+        .max(state.management)
+        .max(state.knowledge);
+    let side_job_available = !state.side_job_done && best_skill >= 5.0;
+
+    !any_training && !networking_available && !side_job_available
+}
+
 // ── Next Goal ─────────────────────────────────────────────────────────
 
 /// Returns a short description of what the player should aim for next.
@@ -483,30 +504,62 @@ pub fn next_goal(state: &CareerState) -> &'static str {
 
     // Phase 1: Need to get first job upgrade
     if state.job == JobKind::Freeter {
-        if state.knowledge < 5.0 {
+        if state.knowledge >= 5.0 {
+            return "事務員に転職しよう[6]";
+        }
+        if !state.training_done[0] {
             return "独学[1]で知識を5にしよう";
         }
-        return "事務員に転職しよう[6]";
+        if !state.networked {
+            return "人脈作り[2]もやってみよう";
+        }
+        return "次の月へ[0]→独学を繰り返そう";
     }
 
     // Phase 2: Early career - get to Tier 2
     if matches!(state.job, JobKind::OfficeClerk) {
-        let info_prog = job_info(JobKind::Programmer);
-        let info_sales = job_info(JobKind::Sales);
-        if state.technical >= info_prog.req_technical && can_apply(state, JobKind::Programmer) {
+        if can_apply(state, JobKind::Programmer) {
             return "プログラマーに転職しよう[6]";
         }
-        if state.social >= info_sales.req_social && can_apply(state, JobKind::Sales) {
+        if can_apply(state, JobKind::Sales) {
             return "営業に転職しよう[6]";
         }
-        return "研修[1]でスキルを上げよう";
+        if !state.training_done[1] && state.money >= 2_000.0 {
+            return "研修[1]でスキルを上げよう";
+        }
+        if !state.training_done[0] {
+            return "独学[1]で知識を伸ばそう";
+        }
+        if !state.networked {
+            return "人脈作り[2]もやろう";
+        }
+        return "次の月へ[0]→研修を繰り返そう";
     }
 
-    // Phase 3: Mid career - suggest investment or higher jobs
+    // Phase 3: All monthly actions exhausted → guide to advance
+    if monthly_actions_exhausted(state) {
+        if state.money >= 1_000.0 {
+            return "投資[7]してから次の月へ[0]";
+        }
+        return "次の月へ進もう[0]";
+    }
+
+    // Phase 4: Mid career - suggest investment or higher jobs
     let passive = monthly_passive(state);
     let expenses = monthly_expenses(state);
     if passive > 0.0 && passive >= expenses * 0.5 {
         return "もう少しで経済的自由！投資を続けよう";
+    }
+
+    // Suggest available training
+    if !state.training_done[1] && state.money >= 2_000.0 {
+        return "研修[1]でスキルを上げよう";
+    }
+    if !state.training_done[0] {
+        return "独学[1]も活用しよう";
+    }
+    if !state.networked {
+        return "人脈作り[2]で評判UP";
     }
 
     // Suggest investing if sitting on cash
@@ -1180,7 +1233,40 @@ mod tests {
     fn next_goal_for_new_player() {
         let s = CareerState::new();
         let goal = next_goal(&s);
-        assert!(goal.contains("独学") || goal.contains("知識"));
+        assert!(goal.contains("独学"), "goal was: {}", goal);
+    }
+
+    #[test]
+    fn next_goal_after_training_done() {
+        let mut s = CareerState::new();
+        s.training_done[0] = true; // did self-study
+        let goal = next_goal(&s);
+        // Should suggest networking or advancing, NOT re-suggest self-study
+        assert!(!goal.contains("独学"), "should not suggest done training, got: {}", goal);
+    }
+
+    #[test]
+    fn next_goal_all_actions_done_suggests_advance() {
+        let mut s = CareerState::new();
+        s.training_done = [true; 5]; // all trainings done
+        s.networked = true;
+        s.side_job_done = true;
+        s.money = 500.0; // can't invest
+        let goal = next_goal(&s);
+        assert!(goal.contains("次の月"), "should suggest advance, got: {}", goal);
+    }
+
+    #[test]
+    fn next_goal_actions_done_with_money_suggests_invest() {
+        let mut s = CareerState::new();
+        s.job = JobKind::Programmer;
+        s.technical = 20.0;
+        s.training_done = [true; 5];
+        s.networked = true;
+        s.side_job_done = true;
+        s.money = 10_000.0; // can invest
+        let goal = next_goal(&s);
+        assert!(goal.contains("投資"), "should suggest investing, got: {}", goal);
     }
 
     #[test]
@@ -1188,6 +1274,34 @@ mod tests {
         let mut s = CareerState::new();
         s.won = true;
         assert!(next_goal(&s).contains("達成"));
+    }
+
+    #[test]
+    fn monthly_actions_exhausted_initial() {
+        let mut s = CareerState::new();
+        // New player: can do self-study (free) and networking
+        assert!(!monthly_actions_exhausted(&s));
+        // After doing both
+        s.training_done[0] = true; // self-study done
+        s.networked = true;
+        // Remaining trainings cost ¥2000+ but we have ¥5000 → can still train
+        assert!(!monthly_actions_exhausted(&s));
+        // Do programming training too
+        s.training_done[1] = true;
+        s.money = 1_500.0; // can't afford remaining trainings (¥2000+)
+        // Still have side job available if skill >= 5
+        assert!(monthly_actions_exhausted(&s)); // skill < 5, so exhausted
+    }
+
+    #[test]
+    fn monthly_actions_exhausted_with_side_job() {
+        let mut s = CareerState::new();
+        s.training_done = [true; 5];
+        s.networked = true;
+        s.technical = 10.0; // skill >= 5
+        assert!(!monthly_actions_exhausted(&s)); // side job available
+        s.side_job_done = true;
+        assert!(monthly_actions_exhausted(&s)); // now exhausted
     }
 
     // ── Balance Simulation ──────────────────────────────────────

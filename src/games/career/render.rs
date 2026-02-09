@@ -15,9 +15,9 @@ use crate::widgets::ClickableList;
 use super::actions::*;
 
 use super::logic::{
-    can_apply, format_money, format_money_exact, freedom_progress, is_game_over, monthly_expenses,
-    monthly_passive, monthly_salary, months_remaining, next_available_job, next_goal,
-    training_cost_multiplier,
+    can_apply, format_money, format_money_exact, freedom_progress, is_game_over,
+    monthly_actions_exhausted, monthly_expenses, monthly_passive, monthly_salary, months_remaining,
+    next_available_job, next_goal, training_cost_multiplier,
 };
 use super::state::{
     event_description, event_name, invest_info, job_info, lifestyle_info, CareerState, InvestKind,
@@ -393,15 +393,26 @@ fn render_actions(
             Style::default().fg(Color::Red),
         )));
     } else {
-        cl.push_clickable(Line::from(vec![
+        let exhausted = monthly_actions_exhausted(state);
+        let advance_color = if exhausted { Color::Yellow } else { Color::Cyan };
+        let mut spans = vec![
             Span::styled(
                 " ▶▶ 次の月へ ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(advance_color)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("[0]", Style::default().fg(Color::DarkGray)),
-        ]), ADVANCE_MONTH);
+        ];
+        if exhausted {
+            spans.push(Span::styled(
+                " ← 準備OK！",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        cl.push_clickable(Line::from(spans), ADVANCE_MONTH);
         cl.push(Line::from(""));
     }
 
