@@ -1,10 +1,7 @@
-//! Semantic action IDs for RPG Quest click targets.
-//!
-//! Simplified for the scene-based system.
-//! Choices always use [1]-[5], overlays use [I]/[S]/[Q].
+//! Semantic action IDs for Dungeon Dive click targets.
 
 // ── Scene choices (1-based index) ──────────────────────────────
-/// Choice base: +index (0-based). So choice [1] = CHOICE_BASE+0, [2] = CHOICE_BASE+1, etc.
+/// Choice base: +index (0-based). So choice [1] = CHOICE_BASE+0, etc.
 pub const CHOICE_BASE: u16 = 10;
 
 // ── Battle sub-menus ───────────────────────────────────────────
