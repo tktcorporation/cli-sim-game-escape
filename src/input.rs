@@ -28,6 +28,10 @@ pub struct ClickState {
     pub targets: Vec<ClickTarget>,
     pub terminal_cols: u16,
     pub terminal_rows: u16,
+    /// Guard flag: set when a tap/click is processed, cleared each render frame.
+    /// Prevents the same physical tap from being dispatched twice (e.g. when the
+    /// browser fires both a synthetic and a compatibility mouse event for one touch).
+    pub tap_handled: bool,
 }
 
 impl ClickState {
@@ -36,11 +40,15 @@ impl ClickState {
             targets: Vec::new(),
             terminal_cols: 0,
             terminal_rows: 0,
+            tap_handled: false,
         }
     }
 
+    /// Clear all click targets and reset the per-frame tap guard.
+    /// Called once at the start of each render frame.
     pub fn clear_targets(&mut self) {
         self.targets.clear();
+        self.tap_handled = false;
     }
 
     /// Register a click target with a rectangular hit region and a semantic action ID.

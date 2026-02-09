@@ -158,6 +158,10 @@
       document.addEventListener('touchstart', function(e) {
         if (e.touches.length === 0) return;
         var touch = e.touches[0];
+        // Prevent the browser from also generating mouse events from this touch.
+        // Without this, Ratzilla's on_mouse_event fires twice per tap: once for
+        // our synthetic mousedown and once for the browser's compatibility event.
+        e.preventDefault();
         // Dispatch a synthetic mousedown so Ratzilla's on_mouse_event fires
         document.dispatchEvent(new MouseEvent('mousedown', {
           clientX: touch.clientX,
@@ -165,7 +169,7 @@
           button: 0,
           bubbles: true
         }));
-      }, { passive: true });
+      }, { passive: false });
     })();
   </script>
 </html>

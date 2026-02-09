@@ -88,19 +88,28 @@ fn find_ancestor_pre(el: &web_sys::Element) -> Option<web_sys::Element> {
 }
 
 /// Process a tap/click at the given client coordinates.
+///
+/// The `tap_handled` guard in [`ClickState`] ensures that only the first
+/// mouse event per render frame is dispatched.  This prevents the same
+/// physical tap from being processed twice when the browser fires both a
+/// synthetic (from our touchstart handler) and a compatibility mouse event.
 fn handle_tap(
     client_x: f64,
     client_y: f64,
     app_state: &Rc<RefCell<AppState>>,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let cs = click_state.borrow();
+    let mut cs = click_state.borrow_mut();
+    if cs.tap_handled {
+        return;
+    }
     let (row, col) = match dom_element_to_cell(client_x, client_y, cs.terminal_cols) {
         Some(r) => r,
         None => return,
     };
 
     if let Some(action_id) = cs.hit_test(col, row) {
+        cs.tap_handled = true;
         drop(cs);
         dispatch_event(&InputEvent::Click(action_id), app_state);
     }
