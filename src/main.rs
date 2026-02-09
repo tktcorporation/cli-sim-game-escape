@@ -350,10 +350,10 @@ fn render_menu(
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("RPG Quest", Style::default().fg(Color::White)),
+        Span::styled("Dungeon Dive", Style::default().fg(Color::White)),
     ]), MENU_SELECT_RPG);
     cl.push_clickable(Line::from(Span::styled(
-        "    魔王を倒す短編RPG。クエストで冒険の世界を探索",
+        "    ダンジョンを探索して帰還するローグライト風RPG",
         Style::default().fg(Color::DarkGray),
     )), MENU_SELECT_RPG);
 
