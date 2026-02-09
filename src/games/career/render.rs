@@ -62,7 +62,7 @@ fn render_main(
             Constraint::Length(6),  // Header (expanded for freedom progress)
             Constraint::Length(6),  // Skills
             Constraint::Length(3),  // Event (always reserved)
-            Constraint::Length(if is_narrow { 12 } else { 13 }), // Actions
+            Constraint::Length(if is_narrow { 11 } else { 12 }), // Actions
             Constraint::Min(4),    // Log
         ])
         .split(area);
@@ -338,7 +338,45 @@ fn render_actions(
         ),
     ]), DO_SIDE_JOB);
 
-    // Spacer
+    // Advance Month / Win / Game Over — placed right after monthly actions
+    if state.won {
+        cl.push(Line::from(Span::styled(
+            " ★ 経済的自由を達成しました！",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else if is_game_over(state) {
+        cl.push(Line::from(Span::styled(
+            " ✖ GAME OVER - 経済的自由は未達成…",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        let exhausted = monthly_actions_exhausted(state);
+        let advance_color = if exhausted { Color::Yellow } else { Color::Cyan };
+        let mut spans = vec![
+            Span::styled(
+                " ▶▶ 次の月へ ",
+                Style::default()
+                    .fg(advance_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("[0]", Style::default().fg(Color::DarkGray)),
+        ];
+        if exhausted {
+            spans.push(Span::styled(
+                " ← 準備OK！",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        cl.push_clickable(Line::from(spans), ADVANCE_MONTH);
+    }
+
+    // Spacer before navigation
     cl.push(Line::from(""));
 
     // Navigation (clickable)
@@ -369,52 +407,6 @@ fn render_actions(
             Style::default().fg(Color::White),
         ),
     ]), GO_LIFESTYLE);
-
-    // Spacer + Advance Month
-    cl.push(Line::from(""));
-
-    if state.won {
-        cl.push(Line::from(Span::styled(
-            " ★ 経済的自由を達成しました！",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )));
-        cl.push(Line::from(""));
-    } else if is_game_over(state) {
-        cl.push(Line::from(Span::styled(
-            " ✖ 60ヶ月経過 - GAME OVER",
-            Style::default()
-                .fg(Color::Red)
-                .add_modifier(Modifier::BOLD),
-        )));
-        cl.push(Line::from(Span::styled(
-            "   経済的自由は達成できませんでした…",
-            Style::default().fg(Color::Red),
-        )));
-    } else {
-        let exhausted = monthly_actions_exhausted(state);
-        let advance_color = if exhausted { Color::Yellow } else { Color::Cyan };
-        let mut spans = vec![
-            Span::styled(
-                " ▶▶ 次の月へ ",
-                Style::default()
-                    .fg(advance_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("[0]", Style::default().fg(Color::DarkGray)),
-        ];
-        if exhausted {
-            spans.push(Span::styled(
-                " ← 準備OK！",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ));
-        }
-        cl.push_clickable(Line::from(spans), ADVANCE_MONTH);
-        cl.push(Line::from(""));
-    }
 
     // Next goal hint
     let goal = next_goal(state);
