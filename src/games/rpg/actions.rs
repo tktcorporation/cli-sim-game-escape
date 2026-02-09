@@ -1,48 +1,25 @@
 //! Semantic action IDs for RPG Quest click targets.
+//!
+//! Simplified for the scene-based system.
+//! Choices always use [1]-[5], overlays use [I]/[S]/[Q].
 
-// ── World screen ────────────────────────────────────────────
-pub const EXPLORE: u16 = 10;
-pub const TALK_NPC: u16 = 11;
-pub const GO_SHOP: u16 = 12;
-pub const GO_INVENTORY: u16 = 13;
-pub const GO_QUEST_LOG: u16 = 14;
-pub const GO_STATUS: u16 = 15;
-pub const REST: u16 = 16;
+// ── Scene choices (1-based index) ──────────────────────────────
+/// Choice base: +index (0-based). So choice [1] = CHOICE_BASE+0, [2] = CHOICE_BASE+1, etc.
+pub const CHOICE_BASE: u16 = 10;
 
-/// Travel destination base: + index into connections array.
-pub const TRAVEL_BASE: u16 = 20;
-
-// ── Battle screen ───────────────────────────────────────────
-pub const BATTLE_ATTACK: u16 = 40;
-pub const BATTLE_SKILL: u16 = 41;
-pub const BATTLE_ITEM: u16 = 42;
-pub const BATTLE_FLEE: u16 = 43;
+// ── Battle sub-menus ───────────────────────────────────────────
 /// Skill select base: + index into available skills.
-pub const SKILL_SELECT_BASE: u16 = 50;
+pub const SKILL_BASE: u16 = 30;
 /// Item select base (in battle): + index into consumable items.
-pub const BATTLE_ITEM_BASE: u16 = 60;
-pub const BATTLE_CONTINUE: u16 = 70;
-pub const BACK_FROM_SKILL: u16 = 71;
-pub const BACK_FROM_BATTLE_ITEM: u16 = 72;
+pub const BATTLE_ITEM_BASE: u16 = 40;
+/// Back from sub-menu in battle.
+pub const BATTLE_BACK: u16 = 50;
 
-// ── Inventory screen ────────────────────────────────────────
-/// Use/equip item base: + index into inventory.
-pub const INV_USE_BASE: u16 = 100;
-pub const BACK_FROM_INVENTORY: u16 = 130;
+// ── Overlay: Inventory ─────────────────────────────────────────
+pub const INV_USE_BASE: u16 = 60;
 
-// ── Quest log screen ────────────────────────────────────────
-pub const BACK_FROM_QUEST_LOG: u16 = 140;
+// ── Overlay: Shop ──────────────────────────────────────────────
+pub const SHOP_BUY_BASE: u16 = 80;
 
-// ── Shop screen ─────────────────────────────────────────────
-/// Buy item base: + index into shop inventory.
-pub const SHOP_BUY_BASE: u16 = 150;
-pub const BACK_FROM_SHOP: u16 = 170;
-
-// ── Status screen ───────────────────────────────────────────
-pub const BACK_FROM_STATUS: u16 = 180;
-
-// ── Dialogue screen ─────────────────────────────────────────
-pub const DIALOGUE_NEXT: u16 = 190;
-
-// ── Game clear screen ───────────────────────────────────────
-pub const GAME_CLEAR_CONTINUE: u16 = 200;
+// ── Overlay close ──────────────────────────────────────────────
+pub const CLOSE_OVERLAY: u16 = 100;

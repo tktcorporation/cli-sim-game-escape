@@ -1,4 +1,7 @@
-//! RPG Quest — a short-form RPG with extensible quest system.
+//! RPG Quest — scene-based story RPG.
+//!
+//! Game trait implementation with simplified input dispatch.
+//! All choices use [1]-[5], overlays use [I]/[S]/[Q], back uses [0].
 
 pub mod actions;
 pub mod logic;
@@ -11,415 +14,27 @@ use std::rc::Rc;
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
 
+use crate::games::Game;
 use crate::input::{ClickState, InputEvent};
 
-use super::Game;
 use actions::*;
-use state::{BattleAction, RpgState, Screen};
+use state::{BattlePhase, Overlay, RpgState, Scene};
 
 pub struct RpgGame {
-    pub state: RpgState,
+    state: RpgState,
 }
 
 impl RpgGame {
     pub fn new() -> Self {
-        Self {
-            state: RpgState::new(),
-        }
-    }
-
-    fn handle_key(&mut self, key: char) -> bool {
-        match self.state.screen {
-            Screen::World => self.handle_world_key(key),
-            Screen::Battle => self.handle_battle_key(key),
-            Screen::Inventory => self.handle_inventory_key(key),
-            Screen::QuestLog => self.handle_back_key(key, Screen::World),
-            Screen::Shop => self.handle_shop_key(key),
-            Screen::Status => self.handle_back_key(key, Screen::World),
-            Screen::Dialogue => self.handle_dialogue_key(key),
-            Screen::GameClear => self.handle_game_clear_key(key),
-        }
-    }
-
-    fn handle_click(&mut self, action_id: u16) -> bool {
-        match self.state.screen {
-            Screen::World => self.handle_world_click(action_id),
-            Screen::Battle => self.handle_battle_click(action_id),
-            Screen::Inventory => self.handle_inventory_click(action_id),
-            Screen::QuestLog => self.handle_quest_log_click(action_id),
-            Screen::Shop => self.handle_shop_click(action_id),
-            Screen::Status => self.handle_status_click(action_id),
-            Screen::Dialogue => self.handle_dialogue_click(action_id),
-            Screen::GameClear => self.handle_game_clear_click(action_id),
-        }
-    }
-
-    // ── World ────────────────────────────────────────────────
-
-    fn handle_world_key(&mut self, key: char) -> bool {
-        match key {
-            '1' => logic::explore(&mut self.state),
-            '2' => logic::talk_npc(&mut self.state),
-            '3' => {
-                if state::location_info(self.state.location).has_shop {
-                    self.state.screen = Screen::Shop;
-                    true
-                } else {
-                    false
-                }
-            }
-            '4' => logic::rest(&mut self.state),
-            '7' => {
-                self.state.screen = Screen::Inventory;
-                true
-            }
-            '8' => {
-                self.state.screen = Screen::QuestLog;
-                true
-            }
-            '9' => {
-                self.state.screen = Screen::Status;
-                true
-            }
-            // Travel keys: A=first, B=second, C=third, D=fourth
-            'A' | 'a' => logic::travel(&mut self.state, 0),
-            'B' | 'b' => logic::travel(&mut self.state, 1),
-            'C' | 'c' => logic::travel(&mut self.state, 2),
-            'D' | 'd' => logic::travel(&mut self.state, 3),
-            _ => false,
-        }
-    }
-
-    fn handle_world_click(&mut self, action_id: u16) -> bool {
-        match action_id {
-            EXPLORE => logic::explore(&mut self.state),
-            TALK_NPC => logic::talk_npc(&mut self.state),
-            GO_SHOP => {
-                self.state.screen = Screen::Shop;
-                true
-            }
-            REST => logic::rest(&mut self.state),
-            GO_INVENTORY => {
-                self.state.screen = Screen::Inventory;
-                true
-            }
-            GO_QUEST_LOG => {
-                self.state.screen = Screen::QuestLog;
-                true
-            }
-            GO_STATUS => {
-                self.state.screen = Screen::Status;
-                true
-            }
-            id if (TRAVEL_BASE..TRAVEL_BASE + 10).contains(&id) => {
-                let idx = (id - TRAVEL_BASE) as usize;
-                logic::travel(&mut self.state, idx)
-            }
-            _ => false,
-        }
-    }
-
-    // ── Battle ───────────────────────────────────────────────
-
-    fn handle_battle_key(&mut self, key: char) -> bool {
-        let action = self
-            .state
-            .battle
-            .as_ref()
-            .map(|b| b.action)
-            .unwrap_or(BattleAction::SelectAction);
-
-        match action {
-            BattleAction::SelectAction => match key {
-                '1' => logic::battle_attack(&mut self.state),
-                '2' => {
-                    if let Some(b) = &mut self.state.battle {
-                        b.action = BattleAction::SelectSkill;
-                    }
-                    true
-                }
-                '3' => {
-                    if let Some(b) = &mut self.state.battle {
-                        b.action = BattleAction::SelectItem;
-                    }
-                    true
-                }
-                '4' => logic::battle_flee(&mut self.state),
-                _ => false,
-            },
-            BattleAction::SelectSkill => match key {
-                '1'..='9' => {
-                    let idx = (key as u8 - b'1') as usize;
-                    if let Some(b) = &mut self.state.battle {
-                        b.action = BattleAction::SelectAction;
-                    }
-                    logic::battle_use_skill(&mut self.state, idx)
-                }
-                '-' => {
-                    if let Some(b) = &mut self.state.battle {
-                        b.action = BattleAction::SelectAction;
-                    }
-                    true
-                }
-                _ => false,
-            },
-            BattleAction::SelectItem => match key {
-                '1'..='9' => {
-                    let idx = (key as u8 - b'1') as usize;
-                    if let Some(b) = &mut self.state.battle {
-                        b.action = BattleAction::SelectAction;
-                    }
-                    logic::battle_use_item(&mut self.state, idx)
-                }
-                '-' => {
-                    if let Some(b) = &mut self.state.battle {
-                        b.action = BattleAction::SelectAction;
-                    }
-                    true
-                }
-                _ => false,
-            },
-            BattleAction::Victory => {
-                if key == '0' {
-                    logic::process_victory(&mut self.state);
-                    true
-                } else {
-                    false
-                }
-            }
-            BattleAction::Defeat => {
-                if key == '0' {
-                    logic::process_defeat(&mut self.state);
-                    true
-                } else {
-                    false
-                }
-            }
-            BattleAction::Fled => {
-                if key == '0' {
-                    logic::process_fled(&mut self.state);
-                    true
-                } else {
-                    false
-                }
-            }
-            BattleAction::EnemyTurn => false,
-        }
-    }
-
-    fn handle_battle_click(&mut self, action_id: u16) -> bool {
-        let action = self
-            .state
-            .battle
-            .as_ref()
-            .map(|b| b.action)
-            .unwrap_or(BattleAction::SelectAction);
-
-        match action {
-            BattleAction::SelectAction => match action_id {
-                BATTLE_ATTACK => logic::battle_attack(&mut self.state),
-                BATTLE_SKILL => {
-                    if let Some(b) = &mut self.state.battle {
-                        b.action = BattleAction::SelectSkill;
-                    }
-                    true
-                }
-                BATTLE_ITEM => {
-                    if let Some(b) = &mut self.state.battle {
-                        b.action = BattleAction::SelectItem;
-                    }
-                    true
-                }
-                BATTLE_FLEE => logic::battle_flee(&mut self.state),
-                _ => false,
-            },
-            BattleAction::SelectSkill => {
-                if action_id == BACK_FROM_SKILL {
-                    if let Some(b) = &mut self.state.battle {
-                        b.action = BattleAction::SelectAction;
-                    }
-                    return true;
-                }
-                if (SKILL_SELECT_BASE..SKILL_SELECT_BASE + 10).contains(&action_id) {
-                    let idx = (action_id - SKILL_SELECT_BASE) as usize;
-                    if let Some(b) = &mut self.state.battle {
-                        b.action = BattleAction::SelectAction;
-                    }
-                    return logic::battle_use_skill(&mut self.state, idx);
-                }
-                false
-            }
-            BattleAction::SelectItem => {
-                if action_id == BACK_FROM_BATTLE_ITEM {
-                    if let Some(b) = &mut self.state.battle {
-                        b.action = BattleAction::SelectAction;
-                    }
-                    return true;
-                }
-                if (BATTLE_ITEM_BASE..BATTLE_ITEM_BASE + 10).contains(&action_id) {
-                    let idx = (action_id - BATTLE_ITEM_BASE) as usize;
-                    if let Some(b) = &mut self.state.battle {
-                        b.action = BattleAction::SelectAction;
-                    }
-                    return logic::battle_use_item(&mut self.state, idx);
-                }
-                false
-            }
-            BattleAction::Victory => {
-                if action_id == BATTLE_CONTINUE {
-                    logic::process_victory(&mut self.state);
-                    true
-                } else {
-                    false
-                }
-            }
-            BattleAction::Defeat => {
-                if action_id == BATTLE_CONTINUE {
-                    logic::process_defeat(&mut self.state);
-                    true
-                } else {
-                    false
-                }
-            }
-            BattleAction::Fled => {
-                if action_id == BATTLE_CONTINUE {
-                    logic::process_fled(&mut self.state);
-                    true
-                } else {
-                    false
-                }
-            }
-            BattleAction::EnemyTurn => false,
-        }
-    }
-
-    // ── Inventory ────────────────────────────────────────────
-
-    fn handle_inventory_key(&mut self, key: char) -> bool {
-        match key {
-            '1'..='9' => {
-                let idx = (key as u8 - b'1') as usize;
-                logic::use_item(&mut self.state, idx)
-            }
-            '-' => {
-                self.state.screen = Screen::World;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn handle_inventory_click(&mut self, action_id: u16) -> bool {
-        if action_id == BACK_FROM_INVENTORY {
-            self.state.screen = Screen::World;
-            return true;
-        }
-        if (INV_USE_BASE..INV_USE_BASE + 30).contains(&action_id) {
-            let idx = (action_id - INV_USE_BASE) as usize;
-            return logic::use_item(&mut self.state, idx);
-        }
-        false
-    }
-
-    // ── Shop ─────────────────────────────────────────────────
-
-    fn handle_shop_key(&mut self, key: char) -> bool {
-        match key {
-            '1'..='9' => {
-                let idx = (key as u8 - b'1') as usize;
-                logic::buy_item(&mut self.state, idx)
-            }
-            '-' => {
-                self.state.screen = Screen::World;
-                true
-            }
-            _ => false,
-        }
-    }
-
-    fn handle_shop_click(&mut self, action_id: u16) -> bool {
-        if action_id == BACK_FROM_SHOP {
-            self.state.screen = Screen::World;
-            return true;
-        }
-        if (SHOP_BUY_BASE..SHOP_BUY_BASE + 20).contains(&action_id) {
-            let idx = (action_id - SHOP_BUY_BASE) as usize;
-            return logic::buy_item(&mut self.state, idx);
-        }
-        false
-    }
-
-    // ── Quest Log / Status (back only) ───────────────────────
-
-    fn handle_quest_log_click(&mut self, action_id: u16) -> bool {
-        if action_id == BACK_FROM_QUEST_LOG {
-            self.state.screen = Screen::World;
-            return true;
-        }
-        false
-    }
-
-    fn handle_status_click(&mut self, action_id: u16) -> bool {
-        if action_id == BACK_FROM_STATUS {
-            self.state.screen = Screen::World;
-            return true;
-        }
-        false
-    }
-
-    fn handle_back_key(&mut self, key: char, target: Screen) -> bool {
-        if key == '-' {
-            self.state.screen = target;
-            true
-        } else {
-            false
-        }
-    }
-
-    // ── Dialogue ─────────────────────────────────────────────
-
-    fn handle_dialogue_key(&mut self, key: char) -> bool {
-        if key == '0' || key == ' ' {
-            logic::advance_dialogue(&mut self.state)
-        } else {
-            false
-        }
-    }
-
-    fn handle_dialogue_click(&mut self, action_id: u16) -> bool {
-        if action_id == DIALOGUE_NEXT {
-            logic::advance_dialogue(&mut self.state)
-        } else {
-            false
-        }
-    }
-
-    // ── Game Clear ───────────────────────────────────────────
-
-    fn handle_game_clear_key(&mut self, key: char) -> bool {
-        if key == '0' {
-            // Return false to go back to menu
-            false
-        } else {
-            false
-        }
-    }
-
-    fn handle_game_clear_click(&mut self, action_id: u16) -> bool {
-        if action_id == GAME_CLEAR_CONTINUE {
-            // Return false to go back to menu
-            false
-        } else {
-            false
-        }
+        Self { state: RpgState::new() }
     }
 }
 
 impl Game for RpgGame {
     fn handle_input(&mut self, event: &InputEvent) -> bool {
         match event {
-            InputEvent::Key(c) => self.handle_key(*c),
-            InputEvent::Click(id) => self.handle_click(*id),
+            InputEvent::Key(ch) => handle_key(&mut self.state, *ch),
+            InputEvent::Click(id) => handle_click(&mut self.state, *id),
         }
     }
 
@@ -432,92 +47,372 @@ impl Game for RpgGame {
     }
 }
 
+// ── Input Handling ──────────────────────────────────────────
+
+fn handle_key(state: &mut RpgState, ch: char) -> bool {
+    // Overlay close
+    if state.overlay.is_some() {
+        return handle_overlay_key(state, ch);
+    }
+
+    match state.scene {
+        Scene::Prologue(_) => handle_prologue_key(state, ch),
+        Scene::World => handle_world_key(state, ch),
+        Scene::Battle => handle_battle_key(state, ch),
+        Scene::GameClear => handle_game_clear_key(state, ch),
+    }
+}
+
+fn handle_click(state: &mut RpgState, id: u16) -> bool {
+    // Overlay close
+    if state.overlay.is_some() {
+        return handle_overlay_click(state, id);
+    }
+
+    match state.scene {
+        Scene::Prologue(_) => handle_prologue_click(state, id),
+        Scene::World => handle_world_click(state, id),
+        Scene::Battle => handle_battle_click(state, id),
+        Scene::GameClear => handle_game_clear_click(state, id),
+    }
+}
+
+// ── Prologue ────────────────────────────────────────────────
+
+fn handle_prologue_key(state: &mut RpgState, ch: char) -> bool {
+    match ch {
+        '1' | '2' | ' ' => { logic::advance_prologue(state); true }
+        _ => false,
+    }
+}
+
+fn handle_prologue_click(state: &mut RpgState, id: u16) -> bool {
+    if (CHOICE_BASE..CHOICE_BASE + 5).contains(&id) {
+        logic::advance_prologue(state);
+        return true;
+    }
+    false
+}
+
+// ── World ───────────────────────────────────────────────────
+
+fn handle_world_key(state: &mut RpgState, ch: char) -> bool {
+    // Number choices 1-5
+    let choice_index = match ch {
+        '1' => Some(0), '2' => Some(1), '3' => Some(2),
+        '4' => Some(3), '5' => Some(4),
+        _ => None,
+    };
+    if let Some(idx) = choice_index {
+        return logic::execute_world_choice(state, idx);
+    }
+
+    // Overlay shortcuts
+    match ch {
+        'I' | 'i' => {
+            if state.unlocks.inventory_shortcut {
+                state.overlay = Some(Overlay::Inventory);
+                return true;
+            }
+        }
+        'S' | 's' => {
+            if state.unlocks.status_shortcut {
+                state.overlay = Some(Overlay::Status);
+                return true;
+            }
+        }
+        'Q' | 'q' => {
+            if state.unlocks.quest_log_shortcut {
+                state.overlay = Some(Overlay::QuestLog);
+                return true;
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+fn handle_world_click(state: &mut RpgState, id: u16) -> bool {
+    if (CHOICE_BASE..CHOICE_BASE + 10).contains(&id) {
+        let index = (id - CHOICE_BASE) as usize;
+        return logic::execute_world_choice(state, index);
+    }
+    false
+}
+
+// ── Battle ──────────────────────────────────────────────────
+
+fn handle_battle_key(state: &mut RpgState, ch: char) -> bool {
+    let battle = match &state.battle { Some(b) => b, None => return false };
+
+    match battle.phase {
+        BattlePhase::SelectAction => {
+            match ch {
+                '1' => logic::battle_attack(state),
+                '2' => {
+                    if !logic::available_skills(state.level).is_empty() {
+                        if let Some(b) = &mut state.battle {
+                            b.phase = BattlePhase::SelectSkill;
+                        }
+                        true
+                    } else { false }
+                }
+                '3' => {
+                    if !logic::battle_consumables(state).is_empty() {
+                        if let Some(b) = &mut state.battle {
+                            b.phase = BattlePhase::SelectItem;
+                        }
+                        true
+                    } else { false }
+                }
+                '4' => logic::battle_flee(state),
+                _ => false,
+            }
+        }
+        BattlePhase::SelectSkill => {
+            match ch {
+                '0' | '-' => {
+                    if let Some(b) = &mut state.battle { b.phase = BattlePhase::SelectAction; }
+                    true
+                }
+                '1'..='9' => {
+                    let idx = (ch as u32 - '1' as u32) as usize;
+                    logic::battle_use_skill(state, idx)
+                }
+                _ => false,
+            }
+        }
+        BattlePhase::SelectItem => {
+            match ch {
+                '0' | '-' => {
+                    if let Some(b) = &mut state.battle { b.phase = BattlePhase::SelectAction; }
+                    true
+                }
+                '1'..='9' => {
+                    let idx = (ch as u32 - '1' as u32) as usize;
+                    logic::battle_use_item(state, idx)
+                }
+                _ => false,
+            }
+        }
+        BattlePhase::Victory => {
+            if ch == '1' || ch == ' ' { logic::process_victory(state); true }
+            else { false }
+        }
+        BattlePhase::Defeat => {
+            if ch == '1' || ch == ' ' { logic::process_defeat(state); true }
+            else { false }
+        }
+        BattlePhase::Fled => {
+            if ch == '1' || ch == ' ' { logic::process_fled(state); true }
+            else { false }
+        }
+    }
+}
+
+fn handle_battle_click(state: &mut RpgState, id: u16) -> bool {
+    let battle = match &state.battle { Some(b) => b, None => return false };
+
+    match battle.phase {
+        BattlePhase::SelectAction => {
+            if id == CHOICE_BASE { return logic::battle_attack(state); }
+            if id == CHOICE_BASE + 1
+                && !logic::available_skills(state.level).is_empty()
+            {
+                if let Some(b) = &mut state.battle { b.phase = BattlePhase::SelectSkill; }
+                return true;
+            }
+            if id == CHOICE_BASE + 2
+                && !logic::battle_consumables(state).is_empty()
+            {
+                if let Some(b) = &mut state.battle { b.phase = BattlePhase::SelectItem; }
+                return true;
+            }
+            if id == CHOICE_BASE + 3 { return logic::battle_flee(state); }
+            false
+        }
+        BattlePhase::SelectSkill => {
+            if id == BATTLE_BACK {
+                if let Some(b) = &mut state.battle { b.phase = BattlePhase::SelectAction; }
+                return true;
+            }
+            if (SKILL_BASE..SKILL_BASE + 10).contains(&id) {
+                return logic::battle_use_skill(state, (id - SKILL_BASE) as usize);
+            }
+            false
+        }
+        BattlePhase::SelectItem => {
+            if id == BATTLE_BACK {
+                if let Some(b) = &mut state.battle { b.phase = BattlePhase::SelectAction; }
+                return true;
+            }
+            if (BATTLE_ITEM_BASE..BATTLE_ITEM_BASE + 10).contains(&id) {
+                return logic::battle_use_item(state, (id - BATTLE_ITEM_BASE) as usize);
+            }
+            false
+        }
+        BattlePhase::Victory => {
+            if id == CHOICE_BASE { logic::process_victory(state); true }
+            else { false }
+        }
+        BattlePhase::Defeat => {
+            if id == CHOICE_BASE { logic::process_defeat(state); true }
+            else { false }
+        }
+        BattlePhase::Fled => {
+            if id == CHOICE_BASE { logic::process_fled(state); true }
+            else { false }
+        }
+    }
+}
+
+// ── Overlays ────────────────────────────────────────────────
+
+fn handle_overlay_key(state: &mut RpgState, ch: char) -> bool {
+    match state.overlay {
+        Some(Overlay::Inventory) => {
+            match ch {
+                '0' | '-' => { state.overlay = None; true }
+                '1'..='9' => {
+                    let idx = (ch as u32 - '1' as u32) as usize;
+                    logic::use_item(state, idx)
+                }
+                _ => false,
+            }
+        }
+        Some(Overlay::Shop) => {
+            match ch {
+                '0' | '-' => { state.overlay = None; true }
+                '1'..='9' => {
+                    let idx = (ch as u32 - '1' as u32) as usize;
+                    logic::buy_item(state, idx)
+                }
+                _ => false,
+            }
+        }
+        Some(Overlay::QuestLog) | Some(Overlay::Status) => {
+            if ch == '0' || ch == '-' { state.overlay = None; true }
+            else { false }
+        }
+        None => false,
+    }
+}
+
+fn handle_overlay_click(state: &mut RpgState, id: u16) -> bool {
+    if id == CLOSE_OVERLAY {
+        state.overlay = None;
+        return true;
+    }
+
+    match state.overlay {
+        Some(Overlay::Inventory) => {
+            if (INV_USE_BASE..INV_USE_BASE + 20).contains(&id) {
+                return logic::use_item(state, (id - INV_USE_BASE) as usize);
+            }
+            false
+        }
+        Some(Overlay::Shop) => {
+            if (SHOP_BUY_BASE..SHOP_BUY_BASE + 20).contains(&id) {
+                return logic::buy_item(state, (id - SHOP_BUY_BASE) as usize);
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+// ── Game Clear ──────────────────────────────────────────────
+
+fn handle_game_clear_key(state: &mut RpgState, ch: char) -> bool {
+    let _ = state;
+    ch == '1' || ch == ' '
+}
+
+fn handle_game_clear_click(_state: &mut RpgState, id: u16) -> bool {
+    id == CHOICE_BASE
+}
+
+// ── Tests ───────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn rpg_game_new() {
-        let game = RpgGame::new();
-        assert_eq!(game.state.level, 1);
-        assert_eq!(game.state.screen, Screen::World);
+    fn make_game() -> RpgGame {
+        RpgGame::new()
     }
 
     #[test]
-    fn rpg_game_talk_npc_key() {
-        let mut game = RpgGame::new();
-        // Talk to village elder - should complete MainPrepare
-        assert!(game.handle_input(&InputEvent::Key('2')));
+    fn prologue_sequence() {
+        let mut g = make_game();
+        assert_eq!(g.state.scene, Scene::Prologue(0));
+        g.handle_input(&InputEvent::Key('1')); // step 0 -> 1
+        assert_eq!(g.state.scene, Scene::Prologue(1));
+        g.handle_input(&InputEvent::Key('1')); // step 1 -> 2
+        assert_eq!(g.state.scene, Scene::Prologue(2));
+        g.handle_input(&InputEvent::Key('1')); // step 2 -> World
+        assert_eq!(g.state.scene, Scene::World);
+        assert!(g.state.unlocks.status_bar);
     }
 
     #[test]
-    fn rpg_game_navigate_screens() {
-        let mut game = RpgGame::new();
-        // Go to inventory
-        assert!(game.handle_input(&InputEvent::Key('7')));
-        assert_eq!(game.state.screen, Screen::Inventory);
-        // Go back
-        assert!(game.handle_input(&InputEvent::Key('-')));
-        assert_eq!(game.state.screen, Screen::World);
+    fn world_choice_talk_npc() {
+        let mut g = make_game();
+        // Skip prologue
+        for _ in 0..3 { g.handle_input(&InputEvent::Key('1')); }
+        assert_eq!(g.state.scene, Scene::World);
+        // First choice at village should be talk NPC
+        g.handle_input(&InputEvent::Key('1'));
+        // Should trigger some action
+        assert!(!g.state.log.is_empty());
     }
 
     #[test]
-    fn rpg_game_navigate_quest_log() {
-        let mut game = RpgGame::new();
-        assert!(game.handle_input(&InputEvent::Key('8')));
-        assert_eq!(game.state.screen, Screen::QuestLog);
-        assert!(game.handle_input(&InputEvent::Key('-')));
-        assert_eq!(game.state.screen, Screen::World);
+    fn overlay_open_close() {
+        let mut g = make_game();
+        for _ in 0..3 { g.handle_input(&InputEvent::Key('1')); }
+        g.state.unlocks.inventory_shortcut = true;
+        g.handle_input(&InputEvent::Key('I'));
+        assert_eq!(g.state.overlay, Some(Overlay::Inventory));
+        g.handle_input(&InputEvent::Key('0'));
+        assert_eq!(g.state.overlay, None);
     }
 
     #[test]
-    fn rpg_game_click_travel() {
-        let mut game = RpgGame::new();
-        game.state.rng_seed = 999; // Avoid encounters
-        // Travel to forest (index 0)
-        assert!(game.handle_input(&InputEvent::Click(TRAVEL_BASE)));
-        assert_eq!(game.state.location, state::LocationId::Forest);
-    }
-
-    #[test]
-    fn rpg_game_click_inventory() {
-        let mut game = RpgGame::new();
-        assert!(game.handle_input(&InputEvent::Click(GO_INVENTORY)));
-        assert_eq!(game.state.screen, Screen::Inventory);
-        assert!(game.handle_input(&InputEvent::Click(BACK_FROM_INVENTORY)));
-        assert_eq!(game.state.screen, Screen::World);
-    }
-
-    #[test]
-    fn rpg_game_shop() {
-        let mut game = RpgGame::new();
-        game.state.gold = 100;
-        // Open shop
-        assert!(game.handle_input(&InputEvent::Key('3')));
-        assert_eq!(game.state.screen, Screen::Shop);
-        // Buy herb (index 0, 20G)
-        assert!(game.handle_input(&InputEvent::Key('1')));
-        assert_eq!(game.state.gold, 80);
-        // Back
-        assert!(game.handle_input(&InputEvent::Key('-')));
-        assert_eq!(game.state.screen, Screen::World);
-    }
-
-    #[test]
-    fn rpg_game_battle_flow() {
-        let mut game = RpgGame::new();
-        game.state.weapon = Some(state::ItemKind::HolySword);
-        logic::start_battle(&mut game.state, state::EnemyKind::Slime, false);
-        assert_eq!(game.state.screen, Screen::Battle);
-
+    fn battle_flow() {
+        let mut g = make_game();
+        for _ in 0..3 { g.handle_input(&InputEvent::Key('1')); }
+        // Force a battle
+        logic::start_battle(&mut g.state, state::EnemyKind::Slime, false);
+        assert_eq!(g.state.scene, Scene::Battle);
         // Attack
-        assert!(game.handle_input(&InputEvent::Key('1')));
-        // Slime should be dead with holy sword
-        let action = game.state.battle.as_ref().map(|b| b.action);
-        assert_eq!(action, Some(BattleAction::Victory));
+        g.handle_input(&InputEvent::Key('1'));
+        // Battle should have progressed
+        assert!(g.state.battle.as_ref().unwrap().log.len() > 1);
+    }
 
-        // Continue
-        assert!(game.handle_input(&InputEvent::Key('0')));
-        assert_eq!(game.state.screen, Screen::World);
+    #[test]
+    fn click_prologue() {
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Click(CHOICE_BASE)); // step 0 -> 1
+        assert_eq!(g.state.scene, Scene::Prologue(1));
+    }
+
+    #[test]
+    fn click_world_choice() {
+        let mut g = make_game();
+        for _ in 0..3 { g.handle_input(&InputEvent::Key('1')); }
+        let result = g.handle_input(&InputEvent::Click(CHOICE_BASE));
+        assert!(result);
+    }
+
+    #[test]
+    fn shop_overlay_buy() {
+        let mut g = make_game();
+        for _ in 0..3 { g.handle_input(&InputEvent::Key('1')); }
+        g.state.overlay = Some(Overlay::Shop);
+        g.state.gold = 200;
+        g.handle_input(&InputEvent::Key('1'));
+        assert!(g.state.gold < 200);
     }
 }
