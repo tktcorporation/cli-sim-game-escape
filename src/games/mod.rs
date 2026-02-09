@@ -3,6 +3,7 @@
 pub mod career;
 pub mod cookie;
 pub mod factory;
+pub mod rpg;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -30,6 +31,7 @@ pub enum GameChoice {
     Cookie,
     Factory,
     Career,
+    Rpg,
 }
 
 /// Top-level application state.
@@ -48,5 +50,6 @@ pub fn create_game(choice: &GameChoice) -> Box<dyn Game> {
         GameChoice::Cookie => Box::new(cookie::CookieGame::new()),
         GameChoice::Factory => Box::new(factory::FactoryGame::new()),
         GameChoice::Career => Box::new(career::CareerGame::new()),
+        GameChoice::Rpg => Box::new(rpg::RpgGame::new()),
     }
 }
