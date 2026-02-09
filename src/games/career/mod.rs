@@ -236,28 +236,29 @@ mod tests {
         // Navigate to training screen
         game.handle_input(&InputEvent::Key('1'));
         assert_eq!(game.state.screen, Screen::Training);
-        // Free self-study (key '4' in training screen)
-        game.handle_input(&InputEvent::Key('4'));
-        assert_eq!(game.state.knowledge, 1.0);
-        assert_eq!(game.state.ap, 1); // used 1 AP
+        // Free self-study (key '1' in training screen = index 0 = 独学)
+        game.handle_input(&InputEvent::Key('1'));
+        assert_eq!(game.state.knowledge, 2.0); // 独学 gives +2 knowledge
+        assert!(game.state.training_done[0]);
     }
 
     #[test]
     fn career_game_training_needs_money() {
         let mut game = CareerGame::new();
+        game.state.money = 0.0;
         game.handle_input(&InputEvent::Key('1')); // go to training
-        // Programming course costs ¥3,000 but we have ¥0
-        game.handle_input(&InputEvent::Key('1'));
+        // Programming course costs ¥2,000 but we have ¥0
+        game.handle_input(&InputEvent::Key('2'));
         assert_eq!(game.state.technical, 0.0);
     }
 
     #[test]
-    fn career_game_training_needs_ap() {
+    fn career_game_training_already_done() {
         let mut game = CareerGame::new();
         game.state.money = 50_000.0;
-        game.state.ap = 0;
+        game.state.training_done = [true; 5]; // all done this month
         game.handle_input(&InputEvent::Key('1')); // go to training
-        game.handle_input(&InputEvent::Key('1')); // try programming course
+        game.handle_input(&InputEvent::Key('2')); // try programming course
         assert_eq!(game.state.technical, 0.0);
         assert_eq!(game.state.money, 50_000.0); // unchanged
     }
@@ -304,7 +305,7 @@ mod tests {
         game.handle_input(&InputEvent::Key('2')); // networking
         assert_eq!(game.state.social, 2.0);
         assert_eq!(game.state.reputation, 3.0);
-        assert_eq!(game.state.ap, 1);
+        assert!(game.state.networked);
     }
 
     #[test]
@@ -312,8 +313,8 @@ mod tests {
         let mut game = CareerGame::new();
         game.state.technical = 10.0;
         game.handle_input(&InputEvent::Key('3')); // side job
-        assert!(game.state.money > 0.0);
-        assert_eq!(game.state.ap, 1);
+        assert!(game.state.money > 5_000.0); // started with 5000
+        assert!(game.state.side_job_done);
     }
 
     #[test]
@@ -324,13 +325,12 @@ mod tests {
         game.handle_input(&InputEvent::Key('2')); // apply for office clerk
         assert_eq!(game.state.job, state::JobKind::OfficeClerk);
         assert_eq!(game.state.screen, Screen::Main);
-        assert_eq!(game.state.ap, 1); // used 1 AP
     }
 
     #[test]
     fn career_game_invest() {
         let mut game = CareerGame::new();
-        game.state.money = 5_000.0;
+        // Starting money is 5000
         game.handle_input(&InputEvent::Key('7')); // go to invest
         game.handle_input(&InputEvent::Key('1')); // savings +¥1,000
         assert_eq!(game.state.savings, 1_000.0);
@@ -359,7 +359,7 @@ mod tests {
     fn career_game_tick_is_noop() {
         let mut game = CareerGame::new();
         game.tick(1000);
-        assert_eq!(game.state.money, 0.0);
+        assert_eq!(game.state.money, 5_000.0); // starting money unchanged
         assert_eq!(game.state.months_elapsed, 0);
     }
 
@@ -367,50 +367,46 @@ mod tests {
     fn career_game_full_progression() {
         let mut game = CareerGame::new();
 
-        // Self-study to get knowledge >= 5 (uses AP, need to advance months)
+        // Self-study to get knowledge >= 5
+        // In v3: each training can be done once per month, advance month to reset
         game.handle_input(&InputEvent::Key('1')); // training screen
-        game.handle_input(&InputEvent::Key('4')); // 独学 (AP: 2→1)
-        game.handle_input(&InputEvent::Key('4')); // 独学 (AP: 1→0)
+        game.handle_input(&InputEvent::Key('1')); // 独学 (knowledge +2)
         game.handle_input(&InputEvent::Key('-')); // back to main
-        game.handle_input(&InputEvent::Key('0')); // advance month (AP reset)
+        game.handle_input(&InputEvent::Key('0')); // advance month (resets training_done)
         game.handle_input(&InputEvent::Key('0')); // close report
         game.handle_input(&InputEvent::Key('1')); // training screen
-        game.handle_input(&InputEvent::Key('4')); // 独学 (AP: 2→1)
-        game.handle_input(&InputEvent::Key('4')); // 独学 (AP: 1→0)
+        game.handle_input(&InputEvent::Key('1')); // 独学 (knowledge +2 = 4)
         game.handle_input(&InputEvent::Key('-')); // back to main
         game.handle_input(&InputEvent::Key('0')); // advance month
         game.handle_input(&InputEvent::Key('0')); // close report
         game.handle_input(&InputEvent::Key('1')); // training screen
-        game.handle_input(&InputEvent::Key('4')); // 独学 (AP: 2→1)
+        game.handle_input(&InputEvent::Key('1')); // 独学 (knowledge +2 = 6)
         game.handle_input(&InputEvent::Key('-')); // back
         assert!(game.state.knowledge >= 5.0);
 
-        // Switch to office clerk
+        // Switch to office clerk (no AP cost in v3)
         game.handle_input(&InputEvent::Key('6'));
         game.handle_input(&InputEvent::Key('2'));
         assert_eq!(game.state.job, state::JobKind::OfficeClerk);
 
         // Earn money and buy programming courses
         game.state.money = 15_000.0;
-        game.state.ap = 3; // give enough AP
-        game.state.ap_max = 3;
         game.handle_input(&InputEvent::Key('1')); // training screen
-        game.handle_input(&InputEvent::Key('1')); // programming course, tech+3
-        game.handle_input(&InputEvent::Key('1')); // tech+3
-        game.handle_input(&InputEvent::Key('1')); // tech+3 (no AP left)
+        game.handle_input(&InputEvent::Key('2')); // programming course, tech+4
         game.handle_input(&InputEvent::Key('-')); // back
         game.handle_input(&InputEvent::Key('0')); // advance month
         game.handle_input(&InputEvent::Key('0')); // close report
         game.state.money = 15_000.0;
         game.handle_input(&InputEvent::Key('1')); // training screen
-        game.handle_input(&InputEvent::Key('1')); // tech+3
-        game.handle_input(&InputEvent::Key('1')); // tech+3
+        game.handle_input(&InputEvent::Key('2')); // tech+4
         game.handle_input(&InputEvent::Key('-'));
-        assert!(game.state.technical >= 15.0);
-
-        // Need AP for job change — advance month to reset
         game.handle_input(&InputEvent::Key('0'));
-        game.handle_input(&InputEvent::Key('0')); // close report
+        game.handle_input(&InputEvent::Key('0'));
+        game.state.money = 15_000.0;
+        game.handle_input(&InputEvent::Key('1'));
+        game.handle_input(&InputEvent::Key('2')); // tech+4 = 12 total
+        game.handle_input(&InputEvent::Key('-'));
+        assert!(game.state.technical >= 12.0);
 
         // Switch to programmer
         game.handle_input(&InputEvent::Key('6'));
@@ -426,9 +422,9 @@ mod tests {
         // Navigate to training via click
         game.handle_input(&InputEvent::Click(GO_TRAINING));
         assert_eq!(game.state.screen, Screen::Training);
-        // Free self-study via click (index 3)
-        game.handle_input(&InputEvent::Click(TRAINING_BASE + 3));
-        assert_eq!(game.state.knowledge, 1.0);
+        // Free self-study via click (index 0)
+        game.handle_input(&InputEvent::Click(TRAINING_BASE + 0));
+        assert_eq!(game.state.knowledge, 2.0);
     }
 
     #[test]
@@ -480,7 +476,7 @@ mod tests {
         let mut game = CareerGame::new();
         game.state.technical = 10.0;
         game.handle_input(&InputEvent::Click(DO_SIDE_JOB));
-        assert!(game.state.money > 0.0);
+        assert!(game.state.money > 5_000.0);
     }
 
     #[test]
@@ -494,7 +490,7 @@ mod tests {
     #[test]
     fn click_action_invest() {
         let mut game = CareerGame::new();
-        game.state.money = 5_000.0;
+        // Starting money is 5000
         game.handle_input(&InputEvent::Click(INVEST_SAVINGS));
         assert_eq!(game.state.savings, 1_000.0);
         assert_eq!(game.state.money, 4_000.0);
@@ -528,28 +524,27 @@ mod tests {
         game.handle_input(&InputEvent::Key('0')); // advance 1 month
         assert_eq!(game.state.months_elapsed, 1);
         assert!(game.state.money > 0.0);
-        assert!(game.state.money < 2_400.0);
-        // AP should be reset
-        assert_eq!(game.state.ap, game.state.ap_max);
+        // Monthly actions should be reset
+        assert_eq!(game.state.training_done, [false; 5]);
+        assert!(!game.state.networked);
+        assert!(!game.state.side_job_done);
     }
 
     #[test]
-    fn ap_limits_actions_per_month() {
+    fn per_month_action_limits() {
         let mut game = CareerGame::new();
-        // Freeter: 2 AP
-        assert_eq!(game.state.ap, 2);
 
-        // Use both AP
-        game.handle_input(&InputEvent::Key('2')); // networking (AP: 2→1)
-        game.handle_input(&InputEvent::Key('2')); // networking (AP: 1→0)
-        assert_eq!(game.state.ap, 0);
+        // Do networking
+        game.handle_input(&InputEvent::Key('2')); // networking
+        assert!(game.state.networked);
 
-        // Can't do more actions
+        // Can't do networking again
+        let social_after_first = game.state.social;
         game.handle_input(&InputEvent::Key('2')); // should fail
-        assert_eq!(game.state.ap, 0);
+        assert_eq!(game.state.social, social_after_first);
 
-        // Advance month resets AP
+        // Advance month resets
         game.handle_input(&InputEvent::Key('0'));
-        assert_eq!(game.state.ap, 2);
+        assert!(!game.state.networked);
     }
 }

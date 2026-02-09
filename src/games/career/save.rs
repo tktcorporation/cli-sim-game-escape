@@ -6,18 +6,24 @@
 //! - `MIN_COMPATIBLE_VERSION`: 互換性を維持できる最小バージョン。
 //!   新フィールドの追加のみの場合はこの値を変えない（旧データを維持できる）。
 //!   既存フィールドの意味変更や削除など破壊的変更を行った場合のみインクリメントする。
+//!
+//! ## v3 変更点
+//! - AP (ap, ap_max) フィールドを廃止
+//! - 代わりに training_done, networked, side_job_done を追加
+//! - 初期資金が ¥5,000 に変更
+//! - 破壊的変更のため MIN_COMPATIBLE_VERSION=3 に引き上げ
 
 #[cfg(any(target_arch = "wasm32", test))]
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
-use super::state::{CareerState, JobKind, LifestyleLevel, MonthEvent, MonthlyReport};
+use super::state::{CareerState, JobKind, LifestyleLevel, MonthEvent, MonthlyReport, TRAINING_COUNT};
 
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 2;
+const SAVE_VERSION: u32 = 3;
 
 #[cfg(any(target_arch = "wasm32", test))]
-const MIN_COMPATIBLE_VERSION: u32 = 1;
+const MIN_COMPATIBLE_VERSION: u32 = 3;
 
 #[cfg(target_arch = "wasm32")]
 const STORAGE_KEY: &str = "career_simulator_save";
@@ -67,11 +73,12 @@ struct CareerSave {
     report_rent: f64,
     report_cashflow: f64,
 
-    // Action Points (v2)
-    ap: u8,
-    ap_max: u8,
+    // Per-month action tracking (v3 — replaces AP)
+    training_done: [bool; TRAINING_COUNT],
+    networked: bool,
+    side_job_done: bool,
 
-    // Event system (v2)
+    // Event system (v2+)
     /// MonthEvent as u8 index (0=TrainingSale..7=ExpenseSpike), 255=None
     #[serde(default = "default_no_event")]
     current_event: u8,
@@ -133,8 +140,9 @@ fn extract_save(state: &CareerState) -> SaveData {
             report_living_cost: state.last_report.living_cost,
             report_rent: state.last_report.rent,
             report_cashflow: state.last_report.cashflow,
-            ap: state.ap,
-            ap_max: state.ap_max,
+            training_done: state.training_done,
+            networked: state.networked,
+            side_job_done: state.side_job_done,
             current_event: match state.current_event {
                 Some(MonthEvent::TrainingSale) => 0,
                 Some(MonthEvent::BullMarket) => 1,
@@ -204,8 +212,10 @@ fn apply_save(state: &mut CareerState, save: &CareerSave) {
         cashflow: save.report_cashflow,
     };
 
-    state.ap = save.ap;
-    state.ap_max = save.ap_max;
+    state.training_done = save.training_done;
+    state.networked = save.networked;
+    state.side_job_done = save.side_job_done;
+
     state.current_event = match save.current_event {
         0 => Some(MonthEvent::TrainingSale),
         1 => Some(MonthEvent::BullMarket),
@@ -323,8 +333,9 @@ mod tests {
         original.months_elapsed = 3;
         original.won = false;
         original.won_message = None;
-        original.ap = 2;
-        original.ap_max = 3;
+        original.training_done = [true, false, true, false, false];
+        original.networked = true;
+        original.side_job_done = false;
         original.current_event = Some(MonthEvent::BullMarket);
         original.event_seed = 999;
         original.last_report = MonthlyReport {
@@ -363,8 +374,9 @@ mod tests {
         assert_eq!(restored.months_elapsed, 3);
         assert!(!restored.won);
         assert!(restored.won_message.is_none());
-        assert_eq!(restored.ap, 2);
-        assert_eq!(restored.ap_max, 3);
+        assert_eq!(restored.training_done, [true, false, true, false, false]);
+        assert!(restored.networked);
+        assert!(!restored.side_job_done);
         assert_eq!(restored.current_event, Some(MonthEvent::BullMarket));
         assert_eq!(restored.event_seed, 999);
 
@@ -404,53 +416,19 @@ mod tests {
         let mut restored = CareerState::new();
         apply_save(&mut restored, &loaded.game);
 
-        assert!((restored.money - 0.0).abs() < 0.001);
+        assert!((restored.money - 5_000.0).abs() < 0.001);
         assert_eq!(restored.job, JobKind::Freeter);
         assert_eq!(restored.lifestyle, LifestyleLevel::Frugal);
         assert_eq!(restored.months_elapsed, 0);
-    }
-
-    #[test]
-    fn unknown_fields_in_json_are_ignored() {
-        let json_with_extra = r#"{
-            "version": 1,
-            "game": {
-                "money": 1000.0,
-                "total_earned": 2000.0,
-                "total_ticks": 300,
-                "technical": 5.0,
-                "social": 3.0,
-                "management": 0.0,
-                "knowledge": 10.0,
-                "reputation": 1.0,
-                "job": 1,
-                "savings": 0.0,
-                "stocks": 0.0,
-                "real_estate": 0.0,
-                "lifestyle": 0,
-                "months_elapsed": 1,
-                "won": false,
-                "report_gross_salary": 0.0,
-                "report_tax": 0.0,
-                "report_insurance": 0.0,
-                "report_net_salary": 0.0,
-                "report_passive_income": 0.0,
-                "report_living_cost": 0.0,
-                "report_rent": 0.0,
-                "report_cashflow": 0.0,
-                "future_unknown_field": "should be ignored"
-            }
-        }"#;
-
-        let loaded: SaveData = serde_json::from_str(json_with_extra).unwrap();
-        assert_eq!(loaded.version, 1);
-        assert!((loaded.game.money - 1000.0).abs() < 0.001);
+        assert_eq!(restored.training_done, [false; TRAINING_COUNT]);
+        assert!(!restored.networked);
+        assert!(!restored.side_job_done);
     }
 
     #[test]
     fn version_below_min_compatible_is_rejected() {
         let save_data = SaveData {
-            version: 0,
+            version: 2,
             game: CareerSave::default(),
         };
         assert!(save_data.version < MIN_COMPATIBLE_VERSION);
@@ -510,51 +488,6 @@ mod tests {
     }
 
     #[test]
-    fn v1_save_without_ap_fields_uses_defaults() {
-        // Simulate a v1 save that doesn't have AP/event fields
-        let json = r#"{
-            "version": 1,
-            "game": {
-                "money": 5000.0,
-                "total_earned": 10000.0,
-                "total_ticks": 600,
-                "technical": 10.0,
-                "social": 5.0,
-                "management": 0.0,
-                "knowledge": 15.0,
-                "reputation": 5.0,
-                "job": 2,
-                "savings": 1000.0,
-                "stocks": 0.0,
-                "real_estate": 0.0,
-                "lifestyle": 1,
-                "months_elapsed": 2,
-                "won": false,
-                "report_gross_salary": 0.0,
-                "report_tax": 0.0,
-                "report_insurance": 0.0,
-                "report_net_salary": 0.0,
-                "report_passive_income": 0.0,
-                "report_living_cost": 0.0,
-                "report_rent": 0.0,
-                "report_cashflow": 0.0
-            }
-        }"#;
-
-        let loaded: SaveData = serde_json::from_str(json).unwrap();
-        assert!(loaded.version >= MIN_COMPATIBLE_VERSION);
-
-        let mut restored = CareerState::new();
-        apply_save(&mut restored, &loaded.game);
-
-        // AP fields should have defaults (0 from serde default)
-        // This is fine since advance_month() will reset them
-        assert_eq!(restored.job, JobKind::Programmer);
-        assert_eq!(restored.months_elapsed, 2);
-        assert_eq!(restored.current_event, None); // 0 maps to TrainingSale but default is 0
-    }
-
-    #[test]
     fn all_lifestyles_roundtrip() {
         let lifestyles = [
             (LifestyleLevel::Frugal, 0u8),
@@ -574,5 +507,24 @@ mod tests {
             apply_save(&mut restored, &save.game);
             assert_eq!(restored.lifestyle, level);
         }
+    }
+
+    #[test]
+    fn training_done_roundtrip() {
+        let mut state = CareerState::new();
+        state.training_done = [true, true, false, true, false];
+        state.networked = true;
+        state.side_job_done = true;
+
+        let save = extract_save(&state);
+        let json = serde_json::to_string(&save).unwrap();
+        let loaded: SaveData = serde_json::from_str(&json).unwrap();
+
+        let mut restored = CareerState::new();
+        apply_save(&mut restored, &loaded.game);
+
+        assert_eq!(restored.training_done, [true, true, false, true, false]);
+        assert!(restored.networked);
+        assert!(restored.side_job_done);
     }
 }
