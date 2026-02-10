@@ -766,17 +766,11 @@ fn render_tool_panel(
         )), TOGGLE_MINER_MODE);
     }
 
-    // Register click targets (Borders::ALL → top=1, bottom=1)
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" ツール ");
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, 1, 1, 0, 0);
-    drop(cs);
-
-    let widget = Paragraph::new(cl.into_lines()).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" ツール "),
-    );
-    f.render_widget(widget, area);
+    cl.render(f, area, block, &mut cs, false, 0);
 }
 

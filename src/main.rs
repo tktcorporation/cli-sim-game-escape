@@ -357,21 +357,14 @@ fn render_menu(
         Style::default().fg(Color::DarkGray),
     )), MENU_SELECT_RPG);
 
-    // Register click targets (borders → top=1, bottom=1)
-    let top_offset = if borders.contains(Borders::TOP) { 1 } else { 0 };
-    let bottom_offset = if borders.contains(Borders::BOTTOM) { 1 } else { 0 };
+    let menu_block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Green))
+        .title(" Games ");
     {
         let mut cs = click_state.borrow_mut();
-        cl.register_targets(chunks[1], &mut cs, top_offset, bottom_offset, 0, 0);
+        cl.render(f, chunks[1], menu_block, &mut cs, false, 0);
     }
-
-    let menu_widget = Paragraph::new(cl.into_lines()).block(
-        Block::default()
-            .borders(borders)
-            .border_style(Style::default().fg(Color::Green))
-            .title(" Games "),
-    );
-    f.render_widget(menu_widget, chunks[1]);
 
     // Footer
     let footer_widget = Paragraph::new(Line::from(Span::styled(

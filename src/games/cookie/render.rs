@@ -1306,23 +1306,16 @@ fn render_milestones(
         Color::Cyan
     };
 
-    // Register click targets before consuming lines (Borders::ALL → top=1, bottom=1)
-    let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, 1, 1, 0, 0);
-    drop(cs);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .title(format!(
+            " マイルストーン ({}/{}) ",
+            claimed, total
+        ));
 
-    let widget = Paragraph::new(cl.into_lines())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color))
-                .title(format!(
-                    " マイルストーン ({}/{}) ",
-                    claimed, total
-                )),
-        )
-        .wrap(Wrap { trim: false });
-    f.render_widget(widget, area);
+    let mut cs = click_state.borrow_mut();
+    cl.render(f, area, block, &mut cs, true, 0);
 }
 
 fn render_prestige(
@@ -1430,17 +1423,11 @@ fn render_prestige(
             )));
         }
 
-        // Borders::LEFT | RIGHT → no top/bottom border
+        let header_block = Block::default()
+            .borders(Borders::LEFT | Borders::RIGHT)
+            .border_style(Style::default().fg(border_color));
         let mut cs = click_state.borrow_mut();
-        cl.register_targets(chunks[1], &mut cs, 0, 0, 0, 0);
-        drop(cs);
-
-        let header_widget = Paragraph::new(cl.into_lines()).block(
-            Block::default()
-                .borders(Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(border_color)),
-        );
-        f.render_widget(header_widget, chunks[1]);
+        cl.render(f, chunks[1], header_block, &mut cs, false, 0);
     }
 
     // === Section content with scroll ===
@@ -1611,23 +1598,14 @@ fn render_prestige_upgrades(
         }
     }
 
-    let inner_width = area.width.saturating_sub(2); // minus left+right borders
+    let block = Block::default()
+        .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+        .border_style(Style::default().fg(border_color));
+    let inner_width = block.inner(area).width;
     let total_lines = estimate_wrapped_lines(cl.lines(), inner_width);
 
-    // Register click targets (no top border, 1 bottom border, with scroll)
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, 0, 1, scroll, inner_width);
-    drop(cs);
-
-    let widget = Paragraph::new(cl.into_lines())
-        .block(
-            Block::default()
-                .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(border_color)),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-    f.render_widget(widget, area);
+    cl.render(f, area, block, &mut cs, true, scroll);
 
     total_lines
 }
@@ -1787,23 +1765,14 @@ fn render_prestige_boosts(
         ]));
     }
 
-    let inner_width = area.width.saturating_sub(2);
+    let block = Block::default()
+        .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+        .border_style(Style::default().fg(border_color));
+    let inner_width = block.inner(area).width;
     let total_lines = estimate_wrapped_lines(cl.lines(), inner_width);
 
-    // Register click targets (no top border, 1 bottom border, with scroll)
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, 0, 1, scroll, inner_width);
-    drop(cs);
-
-    let widget = Paragraph::new(cl.into_lines())
-        .block(
-            Block::default()
-                .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(border_color)),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-    f.render_widget(widget, area);
+    cl.render(f, area, block, &mut cs, true, scroll);
 
     total_lines
 }
@@ -1910,23 +1879,14 @@ fn render_prestige_dragon(
         )));
     }
 
-    let inner_width = area.width.saturating_sub(2);
+    let block = Block::default()
+        .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
+        .border_style(Style::default().fg(border_color));
+    let inner_width = block.inner(area).width;
     let total_lines = estimate_wrapped_lines(cl.lines(), inner_width);
 
-    // Register click targets (no top border, 1 bottom border, with scroll)
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, 0, 1, scroll, inner_width);
-    drop(cs);
-
-    let widget = Paragraph::new(cl.into_lines())
-        .block(
-            Block::default()
-                .borders(Borders::BOTTOM | Borders::LEFT | Borders::RIGHT)
-                .border_style(Style::default().fg(border_color)),
-        )
-        .wrap(Wrap { trim: false })
-        .scroll((scroll, 0));
-    f.render_widget(widget, area);
+    cl.render(f, area, block, &mut cs, true, scroll);
 
     total_lines
 }

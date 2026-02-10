@@ -18,7 +18,7 @@
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::style::{Color, Style};
 use ratzilla::ratatui::text::{Line, Span};
-use ratzilla::ratatui::widgets::{Block, Paragraph};
+use ratzilla::ratatui::widgets::{Block, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
 use crate::input::ClickState;
@@ -117,18 +117,23 @@ impl<'a> TabBar<'a> {
 /// A builder that pairs rendered [`Line`]s with click actions.
 ///
 /// Instead of manually calculating row offsets for click targets, use this
-/// builder to annotate lines as clickable when you add them.  Then call
-/// [`register_targets`](ClickableList::register_targets) once after rendering
-/// to register all targets at the correct rows automatically.
+/// builder to annotate lines as clickable when you add them.
 ///
-/// # Example
+/// **Preferred API**: Use [`render()`](ClickableList::render) to atomically
+/// register click targets and render the `Paragraph`.  This guarantees that
+/// wrap mode, block offsets, and scroll position are always consistent,
+/// eliminating tap-offset bugs.
+///
+/// Use [`register_targets()`](ClickableList::register_targets) only when
+/// the widget is not a `Paragraph` (e.g. `List`).
+///
+/// # Example (recommended)
 /// ```ignore
 /// let mut cl = ClickableList::new();
 /// cl.push(Line::from("Header (not clickable)"));
 /// cl.push_clickable(Line::from("Buy item"), BUY_ITEM_ACTION);
-/// cl.register_targets(area, &mut cs, 1, 1, 0, 0);
-/// let widget = Paragraph::new(cl.into_lines()).block(block);
-/// f.render_widget(widget, area);
+/// let block = Block::default().borders(Borders::ALL);
+/// cl.render(f, area, block, &mut cs, true, 0);
 /// ```
 pub struct ClickableList<'a> {
     lines: Vec<Line<'a>>,
@@ -258,6 +263,7 @@ impl<'a> ClickableList<'a> {
     /// * `scroll` — vertical scroll offset in visual rows (0 if not scrollable).
     /// * `inner_width` — content width for wrap calculation. Pass `0` when the
     ///   widget does **not** use `Wrap`.
+    #[cfg(test)]
     pub fn register_targets_with_block(
         &self,
         area: Rect,
@@ -270,6 +276,48 @@ impl<'a> ClickableList<'a> {
         let top_offset = inner.y.saturating_sub(area.y);
         let bottom_offset = (area.y + area.height).saturating_sub(inner.y + inner.height);
         self.register_targets(area, cs, top_offset, bottom_offset, scroll, inner_width);
+    }
+
+    /// Render the list as a [`Paragraph`] and register click targets atomically.
+    ///
+    /// This is the **preferred API** for rendering a `ClickableList`.  It
+    /// guarantees that the wrap mode, block offsets, scroll position, and
+    /// content area are **identical** between the visual output and the
+    /// hit-test regions, eliminating an entire class of tap-offset bugs.
+    ///
+    /// * `f` — the frame to render into.
+    /// * `area` — the widget area (including borders).
+    /// * `block` — the block wrapping the content.
+    /// * `cs` — mutable reference to the shared click state.
+    /// * `wrap` — whether to enable text wrapping (`Wrap { trim: false }`).
+    /// * `scroll` — vertical scroll offset in visual rows (0 if not scrollable).
+    pub fn render(
+        self,
+        f: &mut Frame,
+        area: Rect,
+        block: Block<'a>,
+        cs: &mut ClickState,
+        wrap: bool,
+        scroll: u16,
+    ) {
+        let inner = block.inner(area);
+        let top_offset = inner.y.saturating_sub(area.y);
+        let bottom_offset = (area.y + area.height).saturating_sub(inner.y + inner.height);
+        let inner_width = if wrap { inner.width } else { 0 };
+        self.register_targets(area, cs, top_offset, bottom_offset, scroll, inner_width);
+
+        let paragraph = Paragraph::new(self.into_lines()).block(block);
+        let paragraph = if wrap {
+            paragraph.wrap(Wrap { trim: false })
+        } else {
+            paragraph
+        };
+        let paragraph = if scroll > 0 {
+            paragraph.scroll((scroll, 0))
+        } else {
+            paragraph
+        };
+        f.render_widget(paragraph, area);
     }
 }
 
