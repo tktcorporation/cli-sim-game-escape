@@ -3,6 +3,15 @@
 //! Design: "Dungeon Crawler" — room-by-room exploration with
 //! risk/reward resource management across dungeon floors.
 
+// ── Elements ──────────────────────────────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Element {
+    Fire,
+    Ice,
+    Thunder,
+}
+
 // ── Enemies ───────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -27,6 +36,8 @@ pub struct EnemyInfo {
     pub exp: u32,
     pub gold: u32,
     pub drop: Option<(ItemKind, u32)>, // (item, chance_pct 0-100)
+    pub weakness: Option<Element>,
+    pub can_charge: bool, // can do charge attack (telegraph → 2x damage)
 }
 
 pub fn enemy_info(kind: EnemyKind) -> EnemyInfo {
@@ -34,42 +45,52 @@ pub fn enemy_info(kind: EnemyKind) -> EnemyInfo {
         EnemyKind::Slime => EnemyInfo {
             name: "スライム", max_hp: 12, atk: 4, def: 1, exp: 5, gold: 8,
             drop: Some((ItemKind::Herb, 40)),
+            weakness: Some(Element::Fire), can_charge: false,
         },
         EnemyKind::Rat => EnemyInfo {
             name: "大ネズミ", max_hp: 10, atk: 6, def: 0, exp: 4, gold: 6,
             drop: Some((ItemKind::Herb, 25)),
+            weakness: None, can_charge: false,
         },
         EnemyKind::Goblin => EnemyInfo {
             name: "ゴブリン", max_hp: 28, atk: 10, def: 4, exp: 15, gold: 20,
             drop: Some((ItemKind::MagicWater, 30)),
+            weakness: Some(Element::Fire), can_charge: false,
         },
         EnemyKind::Bat => EnemyInfo {
             name: "コウモリ", max_hp: 18, atk: 9, def: 2, exp: 10, gold: 12,
             drop: None,
+            weakness: Some(Element::Thunder), can_charge: false,
         },
         EnemyKind::Skeleton => EnemyInfo {
             name: "スケルトン", max_hp: 45, atk: 14, def: 8, exp: 30, gold: 35,
             drop: Some((ItemKind::StrengthPotion, 20)),
+            weakness: Some(Element::Fire), can_charge: false,
         },
         EnemyKind::Golem => EnemyInfo {
             name: "ゴーレム", max_hp: 60, atk: 16, def: 14, exp: 40, gold: 50,
             drop: Some((ItemKind::MagicWater, 30)),
+            weakness: Some(Element::Thunder), can_charge: true,
         },
         EnemyKind::DarkKnight => EnemyInfo {
             name: "暗黒騎士", max_hp: 75, atk: 20, def: 15, exp: 55, gold: 70,
             drop: Some((ItemKind::StrengthPotion, 35)),
+            weakness: Some(Element::Thunder), can_charge: true,
         },
         EnemyKind::Demon => EnemyInfo {
             name: "デーモン", max_hp: 85, atk: 22, def: 12, exp: 65, gold: 80,
             drop: Some((ItemKind::MagicWater, 40)),
+            weakness: Some(Element::Ice), can_charge: false,
         },
         EnemyKind::Dragon => EnemyInfo {
             name: "ドラゴン", max_hp: 120, atk: 28, def: 18, exp: 100, gold: 150,
             drop: Some((ItemKind::Herb, 50)),
+            weakness: Some(Element::Ice), can_charge: true,
         },
         EnemyKind::DemonLord => EnemyInfo {
             name: "魔王", max_hp: 200, atk: 32, def: 20, exp: 300, gold: 500,
             drop: None,
+            weakness: None, can_charge: true,
         },
     }
 }
@@ -202,6 +223,10 @@ pub enum SkillKind {
     Fire,
     Heal,
     Shield,
+    IceBlade,
+    Thunder,
+    Drain,
+    Berserk,
 }
 
 pub struct SkillInfo {
@@ -222,14 +247,48 @@ pub fn skill_info(kind: SkillKind) -> SkillInfo {
             name: "ヒール", description: "HPを回復 (魔力依存)",
             mp_cost: 6, value: 2, learn_level: 2,
         },
+        SkillKind::IceBlade => SkillInfo {
+            name: "アイスブレード", description: "氷の刃で斬る (ATK+MAG)",
+            mp_cost: 10, value: 2, learn_level: 3,
+        },
         SkillKind::Shield => SkillInfo {
             name: "シールド", description: "戦闘中DEF上昇",
             mp_cost: 5, value: 8, learn_level: 4,
         },
+        SkillKind::Thunder => SkillInfo {
+            name: "サンダー", description: "雷撃 (高威力・魔力依存)",
+            mp_cost: 14, value: 4, learn_level: 5,
+        },
+        SkillKind::Drain => SkillInfo {
+            name: "ドレイン", description: "HP吸収攻撃 (魔力依存)",
+            mp_cost: 12, value: 2, learn_level: 6,
+        },
+        SkillKind::Berserk => SkillInfo {
+            name: "バーサク", description: "ATK大幅UP / DEF低下",
+            mp_cost: 8, value: 15, learn_level: 8,
+        },
     }
 }
 
-pub const ALL_SKILLS: &[SkillKind] = &[SkillKind::Fire, SkillKind::Heal, SkillKind::Shield];
+/// Returns the element associated with a skill, if any.
+pub fn skill_element(kind: SkillKind) -> Option<Element> {
+    match kind {
+        SkillKind::Fire => Some(Element::Fire),
+        SkillKind::IceBlade => Some(Element::Ice),
+        SkillKind::Thunder => Some(Element::Thunder),
+        _ => None,
+    }
+}
+
+pub const ALL_SKILLS: &[SkillKind] = &[
+    SkillKind::Fire,
+    SkillKind::Heal,
+    SkillKind::IceBlade,
+    SkillKind::Shield,
+    SkillKind::Thunder,
+    SkillKind::Drain,
+    SkillKind::Berserk,
+];
 
 // ── Level / EXP Table ─────────────────────────────────────────
 
@@ -332,6 +391,8 @@ pub struct BattleState {
     pub player_atk_boost: u32,
     pub log: Vec<String>,
     pub is_boss: bool,
+    pub enemy_charging: bool,
+    pub player_berserk: bool,
 }
 
 // ── Scene System ─────────────────────────────────────────────
@@ -409,6 +470,7 @@ pub struct RpgState {
     pub run_gold_earned: u32,
     pub run_exp_earned: u32,
     pub run_enemies_killed: u32,
+    pub run_rooms_cleared: u32,
 }
 
 impl RpgState {
@@ -442,6 +504,7 @@ impl RpgState {
             run_gold_earned: 0,
             run_exp_earned: 0,
             run_enemies_killed: 0,
+            run_rooms_cleared: 0,
         }
     }
 

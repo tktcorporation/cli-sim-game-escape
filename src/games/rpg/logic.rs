@@ -4,10 +4,10 @@
 //! Resource management across floors is the central tension.
 
 use super::state::{
-    enemy_info, floor_enemies, item_info, level_stats, shop_items, skill_info, BattleEnemy,
-    BattlePhase, BattleState, DungeonFloor, EnemyKind, InventoryItem, ItemCategory, ItemKind,
-    Overlay, Room, RoomKind, RoomResult, RpgState, Scene, SkillKind, ALL_SKILLS, MAX_FLOOR,
-    MAX_LEVEL,
+    enemy_info, floor_enemies, item_info, level_stats, shop_items, skill_element, skill_info,
+    BattleEnemy, BattlePhase, BattleState, DungeonFloor, EnemyKind, InventoryItem, ItemCategory,
+    ItemKind, Overlay, Room, RoomKind, RoomResult, RpgState, Scene, SkillKind, ALL_SKILLS,
+    MAX_FLOOR, MAX_LEVEL,
 };
 
 // ── Tick (no-op: command-based game) ─────────────────────────
@@ -156,6 +156,7 @@ pub fn enter_dungeon(state: &mut RpgState, floor: u32) {
         state.run_gold_earned = 0;
         state.run_exp_earned = 0;
         state.run_enemies_killed = 0;
+        state.run_rooms_cleared = 0;
     }
 
     let num_rooms = rooms_for_floor(floor) as usize;
@@ -394,6 +395,8 @@ pub fn advance_room(state: &mut RpgState) {
         return;
     }
 
+    state.run_rooms_cleared += 1;
+
     let dungeon = match &mut state.dungeon {
         Some(d) => d,
         None => return,
@@ -416,32 +419,58 @@ pub fn descend_floor(state: &mut RpgState) {
         Some(d) => d.floor_num,
         None => return,
     };
+    state.run_rooms_cleared += 1;
     let next_floor = floor + 1;
     enter_dungeon(state, next_floor);
 }
 
-/// Retreat back to town, keeping all loot.
+/// Retreat back to town, keeping all loot + return bonus.
 pub fn retreat_to_town(state: &mut RpgState) {
     let run_gold = state.run_gold_earned;
     let run_exp = state.run_exp_earned;
     let run_kills = state.run_enemies_killed;
+    let rooms = state.run_rooms_cleared;
+    let floor = state.dungeon.as_ref().map(|d| d.floor_num).unwrap_or(1);
+
+    // Return bonus: floor × rooms × 3
+    let bonus = return_bonus(floor, rooms);
+    if bonus > 0 {
+        state.gold += bonus;
+    }
+
     state.dungeon = None;
     state.battle = None;
     state.room_result = None;
     state.scene = Scene::Town;
     if run_kills > 0 || run_gold > 0 {
-        state.add_log(&format!(
-            "帰還！ 獲得: {}G / {}EXP / {}体撃破",
-            run_gold, run_exp, run_kills
-        ));
+        if bonus > 0 {
+            state.add_log(&format!(
+                "帰還！ {}G/{}EXP/{}体撃破 帰還ボーナス+{}G",
+                run_gold, run_exp, run_kills, bonus
+            ));
+        } else {
+            state.add_log(&format!(
+                "帰還！ 獲得: {}G / {}EXP / {}体撃破",
+                run_gold, run_exp, run_kills
+            ));
+        }
     } else {
         state.add_log("町に戻った。");
     }
     update_town_text(state);
 }
 
+/// Calculate return bonus for surviving a dungeon run.
+pub fn return_bonus(floor: u32, rooms_cleared: u32) -> u32 {
+    floor * rooms_cleared * 3
+}
+
 fn process_dungeon_death(state: &mut RpgState) {
-    let lost_gold = state.gold / 2;
+    // Death penalty: lose all gold earned this run + 20% of pre-run gold
+    let run_gold = state.run_gold_earned;
+    let pre_run_gold = state.gold.saturating_sub(run_gold);
+    let extra_penalty = pre_run_gold / 5;
+    let lost_gold = (run_gold + extra_penalty).min(state.gold);
     state.gold -= lost_gold;
     state.hp = state.max_hp / 2;
     state.mp = state.max_mp / 2;
@@ -468,6 +497,8 @@ pub fn start_battle(state: &mut RpgState, enemy_kind: EnemyKind, is_boss: bool) 
         player_atk_boost: 0,
         log: vec![format!("{}が現れた！", info.name)],
         is_boss,
+        enemy_charging: false,
+        player_berserk: false,
     });
     state.scene = Scene::Battle;
 }
@@ -483,13 +514,30 @@ pub fn battle_attack(state: &mut RpgState) -> bool {
     }
 
     let total_atk = player_atk + battle.player_atk_boost;
-    let einfo = enemy_info(battle.enemy.kind);
-    let damage = total_atk.saturating_sub(einfo.def / 2).max(1);
-    battle
-        .log
-        .push(format!("攻撃！ {}に{}ダメージ！", einfo.name, damage));
+    let enemy_kind = battle.enemy.kind;
+    let einfo = enemy_info(enemy_kind);
+    let base_damage = total_atk.saturating_sub(einfo.def / 2).max(1);
+
+    // Critical hit: 10% chance, 1.5x damage
+    let crit_roll = rng_range(state, 100);
+    let is_critical = crit_roll < 10;
+    let damage = if is_critical {
+        base_damage * 3 / 2
+    } else {
+        base_damage
+    };
 
     let battle = state.battle.as_mut().unwrap();
+    if is_critical {
+        battle
+            .log
+            .push(format!("会心の一撃！ {}に{}ダメージ！", einfo.name, damage));
+    } else {
+        battle
+            .log
+            .push(format!("攻撃！ {}に{}ダメージ！", einfo.name, damage));
+    }
+
     battle.enemy.hp = battle.enemy.hp.saturating_sub(damage);
     if battle.enemy.hp == 0 {
         battle.phase = BattlePhase::Victory;
@@ -517,21 +565,37 @@ pub fn battle_use_skill(state: &mut RpgState, skill_index: usize) -> bool {
     }
     state.mp -= sinfo.mp_cost;
 
-    let battle = match &mut state.battle {
-        Some(b) => b,
+    let enemy_kind = match &state.battle {
+        Some(b) => b.enemy.kind,
         None => return false,
     };
+    let einfo = enemy_info(enemy_kind);
+
+    // Check elemental weakness
+    let element = skill_element(skill_kind);
+    let is_weak = element.is_some() && einfo.weakness == element;
+    let weak_str = if is_weak { " [弱点!]" } else { "" };
+
+    // Pre-compute values that require &self before mutable borrow of battle
+    let player_atk = state.total_atk();
+    let mag = state.mag;
+    let max_hp = state.max_hp;
+
+    let battle = state.battle.as_mut().unwrap();
     match skill_kind {
         SkillKind::Fire => {
-            let damage = (state.mag * sinfo.value)
-                .saturating_sub(enemy_info(battle.enemy.kind).def / 3)
+            let base = (mag * sinfo.value)
+                .saturating_sub(einfo.def / 3)
                 .max(1);
-            battle.log.push(format!("ファイア！ {}ダメージ！", damage));
+            let damage = if is_weak { base * 3 / 2 } else { base };
+            battle
+                .log
+                .push(format!("ファイア！ {}ダメージ！{}", damage, weak_str));
             battle.enemy.hp = battle.enemy.hp.saturating_sub(damage);
         }
         SkillKind::Heal => {
-            let heal = state.mag * sinfo.value;
-            state.hp = (state.hp + heal).min(state.max_hp);
+            let heal = mag * sinfo.value;
+            state.hp = (state.hp + heal).min(max_hp);
             battle.log.push(format!("ヒール！ HP{}回復！", heal));
         }
         SkillKind::Shield => {
@@ -539,6 +603,50 @@ pub fn battle_use_skill(state: &mut RpgState, skill_index: usize) -> bool {
             battle
                 .log
                 .push(format!("シールド！ DEF+{}！", sinfo.value));
+        }
+        SkillKind::IceBlade => {
+            // Hybrid ATK + MAG attack with Ice element
+            let base = (player_atk / 2 + mag * sinfo.value)
+                .saturating_sub(einfo.def / 3)
+                .max(1);
+            let damage = if is_weak { base * 3 / 2 } else { base };
+            battle
+                .log
+                .push(format!("アイスブレード！ {}ダメージ！{}", damage, weak_str));
+            battle.enemy.hp = battle.enemy.hp.saturating_sub(damage);
+        }
+        SkillKind::Thunder => {
+            // High power magic with Thunder element
+            let base = (mag * sinfo.value)
+                .saturating_sub(einfo.def / 4)
+                .max(1);
+            let damage = if is_weak { base * 3 / 2 } else { base };
+            battle
+                .log
+                .push(format!("サンダー！ {}ダメージ！{}", damage, weak_str));
+            battle.enemy.hp = battle.enemy.hp.saturating_sub(damage);
+        }
+        SkillKind::Drain => {
+            // Damage + heal 50%
+            let damage = (mag * sinfo.value)
+                .saturating_sub(einfo.def / 3)
+                .max(1);
+            let heal = damage / 2;
+            state.hp = (state.hp + heal).min(max_hp);
+            battle.log.push(format!(
+                "ドレイン！ {}ダメージ！ HP{}回復！",
+                damage, heal
+            ));
+            battle.enemy.hp = battle.enemy.hp.saturating_sub(damage);
+        }
+        SkillKind::Berserk => {
+            // ATK up, DEF down
+            battle.player_atk_boost += sinfo.value;
+            battle.player_def_boost = battle.player_def_boost.saturating_sub(5);
+            battle.player_berserk = true;
+            battle
+                .log
+                .push(format!("バーサク！ ATK+{}！ DEF-5！", sinfo.value));
         }
     }
 
@@ -632,22 +740,75 @@ pub fn battle_flee(state: &mut RpgState) -> bool {
 
 fn process_enemy_turn(state: &mut RpgState) {
     let player_def = state.total_def();
-    let battle = match &mut state.battle {
-        Some(b) => b,
-        None => return,
+
+    // Extract battle state info to avoid borrow conflicts with rng_range
+    let (enemy_kind, enemy_hp, is_charging, can_charge, def_boost) = {
+        let battle = match &state.battle {
+            Some(b) => b,
+            None => return,
+        };
+        if battle.enemy.hp == 0 {
+            return;
+        }
+        (
+            battle.enemy.kind,
+            battle.enemy.hp,
+            battle.enemy_charging,
+            enemy_info(battle.enemy.kind).can_charge,
+            battle.player_def_boost,
+        )
     };
-    if battle.enemy.hp == 0 {
-        return;
+
+    let _ = enemy_hp;
+    let einfo = enemy_info(enemy_kind);
+    let total_def = player_def + def_boost;
+
+    if is_charging {
+        // Execute charged attack — 2x ATK
+        let damage = (einfo.atk * 2).saturating_sub(total_def / 2).max(1);
+        let battle = state.battle.as_mut().unwrap();
+        battle.enemy_charging = false;
+        let msg = match enemy_kind {
+            EnemyKind::Dragon => format!("{}のブレス！ {}ダメージ！", einfo.name, damage),
+            EnemyKind::DemonLord => {
+                format!("{}の闇の波動！ {}ダメージ！", einfo.name, damage)
+            }
+            _ => format!("{}の渾身の一撃！ {}ダメージ！", einfo.name, damage),
+        };
+        battle.log.push(msg);
+        state.hp = state.hp.saturating_sub(damage);
+    } else if can_charge {
+        // 25% chance to charge instead of attacking
+        let charge_roll = rng_range(state, 100);
+        if charge_roll < 25 {
+            let battle = state.battle.as_mut().unwrap();
+            battle.enemy_charging = true;
+            let telegraph = match enemy_kind {
+                EnemyKind::Golem => format!("{}は大振りの構えを取った！", einfo.name),
+                EnemyKind::Dragon => format!("{}がブレスの準備をしている！", einfo.name),
+                EnemyKind::DemonLord => format!("{}が闇の力を集めている…", einfo.name),
+                _ => format!("{}は力を溜めている！", einfo.name),
+            };
+            battle.log.push(telegraph);
+            return; // No damage this turn — player has a chance to Shield
+        } else {
+            let battle = state.battle.as_mut().unwrap();
+            let damage = einfo.atk.saturating_sub(total_def / 2).max(1);
+            battle
+                .log
+                .push(format!("{}の攻撃！ {}ダメージ！", einfo.name, damage));
+            state.hp = state.hp.saturating_sub(damage);
+        }
+    } else {
+        // Normal attack
+        let battle = state.battle.as_mut().unwrap();
+        let damage = einfo.atk.saturating_sub(total_def / 2).max(1);
+        battle
+            .log
+            .push(format!("{}の攻撃！ {}ダメージ！", einfo.name, damage));
+        state.hp = state.hp.saturating_sub(damage);
     }
 
-    let einfo = enemy_info(battle.enemy.kind);
-    let total_def = player_def + battle.player_def_boost;
-    let damage = einfo.atk.saturating_sub(total_def / 2).max(1);
-    battle
-        .log
-        .push(format!("{}の攻撃！ {}ダメージ！", einfo.name, damage));
-
-    state.hp = state.hp.saturating_sub(damage);
     if state.hp == 0 {
         let battle = state.battle.as_mut().unwrap();
         battle.phase = BattlePhase::Defeat;
@@ -993,7 +1154,8 @@ mod tests {
         s.battle.as_mut().unwrap().phase = BattlePhase::Defeat;
         process_defeat(&mut s);
         assert_eq!(s.scene, Scene::Town);
-        assert_eq!(s.gold, 50); // half lost
+        // Death penalty: lose run gold (0) + 20% pre-run gold (100*20%=20)
+        assert_eq!(s.gold, 80);
     }
 
     #[test]
@@ -1072,5 +1234,67 @@ mod tests {
         enter_dungeon(&mut s, 3);
         descend_floor(&mut s);
         assert_eq!(s.dungeon.as_ref().unwrap().floor_num, 4);
+    }
+
+    #[test]
+    fn return_bonus_scales_with_floor_and_rooms() {
+        assert_eq!(return_bonus(1, 0), 0);
+        assert_eq!(return_bonus(1, 3), 9);  // 1 * 3 * 3
+        assert_eq!(return_bonus(5, 4), 60); // 5 * 4 * 3
+        assert_eq!(return_bonus(10, 7), 210); // 10 * 7 * 3
+    }
+
+    #[test]
+    fn retreat_gives_return_bonus() {
+        let mut s = RpgState::new();
+        s.gold = 50;
+        enter_dungeon(&mut s, 3);
+        s.run_rooms_cleared = 4;
+        s.run_gold_earned = 20;
+        s.run_enemies_killed = 2;
+        let gold_before = s.gold;
+        retreat_to_town(&mut s);
+        // Bonus = 3 * 4 * 3 = 36
+        assert_eq!(s.gold, gold_before + 36);
+    }
+
+    #[test]
+    fn death_penalty_loses_run_gold() {
+        let mut s = RpgState::new();
+        s.gold = 200;
+        enter_dungeon(&mut s, 1);
+        // Simulate earning gold during the run
+        s.run_gold_earned = 80;
+        // pre_run = 200 - 80 = 120, extra = 120/5 = 24
+        // lost = 80 + 24 = 104
+        s.hp = 0;
+        process_dungeon_death(&mut s);
+        assert_eq!(s.gold, 96);
+    }
+
+    #[test]
+    fn new_skills_available_at_correct_levels() {
+        assert_eq!(available_skills(1).len(), 1); // Fire
+        assert_eq!(available_skills(2).len(), 2); // +Heal
+        assert_eq!(available_skills(3).len(), 3); // +IceBlade
+        assert_eq!(available_skills(4).len(), 4); // +Shield
+        assert_eq!(available_skills(5).len(), 5); // +Thunder
+        assert_eq!(available_skills(6).len(), 6); // +Drain
+        assert_eq!(available_skills(8).len(), 7); // +Berserk
+    }
+
+    #[test]
+    fn rooms_cleared_increments_on_advance() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        assert_eq!(s.run_rooms_cleared, 0);
+        s.hp = s.max_hp; // ensure not dead
+        // Simulate resolving a room
+        s.scene = Scene::DungeonResult;
+        s.room_result = Some(RoomResult {
+            description: vec!["test".into()],
+        });
+        advance_room(&mut s);
+        assert_eq!(s.run_rooms_cleared, 1);
     }
 }
