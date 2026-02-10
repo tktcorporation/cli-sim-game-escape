@@ -17,10 +17,12 @@ use crate::widgets::ClickableList;
 
 use super::actions::*;
 use super::logic::{
-    available_skills, battle_consumables, current_room_kind, dungeon_progress, town_choices,
+    available_skills, battle_consumables, current_room_kind, dungeon_progress, return_bonus,
+    town_choices,
 };
 use super::state::{
-    enemy_info, item_info, shop_items, skill_info, BattlePhase, Overlay, RoomKind, RpgState, Scene,
+    enemy_info, item_info, shop_items, skill_element, skill_info, BattlePhase, Element, Overlay,
+    RoomKind, RpgState, Scene,
 };
 
 pub fn render(
@@ -286,6 +288,17 @@ fn render_dungeon_bar(state: &RpgState, f: &mut Frame, area: Rect, borders: Bord
             map_spans.push(Span::styled(symbol, Style::default().fg(color)));
         }
 
+        // Return bonus display
+        let bonus = return_bonus(floor, state.run_rooms_cleared);
+        let bonus_span = if bonus > 0 {
+            Span::styled(
+                format!(" 帰還+{}G", bonus),
+                Style::default().fg(Color::Green),
+            )
+        } else {
+            Span::styled(" 帰還+0G", Style::default().fg(Color::DarkGray))
+        };
+
         let line = Line::from(vec![
             Span::styled(
                 format!(" B{}F ", floor),
@@ -299,9 +312,10 @@ fn render_dungeon_bar(state: &RpgState, f: &mut Frame, area: Rect, borders: Bord
             ),
             Span::raw(" "),
         ]);
-        // Combine into one line with map
+        // Combine into one line with map + bonus
         let mut all_spans = line.spans;
         all_spans.extend(map_spans);
+        all_spans.push(bonus_span);
 
         let block = Block::default()
             .borders(borders)
@@ -393,6 +407,26 @@ fn render_dungeon_content(
     click_state: &Rc<RefCell<ClickState>>,
 ) {
     let mut cl = ClickableList::new();
+
+    // Low HP warning
+    let hp_ratio = if state.max_hp > 0 {
+        state.hp as f64 / state.max_hp as f64
+    } else {
+        1.0
+    };
+    if hp_ratio <= 0.25 && hp_ratio > 0.0 {
+        cl.push(Line::from(Span::styled(
+            " ※ 体力が危険な状態だ…引き返すべきか？",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else if hp_ratio <= 0.5 {
+        cl.push(Line::from(Span::styled(
+            " ※ 傷が痛む…無理は禁物だ",
+            Style::default().fg(Color::Yellow),
+        )));
+    }
 
     // Show what's ahead
     let room_kind = current_room_kind(state);
@@ -515,12 +549,22 @@ fn render_battle_content(
     } else {
         ""
     };
-    cl.push(Line::from(vec![Span::styled(
-        format!(" \u{300a}\u{6226}\u{95d8}\u{300b} {}{}", einfo.name, boss_str),
-        Style::default()
-            .fg(Color::Red)
-            .add_modifier(Modifier::BOLD),
-    )]));
+    // Weakness indicator
+    let weak_str = match einfo.weakness {
+        Some(Element::Fire) => " [炎弱点]",
+        Some(Element::Ice) => " [氷弱点]",
+        Some(Element::Thunder) => " [雷弱点]",
+        None => "",
+    };
+    cl.push(Line::from(vec![
+        Span::styled(
+            format!(" \u{300a}\u{6226}\u{95d8}\u{300b} {}{}", einfo.name, boss_str),
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(weak_str, Style::default().fg(Color::Cyan)),
+    ]));
 
     let ehp_w = if is_narrow { 10 } else { 16 };
     let (ehp_bar, ehp_color) = hp_bar(battle.enemy.hp, battle.enemy.max_hp, ehp_w);
@@ -533,7 +577,17 @@ fn render_battle_content(
         ),
     ]));
 
-    cl.push(Line::from(""));
+    // Charge warning
+    if battle.enemy_charging {
+        cl.push(Line::from(Span::styled(
+            " \u{26a0} 力を溜めている！（次のターン大ダメージ）",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        cl.push(Line::from(""));
+    }
 
     let max_log = 3;
     let start = battle.log.len().saturating_sub(max_log);
@@ -569,7 +623,18 @@ fn render_battle_content(
             for (i, &skill) in skills.iter().enumerate() {
                 let sinfo = skill_info(skill);
                 let can_use = state.mp >= sinfo.mp_cost;
-                let label = format!("{} (MP:{})", sinfo.name, sinfo.mp_cost);
+                // Element icon for skills with elements
+                let elem_icon = match skill_element(skill) {
+                    Some(Element::Fire) => "\u{1f525}",
+                    Some(Element::Ice) => "\u{2744}",
+                    Some(Element::Thunder) => "\u{26a1}",
+                    None => "",
+                };
+                let label = if elem_icon.is_empty() {
+                    format!("{} (MP:{})", sinfo.name, sinfo.mp_cost)
+                } else {
+                    format!("{}{} (MP:{})", elem_icon, sinfo.name, sinfo.mp_cost)
+                };
                 if can_use {
                     cl.push_clickable(
                         Line::from(vec![
@@ -649,8 +714,14 @@ fn render_battle_content(
                     .fg(Color::Red)
                     .add_modifier(Modifier::BOLD),
             )));
+            let lost_run = state.run_gold_earned;
+            let pre_run = state.gold.saturating_sub(lost_run);
+            let extra = pre_run / 5;
             cl.push(Line::from(Span::styled(
-                "   町に戻される (所持金半減)",
+                format!(
+                    "   探索報酬{}G + ペナルティ{}G 失う",
+                    lost_run, extra
+                ),
                 Style::default().fg(Color::Red),
             )));
             cl.push(Line::from(""));
