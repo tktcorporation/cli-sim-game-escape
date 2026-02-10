@@ -140,12 +140,7 @@ fn render_intro(
         .border_style(Style::default().fg(Color::DarkGray));
 
     let mut cs = click_state.borrow_mut();
-    cl.register_targets_with_block(chunks[1], &choice_block, &mut cs, 0, 0);
-    drop(cs);
-    f.render_widget(
-        Paragraph::new(cl.into_lines()).block(choice_block),
-        chunks[1],
-    );
+    cl.render(f, chunks[1], choice_block, &mut cs, false, 0);
 }
 
 // ── Main Screen (Town + Dungeon + Battle) ────────────────────
@@ -387,14 +382,7 @@ fn render_town_content(
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
     let mut cs = click_state.borrow_mut();
-    cl.register_targets_with_block(area, &block, &mut cs, 0, 0);
-    drop(cs);
-    f.render_widget(
-        Paragraph::new(cl.into_lines())
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    cl.render(f, area, block, &mut cs, true, 0);
 }
 
 fn render_dungeon_content(
@@ -441,14 +429,7 @@ fn render_dungeon_content(
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
     let mut cs = click_state.borrow_mut();
-    cl.register_targets_with_block(area, &block, &mut cs, 0, 0);
-    drop(cs);
-    f.render_widget(
-        Paragraph::new(cl.into_lines())
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    cl.render(f, area, block, &mut cs, true, 0);
 }
 
 fn render_dungeon_result(
@@ -510,14 +491,7 @@ fn render_dungeon_result(
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
     let mut cs = click_state.borrow_mut();
-    cl.register_targets_with_block(area, &block, &mut cs, 0, 0);
-    drop(cs);
-    f.render_widget(
-        Paragraph::new(cl.into_lines())
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    cl.render(f, area, block, &mut cs, true, 0);
 }
 
 fn render_battle_content(
@@ -696,14 +670,7 @@ fn render_battle_content(
         .borders(borders)
         .border_style(Style::default().fg(Color::Red));
     let mut cs = click_state.borrow_mut();
-    cl.register_targets_with_block(area, &block, &mut cs, 0, 0);
-    drop(cs);
-    f.render_widget(
-        Paragraph::new(cl.into_lines())
-            .block(block)
-            .wrap(Wrap { trim: false }),
-        area,
-    );
+    cl.render(f, area, block, &mut cs, true, 0);
 }
 
 fn render_log(state: &RpgState, f: &mut Frame, area: Rect, borders: Borders) {
@@ -841,9 +808,7 @@ fn render_inventory(
         ));
 
     let mut cs = click_state.borrow_mut();
-    cl.register_targets_with_block(area, &block, &mut cs, 0, 0);
-    drop(cs);
-    f.render_widget(Paragraph::new(cl.into_lines()).block(block), area);
+    cl.render(f, area, block, &mut cs, false, 0);
 }
 
 fn render_status(
@@ -959,9 +924,7 @@ fn render_status(
         ));
 
     let mut cs = click_state.borrow_mut();
-    cl.register_targets_with_block(area, &block, &mut cs, 0, 0);
-    drop(cs);
-    f.render_widget(Paragraph::new(cl.into_lines()).block(block), area);
+    cl.render(f, area, block, &mut cs, false, 0);
 }
 
 fn render_shop(
@@ -1031,9 +994,7 @@ fn render_shop(
         ));
 
     let mut cs = click_state.borrow_mut();
-    cl.register_targets_with_block(area, &block, &mut cs, 0, 0);
-    drop(cs);
-    f.render_widget(Paragraph::new(cl.into_lines()).block(block), area);
+    cl.render(f, area, block, &mut cs, false, 0);
 }
 
 // ── Game Clear ──────────────────────────────────────────────
@@ -1087,7 +1048,5 @@ fn render_game_clear(
         ));
 
     let mut cs = click_state.borrow_mut();
-    cl.register_targets_with_block(area, &block, &mut cs, 0, 0);
-    drop(cs);
-    f.render_widget(Paragraph::new(cl.into_lines()).block(block), area);
+    cl.render(f, area, block, &mut cs, false, 0);
 }

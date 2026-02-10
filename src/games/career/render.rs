@@ -418,11 +418,7 @@ fn render_actions(
         .title(Span::styled(title, Style::default().fg(Color::Yellow)));
 
     let mut cs = click_state.borrow_mut();
-    cl.register_targets_with_block(area, &block, &mut cs, 0, 0);
-    drop(cs);
-
-    let widget = Paragraph::new(cl.into_lines()).block(block);
-    f.render_widget(widget, area);
+    cl.render(f, area, block, &mut cs, false, 0);
 }
 
 fn next_job_hint(state: &CareerState) -> Span<'static> {
@@ -552,15 +548,8 @@ fn render_training(
         .border_style(Style::default().fg(Color::DarkGray));
 
     let mut cs = click_state.borrow_mut();
-    cl.register_targets_with_block(chunks[0], &block, &mut cs, 0, 0);
-    cl_footer.register_targets_with_block(chunks[1], &footer_block, &mut cs, 0, 0);
-    drop(cs);
-
-    let widget = Paragraph::new(cl.into_lines()).block(block);
-    f.render_widget(widget, chunks[0]);
-
-    let footer_widget = Paragraph::new(cl_footer.into_lines()).block(footer_block);
-    f.render_widget(footer_widget, chunks[1]);
+    cl.render(f, chunks[0], block, &mut cs, false, 0);
+    cl_footer.render(f, chunks[1], footer_block, &mut cs, false, 0);
 }
 
 fn training_effect_str(
@@ -680,15 +669,8 @@ fn render_job_market(
         .border_style(Style::default().fg(Color::DarkGray));
 
     let mut cs = click_state.borrow_mut();
-    cl.register_targets_with_block(chunks[0], &block, &mut cs, 0, 0);
-    cl_footer.register_targets_with_block(chunks[1], &footer_block, &mut cs, 0, 0);
-    drop(cs);
-
-    let widget = Paragraph::new(cl.into_lines()).block(block);
-    f.render_widget(widget, chunks[0]);
-
-    let footer_widget = Paragraph::new(cl_footer.into_lines()).block(footer_block);
-    f.render_widget(footer_widget, chunks[1]);
+    cl.render(f, chunks[0], block, &mut cs, false, 0);
+    cl_footer.render(f, chunks[1], footer_block, &mut cs, false, 0);
 }
 
 fn requirement_str(
@@ -890,18 +872,8 @@ fn render_invest(
         .border_style(Style::default().fg(Color::DarkGray));
 
     let mut cs = click_state.borrow_mut();
-    cl.register_targets_with_block(chunks[1], &action_block, &mut cs, 0, 0);
-    cl_footer.register_targets_with_block(chunks[2], &footer_block, &mut cs, 0, 0);
-    drop(cs);
-
-    f.render_widget(
-        Paragraph::new(cl.into_lines()).block(action_block),
-        chunks[1],
-    );
-    f.render_widget(
-        Paragraph::new(cl_footer.into_lines()).block(footer_block),
-        chunks[2],
-    );
+    cl.render(f, chunks[1], action_block, &mut cs, false, 0);
+    cl_footer.render(f, chunks[2], footer_block, &mut cs, false, 0);
 }
 
 // ── Budget Screen (Income Statement + Balance Sheet) ───────────────────
@@ -987,13 +959,7 @@ fn render_budget(
         .border_style(Style::default().fg(Color::DarkGray));
 
     let mut cs = click_state.borrow_mut();
-    cl_footer.register_targets_with_block(chunks[1], &footer_block, &mut cs, 0, 0);
-    drop(cs);
-
-    f.render_widget(
-        Paragraph::new(cl_footer.into_lines()).block(footer_block),
-        chunks[1],
-    );
+    cl_footer.render(f, chunks[1], footer_block, &mut cs, false, 0);
 }
 
 fn render_budget_narrow(
@@ -1386,13 +1352,7 @@ fn render_report(
         .border_style(Style::default().fg(Color::DarkGray));
 
     let mut cs = click_state.borrow_mut();
-    cl_footer.register_targets_with_block(chunks[1], &footer_block, &mut cs, 0, 0);
-    drop(cs);
-
-    f.render_widget(
-        Paragraph::new(cl_footer.into_lines()).block(footer_block),
-        chunks[1],
-    );
+    cl_footer.render(f, chunks[1], footer_block, &mut cs, false, 0);
 }
 
 // ── Lifestyle Screen ───────────────────────────────────────────────────
@@ -1500,15 +1460,8 @@ fn render_lifestyle(
         .border_style(Style::default().fg(Color::DarkGray));
 
     let mut cs = click_state.borrow_mut();
-    cl.register_targets_with_block(chunks[0], &block, &mut cs, 0, 0);
-    cl_footer.register_targets_with_block(chunks[1], &footer_block, &mut cs, 0, 0);
-    drop(cs);
-
-    f.render_widget(Paragraph::new(cl.into_lines()).block(block), chunks[0]);
-    f.render_widget(
-        Paragraph::new(cl_footer.into_lines()).block(footer_block),
-        chunks[1],
-    );
+    cl.render(f, chunks[0], block, &mut cs, false, 0);
+    cl_footer.render(f, chunks[1], footer_block, &mut cs, false, 0);
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
