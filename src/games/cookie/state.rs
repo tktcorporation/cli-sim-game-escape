@@ -1855,7 +1855,7 @@ impl CookieState {
                 id: "angels_aura",
                 name: "天使のオーラ".into(),
                 description: "CPS 永続 ×2".into(),
-                cost: 5,
+                cost: 3,
                 purchased: false,
                 effect: PrestigeEffect::CpsMultiplier(2.0),
                 requires: Some("heavenly_power"),
@@ -1865,7 +1865,7 @@ impl CookieState {
                 id: "factory_memory",
                 name: "工場の記憶".into(),
                 description: "転生後 Cursor 10台で開始".into(),
-                cost: 15,
+                cost: 8,
                 purchased: false,
                 effect: PrestigeEffect::StartingCursors(10),
                 requires: Some("angels_aura"),
@@ -1875,7 +1875,7 @@ impl CookieState {
                 id: "efficiency_peak",
                 name: "効率の極致".into(),
                 description: "全生産者コスト -10%".into(),
-                cost: 30,
+                cost: 15,
                 purchased: false,
                 effect: PrestigeEffect::ProducerCostReduction(0.1),
                 requires: Some("factory_memory"),
@@ -1885,7 +1885,7 @@ impl CookieState {
                 id: "heavenly_wealth",
                 name: "天界の富".into(),
                 description: "転生後 10,000,000 クッキーで開始".into(),
-                cost: 60,
+                cost: 30,
                 purchased: false,
                 effect: PrestigeEffect::StartingCookies(10_000_000.0),
                 requires: Some("efficiency_peak"),
@@ -1908,7 +1908,7 @@ impl CookieState {
                 id: "gods_click",
                 name: "神のクリック".into(),
                 description: "クリック力 永続 ×3".into(),
-                cost: 5,
+                cost: 3,
                 purchased: false,
                 effect: PrestigeEffect::ClickMultiplier(3.0),
                 requires: Some("angels_click"),
@@ -1918,7 +1918,7 @@ impl CookieState {
                 id: "sugar_alchemy",
                 name: "砂糖錬金術".into(),
                 description: "砂糖ブースト効果 +50%".into(),
-                cost: 15,
+                cost: 8,
                 purchased: false,
                 effect: PrestigeEffect::SugarBoostMultiplier(1.5),
                 requires: Some("gods_click"),
@@ -1928,7 +1928,7 @@ impl CookieState {
                 id: "combo_mastery",
                 name: "連撃の極意".into(),
                 description: "クリック力 永続 ×2".into(),
-                cost: 30,
+                cost: 15,
                 purchased: false,
                 effect: PrestigeEffect::ClickMultiplier(2.0),
                 requires: Some("sugar_alchemy"),
@@ -1938,7 +1938,7 @@ impl CookieState {
                 id: "click_sovereign",
                 name: "クリックの覇者".into(),
                 description: "クリック力 永続 ×5".into(),
-                cost: 60,
+                cost: 30,
                 purchased: false,
                 effect: PrestigeEffect::ClickMultiplier(5.0),
                 requires: Some("combo_mastery"),
@@ -1961,7 +1961,7 @@ impl CookieState {
                 id: "golden_intuition",
                 name: "黄金の直感".into(),
                 description: "ゴールデン効果時間 +30%".into(),
-                cost: 5,
+                cost: 3,
                 purchased: false,
                 effect: PrestigeEffect::GoldenDuration(1.3),
                 requires: Some("golden_rush"),
@@ -1971,7 +1971,7 @@ impl CookieState {
                 id: "luck_extension",
                 name: "幸運の延長".into(),
                 description: "ゴールデン効果時間 +50%".into(),
-                cost: 15,
+                cost: 8,
                 purchased: false,
                 effect: PrestigeEffect::GoldenDuration(1.5),
                 requires: Some("golden_intuition"),
@@ -1981,7 +1981,7 @@ impl CookieState {
                 id: "milk_memory",
                 name: "ミルクの記憶".into(),
                 description: "転生後にミルクを50%保持".into(),
-                cost: 30,
+                cost: 15,
                 purchased: false,
                 effect: PrestigeEffect::MilkRetention(0.5),
                 requires: Some("luck_extension"),
@@ -1991,7 +1991,7 @@ impl CookieState {
                 id: "luck_sovereign",
                 name: "幸運の支配者".into(),
                 description: "ゴールデン効果 ×2".into(),
-                cost: 60,
+                cost: 30,
                 purchased: false,
                 effect: PrestigeEffect::GoldenEffectMultiplier(2.0),
                 requires: Some("milk_memory"),
@@ -2376,10 +2376,11 @@ impl CookieState {
     }
 
     /// Calculate how many new heavenly chips would be earned from current run.
-    /// Threshold: 10億 (1e9) cookies per chip² (lowered from 1e12 for better pacing).
+    /// Threshold: 1000万 (1e7) cookies per chip² — first prestige accessible
+    /// within ~20-25 minutes, scaling controlled to prevent exponential blow-up.
     pub fn pending_heavenly_chips(&self) -> u64 {
         let total = self.cookies_all_runs + self.cookies_all_time;
-        let total_chips = (total / 1e9).sqrt().floor() as u64;
+        let total_chips = (total / 1e7).sqrt().floor() as u64;
         total_chips.saturating_sub(self.heavenly_chips)
     }
 
@@ -2511,10 +2512,43 @@ impl CookieState {
         // Step 8: Apply sugar boost
         let sugar_mult = self.sugar_boost_multiplier();
 
-        after_market * multiplier * sugar_mult
+        // Step 9: Apply savings bonus (reward for holding cookies)
+        let savings = self.savings_bonus();
+
+        after_market * multiplier * sugar_mult * savings
     }
 
-    /// Effective cookies per click (with buffs, research, dragon).
+    /// Combo click multiplier: +2% per combo hit, max 3x at 100 combo.
+    pub fn combo_click_multiplier(&self) -> f64 {
+        1.0 + (self.combo_count as f64 * 0.02).min(2.0)
+    }
+
+    /// Critical click chance: 3% base + 0.1% per combo, max 15%.
+    pub fn critical_chance(&self) -> f64 {
+        (0.03 + self.combo_count as f64 * 0.001).min(0.15)
+    }
+
+    /// Savings bonus multiplier: holding more cookies gives a small CPS bonus.
+    /// +0.5% per order of magnitude of saved cookies.
+    pub fn savings_bonus(&self) -> f64 {
+        if self.cookies > 10.0 {
+            1.0 + self.cookies.log10() * 0.005
+        } else {
+            1.0
+        }
+    }
+
+    /// Whether any golden buff is active (for chain bonus check).
+    pub fn has_active_golden_buff(&self) -> bool {
+        self.active_buffs.iter().any(|b| {
+            matches!(
+                &b.effect,
+                GoldenEffect::ProductionFrenzy { .. } | GoldenEffect::ClickFrenzy { .. }
+            )
+        })
+    }
+
+    /// Effective cookies per click (with buffs, research, dragon, combo).
     pub fn effective_click_power(&self) -> f64 {
         let mut power = self.cookies_per_click;
 
@@ -2526,6 +2560,9 @@ impl CookieState {
 
         // Dragon: click multiplier
         power *= self.dragon_click_modifier();
+
+        // Combo multiplier
+        power *= self.combo_click_multiplier();
 
         // Buffs: click frenzy (with research buff effect modifier)
         let buff_effect_mult = self.research_buff_effect_modifier();

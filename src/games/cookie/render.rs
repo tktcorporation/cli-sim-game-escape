@@ -287,11 +287,25 @@ fn render_cookie_display(
         delta_indicator,
     ]));
 
-    // --- Row 2: Art[2] + click button + combo ---
+    // --- Row 2: Art[2] + click button + combo + critical ---
+    let combo_mult = state.combo_click_multiplier();
+    let crit_chance = state.critical_chance();
     let combo_span = if state.combo_count >= 5 {
+        let mut text = format!(" ×{}", state.combo_count);
+        if combo_mult > 1.01 {
+            text.push_str(&format!("(+{:.0}%)", (combo_mult - 1.0) * 100.0));
+        }
         Span::styled(
-            format!(" ×{}", state.combo_count),
+            text,
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled("", Style::default())
+    };
+    let crit_span = if crit_chance > 0.035 {
+        Span::styled(
+            format!(" ⚡{:.0}%", crit_chance * 100.0),
+            Style::default().fg(Color::Magenta),
         )
     } else {
         Span::styled("", Style::default())
@@ -301,6 +315,7 @@ fn render_cookie_display(
         Span::styled(" ", Style::default()),
         Span::styled(&click_label, click_style),
         combo_span,
+        crit_span,
     ]));
 
     // --- Row 3: Stats (clicks / milk / kitten / prestige / milestones) ---
@@ -432,11 +447,22 @@ fn render_cookie_display(
     }
     if !state.active_buffs.is_empty() {
         let buff_blink = (state.anim_frame / 3).is_multiple_of(2);
+        let chain_indicator = if state.has_active_golden_buff() { "🔗" } else { "" };
         status_spans.push(Span::styled(
-            format!(" ⚡×{}", state.active_buffs.len()),
+            format!(" ⚡×{}{}", state.active_buffs.len(), chain_indicator),
             Style::default().fg(if buff_blink { Color::Yellow } else { Color::Magenta })
                 .add_modifier(Modifier::BOLD),
         ));
+    }
+    // Savings bonus indicator (show when bonus > 1%)
+    {
+        let savings = state.savings_bonus();
+        if savings > 1.01 {
+            status_spans.push(Span::styled(
+                format!(" 💎+{:.1}%", (savings - 1.0) * 100.0),
+                Style::default().fg(Color::Cyan),
+            ));
+        }
     }
     if state.golden_event.is_some() {
         let golden_blink = (state.anim_frame / 2).is_multiple_of(2);
