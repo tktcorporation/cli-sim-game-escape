@@ -181,34 +181,65 @@ pub fn claim_golden(state: &mut CookieState) -> bool {
     };
     let _ = event; // just needed for the check
 
+    // Chain bonus: claiming during an active buff gives +50% effect
+    let chain_bonus = if state.has_active_golden_buff() { 1.5 } else { 1.0 };
+
     // Pick a random effect
     let effect = pick_golden_effect(state);
 
     // Apply the effect (research + prestige can extend buff duration)
     let buff_dur_mult = state.total_buff_duration();
+    let chain_label = if chain_bonus > 1.0 { " 🔗チェーン！" } else { "" };
     match &effect {
-        GoldenEffect::ProductionFrenzy { .. } => {
-            let ticks = (70.0 * buff_dur_mult) as u32;
+        GoldenEffect::ProductionFrenzy { multiplier } => {
+            let effective_mult = 1.0 + (multiplier - 1.0) * chain_bonus;
+            let ticks = (70.0 * buff_dur_mult * chain_bonus) as u32;
             state.active_buffs.push(ActiveBuff {
-                effect: effect.clone(),
+                effect: GoldenEffect::ProductionFrenzy {
+                    multiplier: effective_mult,
+                },
                 ticks_left: ticks,
             });
-            state.add_log(&format!("🍪 {} ({:.0}秒)", effect.detail(), ticks as f64 / 10.0), true);
+            state.add_log(
+                &format!(
+                    "🍪 生産×{:.0} 発動中！({:.0}秒){}",
+                    effective_mult,
+                    ticks as f64 / 10.0,
+                    chain_label,
+                ),
+                true,
+            );
         }
-        GoldenEffect::ClickFrenzy { .. } => {
-            let ticks = (100.0 * buff_dur_mult) as u32;
+        GoldenEffect::ClickFrenzy { multiplier } => {
+            let effective_mult = 1.0 + (multiplier - 1.0) * chain_bonus;
+            let ticks = (100.0 * buff_dur_mult * chain_bonus) as u32;
             state.active_buffs.push(ActiveBuff {
-                effect: effect.clone(),
+                effect: GoldenEffect::ClickFrenzy {
+                    multiplier: effective_mult,
+                },
                 ticks_left: ticks,
             });
-            state.add_log(&format!("🍪 {} ({:.0}秒)", effect.detail(), ticks as f64 / 10.0), true);
+            state.add_log(
+                &format!(
+                    "🍪 クリック×{:.0} 発動中！({:.0}秒){}",
+                    effective_mult,
+                    ticks as f64 / 10.0,
+                    chain_label,
+                ),
+                true,
+            );
         }
         GoldenEffect::InstantBonus { cps_seconds } => {
-            let bonus = state.total_cps() * cps_seconds;
+            let bonus = state.total_cps() * cps_seconds * chain_bonus;
             state.cookies += bonus;
             state.cookies_all_time += bonus;
             state.add_log(
-                &format!("🍪 {} (+{})", effect.detail(), format_number(bonus)),
+                &format!(
+                    "🍪 CPS×{:.0}秒分GET！(+{}){}",
+                    cps_seconds * chain_bonus,
+                    format_number(bonus),
+                    chain_label,
+                ),
                 true,
             );
         }
@@ -216,7 +247,8 @@ pub fn claim_golden(state: &mut CookieState) -> bool {
 
     state.golden_event = None;
     state.golden_cookies_claimed += 1;
-    spawn_celebration(state, 5); // golden cookie celebration
+    let celebration_count = if chain_bonus > 1.0 { 8 } else { 5 };
+    spawn_celebration(state, celebration_count);
 
     // Schedule next golden cookie
     let delay = random_spawn_delay(state);
@@ -340,25 +372,36 @@ const SPARKLE_CHARS: &[&str] = &["·", "✧", "˚", "°"];
 
 /// Manual click: add cookies_per_click to cookies (with buffs) + spawn particles.
 pub fn click(state: &mut CookieState) {
-    let power = state.effective_click_power();
-    state.cookies += power;
-    state.cookies_all_time += power;
-    state.total_clicks += 1;
-    state.click_flash = 3; // flash for 3 ticks
+    let mut power = state.effective_click_power();
 
-    // Update combo
+    // Update combo first (affects critical chance)
     state.click_cooldown = 0;
     state.combo_count += 1;
     if state.combo_count > state.best_combo {
         state.best_combo = state.combo_count;
     }
 
+    // Critical hit check
+    let crit_chance = state.critical_chance();
+    let crit_roll = (state.next_random() % 1000) as f64 / 1000.0;
+    let is_critical = crit_roll < crit_chance;
+    if is_critical {
+        power *= 7.0;
+    }
+
+    state.cookies += power;
+    state.cookies_all_time += power;
+    state.total_clicks += 1;
+    state.click_flash = if is_critical { 6 } else { 3 };
+
     let combo = state.combo_count;
 
-    // Main "+N" particle
+    // Main "+N" particle (critical = special text)
     let col_offset = (state.next_random() % 13) as i16 - 6;
-    let life = 8 + (state.next_random() % 5);
-    let text = if power >= 10.0 {
+    let life = if is_critical { 12 } else { 8 + (state.next_random() % 5) };
+    let text = if is_critical {
+        format!("⚡+{}", format_number(power))
+    } else if power >= 10.0 {
         format!("+{}", format_number(power))
     } else {
         format!("+{}", power as u32)
@@ -371,6 +414,11 @@ pub fn click(state: &mut CookieState) {
         style: ParticleStyle::Click,
         row_offset: 0,
     });
+
+    // Critical hit burst particles
+    if is_critical {
+        spawn_celebration(state, 3);
+    }
 
     // Subtle accent particle on higher combos (1 at most)
     if combo >= 5 {
@@ -763,8 +811,10 @@ pub fn perform_prestige(state: &mut CookieState) -> u64 {
         .sum();
 
     // Recalculate prestige multiplier from chips + prestige upgrades
-    // 1チップ = +10% CPS (旧: +5%) — 転生の体感報酬を強化
-    let chip_bonus = 1.0 + state.heavenly_chips as f64 * 0.10;
+    // Diminishing returns: sqrt(chips) * 0.30
+    // 1=1.3x, 10=1.95x, 50=3.12x, 100=4.0x, 1000=10.5x
+    // Prevents runaway exponential growth while every prestige feels rewarding
+    let chip_bonus = 1.0 + (state.heavenly_chips as f64).sqrt() * 0.30;
     let upgrade_cps_mult: f64 = state
         .prestige_upgrades
         .iter()
@@ -1717,19 +1767,19 @@ mod tests {
     }
 
     #[test]
-    fn prestige_requires_billion_cookies() {
+    fn prestige_requires_threshold_cookies() {
         let mut state = CookieState::new();
-        state.cookies_all_time = 5e8; // 500 million — not enough for 1 chip
+        state.cookies_all_time = 5e6; // 5 million — not enough for 1 chip (threshold=1e7)
         let chips = perform_prestige(&mut state);
         assert_eq!(chips, 0);
         assert_eq!(state.prestige_count, 0);
     }
 
     #[test]
-    fn prestige_earns_chips_from_billion() {
+    fn prestige_earns_chips_from_threshold() {
         let mut state = CookieState::new();
-        // sqrt(1e9 / 1e9) = sqrt(1) = 1 chip
-        state.cookies_all_time = 1e9;
+        // sqrt(1e7 / 1e7) = sqrt(1) = 1 chip
+        state.cookies_all_time = 1e7;
         let chips = perform_prestige(&mut state);
         assert_eq!(chips, 1);
         assert_eq!(state.heavenly_chips, 1);
@@ -1754,23 +1804,24 @@ mod tests {
     #[test]
     fn prestige_multiplier_scales_with_chips() {
         let mut state = CookieState::new();
-        // sqrt(100e9 / 1e9) = sqrt(100) = 10 chips
-        state.cookies_all_time = 100e9;
+        // sqrt(1000e7 / 1e7) = sqrt(1000) ≈ 31 chips
+        state.cookies_all_time = 1000e7;
         perform_prestige(&mut state);
-        assert_eq!(state.heavenly_chips, 10);
-        // prestige_multiplier = 1.0 + 10 * 0.10 = 2.00
-        assert!((state.prestige_multiplier - 2.00).abs() < 0.001);
+        assert_eq!(state.heavenly_chips, 31);
+        // prestige_multiplier = 1.0 + sqrt(31) * 0.30 = 1.0 + 5.567 * 0.30 ≈ 2.67
+        let expected = 1.0 + (31.0_f64).sqrt() * 0.30;
+        assert!((state.prestige_multiplier - expected).abs() < 0.01);
     }
 
     #[test]
     fn prestige_chips_accumulate_across_runs() {
         let mut state = CookieState::new();
-        // sqrt(1e9 / 1e9) = 1 chip
-        state.cookies_all_time = 1e9;
+        // sqrt(1e7 / 1e7) = 1 chip
+        state.cookies_all_time = 1e7;
         perform_prestige(&mut state);
         assert_eq!(state.heavenly_chips, 1);
-        // total across runs: 1e9 + 3e9 = 4e9, sqrt(4) = 2 chips, already have 1
-        state.cookies_all_time = 3e9;
+        // total across runs: 1e7 + 3e7 = 4e7, sqrt(4) = 2 chips, already have 1
+        state.cookies_all_time = 3e7;
         perform_prestige(&mut state);
         assert_eq!(state.heavenly_chips, 2);
         assert_eq!(state.prestige_count, 2);

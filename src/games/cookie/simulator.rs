@@ -189,6 +189,26 @@ mod tests {
             eprintln!("│ 達成済: {:?}", recent);
         }
 
+        // Prestige info
+        let pending = state.pending_heavenly_chips();
+        let total_all = state.cookies_all_runs + state.cookies_all_time;
+        eprintln!(
+            "│ 転生: {}回  チップ: {} (使用済{})  待機: {}  倍率: x{:.2}  全時間クッキー: {}",
+            state.prestige_count,
+            state.heavenly_chips,
+            state.heavenly_chips_spent,
+            pending,
+            state.prestige_multiplier,
+            logic::format_number(total_all)
+        );
+
+        // Savings bonus
+        eprintln!(
+            "│ 貯蓄ボーナス: x{:.3}  砂糖: {}",
+            state.savings_bonus(),
+            state.sugar,
+        );
+
         // Next affordable purchase
         if let Some(purchase) = find_best_purchase(state) {
             match purchase {
@@ -226,7 +246,7 @@ mod tests {
         eprintln!("└────────────────────────────────────");
     }
 
-    /// Simulate optimal play for `total_seconds`.
+    /// Simulate optimal play for `total_seconds` (single run, no prestige).
     fn simulate(total_seconds: u32) {
         let mut state = CookieState::new();
         let ticks_per_second: u32 = 10;
@@ -334,6 +354,166 @@ mod tests {
         eprintln!("==============================\n");
     }
 
+    /// Simulate optimal play with automatic prestige decisions.
+    /// Prestiges when pending chips > 50% of current chips (meaningful boost).
+    fn simulate_with_prestige(total_seconds: u32) {
+        let mut state = CookieState::new();
+        let ticks_per_second: u32 = 10;
+        let clicks_per_second: u32 = 5;
+
+        let mut total_purchases: u32 = 0;
+        let mut prestige_log: Vec<(u32, u64, f64, f64)> = Vec::new(); // (second, chips, multiplier, all_time)
+        let mut run_start_second: u32 = 0;
+
+        // Report at these times
+        let report_times: Vec<u32> = vec![300, 600, 900, 1200, 1800, 2700, 3600, 5400, 7200];
+        let mut next_report_idx = 0;
+
+        eprintln!("\n========================================");
+        eprintln!("  Cookie Factory 転生シミュレーター");
+        eprintln!("  プレイ時間: {}分", total_seconds / 60);
+        eprintln!("  クリック速度: {}/秒", clicks_per_second);
+        eprintln!("  転生条件: 待機チップ > 現チップ×50%");
+        eprintln!("========================================\n");
+
+        for second in 1..=total_seconds {
+            // Clicks
+            for _ in 0..clicks_per_second {
+                logic::click(&mut state);
+            }
+
+            // Tick
+            logic::tick(&mut state, ticks_per_second);
+
+            // Claim golden cookies
+            logic::claim_golden(&mut state);
+
+            // Claim milestones
+            logic::claim_all_milestones(&mut state);
+
+            // Buy research (prefer mass production path for simulation)
+            for idx in 0..state.research_nodes.len() {
+                if !state.research_nodes[idx].purchased
+                    && state.research_nodes[idx].path == ResearchPath::MassProduction
+                {
+                    logic::buy_research(&mut state, idx);
+                }
+            }
+
+            // Try to buy things
+            for _ in 0..20 {
+                match find_best_purchase(&state) {
+                    Some(Purchase::Producer(kind)) => {
+                        if logic::buy_producer(&mut state, &kind) {
+                            total_purchases += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    Some(Purchase::Upgrade(idx)) => {
+                        if logic::buy_upgrade(&mut state, idx) {
+                            total_purchases += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+
+            // Check if we should prestige
+            let pending = state.pending_heavenly_chips();
+            let current = state.heavenly_chips;
+            let run_duration = second - run_start_second;
+            // Prestige when:
+            // - At least 1 pending chip
+            // - Run has lasted at least 120 seconds (don't prestige too fast)
+            // - Pending chips > 50% of current (meaningful boost), OR first prestige with > 0
+            let should_prestige = pending > 0
+                && run_duration >= 120
+                && (current == 0 || pending as f64 > current as f64 * 0.5);
+
+            if should_prestige {
+                let total_all = state.cookies_all_runs + state.cookies_all_time;
+                eprintln!(
+                    "🌟 [{}分{}秒] 転生実行！ 待機チップ: {} → 合計: {} 全時間クッキー: {}",
+                    second / 60,
+                    second % 60,
+                    pending,
+                    current + pending,
+                    logic::format_number(total_all),
+                );
+
+                let new_chips = logic::perform_prestige(&mut state);
+
+                // Buy prestige upgrades (prioritize production path)
+                let upgrade_order = [
+                    "angels_gift",
+                    "heavenly_power",
+                    "angels_aura",
+                    "factory_memory",
+                    "efficiency_peak",
+                    "heavenly_wealth",
+                    "angels_click",
+                    "gods_click",
+                    "golden_rush",
+                    "golden_intuition",
+                    "sugar_alchemy",
+                    "luck_extension",
+                    "combo_mastery",
+                    "click_sovereign",
+                    "milk_memory",
+                    "luck_sovereign",
+                ];
+                for id in &upgrade_order {
+                    if let Some(idx) = state.prestige_upgrades.iter().position(|u| u.id == *id) {
+                        logic::buy_prestige_upgrade(&mut state, idx);
+                    }
+                }
+
+                prestige_log.push((second, state.heavenly_chips, state.prestige_multiplier, total_all));
+                run_start_second = second;
+
+                eprintln!(
+                    "   → チップ+{} (合計{}) 倍率: x{:.2}  購入済転生UP: {:?}",
+                    new_chips,
+                    state.heavenly_chips,
+                    state.prestige_multiplier,
+                    state.prestige_upgrades.iter().filter(|u| u.purchased).map(|u| u.name.as_str()).collect::<Vec<_>>(),
+                );
+            }
+
+            // Report at intervals
+            if next_report_idx < report_times.len() && second >= report_times[next_report_idx] {
+                report_stats(&state, second, total_purchases);
+                next_report_idx += 1;
+            }
+        }
+
+        // Final report
+        eprintln!("\n======== 転生シミュレーション最終結果 ========");
+        report_stats(&state, total_seconds, total_purchases);
+
+        eprintln!("\n--- 転生履歴 ---");
+        for (i, (sec, chips, mult, all_time)) in prestige_log.iter().enumerate() {
+            eprintln!(
+                "  転生{}: {}分{}秒  チップ合計: {}  倍率: x{:.2}  全時間: {}",
+                i + 1,
+                sec / 60,
+                sec % 60,
+                chips,
+                mult,
+                logic::format_number(*all_time),
+            );
+        }
+        eprintln!("  最終転生回数: {}", state.prestige_count);
+        eprintln!("  最終チップ: {} (使用: {}  残: {})", state.heavenly_chips, state.heavenly_chips_spent, state.available_chips());
+        eprintln!("  最終倍率: x{:.2}", state.prestige_multiplier);
+        eprintln!("  砂糖: {} (全時間: {})", state.sugar, state.sugar_all_time);
+        eprintln!("  購入済転生UP: {:?}", state.prestige_upgrades.iter().filter(|u| u.purchased).map(|u| u.name.as_str()).collect::<Vec<_>>());
+        eprintln!("=============================================\n");
+    }
+
     #[test]
     fn simulate_optimal_1hour() {
         simulate(3600);
@@ -342,5 +522,10 @@ mod tests {
     #[test]
     fn simulate_optimal_30min() {
         simulate(1800);
+    }
+
+    #[test]
+    fn simulate_prestige_2hours() {
+        simulate_with_prestige(7200);
     }
 }
