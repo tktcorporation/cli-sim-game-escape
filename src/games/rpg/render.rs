@@ -448,16 +448,12 @@ fn render_explore_panel(
     let mut cl = ClickableList::new();
 
     if compact {
-        // Narrow/mobile: controls first for immediate accessibility
-        render_movement_controls(&mut cl);
+        // Narrow/mobile: controls + compact minimap
+        render_movement_controls(&mut cl, map);
         cl.push(Line::from(""));
-        for text in &state.scene_text {
-            if !text.is_empty() {
-                cl.push(Line::from(Span::styled(
-                    format!(" {}", text),
-                    Style::default().fg(Color::DarkGray),
-                )));
-            }
+        let minimap_lines = dungeon_view::render_minimap_compact(map, theme);
+        for line in minimap_lines {
+            cl.push(line);
         }
         render_hp_warning(&mut cl, state);
         push_overlay_hints(&mut cl);
@@ -478,7 +474,7 @@ fn render_explore_panel(
         }
         render_hp_warning(&mut cl, state);
         cl.push(Line::from(""));
-        render_movement_controls(&mut cl);
+        render_movement_controls(&mut cl, map);
         push_overlay_hints(&mut cl);
     }
 
@@ -489,16 +485,51 @@ fn render_explore_panel(
     cl.render(f, area, block, &mut cs, true, 0);
 }
 
-fn render_movement_controls(cl: &mut ClickableList) {
+fn render_movement_controls(cl: &mut ClickableList, map: &super::state::DungeonMap) {
+    use super::state::Facing;
+
+    let facing_label = match map.facing {
+        Facing::North => "北",
+        Facing::East => "東",
+        Facing::South => "南",
+        Facing::West => "西",
+    };
+    let cell = map.player_cell();
+    let can_fwd = !cell.wall(map.facing);
+    let can_left = !cell.wall(map.facing.turn_left());
+    let can_right = !cell.wall(map.facing.turn_right());
+
+    // Facing direction header
+    cl.push(Line::from(vec![
+        Span::styled(
+            format!(" 向き:{} ", facing_label),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(
+            format!(
+                "[{}{}{}]",
+                if can_left { "◀" } else { "×" },
+                if can_fwd { "▲" } else { "×" },
+                if can_right { "▶" } else { "×" },
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+
+    // Forward
+    let fwd_style = if can_fwd { Color::Cyan } else { Color::DarkGray };
     cl.push_clickable(
         Line::from(vec![
             Span::styled(
                 " [W] ",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(fwd_style)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("▲ 前進", Style::default().fg(Color::White)),
+            Span::styled(
+                if can_fwd { "▲ 前進" } else { "× 壁" },
+                Style::default().fg(if can_fwd { Color::White } else { Color::DarkGray }),
+            ),
         ]),
         MOVE_FORWARD,
     );

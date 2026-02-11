@@ -213,7 +213,22 @@ pub fn move_forward(state: &mut RpgState) -> bool {
     };
 
     if !can_move {
-        state.add_log("壁だ。進めない。");
+        // Give directional hint about open passages
+        let hint = {
+            let map = state.dungeon.as_ref().unwrap();
+            let cell = map.player_cell();
+            let left_open = !cell.wall(map.facing.turn_left());
+            let right_open = !cell.wall(map.facing.turn_right());
+            let back_open = !cell.wall(map.facing.reverse());
+            match (left_open, right_open, back_open) {
+                (true, true, _) => "壁だ。左右に通路がある。",
+                (true, false, _) => "壁だ。左に通路がある。",
+                (false, true, _) => "壁だ。右に通路がある。",
+                (false, false, true) => "行き止まりだ。引き返そう。",
+                _ => "壁だ。進めない。",
+            }
+        };
+        state.add_log(hint);
         return false;
     }
 

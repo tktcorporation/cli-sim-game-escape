@@ -319,7 +319,19 @@ fn theme_colors(theme: FloorTheme) -> (Color, Color, Color) {
 
 /// Render the minimap as colored Lines. Shows 9×9 area around the player.
 pub fn render_minimap(map: &DungeonMap, theme: FloorTheme) -> Vec<Line<'static>> {
-    let radius: i32 = 4; // show 9×9 area
+    render_minimap_with_radius(map, theme, 4) // 9×9
+}
+
+/// Render a compact minimap. Shows 5×5 area around the player.
+pub fn render_minimap_compact(map: &DungeonMap, theme: FloorTheme) -> Vec<Line<'static>> {
+    render_minimap_with_radius(map, theme, 2) // 5×5
+}
+
+fn render_minimap_with_radius(
+    map: &DungeonMap,
+    theme: FloorTheme,
+    radius: i32,
+) -> Vec<Line<'static>> {
     let map_render_h = (radius * 2 + 1) as usize + 2; // cells + border
 
     let mut lines: Vec<Line<'static>> = Vec::with_capacity(map_render_h);
@@ -414,6 +426,15 @@ mod tests {
         let mut map = generate_map(1, &mut seed);
         map.grid[map.player_y][map.player_x].visited = true;
         let lines = render_minimap(&map, FloorTheme::MossyRuins);
-        assert!(!lines.is_empty());
+        assert_eq!(lines.len(), 9); // 9×9
+    }
+
+    #[test]
+    fn minimap_compact_renders() {
+        let mut seed = 42u64;
+        let mut map = generate_map(1, &mut seed);
+        map.grid[map.player_y][map.player_x].visited = true;
+        let lines = render_minimap_compact(&map, FloorTheme::MossyRuins);
+        assert_eq!(lines.len(), 5); // 5×5
     }
 }
