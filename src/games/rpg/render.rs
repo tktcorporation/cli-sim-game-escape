@@ -385,12 +385,7 @@ fn render_town_content(
         push_choice(&mut cl, i, &choice.label);
     }
 
-    // Shortcut hints
-    cl.push(Line::from(""));
-    cl.push(Line::from(Span::styled(
-        " [I]持ち物  [S]ステータス",
-        Style::default().fg(Color::DarkGray),
-    )));
+    push_overlay_hints(&mut cl);
 
     let block = Block::default()
         .borders(borders)
@@ -453,11 +448,7 @@ fn render_dungeon_content(
     push_choice(&mut cl, 0, "進む");
     push_choice_dim(&mut cl, 1, "引き返す (町に戻る)");
 
-    cl.push(Line::from(""));
-    cl.push(Line::from(Span::styled(
-        " [I]持ち物  [S]ステータス",
-        Style::default().fg(Color::DarkGray),
-    )));
+    push_overlay_hints(&mut cl);
 
     let block = Block::default()
         .borders(borders)
@@ -515,11 +506,7 @@ fn render_dungeon_result(
         push_choice_dim(&mut cl, 1, "引き返す (町に戻る)");
     }
 
-    cl.push(Line::from(""));
-    cl.push(Line::from(Span::styled(
-        " [I]持ち物  [S]ステータス",
-        Style::default().fg(Color::DarkGray),
-    )));
+    push_overlay_hints(&mut cl);
 
     let block = Block::default()
         .borders(borders)
@@ -781,6 +768,34 @@ fn push_choice(cl: &mut ClickableList, index: usize, label: &str) {
             Span::styled(label.to_string(), Style::default().fg(Color::White)),
         ]),
         CHOICE_BASE + index as u16,
+    );
+}
+
+fn push_overlay_hints(cl: &mut ClickableList) {
+    cl.push(Line::from(""));
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(
+                " [I] ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("持ち物", Style::default().fg(Color::White)),
+        ]),
+        OPEN_INVENTORY,
+    );
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(
+                " [S] ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("ステータス", Style::default().fg(Color::White)),
+        ]),
+        OPEN_STATUS,
     );
 }
 

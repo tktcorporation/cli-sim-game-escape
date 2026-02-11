@@ -18,5 +18,9 @@ pub const INV_USE_BASE: u16 = 60;
 // ── Overlay: Shop ──────────────────────────────────────────────
 pub const SHOP_BUY_BASE: u16 = 80;
 
+// ── Overlay open ──────────────────────────────────────────────
+pub const OPEN_INVENTORY: u16 = 101;
+pub const OPEN_STATUS: u16 = 102;
+
 // ── Overlay close ──────────────────────────────────────────────
 pub const CLOSE_OVERLAY: u16 = 100;
