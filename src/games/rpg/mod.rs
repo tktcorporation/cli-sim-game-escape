@@ -135,7 +135,7 @@ fn handle_town_click(state: &mut RpgState, id: u16) -> bool {
         let index = (id - CHOICE_BASE) as usize;
         return logic::execute_town_choice(state, index);
     }
-    false
+    handle_overlay_open_click(state, id)
 }
 
 // ── Dungeon ────────────────────────────────────────────────
@@ -173,7 +173,7 @@ fn handle_dungeon_click(state: &mut RpgState, id: u16) -> bool {
         logic::retreat_to_town(state);
         return true;
     }
-    false
+    handle_overlay_open_click(state, id)
 }
 
 // ── Dungeon Result ─────────────────────────────────────────
@@ -248,6 +248,9 @@ fn handle_dungeon_result_click(state: &mut RpgState, id: u16) -> bool {
     if id == CHOICE_BASE + 1 && !is_dead {
         logic::retreat_to_town(state);
         return true;
+    }
+    if !is_dead {
+        return handle_overlay_open_click(state, id);
     }
     false
 }
@@ -415,6 +418,22 @@ fn handle_battle_click(state: &mut RpgState, id: u16) -> bool {
                 false
             }
         }
+    }
+}
+
+// ── Overlay open (shared by town / dungeon / dungeon_result) ─
+
+fn handle_overlay_open_click(state: &mut RpgState, id: u16) -> bool {
+    match id {
+        OPEN_INVENTORY => {
+            state.overlay = Some(Overlay::Inventory);
+            true
+        }
+        OPEN_STATUS => {
+            state.overlay = Some(Overlay::Status);
+            true
+        }
+        _ => false,
     }
 }
 
@@ -600,5 +619,51 @@ mod tests {
         g.state.gold = 200;
         g.handle_input(&InputEvent::Key('1'));
         assert!(g.state.gold < 200);
+    }
+
+    #[test]
+    fn click_town_open_inventory() {
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        assert_eq!(g.state.scene, Scene::Town);
+        let result = g.handle_input(&InputEvent::Click(OPEN_INVENTORY));
+        assert!(result);
+        assert_eq!(g.state.overlay, Some(Overlay::Inventory));
+    }
+
+    #[test]
+    fn click_town_open_status() {
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        assert_eq!(g.state.scene, Scene::Town);
+        let result = g.handle_input(&InputEvent::Click(OPEN_STATUS));
+        assert!(result);
+        assert_eq!(g.state.overlay, Some(Overlay::Status));
+    }
+
+    #[test]
+    fn click_dungeon_open_inventory() {
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1')); // Enter dungeon
+        assert_eq!(g.state.scene, Scene::Dungeon);
+        let result = g.handle_input(&InputEvent::Click(OPEN_INVENTORY));
+        assert!(result);
+        assert_eq!(g.state.overlay, Some(Overlay::Inventory));
+    }
+
+    #[test]
+    fn click_dungeon_open_status() {
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1')); // Enter dungeon
+        assert_eq!(g.state.scene, Scene::Dungeon);
+        let result = g.handle_input(&InputEvent::Click(OPEN_STATUS));
+        assert!(result);
+        assert_eq!(g.state.overlay, Some(Overlay::Status));
     }
 }
