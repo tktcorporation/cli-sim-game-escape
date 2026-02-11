@@ -23,7 +23,14 @@ pub const MENU_SELECT_COOKIE: u16 = 1;
 pub const MENU_SELECT_FACTORY: u16 = 2;
 pub const MENU_SELECT_CAREER: u16 = 3;
 pub const MENU_SELECT_RPG: u16 = 4;
+pub const MENU_SELECT_SETTINGS: u16 = 5;
 pub const BACK_TO_MENU: u16 = 65535;
+
+// ── Settings action IDs ─────────────────────────────────────────
+const SETTINGS_RESET_COOKIE: u16 = 10;
+const SETTINGS_RESET_CAREER: u16 = 11;
+const SETTINGS_CONFIRM_YES: u16 = 12;
+const SETTINGS_CONFIRM_NO: u16 = 13;
 
 /// Use `elementFromPoint` to find which grid cell was clicked.
 ///
@@ -138,6 +145,46 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
             if let Some(choice) = choice {
                 let game = create_game(&choice);
                 *state = AppState::Playing { game };
+            } else if matches!(
+                event,
+                InputEvent::Key('5') | InputEvent::Click(MENU_SELECT_SETTINGS)
+            ) {
+                *state = AppState::Settings {
+                    confirm_reset: None,
+                };
+            }
+        }
+        AppState::Settings { confirm_reset } => {
+            if confirm_reset.is_some() {
+                // Confirmation dialog is active
+                match event {
+                    InputEvent::Key('y') | InputEvent::Click(SETTINGS_CONFIRM_YES) => {
+                        let game = confirm_reset.take().unwrap();
+                        perform_reset(&game);
+                        *state = AppState::Settings {
+                            confirm_reset: None,
+                        };
+                    }
+                    InputEvent::Key('n')
+                    | InputEvent::Key('q')
+                    | InputEvent::Click(SETTINGS_CONFIRM_NO) => {
+                        *confirm_reset = None;
+                    }
+                    _ => {}
+                }
+            } else {
+                match event {
+                    InputEvent::Key('1') | InputEvent::Click(SETTINGS_RESET_COOKIE) => {
+                        *confirm_reset = Some(GameChoice::Cookie);
+                    }
+                    InputEvent::Key('2') | InputEvent::Click(SETTINGS_RESET_CAREER) => {
+                        *confirm_reset = Some(GameChoice::Career);
+                    }
+                    InputEvent::Key('q') | InputEvent::Click(BACK_TO_MENU) => {
+                        *state = AppState::Menu;
+                    }
+                    _ => {}
+                }
             }
         }
         AppState::Playing { game } => {
@@ -152,6 +199,18 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
             }
         }
     }
+}
+
+/// Delete localStorage save data for the specified game.
+fn perform_reset(game: &GameChoice) {
+    #[cfg(target_arch = "wasm32")]
+    match game {
+        GameChoice::Cookie => games::cookie::save::delete_save(),
+        GameChoice::Career => games::career::save::delete_save(),
+        _ => {}
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = game;
 }
 
 fn main() -> io::Result<()> {
@@ -225,6 +284,9 @@ fn main() -> io::Result<()> {
             match &mut *state {
                 AppState::Menu => {
                     render_menu(f, size, &click_state);
+                }
+                AppState::Settings { confirm_reset } => {
+                    render_settings(f, size, &click_state, confirm_reset.as_ref());
                 }
                 AppState::Playing { game } => {
                     // Tick game logic
@@ -357,6 +419,21 @@ fn render_menu(
         Style::default().fg(Color::DarkGray),
     )), MENU_SELECT_RPG);
 
+    cl.push(Line::from(""));
+    cl.push_clickable(Line::from(vec![
+        Span::styled(
+            " ⚙ ",
+            Style::default()
+                .fg(Color::Gray)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("設定", Style::default().fg(Color::Gray)),
+    ]), MENU_SELECT_SETTINGS);
+    cl.push_clickable(Line::from(Span::styled(
+        "    セーブデータの管理",
+        Style::default().fg(Color::DarkGray),
+    )), MENU_SELECT_SETTINGS);
+
     let menu_block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Green))
@@ -378,4 +455,184 @@ fn render_menu(
     )
     .alignment(Alignment::Center);
     f.render_widget(footer_widget, chunks[2]);
+}
+
+fn render_settings(
+    f: &mut ratzilla::ratatui::Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+    confirm_reset: Option<&GameChoice>,
+) {
+    let is_narrow = is_narrow_layout(area.width);
+    let borders = if is_narrow {
+        Borders::TOP | Borders::BOTTOM
+    } else {
+        Borders::ALL
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Title
+            Constraint::Min(8),   // Content
+            Constraint::Length(3), // Footer
+        ])
+        .split(area);
+
+    // Title
+    let title_widget = Paragraph::new(Line::from(Span::styled(
+        "設定",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )))
+    .block(
+        Block::default()
+            .borders(borders)
+            .border_style(Style::default().fg(Color::Cyan)),
+    )
+    .alignment(Alignment::Center);
+    f.render_widget(title_widget, chunks[0]);
+
+    if let Some(game) = confirm_reset {
+        render_confirm_dialog(f, chunks[1], click_state, borders, game);
+    } else {
+        render_settings_main(f, chunks[1], click_state, borders);
+    }
+
+    // Footer — back to menu
+    let mut cl = ClickableList::new();
+    cl.push_clickable(
+        Line::from(Span::styled(
+            "◀ メニューに戻る",
+            Style::default().fg(Color::DarkGray),
+        )),
+        BACK_TO_MENU,
+    );
+    let footer_block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::DarkGray));
+    {
+        let mut cs = click_state.borrow_mut();
+        cl.render(f, chunks[2], footer_block, &mut cs, false, 0);
+    }
+}
+
+fn render_settings_main(
+    f: &mut ratzilla::ratatui::Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+    borders: Borders,
+) {
+    let mut cl = ClickableList::new();
+
+    cl.push(Line::from(""));
+    cl.push(Line::from(Span::styled(
+        " セーブデータ管理",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )));
+    cl.push(Line::from(""));
+
+    // Cookie Factory
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
+            Span::styled("Cookie Factory", Style::default().fg(Color::White)),
+            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
+        ]),
+        SETTINGS_RESET_COOKIE,
+    );
+
+    cl.push(Line::from(""));
+
+    // Career Simulator
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
+            Span::styled("Career Simulator", Style::default().fg(Color::White)),
+            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
+        ]),
+        SETTINGS_RESET_CAREER,
+    );
+
+    cl.push(Line::from(""));
+    cl.push(Line::from(""));
+    cl.push(Line::from(Span::styled(
+        " ※ Tiny Factory と Dungeon Dive は",
+        Style::default().fg(Color::DarkGray),
+    )));
+    cl.push(Line::from(Span::styled(
+        "   セーブデータがありません",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Green))
+        .title(" Data Reset ");
+    {
+        let mut cs = click_state.borrow_mut();
+        cl.render(f, area, block, &mut cs, false, 0);
+    }
+}
+
+fn render_confirm_dialog(
+    f: &mut ratzilla::ratatui::Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+    borders: Borders,
+    game: &GameChoice,
+) {
+    let game_name = match game {
+        GameChoice::Cookie => "Cookie Factory",
+        GameChoice::Career => "Career Simulator",
+        _ => "Unknown",
+    };
+
+    let mut cl = ClickableList::new();
+
+    cl.push(Line::from(""));
+    cl.push(Line::from(Span::styled(
+        format!(" {game_name} のセーブデータを"),
+        Style::default().fg(Color::White),
+    )));
+    cl.push(Line::from(Span::styled(
+        " 本当にリセットしますか？",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )));
+    cl.push(Line::from(""));
+    cl.push(Line::from(Span::styled(
+        " ※ この操作は取り消せません",
+        Style::default().fg(Color::Red),
+    )));
+    cl.push(Line::from(""));
+
+    cl.push_clickable(
+        Line::from(Span::styled(
+            " ▶ はい、リセットする",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        )),
+        SETTINGS_CONFIRM_YES,
+    );
+    cl.push(Line::from(""));
+    cl.push_clickable(
+        Line::from(Span::styled(
+            " ▶ キャンセル",
+            Style::default().fg(Color::Green),
+        )),
+        SETTINGS_CONFIRM_NO,
+    );
+
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Red))
+        .title(" 確認 ");
+    {
+        let mut cs = click_state.borrow_mut();
+        cl.render(f, area, block, &mut cs, false, 0);
+    }
 }
