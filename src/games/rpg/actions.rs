@@ -24,3 +24,12 @@ pub const OPEN_STATUS: u16 = 102;
 
 // ── Overlay close ──────────────────────────────────────────────
 pub const CLOSE_OVERLAY: u16 = 100;
+
+// ── Dungeon movement ──────────────────────────────────────────
+pub const MOVE_FORWARD: u16 = 110;
+pub const TURN_LEFT: u16 = 111;
+pub const TURN_RIGHT: u16 = 112;
+pub const TURN_AROUND: u16 = 113;
+
+// ── Event choices ─────────────────────────────────────────────
+pub const EVENT_CHOICE_BASE: u16 = 120;

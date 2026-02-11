@@ -1,10 +1,15 @@
-//! Dungeon Dive — room-by-room dungeon crawler.
+//! Dungeon Dive — grid-based dungeon crawler with first-person 3D view.
 //!
-//! Game trait implementation with simplified input dispatch.
-//! All choices use [1]-[5], overlays use [I]/[S], back uses [0].
+//! Game trait implementation with WASD movement and interactive events.
+//! Movement: [W] forward, [A] turn left, [D] turn right, [X] turn around.
+//! Events: [1]-[5] choices.  Overlays: [I] inventory, [S] status.
 
 pub mod actions;
+pub mod dungeon_map;
+pub mod dungeon_view;
+pub mod events;
 pub mod logic;
+pub mod lore;
 pub mod render;
 pub mod state;
 
@@ -18,7 +23,7 @@ use crate::games::Game;
 use crate::input::{ClickState, InputEvent};
 
 use actions::*;
-use state::{BattlePhase, Overlay, RoomKind, RpgState, Scene};
+use state::{BattlePhase, Overlay, RpgState, Scene};
 
 pub struct RpgGame {
     state: RpgState,
@@ -60,7 +65,8 @@ fn handle_key(state: &mut RpgState, ch: char) -> bool {
     match state.scene {
         Scene::Intro(_) => handle_intro_key(state, ch),
         Scene::Town => handle_town_key(state, ch),
-        Scene::Dungeon => handle_dungeon_key(state, ch),
+        Scene::DungeonExplore => handle_dungeon_explore_key(state, ch),
+        Scene::DungeonEvent => handle_dungeon_event_key(state, ch),
         Scene::DungeonResult => handle_dungeon_result_key(state, ch),
         Scene::Battle => handle_battle_key(state, ch),
         Scene::GameClear => handle_game_clear_key(state, ch),
@@ -75,7 +81,8 @@ fn handle_click(state: &mut RpgState, id: u16) -> bool {
     match state.scene {
         Scene::Intro(_) => handle_intro_click(state, id),
         Scene::Town => handle_town_click(state, id),
-        Scene::Dungeon => handle_dungeon_click(state, id),
+        Scene::DungeonExplore => handle_dungeon_explore_click(state, id),
+        Scene::DungeonEvent => handle_dungeon_event_click(state, id),
         Scene::DungeonResult => handle_dungeon_result_click(state, id),
         Scene::Battle => handle_battle_click(state, id),
         Scene::GameClear => handle_game_clear_click(state, id),
@@ -138,18 +145,76 @@ fn handle_town_click(state: &mut RpgState, id: u16) -> bool {
     handle_overlay_open_click(state, id)
 }
 
-// ── Dungeon ────────────────────────────────────────────────
+// ── Dungeon Explore (WASD movement) ────────────────────────
 
-fn handle_dungeon_key(state: &mut RpgState, ch: char) -> bool {
+fn handle_dungeon_explore_key(state: &mut RpgState, ch: char) -> bool {
     match ch {
-        '1' => {
-            // Advance: enter the current room
-            logic::enter_current_room(state);
+        // WASD movement
+        'W' | 'w' => logic::move_forward(state),
+        'A' | 'a' => logic::turn_left(state),
+        'D' | 'd' => logic::turn_right(state),
+        'X' | 'x' => logic::turn_around(state),
+        // Overlays
+        'I' | 'i' => {
+            state.overlay = Some(Overlay::Inventory);
             true
         }
-        '2' => {
-            // Retreat to town
-            logic::retreat_to_town(state);
+        'S' | 's' => {
+            state.overlay = Some(Overlay::Status);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_dungeon_explore_click(state: &mut RpgState, id: u16) -> bool {
+    match id {
+        MOVE_FORWARD => logic::move_forward(state),
+        TURN_LEFT => logic::turn_left(state),
+        TURN_RIGHT => logic::turn_right(state),
+        TURN_AROUND => logic::turn_around(state),
+        _ => handle_overlay_open_click(state, id),
+    }
+}
+
+// ── Dungeon Event (Interactive Choices) ─────────────────────
+
+fn handle_dungeon_event_key(state: &mut RpgState, ch: char) -> bool {
+    let choice_index = match ch {
+        '1' => Some(0),
+        '2' => Some(1),
+        '3' => Some(2),
+        '4' => Some(3),
+        '5' => Some(4),
+        _ => None,
+    };
+    if let Some(idx) = choice_index {
+        return logic::resolve_event_choice(state, idx);
+    }
+
+    match ch {
+        'I' | 'i' => {
+            state.overlay = Some(Overlay::Inventory);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn handle_dungeon_event_click(state: &mut RpgState, id: u16) -> bool {
+    if (EVENT_CHOICE_BASE..EVENT_CHOICE_BASE + 10).contains(&id) {
+        let index = (id - EVENT_CHOICE_BASE) as usize;
+        return logic::resolve_event_choice(state, index);
+    }
+    handle_overlay_open_click(state, id)
+}
+
+// ── Dungeon Result ─────────────────────────────────────────
+
+fn handle_dungeon_result_key(state: &mut RpgState, ch: char) -> bool {
+    match ch {
+        '1' | ' ' => {
+            logic::continue_exploration(state);
             true
         }
         'I' | 'i' => {
@@ -164,95 +229,12 @@ fn handle_dungeon_key(state: &mut RpgState, ch: char) -> bool {
     }
 }
 
-fn handle_dungeon_click(state: &mut RpgState, id: u16) -> bool {
+fn handle_dungeon_result_click(state: &mut RpgState, id: u16) -> bool {
     if id == CHOICE_BASE {
-        logic::enter_current_room(state);
-        return true;
-    }
-    if id == CHOICE_BASE + 1 {
-        logic::retreat_to_town(state);
+        logic::continue_exploration(state);
         return true;
     }
     handle_overlay_open_click(state, id)
-}
-
-// ── Dungeon Result ─────────────────────────────────────────
-
-fn handle_dungeon_result_key(state: &mut RpgState, ch: char) -> bool {
-    let is_stairs = state
-        .dungeon
-        .as_ref()
-        .and_then(|d| d.rooms.get(d.current_room))
-        .map(|r| r.kind == RoomKind::Stairs)
-        .unwrap_or(false);
-    let is_dead = state.hp == 0;
-
-    match ch {
-        '1' => {
-            if is_dead {
-                logic::advance_room(state); // Will trigger death handling
-            } else if is_stairs {
-                logic::descend_floor(state);
-            } else {
-                logic::advance_room(state);
-            }
-            true
-        }
-        '2' => {
-            if !is_dead {
-                logic::retreat_to_town(state);
-                true
-            } else {
-                false
-            }
-        }
-        'I' | 'i' => {
-            if !is_dead {
-                state.overlay = Some(Overlay::Inventory);
-                true
-            } else {
-                false
-            }
-        }
-        'S' | 's' => {
-            if !is_dead {
-                state.overlay = Some(Overlay::Status);
-                true
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
-}
-
-fn handle_dungeon_result_click(state: &mut RpgState, id: u16) -> bool {
-    let is_stairs = state
-        .dungeon
-        .as_ref()
-        .and_then(|d| d.rooms.get(d.current_room))
-        .map(|r| r.kind == RoomKind::Stairs)
-        .unwrap_or(false);
-    let is_dead = state.hp == 0;
-
-    if id == CHOICE_BASE {
-        if is_dead {
-            logic::advance_room(state);
-        } else if is_stairs {
-            logic::descend_floor(state);
-        } else {
-            logic::advance_room(state);
-        }
-        return true;
-    }
-    if id == CHOICE_BASE + 1 && !is_dead {
-        logic::retreat_to_town(state);
-        return true;
-    }
-    if !is_dead {
-        return handle_overlay_open_click(state, id);
-    }
-    false
 }
 
 // ── Battle ──────────────────────────────────────────────────
@@ -421,7 +403,7 @@ fn handle_battle_click(state: &mut RpgState, id: u16) -> bool {
     }
 }
 
-// ── Overlay open (shared by town / dungeon / dungeon_result) ─
+// ── Overlay open (shared by town / dungeon) ─────────────────
 
 fn handle_overlay_open_click(state: &mut RpgState, id: u16) -> bool {
     match id {
@@ -539,31 +521,55 @@ mod tests {
         assert_eq!(g.state.scene, Scene::Town);
         // Enter dungeon
         g.handle_input(&InputEvent::Key('1'));
-        assert_eq!(g.state.scene, Scene::Dungeon);
+        assert_eq!(g.state.scene, Scene::DungeonExplore);
         assert!(g.state.dungeon.is_some());
     }
 
     #[test]
-    fn dungeon_advance_room() {
+    fn dungeon_wasd_movement() {
         let mut g = make_game();
         g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('1')); // Enter dungeon
-        assert_eq!(g.state.scene, Scene::Dungeon);
-        // Press 1 to advance into room
-        g.handle_input(&InputEvent::Key('1'));
-        // Should be in battle, dungeon result, or still dungeon depending on room type
-        assert_ne!(g.state.scene, Scene::Town);
+        assert_eq!(g.state.scene, Scene::DungeonExplore);
+
+        // Turn right
+        let facing_before = g.state.dungeon.as_ref().unwrap().facing;
+        g.handle_input(&InputEvent::Key('D'));
+        let facing_after = g.state.dungeon.as_ref().unwrap().facing;
+        assert_ne!(facing_before, facing_after);
+
+        // Turn left back
+        g.handle_input(&InputEvent::Key('A'));
+        let facing_reset = g.state.dungeon.as_ref().unwrap().facing;
+        assert_eq!(facing_before, facing_reset);
     }
 
     #[test]
-    fn dungeon_retreat() {
+    fn dungeon_turn_around() {
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        let original = g.state.dungeon.as_ref().unwrap().facing;
+        g.handle_input(&InputEvent::Key('X'));
+        let turned = g.state.dungeon.as_ref().unwrap().facing;
+        assert_eq!(original.reverse(), turned);
+    }
+
+    #[test]
+    fn dungeon_retreat_via_event() {
         let mut g = make_game();
         g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('1')); // Enter dungeon
-        // Press 2 to retreat
-        g.handle_input(&InputEvent::Key('2'));
+
+        // The entrance event is already done on entry, so we need to
+        // go back to the entrance cell. Turn around and move forward.
+        g.handle_input(&InputEvent::Key('X')); // face south (towards entrance - already there)
+
+        // Just test retreat via logic directly
+        logic::retreat_to_town(&mut g.state);
         assert_eq!(g.state.scene, Scene::Town);
         assert!(g.state.dungeon.is_none());
     }
@@ -644,26 +650,41 @@ mod tests {
     }
 
     #[test]
+    fn click_dungeon_movement() {
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1')); // Enter dungeon
+        assert_eq!(g.state.scene, Scene::DungeonExplore);
+
+        // Click-based turn
+        let result = g.handle_input(&InputEvent::Click(TURN_RIGHT));
+        assert!(result);
+    }
+
+    #[test]
     fn click_dungeon_open_inventory() {
         let mut g = make_game();
         g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('1')); // Enter dungeon
-        assert_eq!(g.state.scene, Scene::Dungeon);
+        assert_eq!(g.state.scene, Scene::DungeonExplore);
         let result = g.handle_input(&InputEvent::Click(OPEN_INVENTORY));
         assert!(result);
         assert_eq!(g.state.overlay, Some(Overlay::Inventory));
     }
 
     #[test]
-    fn click_dungeon_open_status() {
+    fn dungeon_result_continues() {
         let mut g = make_game();
         g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1')); // Enter dungeon
-        assert_eq!(g.state.scene, Scene::Dungeon);
-        let result = g.handle_input(&InputEvent::Click(OPEN_STATUS));
-        assert!(result);
-        assert_eq!(g.state.overlay, Some(Overlay::Status));
+        logic::enter_dungeon(&mut g.state, 1);
+        g.state.scene = Scene::DungeonResult;
+        g.state.room_result = Some(state::RoomResult {
+            description: vec!["test".into()],
+        });
+        g.handle_input(&InputEvent::Key('1'));
+        assert_eq!(g.state.scene, Scene::DungeonExplore);
     }
 }

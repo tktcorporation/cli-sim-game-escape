@@ -1,6 +1,7 @@
 //! Dungeon Dive rendering — single screen, scene-based.
 //!
-//! Layout: status bar + dungeon progress + scene content + log.
+//! Layout: status bar + scene content + log.
+//! DungeonExplore uses a split layout: 3D view (left) + minimap (right).
 //! Overlays (inventory, shop, status) are full-screen replacements.
 
 use std::cell::RefCell;
@@ -16,13 +17,12 @@ use crate::input::{is_narrow_layout, ClickState};
 use crate::widgets::ClickableList;
 
 use super::actions::*;
-use super::logic::{
-    available_skills, battle_consumables, current_room_kind, dungeon_progress, return_bonus,
-    town_choices,
-};
+use super::dungeon_view;
+use super::logic::{available_skills, battle_consumables, return_bonus, town_choices};
+use super::lore::{floor_theme, theme_name};
 use super::state::{
-    enemy_info, item_info, shop_items, skill_element, skill_info, BattlePhase, Element, Overlay,
-    RoomKind, RpgState, Scene,
+    enemy_info, item_info, skill_element, skill_info, BattlePhase, Element, Overlay, RpgState,
+    Scene,
 };
 
 pub fn render(
@@ -44,7 +44,9 @@ pub fn render(
     match state.scene {
         Scene::Intro(_) => render_intro(state, f, area, click_state),
         Scene::Town => render_main(state, f, area, click_state),
-        Scene::Dungeon | Scene::DungeonResult => render_main(state, f, area, click_state),
+        Scene::DungeonExplore => render_main(state, f, area, click_state),
+        Scene::DungeonEvent => render_main(state, f, area, click_state),
+        Scene::DungeonResult => render_main(state, f, area, click_state),
         Scene::Battle => render_main(state, f, area, click_state),
         Scene::GameClear => render_game_clear(state, f, area, click_state),
     }
@@ -157,15 +159,15 @@ fn render_main(
     let is_narrow = is_narrow_layout(area.width);
     let log_h: u16 = 4;
 
-    // Dungeon progress bar shown when in dungeon
-    let has_dungeon_bar = state.dungeon.is_some();
-    let dbar_h: u16 = if has_dungeon_bar { 2 } else { 0 };
+    // Dungeon floor info shown when in dungeon
+    let in_dungeon = state.dungeon.is_some();
+    let dbar_h: u16 = if in_dungeon { 1 } else { 0 };
 
-    let constraints = if has_dungeon_bar {
+    let constraints = if in_dungeon {
         vec![
-            Constraint::Length(3),   // status bar
-            Constraint::Length(dbar_h), // dungeon progress
-            Constraint::Min(6),      // content
+            Constraint::Length(3),    // status bar
+            Constraint::Length(dbar_h), // floor info
+            Constraint::Min(6),       // content
             Constraint::Length(log_h),
         ]
     } else {
@@ -187,9 +189,9 @@ fn render_main(
     render_status_bar(state, f, chunks[chunk_idx], borders, is_narrow);
     chunk_idx += 1;
 
-    // Dungeon progress
-    if has_dungeon_bar {
-        render_dungeon_bar(state, f, chunks[chunk_idx], borders);
+    // Dungeon floor indicator
+    if in_dungeon {
+        render_floor_indicator(state, f, chunks[chunk_idx], borders);
         chunk_idx += 1;
     }
 
@@ -263,33 +265,10 @@ fn render_status_bar(
     f.render_widget(Paragraph::new(vec![line]).block(block), area);
 }
 
-fn render_dungeon_bar(state: &RpgState, f: &mut Frame, area: Rect, borders: Borders) {
-    if let Some((floor, room, total)) = dungeon_progress(state) {
-        // Build room map: [#][#][?][?][?]
-        let dungeon = state.dungeon.as_ref().unwrap();
-        let mut map_spans = vec![Span::styled(" ", Style::default())];
-        for (i, r) in dungeon.rooms.iter().enumerate() {
-            let (symbol, color) = if i + 1 < room {
-                // Visited
-                let c = match r.kind {
-                    RoomKind::Enemy => Color::Red,
-                    RoomKind::Treasure => Color::Yellow,
-                    RoomKind::Trap => Color::Magenta,
-                    RoomKind::Spring => Color::Cyan,
-                    RoomKind::Empty => Color::DarkGray,
-                    RoomKind::Stairs => Color::Green,
-                };
-                ("\u{25a0}", c) // filled square
-            } else if i + 1 == room {
-                ("\u{25c6}", Color::White) // current = diamond
-            } else {
-                ("\u{25a1}", Color::DarkGray) // unknown = empty square
-            };
-            map_spans.push(Span::styled(symbol, Style::default().fg(color)));
-        }
-
-        // Return bonus display
-        let bonus = return_bonus(floor, state.run_rooms_cleared);
+fn render_floor_indicator(state: &RpgState, f: &mut Frame, area: Rect, borders: Borders) {
+    if let Some(map) = &state.dungeon {
+        let theme = floor_theme(map.floor_num);
+        let bonus = return_bonus(map.floor_num, state.run_rooms_explored);
         let bonus_span = if bonus > 0 {
             Span::styled(
                 format!(" 帰還+{}G", bonus),
@@ -301,29 +280,26 @@ fn render_dungeon_bar(state: &RpgState, f: &mut Frame, area: Rect, borders: Bord
 
         let line = Line::from(vec![
             Span::styled(
-                format!(" B{}F ", floor),
+                format!(" B{}F ", map.floor_num),
                 Style::default()
                     .fg(Color::Yellow)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("{}/{}", room, total),
+                format!("〈{}〉", theme_name(theme)),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(
+                format!(" 探索:{}", state.run_rooms_explored),
                 Style::default().fg(Color::Gray),
             ),
-            Span::raw(" "),
+            bonus_span,
         ]);
-        // Combine into one line with map + bonus
-        let mut all_spans = line.spans;
-        all_spans.extend(map_spans);
-        all_spans.push(bonus_span);
 
         let block = Block::default()
             .borders(borders)
             .border_style(Style::default().fg(Color::DarkGray));
-        f.render_widget(
-            Paragraph::new(vec![Line::from(all_spans)]).block(block),
-            area,
-        );
+        f.render_widget(Paragraph::new(vec![line]).block(block), area);
     }
 }
 
@@ -336,7 +312,8 @@ fn render_scene_content(
 ) {
     match state.scene {
         Scene::Battle => render_battle_content(state, f, area, borders, click_state),
-        Scene::Dungeon => render_dungeon_content(state, f, area, borders, click_state),
+        Scene::DungeonExplore => render_dungeon_explore(state, f, area, borders, click_state),
+        Scene::DungeonEvent => render_dungeon_event(state, f, area, borders, click_state),
         Scene::DungeonResult => render_dungeon_result(state, f, area, borders, click_state),
         Scene::Town => render_town_content(state, f, area, borders, click_state),
         _ => {}
@@ -394,14 +371,101 @@ fn render_town_content(
     cl.render(f, area, block, &mut cs, true, 0);
 }
 
-fn render_dungeon_content(
+// ── Dungeon Explore (3D View + Minimap) ──────────────────────
+
+fn render_dungeon_explore(
     state: &RpgState,
     f: &mut Frame,
     area: Rect,
     borders: Borders,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let map = match &state.dungeon {
+        Some(m) => m,
+        None => return,
+    };
+    let theme = floor_theme(map.floor_num);
+    let is_narrow = is_narrow_layout(area.width);
+
+    // Split horizontally: left = 3D view + controls, right = minimap + text
+    if !is_narrow && area.width >= 50 {
+        // Wide layout: side by side
+        let h_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(29), Constraint::Min(20)])
+            .split(area);
+
+        // Left: 3D view
+        render_3d_view(state, f, h_chunks[0], borders, theme);
+
+        // Right: minimap + atmosphere + controls
+        render_explore_panel(state, f, h_chunks[1], borders, click_state);
+    } else {
+        // Narrow layout: stacked vertically
+        let v_chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(13), Constraint::Min(6)])
+            .split(area);
+
+        render_3d_view(state, f, v_chunks[0], borders, theme);
+        render_explore_panel(state, f, v_chunks[1], borders, click_state);
+    }
+}
+
+fn render_3d_view(
+    state: &RpgState,
+    f: &mut Frame,
+    area: Rect,
+    borders: Borders,
+    theme: super::state::FloorTheme,
+) {
+    let map = match &state.dungeon {
+        Some(m) => m,
+        None => return,
+    };
+
+    let view = dungeon_view::compute_view(map);
+    let view_lines = dungeon_view::render_view(&view, theme);
+
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    f.render_widget(Paragraph::new(view_lines).block(block), area);
+}
+
+fn render_explore_panel(
+    state: &RpgState,
+    f: &mut Frame,
+    area: Rect,
+    borders: Borders,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let map = match &state.dungeon {
+        Some(m) => m,
+        None => return,
+    };
+    let theme = floor_theme(map.floor_num);
+
     let mut cl = ClickableList::new();
+
+    // Minimap (compact version)
+    let minimap_lines = dungeon_view::render_minimap(map, theme);
+    for line in minimap_lines {
+        cl.push(line);
+    }
+
+    cl.push(Line::from(""));
+
+    // Atmosphere text
+    for text in &state.scene_text {
+        if !text.is_empty() {
+            cl.push(Line::from(Span::styled(
+                format!(" {}", text),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
 
     // Low HP warning
     let hp_ratio = if state.max_hp > 0 {
@@ -411,42 +475,65 @@ fn render_dungeon_content(
     };
     if hp_ratio <= 0.25 && hp_ratio > 0.0 {
         cl.push(Line::from(Span::styled(
-            " ※ 体力が危険な状態だ…引き返すべきか？",
+            " ※ 体力が危険！",
             Style::default()
                 .fg(Color::Red)
                 .add_modifier(Modifier::BOLD),
         )));
     } else if hp_ratio <= 0.5 {
         cl.push(Line::from(Span::styled(
-            " ※ 傷が痛む…無理は禁物だ",
+            " ※ 傷が痛む…",
             Style::default().fg(Color::Yellow),
         )));
     }
 
-    // Show what's ahead
-    let room_kind = current_room_kind(state);
-    let room_hint = match room_kind {
-        Some(RoomKind::Stairs) => "階段の気配がする…",
-        Some(RoomKind::Enemy) => "殺気を感じる…",
-        Some(RoomKind::Treasure) => "何かが光っている…",
-        Some(RoomKind::Spring) => "水の音が聞こえる…",
-        Some(RoomKind::Trap) => "嫌な予感がする…",
-        Some(RoomKind::Empty) | None => "暗い通路が続いている…",
-    };
-
-    cl.push(Line::from(Span::styled(
-        format!(" {}", room_hint),
-        Style::default().fg(Color::White),
-    )));
-    cl.push(Line::from(""));
-    cl.push(Line::from(Span::styled(
-        " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
-        Style::default().fg(Color::DarkGray),
-    )));
     cl.push(Line::from(""));
 
-    push_choice(&mut cl, 0, "進む");
-    push_choice_dim(&mut cl, 1, "引き返す (町に戻る)");
+    // Movement controls
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(
+                " [W] ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("前進", Style::default().fg(Color::White)),
+        ]),
+        MOVE_FORWARD,
+    );
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(
+                " [A] ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("左旋回", Style::default().fg(Color::White)),
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                "[D] ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("右旋回", Style::default().fg(Color::White)),
+        ]),
+        TURN_LEFT,
+    );
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(
+                " [X] ",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("振り返る", Style::default().fg(Color::DarkGray)),
+        ]),
+        TURN_AROUND,
+    );
 
     push_overlay_hints(&mut cl);
 
@@ -456,6 +543,69 @@ fn render_dungeon_content(
     let mut cs = click_state.borrow_mut();
     cl.render(f, area, block, &mut cs, true, 0);
 }
+
+// ── Dungeon Event (Interactive Choices) ──────────────────────
+
+fn render_dungeon_event(
+    state: &RpgState,
+    f: &mut Frame,
+    area: Rect,
+    borders: Borders,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let mut cl = ClickableList::new();
+
+    if let Some(event) = &state.active_event {
+        for line in &event.description {
+            if line.is_empty() {
+                cl.push(Line::from(""));
+            } else {
+                cl.push(Line::from(Span::styled(
+                    format!(" {}", line),
+                    Style::default().fg(Color::White),
+                )));
+            }
+        }
+
+        cl.push(Line::from(""));
+        cl.push(Line::from(Span::styled(
+            " \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+            Style::default().fg(Color::DarkGray),
+        )));
+        cl.push(Line::from(""));
+
+        for (i, choice) in event.choices.iter().enumerate() {
+            cl.push_clickable(
+                Line::from(vec![
+                    Span::styled(
+                        format!(" [{}] ", i + 1),
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(choice.label.clone(), Style::default().fg(Color::White)),
+                ]),
+                EVENT_CHOICE_BASE + i as u16,
+            );
+        }
+    }
+
+    push_overlay_hints(&mut cl);
+
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(Span::styled(
+            " イベント ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let mut cs = click_state.borrow_mut();
+    cl.render(f, area, block, &mut cs, true, 0);
+}
+
+// ── Dungeon Result ──────────────────────────────────────────
 
 fn render_dungeon_result(
     state: &RpgState,
@@ -486,25 +636,7 @@ fn render_dungeon_result(
     )));
     cl.push(Line::from(""));
 
-    // Check if this is a stairs room
-    let is_stairs = state
-        .dungeon
-        .as_ref()
-        .and_then(|d| d.rooms.get(d.current_room))
-        .map(|r| r.kind == RoomKind::Stairs)
-        .unwrap_or(false);
-
-    let is_dead = state.hp == 0;
-
-    if is_dead {
-        push_choice(&mut cl, 0, "町に戻る");
-    } else if is_stairs {
-        push_choice(&mut cl, 0, "次の階へ進む");
-        push_choice_dim(&mut cl, 1, "引き返す (町に戻る)");
-    } else {
-        push_choice(&mut cl, 0, "先に進む");
-        push_choice_dim(&mut cl, 1, "引き返す (町に戻る)");
-    }
+    push_choice(&mut cl, 0, "探索を続ける");
 
     push_overlay_hints(&mut cl);
 
@@ -968,6 +1100,14 @@ fn render_status(
         ),
         Style::default().fg(Color::Yellow),
     )));
+
+    // Lore progress
+    if !state.lore_found.is_empty() {
+        cl.push(Line::from(Span::styled(
+            format!(" 発見した記録: {}件", state.lore_found.len()),
+            Style::default().fg(Color::Cyan),
+        )));
+    }
     cl.push(Line::from(""));
 
     let skills = available_skills(state.level);
@@ -1030,7 +1170,7 @@ fn render_shop(
     )));
     cl.push(Line::from(""));
 
-    let shop = shop_items(state.max_floor_reached);
+    let shop = super::state::shop_items(state.max_floor_reached);
     for (i, &(kind, _)) in shop.iter().enumerate() {
         let iinfo = item_info(kind);
         let affordable = state.gold >= iinfo.buy_price;

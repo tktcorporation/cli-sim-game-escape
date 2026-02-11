@@ -327,35 +327,183 @@ pub struct InventoryItem {
     pub count: u32,
 }
 
-// ── Dungeon Room System ───────────────────────────────────────
+// ── Dungeon Grid Map System ───────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum RoomKind {
-    /// Monster encounter.
-    Enemy,
-    /// Treasure chest (gold or item).
-    Treasure,
-    /// Trap that deals damage.
-    Trap,
-    /// Healing spring (restores some HP/MP).
-    Spring,
-    /// Empty room with flavor text.
-    Empty,
-    /// Stairs to next floor.
+pub enum Facing {
+    North,
+    East,
+    South,
+    West,
+}
+
+impl Facing {
+    pub fn turn_right(self) -> Self {
+        match self {
+            Facing::North => Facing::East,
+            Facing::East => Facing::South,
+            Facing::South => Facing::West,
+            Facing::West => Facing::North,
+        }
+    }
+    pub fn turn_left(self) -> Self {
+        match self {
+            Facing::North => Facing::West,
+            Facing::West => Facing::South,
+            Facing::South => Facing::East,
+            Facing::East => Facing::North,
+        }
+    }
+    pub fn reverse(self) -> Self {
+        match self {
+            Facing::North => Facing::South,
+            Facing::South => Facing::North,
+            Facing::East => Facing::West,
+            Facing::West => Facing::East,
+        }
+    }
+    pub fn dx(self) -> i32 {
+        match self {
+            Facing::East => 1,
+            Facing::West => -1,
+            _ => 0,
+        }
+    }
+    pub fn dy(self) -> i32 {
+        match self {
+            Facing::North => -1,
+            Facing::South => 1,
+            _ => 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CellType {
+    /// Normal corridor.
+    Corridor,
+    /// Dungeon entrance (stairs up to town).
+    Entrance,
+    /// Stairs down to next floor.
     Stairs,
+    /// Enemy encounter.
+    Enemy,
+    /// Treasure chest with choices.
+    Treasure,
+    /// Trap room.
+    Trap,
+    /// Healing spring.
+    Spring,
+    /// Lore fragment.
+    Lore,
+    /// NPC encounter.
+    Npc,
 }
 
 #[derive(Clone, Debug)]
-pub struct Room {
-    pub kind: RoomKind,
+pub struct MapCell {
+    /// Walls: [North, East, South, West]. true = wall present.
+    pub walls: [bool; 4],
+    pub cell_type: CellType,
     pub visited: bool,
+    /// Whether the event in this cell has been resolved.
+    pub event_done: bool,
+}
+
+impl MapCell {
+    pub fn wall(&self, facing: Facing) -> bool {
+        match facing {
+            Facing::North => self.walls[0],
+            Facing::East => self.walls[1],
+            Facing::South => self.walls[2],
+            Facing::West => self.walls[3],
+        }
+    }
+    pub fn set_wall(&mut self, facing: Facing, val: bool) {
+        match facing {
+            Facing::North => self.walls[0] = val,
+            Facing::East => self.walls[1] = val,
+            Facing::South => self.walls[2] = val,
+            Facing::West => self.walls[3] = val,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
-pub struct DungeonFloor {
+pub struct DungeonMap {
     pub floor_num: u32,
-    pub rooms: Vec<Room>,
-    pub current_room: usize,
+    pub width: usize,
+    pub height: usize,
+    pub grid: Vec<Vec<MapCell>>,
+    pub player_x: usize,
+    pub player_y: usize,
+    pub facing: Facing,
+}
+
+impl DungeonMap {
+    pub fn cell(&self, x: usize, y: usize) -> &MapCell {
+        &self.grid[y][x]
+    }
+    pub fn player_cell(&self) -> &MapCell {
+        &self.grid[self.player_y][self.player_x]
+    }
+    pub fn in_bounds(&self, x: i32, y: i32) -> bool {
+        x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FloorTheme {
+    MossyRuins,
+    Underground,
+    AncientTemple,
+    VolcanicDepths,
+    DemonCastle,
+}
+
+/// Interactive event with choices.
+#[derive(Clone, Debug)]
+pub struct DungeonEvent {
+    pub description: Vec<String>,
+    pub choices: Vec<EventChoice>,
+}
+
+#[derive(Clone, Debug)]
+pub struct EventChoice {
+    pub label: String,
+    pub action: EventAction,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum EventAction {
+    /// Open treasure chest directly.
+    OpenTreasure,
+    /// Search carefully (avoids traps).
+    SearchTreasure,
+    /// Ignore and move on.
+    Ignore,
+    /// Ambush the enemy (first strike).
+    Ambush,
+    /// Sneak past the enemy.
+    SneakPast,
+    /// Fight normally.
+    FightNormally,
+    /// Drink from spring.
+    DrinkSpring,
+    /// Fill a bottle from spring.
+    FillBottle,
+    /// Read the lore inscription.
+    ReadLore,
+    /// Talk to NPC.
+    TalkNpc,
+    /// Trade with NPC.
+    TradeNpc,
+    /// Descend stairs to next floor.
+    DescendStairs,
+    /// Return to town via entrance.
+    ReturnToTown,
+    /// Continue exploring.
+    Continue,
 }
 
 /// What happened after resolving a room event.
@@ -403,9 +551,11 @@ pub enum Scene {
     Intro(u8),
     /// In town: rest, shop, enter dungeon.
     Town,
-    /// Exploring dungeon: room-by-room progression.
-    Dungeon,
-    /// Room event resolved, showing result and choices.
+    /// Grid-based dungeon exploration with 3D view.
+    DungeonExplore,
+    /// Interactive event with choices.
+    DungeonEvent,
+    /// Event result display.
     DungeonResult,
     /// In combat.
     Battle,
@@ -444,7 +594,7 @@ pub struct RpgState {
     pub inventory: Vec<InventoryItem>,
 
     // Dungeon
-    pub dungeon: Option<DungeonFloor>,
+    pub dungeon: Option<DungeonMap>,
     pub max_floor_reached: u32,
     pub total_clears: u32,
 
@@ -459,6 +609,9 @@ pub struct RpgState {
     // Room result (what happened in last room)
     pub room_result: Option<RoomResult>,
 
+    // Active event (interactive choices)
+    pub active_event: Option<DungeonEvent>,
+
     // Log (shown at bottom)
     pub log: Vec<String>,
 
@@ -470,7 +623,10 @@ pub struct RpgState {
     pub run_gold_earned: u32,
     pub run_exp_earned: u32,
     pub run_enemies_killed: u32,
-    pub run_rooms_cleared: u32,
+    pub run_rooms_explored: u32,
+
+    // Lore collected
+    pub lore_found: Vec<u32>,
 }
 
 impl RpgState {
@@ -498,13 +654,15 @@ impl RpgState {
             overlay: None,
             scene_text: Vec::new(),
             room_result: None,
+            active_event: None,
             log: Vec::new(),
             game_cleared: false,
             rng_seed: 42,
             run_gold_earned: 0,
             run_exp_earned: 0,
             run_enemies_killed: 0,
-            run_rooms_cleared: 0,
+            run_rooms_explored: 0,
+            lore_found: Vec::new(),
         }
     }
 
@@ -584,6 +742,28 @@ mod tests {
         s.inventory
             .push(InventoryItem { kind: ItemKind::Herb, count: 5 });
         assert_eq!(s.item_count(ItemKind::Herb), 5);
+    }
+
+    #[test]
+    fn facing_turns() {
+        assert_eq!(Facing::North.turn_right(), Facing::East);
+        assert_eq!(Facing::East.turn_right(), Facing::South);
+        assert_eq!(Facing::North.turn_left(), Facing::West);
+        assert_eq!(Facing::North.reverse(), Facing::South);
+    }
+
+    #[test]
+    fn cell_wall_access() {
+        let mut cell = MapCell {
+            walls: [true, false, true, false],
+            cell_type: CellType::Corridor,
+            visited: false,
+            event_done: false,
+        };
+        assert!(cell.wall(Facing::North));
+        assert!(!cell.wall(Facing::East));
+        cell.set_wall(Facing::East, true);
+        assert!(cell.wall(Facing::East));
     }
 
     #[test]
