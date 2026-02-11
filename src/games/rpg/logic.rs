@@ -148,6 +148,8 @@ pub fn execute_town_choice(state: &mut RpgState, index: usize) -> bool {
 // ── Dungeon: Grid-Based Exploration ───────────────────────────
 
 pub fn enter_dungeon(state: &mut RpgState, floor: u32) {
+    let first_entry = state.max_floor_reached == 0;
+
     // Reset run stats if starting fresh
     if floor == 1 {
         state.run_gold_earned = 0;
@@ -176,7 +178,16 @@ pub fn enter_dungeon(state: &mut RpgState, floor: u32) {
 
     // Show floor entry text
     let theme = floor_theme(floor);
-    state.scene_text = floor_entry_text(floor, theme);
+    let mut texts = floor_entry_text(floor, theme);
+
+    // First dungeon entry: add control guide
+    if first_entry {
+        texts.push(String::new());
+        texts.push("※ ボタンをタップして移動".into());
+        texts.push("  (WASDキーにも対応)".into());
+    }
+
+    state.scene_text = texts;
     state.add_log(&format!("B{}Fに踏み込んだ…", floor));
 }
 

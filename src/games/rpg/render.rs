@@ -395,11 +395,8 @@ fn render_dungeon_explore(
             .constraints([Constraint::Length(29), Constraint::Min(20)])
             .split(area);
 
-        // Left: 3D view
         render_3d_view(state, f, h_chunks[0], borders, theme);
-
-        // Right: minimap + atmosphere + controls
-        render_explore_panel(state, f, h_chunks[1], borders, click_state);
+        render_explore_panel(state, f, h_chunks[1], borders, click_state, false);
     } else {
         // Narrow layout: stacked vertically
         let v_chunks = Layout::default()
@@ -408,7 +405,7 @@ fn render_dungeon_explore(
             .split(area);
 
         render_3d_view(state, f, v_chunks[0], borders, theme);
-        render_explore_panel(state, f, v_chunks[1], borders, click_state);
+        render_explore_panel(state, f, v_chunks[1], borders, click_state, true);
     }
 }
 
@@ -440,6 +437,7 @@ fn render_explore_panel(
     area: Rect,
     borders: Borders,
     click_state: &Rc<RefCell<ClickState>>,
+    compact: bool,
 ) {
     let map = match &state.dungeon {
         Some(m) => m,
@@ -449,25 +447,100 @@ fn render_explore_panel(
 
     let mut cl = ClickableList::new();
 
-    // Minimap (compact version)
-    let minimap_lines = dungeon_view::render_minimap(map, theme);
-    for line in minimap_lines {
-        cl.push(line);
-    }
-
-    cl.push(Line::from(""));
-
-    // Atmosphere text
-    for text in &state.scene_text {
-        if !text.is_empty() {
-            cl.push(Line::from(Span::styled(
-                format!(" {}", text),
-                Style::default().fg(Color::DarkGray),
-            )));
+    if compact {
+        // Narrow/mobile: controls first for immediate accessibility
+        render_movement_controls(&mut cl);
+        cl.push(Line::from(""));
+        for text in &state.scene_text {
+            if !text.is_empty() {
+                cl.push(Line::from(Span::styled(
+                    format!(" {}", text),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
         }
+        render_hp_warning(&mut cl, state);
+        push_overlay_hints(&mut cl);
+    } else {
+        // Wide: full minimap + atmosphere + controls
+        let minimap_lines = dungeon_view::render_minimap(map, theme);
+        for line in minimap_lines {
+            cl.push(line);
+        }
+        cl.push(Line::from(""));
+        for text in &state.scene_text {
+            if !text.is_empty() {
+                cl.push(Line::from(Span::styled(
+                    format!(" {}", text),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+        render_hp_warning(&mut cl, state);
+        cl.push(Line::from(""));
+        render_movement_controls(&mut cl);
+        push_overlay_hints(&mut cl);
     }
 
-    // Low HP warning
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::DarkGray));
+    let mut cs = click_state.borrow_mut();
+    cl.render(f, area, block, &mut cs, true, 0);
+}
+
+fn render_movement_controls(cl: &mut ClickableList) {
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(
+                " [W] ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("▲ 前進", Style::default().fg(Color::White)),
+        ]),
+        MOVE_FORWARD,
+    );
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(
+                " [A] ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("◀ 左旋回", Style::default().fg(Color::White)),
+        ]),
+        TURN_LEFT,
+    );
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(
+                " [D] ",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("▶ 右旋回", Style::default().fg(Color::White)),
+        ]),
+        TURN_RIGHT,
+    );
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(
+                " [X] ",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("▼ 振り返る", Style::default().fg(Color::DarkGray)),
+        ]),
+        TURN_AROUND,
+    );
+}
+
+fn render_hp_warning(cl: &mut ClickableList, state: &RpgState) {
     let hp_ratio = if state.max_hp > 0 {
         state.hp as f64 / state.max_hp as f64
     } else {
@@ -486,62 +559,6 @@ fn render_explore_panel(
             Style::default().fg(Color::Yellow),
         )));
     }
-
-    cl.push(Line::from(""));
-
-    // Movement controls
-    cl.push_clickable(
-        Line::from(vec![
-            Span::styled(
-                " [W] ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("前進", Style::default().fg(Color::White)),
-        ]),
-        MOVE_FORWARD,
-    );
-    cl.push_clickable(
-        Line::from(vec![
-            Span::styled(
-                " [A] ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("左旋回", Style::default().fg(Color::White)),
-            Span::styled("  ", Style::default()),
-            Span::styled(
-                "[D] ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("右旋回", Style::default().fg(Color::White)),
-        ]),
-        TURN_LEFT,
-    );
-    cl.push_clickable(
-        Line::from(vec![
-            Span::styled(
-                " [X] ",
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("振り返る", Style::default().fg(Color::DarkGray)),
-        ]),
-        TURN_AROUND,
-    );
-
-    push_overlay_hints(&mut cl);
-
-    let block = Block::default()
-        .borders(borders)
-        .border_style(Style::default().fg(Color::DarkGray));
-    let mut cs = click_state.borrow_mut();
-    cl.render(f, area, block, &mut cs, true, 0);
 }
 
 // ── Dungeon Event (Interactive Choices) ──────────────────────
