@@ -395,7 +395,6 @@ pub fn load_game(state: &mut CookieState) -> bool {
 
 /// セーブデータを削除する。
 #[cfg(target_arch = "wasm32")]
-#[allow(dead_code)]
 pub fn delete_save() {
     if let Some(storage) = get_storage() {
         let _ = storage.remove_item(STORAGE_KEY);

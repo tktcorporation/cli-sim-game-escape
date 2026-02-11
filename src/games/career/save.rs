@@ -309,6 +309,14 @@ pub fn load_game(state: &mut CareerState) -> bool {
     true
 }
 
+/// セーブデータを削除する。
+#[cfg(target_arch = "wasm32")]
+pub fn delete_save() {
+    if let Some(storage) = get_storage() {
+        let _ = storage.remove_item(STORAGE_KEY);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -38,6 +38,11 @@ pub enum GameChoice {
 pub enum AppState {
     /// Showing game selection menu.
     Menu,
+    /// Showing settings screen (data reset).
+    /// `confirm_reset` is `Some(game)` when a confirmation dialog is shown.
+    Settings {
+        confirm_reset: Option<GameChoice>,
+    },
     /// Playing a game.
     Playing {
         game: Box<dyn Game>,
