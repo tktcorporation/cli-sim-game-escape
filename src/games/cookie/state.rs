@@ -1845,7 +1845,7 @@ impl CookieState {
                 id: "heavenly_power",
                 name: "天界の力".into(),
                 description: "CPS 永続 ×1.5".into(),
-                cost: 2,
+                cost: 5,
                 purchased: false,
                 effect: PrestigeEffect::CpsMultiplier(1.5),
                 requires: Some("angels_gift"),
@@ -1855,7 +1855,7 @@ impl CookieState {
                 id: "angels_aura",
                 name: "天使のオーラ".into(),
                 description: "CPS 永続 ×2".into(),
-                cost: 3,
+                cost: 25,
                 purchased: false,
                 effect: PrestigeEffect::CpsMultiplier(2.0),
                 requires: Some("heavenly_power"),
@@ -1865,7 +1865,7 @@ impl CookieState {
                 id: "factory_memory",
                 name: "工場の記憶".into(),
                 description: "転生後 Cursor 10台で開始".into(),
-                cost: 8,
+                cost: 125,
                 purchased: false,
                 effect: PrestigeEffect::StartingCursors(10),
                 requires: Some("angels_aura"),
@@ -1875,7 +1875,7 @@ impl CookieState {
                 id: "efficiency_peak",
                 name: "効率の極致".into(),
                 description: "全生産者コスト -10%".into(),
-                cost: 15,
+                cost: 500,
                 purchased: false,
                 effect: PrestigeEffect::ProducerCostReduction(0.1),
                 requires: Some("factory_memory"),
@@ -1885,7 +1885,7 @@ impl CookieState {
                 id: "heavenly_wealth",
                 name: "天界の富".into(),
                 description: "転生後 10,000,000 クッキーで開始".into(),
-                cost: 30,
+                cost: 2000,
                 purchased: false,
                 effect: PrestigeEffect::StartingCookies(10_000_000.0),
                 requires: Some("efficiency_peak"),
@@ -1898,7 +1898,7 @@ impl CookieState {
                 id: "angels_click",
                 name: "天使のクリック".into(),
                 description: "クリック力 永続 ×2".into(),
-                cost: 2,
+                cost: 5,
                 purchased: false,
                 effect: PrestigeEffect::ClickMultiplier(2.0),
                 requires: Some("angels_gift"),
@@ -1908,7 +1908,7 @@ impl CookieState {
                 id: "gods_click",
                 name: "神のクリック".into(),
                 description: "クリック力 永続 ×3".into(),
-                cost: 3,
+                cost: 25,
                 purchased: false,
                 effect: PrestigeEffect::ClickMultiplier(3.0),
                 requires: Some("angels_click"),
@@ -1918,7 +1918,7 @@ impl CookieState {
                 id: "sugar_alchemy",
                 name: "砂糖錬金術".into(),
                 description: "砂糖ブースト効果 +50%".into(),
-                cost: 8,
+                cost: 125,
                 purchased: false,
                 effect: PrestigeEffect::SugarBoostMultiplier(1.5),
                 requires: Some("gods_click"),
@@ -1928,7 +1928,7 @@ impl CookieState {
                 id: "combo_mastery",
                 name: "連撃の極意".into(),
                 description: "クリック力 永続 ×2".into(),
-                cost: 15,
+                cost: 500,
                 purchased: false,
                 effect: PrestigeEffect::ClickMultiplier(2.0),
                 requires: Some("sugar_alchemy"),
@@ -1938,7 +1938,7 @@ impl CookieState {
                 id: "click_sovereign",
                 name: "クリックの覇者".into(),
                 description: "クリック力 永続 ×5".into(),
-                cost: 30,
+                cost: 2000,
                 purchased: false,
                 effect: PrestigeEffect::ClickMultiplier(5.0),
                 requires: Some("combo_mastery"),
@@ -1951,7 +1951,7 @@ impl CookieState {
                 id: "golden_rush",
                 name: "ゴールデンラッシュ".into(),
                 description: "ゴールデンクッキー出現 1.5倍速".into(),
-                cost: 2,
+                cost: 5,
                 purchased: false,
                 effect: PrestigeEffect::GoldenCookieSpeed(0.67),
                 requires: Some("angels_gift"),
@@ -1961,7 +1961,7 @@ impl CookieState {
                 id: "golden_intuition",
                 name: "黄金の直感".into(),
                 description: "ゴールデン効果時間 +30%".into(),
-                cost: 3,
+                cost: 25,
                 purchased: false,
                 effect: PrestigeEffect::GoldenDuration(1.3),
                 requires: Some("golden_rush"),
@@ -1971,7 +1971,7 @@ impl CookieState {
                 id: "luck_extension",
                 name: "幸運の延長".into(),
                 description: "ゴールデン効果時間 +50%".into(),
-                cost: 8,
+                cost: 125,
                 purchased: false,
                 effect: PrestigeEffect::GoldenDuration(1.5),
                 requires: Some("golden_intuition"),
@@ -1981,7 +1981,7 @@ impl CookieState {
                 id: "milk_memory",
                 name: "ミルクの記憶".into(),
                 description: "転生後にミルクを50%保持".into(),
-                cost: 15,
+                cost: 500,
                 purchased: false,
                 effect: PrestigeEffect::MilkRetention(0.5),
                 requires: Some("luck_extension"),
@@ -1991,7 +1991,7 @@ impl CookieState {
                 id: "luck_sovereign",
                 name: "幸運の支配者".into(),
                 description: "ゴールデン効果 ×2".into(),
-                cost: 30,
+                cost: 2000,
                 purchased: false,
                 effect: PrestigeEffect::GoldenEffectMultiplier(2.0),
                 requires: Some("milk_memory"),
@@ -2376,11 +2376,12 @@ impl CookieState {
     }
 
     /// Calculate how many new heavenly chips would be earned from current run.
-    /// Threshold: 1000万 (1e7) cookies per chip² — first prestige accessible
-    /// within ~20-25 minutes, scaling controlled to prevent exponential blow-up.
+    /// Threshold: 10億 (1e9) cookies per chip² — inspired by Cookie Clicker's
+    /// prestige scaling.  First chip requires ~10億 cookies, preventing one-reset
+    /// full-unlock and encouraging multiple prestige cycles.
     pub fn pending_heavenly_chips(&self) -> u64 {
         let total = self.cookies_all_runs + self.cookies_all_time;
-        let total_chips = (total / 1e7).sqrt().floor() as u64;
+        let total_chips = (total / 1e9).sqrt().floor() as u64;
         total_chips.saturating_sub(self.heavenly_chips)
     }
 

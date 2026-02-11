@@ -812,8 +812,8 @@ pub fn perform_prestige(state: &mut CookieState) -> u64 {
 
     // Recalculate prestige multiplier from chips + prestige upgrades
     // Diminishing returns: sqrt(chips) * 0.30
-    // 1=1.3x, 10=1.95x, 50=3.12x, 100=4.0x, 1000=10.5x
-    // Prevents runaway exponential growth while every prestige feels rewarding
+    // 10=1.95x, 50=3.12x, 100=4.0x, 500=7.71x, 1000=10.5x, 4000=19.0x
+    // Chips are harder to earn (1e9 divisor), so generous per-chip bonus is needed
     let chip_bonus = 1.0 + (state.heavenly_chips as f64).sqrt() * 0.30;
     let upgrade_cps_mult: f64 = state
         .prestige_upgrades
@@ -1769,7 +1769,7 @@ mod tests {
     #[test]
     fn prestige_requires_threshold_cookies() {
         let mut state = CookieState::new();
-        state.cookies_all_time = 5e6; // 5 million — not enough for 1 chip (threshold=1e7)
+        state.cookies_all_time = 5e8; // 500 million — not enough for 1 chip (threshold=1e9)
         let chips = perform_prestige(&mut state);
         assert_eq!(chips, 0);
         assert_eq!(state.prestige_count, 0);
@@ -1778,8 +1778,8 @@ mod tests {
     #[test]
     fn prestige_earns_chips_from_threshold() {
         let mut state = CookieState::new();
-        // sqrt(1e7 / 1e7) = sqrt(1) = 1 chip
-        state.cookies_all_time = 1e7;
+        // sqrt(1e9 / 1e9) = sqrt(1) = 1 chip
+        state.cookies_all_time = 1e9;
         let chips = perform_prestige(&mut state);
         assert_eq!(chips, 1);
         assert_eq!(state.heavenly_chips, 1);
@@ -1790,7 +1790,7 @@ mod tests {
     fn prestige_resets_cookies_and_producers() {
         let mut state = CookieState::new();
         state.cookies = 5e9;
-        state.cookies_all_time = 5e9;
+        state.cookies_all_time = 5e9; // sqrt(5e9/1e9) = sqrt(5) = 2 chips → prestige succeeds
         state.producers[0].count = 100;
         state.producers[4].count = 50;
         perform_prestige(&mut state);
@@ -1804,8 +1804,8 @@ mod tests {
     #[test]
     fn prestige_multiplier_scales_with_chips() {
         let mut state = CookieState::new();
-        // sqrt(1000e7 / 1e7) = sqrt(1000) ≈ 31 chips
-        state.cookies_all_time = 1000e7;
+        // sqrt(1000e9 / 1e9) = sqrt(1000) ≈ 31 chips
+        state.cookies_all_time = 1000e9;
         perform_prestige(&mut state);
         assert_eq!(state.heavenly_chips, 31);
         // prestige_multiplier = 1.0 + sqrt(31) * 0.30 = 1.0 + 5.567 * 0.30 ≈ 2.67
@@ -1816,12 +1816,12 @@ mod tests {
     #[test]
     fn prestige_chips_accumulate_across_runs() {
         let mut state = CookieState::new();
-        // sqrt(1e7 / 1e7) = 1 chip
-        state.cookies_all_time = 1e7;
+        // sqrt(1e9 / 1e9) = 1 chip
+        state.cookies_all_time = 1e9;
         perform_prestige(&mut state);
         assert_eq!(state.heavenly_chips, 1);
-        // total across runs: 1e7 + 3e7 = 4e7, sqrt(4) = 2 chips, already have 1
-        state.cookies_all_time = 3e7;
+        // total across runs: 1e9 + 3e9 = 4e9, sqrt(4) = 2 chips, already have 1
+        state.cookies_all_time = 3e9;
         perform_prestige(&mut state);
         assert_eq!(state.heavenly_chips, 2);
         assert_eq!(state.prestige_count, 2);
@@ -1850,7 +1850,7 @@ mod tests {
         let mut state = CookieState::new();
         // Give enough chips directly, then buy upgrade
         state.heavenly_chips = 10;
-        buy_prestige_upgrade(&mut state, 0); // "天使の贈り物": start with 10,000
+        buy_prestige_upgrade(&mut state, 0); // "天使の贈り物": cost 1, start with 10,000
         assert!(state.prestige_upgrades[0].purchased);
         // Now set up cookies for prestige (need pending > 0)
         // Already have 10 chips. Need sqrt(total/1e9) > 10 → total > 100e9
