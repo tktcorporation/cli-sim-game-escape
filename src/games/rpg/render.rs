@@ -14,7 +14,7 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
-use crate::widgets::ClickableList;
+use crate::widgets::{ClickableGrid, ClickableList};
 
 use super::actions::*;
 use super::dungeon_view;
@@ -404,7 +404,7 @@ fn render_dungeon_explore(
             .constraints([Constraint::Length(map_w), Constraint::Min(18)])
             .split(area);
 
-        render_2d_map(state, f, h_chunks[0], borders, theme);
+        render_2d_map(state, f, h_chunks[0], borders, theme, click_state);
         render_explore_panel(state, f, h_chunks[1], borders, click_state);
     } else {
         // Narrow layout: 2D map (top) + controls (bottom)
@@ -426,7 +426,7 @@ fn render_dungeon_explore(
             .constraints([Constraint::Length(map_h), Constraint::Min(6)])
             .split(area);
 
-        render_2d_map(state, f, v_chunks[0], borders, theme);
+        render_2d_map(state, f, v_chunks[0], borders, theme, click_state);
         render_explore_panel(state, f, v_chunks[1], borders, click_state);
     }
 }
@@ -437,6 +437,7 @@ fn render_2d_map(
     area: Rect,
     borders: Borders,
     theme: super::state::FloorTheme,
+    click_state: &Rc<RefCell<ClickState>>,
 ) {
     let map = match &state.dungeon {
         Some(m) => m,
@@ -462,6 +463,17 @@ fn render_2d_map(
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
 
+    // Register directional tap zones (3×3 grid over the map area)
+    let inner = block.inner(area);
+    if inner.height >= 3 && inner.width >= 6 {
+        let cell_w = inner.width / 3;
+        let cell_h = inner.height / 3;
+        let grid = ClickableGrid::new(3, 3, MAP_TAP_BASE, cell_w)
+            .with_cell_height(cell_h);
+        let mut cs = click_state.borrow_mut();
+        grid.register_targets(area, &block, &mut cs, 0);
+    }
+
     f.render_widget(Paragraph::new(map_lines).block(block), area);
 }
 
@@ -479,6 +491,16 @@ fn render_explore_panel(
 
     let mut cl = ClickableList::new();
 
+    // Tap hint (most important for mobile users)
+    cl.push(Line::from(Span::styled(
+        " ↑←→↓ マップをタップ",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    render_hp_warning(&mut cl, state);
+
     // Scene text (atmosphere)
     for text in &state.scene_text {
         if !text.is_empty() {
@@ -489,7 +511,6 @@ fn render_explore_panel(
         }
     }
 
-    render_hp_warning(&mut cl, state);
     cl.push(Line::from(""));
     render_movement_controls(&mut cl, map);
     push_overlay_hints(&mut cl);
@@ -502,37 +523,10 @@ fn render_explore_panel(
 }
 
 fn render_movement_controls(cl: &mut ClickableList, map: &super::state::DungeonMap) {
-    use super::state::Facing;
-
-    let facing_label = match map.facing {
-        Facing::North => "北",
-        Facing::East => "東",
-        Facing::South => "南",
-        Facing::West => "西",
-    };
     let cell = map.player_cell();
     let can_fwd = !cell.wall(map.facing);
-    let can_left = !cell.wall(map.facing.turn_left());
-    let can_right = !cell.wall(map.facing.turn_right());
 
-    // Facing direction header
-    cl.push(Line::from(vec![
-        Span::styled(
-            format!(" 向き:{} ", facing_label),
-            Style::default().fg(Color::White),
-        ),
-        Span::styled(
-            format!(
-                "[{}{}{}]",
-                if can_left { "◀" } else { "×" },
-                if can_fwd { "▲" } else { "×" },
-                if can_right { "▶" } else { "×" },
-            ),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]));
-
-    // Forward
+    // Compact: forward + turn buttons (keyboard shortcuts shown for desktop)
     let fwd_style = if can_fwd { Color::Cyan } else { Color::DarkGray };
     cl.push_clickable(
         Line::from(vec![
@@ -551,37 +545,22 @@ fn render_movement_controls(cl: &mut ClickableList, map: &super::state::DungeonM
     );
     cl.push_clickable(
         Line::from(vec![
-            Span::styled(
-                " [A] ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("◀ 左旋回", Style::default().fg(Color::White)),
+            Span::styled(" [A] ", Style::default().fg(Color::Cyan)),
+            Span::styled("◀ 左", Style::default().fg(Color::White)),
         ]),
         TURN_LEFT,
     );
     cl.push_clickable(
         Line::from(vec![
-            Span::styled(
-                " [D] ",
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("▶ 右旋回", Style::default().fg(Color::White)),
+            Span::styled(" [D] ", Style::default().fg(Color::Cyan)),
+            Span::styled("▶ 右", Style::default().fg(Color::White)),
         ]),
         TURN_RIGHT,
     );
     cl.push_clickable(
         Line::from(vec![
-            Span::styled(
-                " [X] ",
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("▼ 振り返る", Style::default().fg(Color::DarkGray)),
+            Span::styled(" [X] ", Style::default().fg(Color::DarkGray)),
+            Span::styled("▼ 転回", Style::default().fg(Color::DarkGray)),
         ]),
         TURN_AROUND,
     );

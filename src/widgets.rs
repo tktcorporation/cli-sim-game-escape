@@ -341,6 +341,8 @@ pub struct ClickableGrid {
     action_base: u16,
     /// Display width of each cell in terminal columns.
     cell_display_width: u16,
+    /// Display height of each cell in terminal rows.
+    cell_display_height: u16,
 }
 
 impl ClickableGrid {
@@ -350,7 +352,14 @@ impl ClickableGrid {
             view_h,
             action_base,
             cell_display_width,
+            cell_display_height: 1,
         }
+    }
+
+    /// Create a grid with multi-row cells.
+    pub fn with_cell_height(mut self, h: u16) -> Self {
+        self.cell_display_height = h;
+        self
     }
 
     /// Decode an action_id back into viewport-relative `(col, row)`.
@@ -383,10 +392,15 @@ impl ClickableGrid {
         for gy in 0..self.view_h {
             for gx in 0..self.view_w {
                 let term_col = inner.x + padding_left + gx as u16 * self.cell_display_width;
-                let term_row = inner.y + gy as u16;
+                let term_row = inner.y + gy as u16 * self.cell_display_height;
                 let action_id = self.action_base + (gy * self.view_w + gx) as u16;
                 cs.add_click_target(
-                    Rect::new(term_col, term_row, self.cell_display_width, 1),
+                    Rect::new(
+                        term_col,
+                        term_row,
+                        self.cell_display_width,
+                        self.cell_display_height,
+                    ),
                     action_id,
                 );
             }

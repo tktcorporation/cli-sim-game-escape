@@ -173,7 +173,63 @@ fn handle_dungeon_explore_click(state: &mut RpgState, id: u16) -> bool {
         TURN_LEFT => logic::turn_left(state),
         TURN_RIGHT => logic::turn_right(state),
         TURN_AROUND => logic::turn_around(state),
-        _ => handle_overlay_open_click(state, id),
+        _ => handle_map_tap(state, id) || handle_overlay_open_click(state, id),
+    }
+}
+
+/// Handle a tap on the 2D map. Decode the 3×3 grid position and convert
+/// the screen cardinal direction to a facing-relative movement action.
+fn handle_map_tap(state: &mut RpgState, id: u16) -> bool {
+    use crate::widgets::ClickableGrid;
+    let Some((col, row)) = ClickableGrid::decode(MAP_TAP_BASE, 3, id) else {
+        return false;
+    };
+    // Map grid (col, row) to screen cardinal direction
+    let screen_dir = match (col, row) {
+        (_, 0) => Some(state::Facing::North),     // top row
+        (0, 1) => Some(state::Facing::West),      // middle-left
+        (2, 1) => Some(state::Facing::East),      // middle-right
+        (_, 2) => Some(state::Facing::South),      // bottom row
+        _ => None,                                  // center (1,1): forward
+    };
+    let facing = match &state.dungeon {
+        Some(m) => m.facing,
+        None => return false,
+    };
+    let action = match screen_dir {
+        Some(dir) => screen_dir_to_action(facing, dir),
+        None => MOVE_FORWARD, // center tap = forward
+    };
+    match action {
+        MOVE_FORWARD => logic::move_forward(state),
+        TURN_LEFT => logic::turn_left(state),
+        TURN_RIGHT => logic::turn_right(state),
+        TURN_AROUND => logic::turn_around(state),
+        _ => false,
+    }
+}
+
+/// Convert a screen cardinal direction to a movement action based on facing.
+/// `turns = (screen_dir - facing) mod 4`: 0=fwd, 1=right, 2=back, 3=left.
+fn screen_dir_to_action(facing: state::Facing, screen_dir: state::Facing) -> u16 {
+    let facing_idx = match facing {
+        state::Facing::North => 0u16,
+        state::Facing::East => 1,
+        state::Facing::South => 2,
+        state::Facing::West => 3,
+    };
+    let screen_idx = match screen_dir {
+        state::Facing::North => 0u16,
+        state::Facing::East => 1,
+        state::Facing::South => 2,
+        state::Facing::West => 3,
+    };
+    match (screen_idx + 4 - facing_idx) % 4 {
+        0 => MOVE_FORWARD,
+        1 => TURN_RIGHT,
+        2 => TURN_AROUND,
+        3 => TURN_LEFT,
+        _ => unreachable!(),
     }
 }
 
