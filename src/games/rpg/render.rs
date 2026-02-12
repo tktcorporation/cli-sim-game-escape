@@ -398,10 +398,10 @@ fn render_dungeon_explore(
         render_3d_view(state, f, h_chunks[0], borders, theme);
         render_explore_panel(state, f, h_chunks[1], borders, click_state, false);
     } else {
-        // Narrow layout: stacked vertically
+        // Narrow layout: stacked vertically (14 = 11 view + 1 desc + 2 border)
         let v_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(13), Constraint::Min(6)])
+            .constraints([Constraint::Length(14), Constraint::Min(6)])
             .split(area);
 
         render_3d_view(state, f, v_chunks[0], borders, theme);
@@ -422,7 +422,14 @@ fn render_3d_view(
     };
 
     let view = dungeon_view::compute_view(map);
-    let view_lines = dungeon_view::render_view(&view, theme);
+    let mut view_lines = dungeon_view::render_view(&view, theme);
+
+    // Add description line below the 3D art
+    let desc = dungeon_view::describe_view(&view);
+    view_lines.push(Line::from(Span::styled(
+        format!(" {}", desc),
+        Style::default().fg(Color::DarkGray),
+    )));
 
     let block = Block::default()
         .borders(borders)

@@ -191,6 +191,9 @@ pub fn render_view(view: &ViewData, theme: FloorTheme) -> Vec<Line<'static>> {
     // Draw perspective edge lines (diagonals connecting frame corners)
     draw_perspective_edges(&mut buf, num_depths);
 
+    // Add floor dots to show walkable depth
+    add_floor_pattern(&mut buf, view);
+
     // Add cell-type indicators at the visible end
     add_cell_markers(&mut buf, view);
 
@@ -243,6 +246,39 @@ fn draw_diagonal(
     }
 }
 
+/// Add floor dot pattern to show walkable passage depth.
+/// Near dots are dense (every cell), far dots are sparse.
+fn add_floor_pattern(buf: &mut [[char; VIEW_W]; VIEW_H], view: &ViewData) {
+    let num_depths = view.depths.len().min(4);
+
+    for d in 0..num_depths {
+        let slice = &view.depths[d];
+        // Don't put floor dots where there's a front wall
+        if slice.wall_front && d > 0 {
+            break;
+        }
+
+        let inner = FRAMES[d + 1];
+        // Floor area is the bottom portion of the inner frame
+        let floor_row = inner.3;
+        if floor_row >= VIEW_H {
+            continue;
+        }
+
+        // Place dots on the floor row — density decreases with depth
+        let step = match d {
+            0 => 2, // dense
+            1 => 3,
+            _ => 4, // sparse
+        };
+        for col in (inner.0..=inner.1).step_by(step) {
+            if col < VIEW_W && buf[floor_row][col] == ' ' {
+                buf[floor_row][col] = '·';
+            }
+        }
+    }
+}
+
 /// Add visual markers for special cells at the visible depth.
 fn add_cell_markers(buf: &mut [[char; VIEW_W]; VIEW_H], view: &ViewData) {
     // Show marker at the deepest visible cell that has a special type
@@ -288,6 +324,7 @@ fn buf_to_lines(buf: &[[char; VIEW_W]; VIEW_H], theme: FloorTheme) -> Vec<Line<'
                         '█' => Style::default().fg(wall_color),
                         '▓' => Style::default().fg(accent_color),
                         '░' => Style::default().fg(floor_color),
+                        '·' => Style::default().fg(Color::Rgb(60, 60, 60)),
                         '│' | '─' | '╲' | '╱' => Style::default().fg(Color::DarkGray),
                         '▼' => Style::default().fg(Color::Green),
                         '◆' => Style::default().fg(Color::Yellow),
@@ -306,12 +343,59 @@ fn buf_to_lines(buf: &[[char; VIEW_W]; VIEW_H], theme: FloorTheme) -> Vec<Line<'
 }
 
 fn theme_colors(theme: FloorTheme) -> (Color, Color, Color) {
+    // (wall_near, wall_mid, wall_far) — brighter for clear wall visibility
     match theme {
-        FloorTheme::MossyRuins => (Color::Rgb(80, 100, 80), Color::Rgb(60, 80, 60), Color::Rgb(40, 60, 40)),
-        FloorTheme::Underground => (Color::Rgb(80, 80, 100), Color::Rgb(60, 60, 80), Color::Rgb(40, 40, 60)),
-        FloorTheme::AncientTemple => (Color::Rgb(120, 100, 60), Color::Rgb(90, 75, 45), Color::Rgb(60, 50, 30)),
-        FloorTheme::VolcanicDepths => (Color::Rgb(130, 50, 30), Color::Rgb(100, 40, 20), Color::Rgb(70, 30, 10)),
-        FloorTheme::DemonCastle => (Color::Rgb(80, 40, 100), Color::Rgb(60, 30, 80), Color::Rgb(40, 20, 60)),
+        FloorTheme::MossyRuins => (Color::Rgb(140, 170, 140), Color::Rgb(100, 130, 100), Color::Rgb(60, 80, 60)),
+        FloorTheme::Underground => (Color::Rgb(140, 140, 180), Color::Rgb(100, 100, 140), Color::Rgb(60, 60, 90)),
+        FloorTheme::AncientTemple => (Color::Rgb(190, 160, 100), Color::Rgb(140, 120, 75), Color::Rgb(90, 75, 50)),
+        FloorTheme::VolcanicDepths => (Color::Rgb(200, 90, 50), Color::Rgb(150, 70, 40), Color::Rgb(100, 50, 30)),
+        FloorTheme::DemonCastle => (Color::Rgb(150, 80, 180), Color::Rgb(110, 60, 140), Color::Rgb(70, 40, 90)),
+    }
+}
+
+// ── View Description ─────────────────────────────────────────
+
+/// Generate a text description of what the player sees ahead.
+pub fn describe_view(view: &ViewData) -> String {
+    if view.depths.is_empty() {
+        return "目の前は壁だ。".into();
+    }
+
+    // How far can we go forward?
+    let walkable = view
+        .depths
+        .iter()
+        .take_while(|d| !d.wall_front)
+        .count();
+
+    let depth_desc = if walkable == 0 {
+        "目の前は壁。".to_string()
+    } else {
+        format!("前方{}マス進める。", walkable)
+    };
+
+    // Find the nearest special cell (skip depth 0 = player's cell)
+    let marker_desc = view
+        .depths
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find_map(|(i, d)| {
+            let label = match d.cell_type {
+                CellType::Stairs => "▼階段",
+                CellType::Treasure => "◆宝箱",
+                CellType::Enemy => "!敵影",
+                CellType::Spring => "~泉",
+                CellType::Npc => "?人影",
+                CellType::Lore => "✦碑文",
+                _ => return None,
+            };
+            Some(format!("{}歩先に{}", i, label))
+        });
+
+    match marker_desc {
+        Some(m) => format!("{} {}", depth_desc, m),
+        None => depth_desc,
     }
 }
 

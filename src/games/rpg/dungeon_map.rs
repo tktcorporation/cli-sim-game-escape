@@ -283,11 +283,12 @@ fn place_rooms(
 /// Room distribution: how many of each type based on floor and total available cells.
 fn room_distribution(floor: u32, total: usize) -> (usize, usize, usize, usize, usize, usize) {
     let t = total as f32;
+    // Total event density ~30-40% so most steps are quiet exploration.
     let (enemy_pct, treasure_pct, trap_pct, spring_pct, lore_pct, npc_pct) = match floor {
-        1..=2 => (0.25, 0.15, 0.05, 0.10, 0.10, 0.05),
-        3..=5 => (0.30, 0.12, 0.10, 0.08, 0.08, 0.05),
-        6..=9 => (0.35, 0.10, 0.12, 0.06, 0.06, 0.03),
-        _ => (0.40, 0.08, 0.10, 0.05, 0.05, 0.02),
+        1..=2 => (0.12, 0.06, 0.02, 0.05, 0.04, 0.03), // ~32%
+        3..=5 => (0.15, 0.05, 0.04, 0.04, 0.03, 0.02), // ~33%
+        6..=9 => (0.18, 0.05, 0.05, 0.03, 0.02, 0.02), // ~35%
+        _ => (0.20, 0.04, 0.06, 0.03, 0.02, 0.01),     // ~36%
     };
 
     (
