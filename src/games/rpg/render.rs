@@ -1,7 +1,7 @@
 //! Dungeon Dive rendering — single screen, scene-based.
 //!
 //! Layout: status bar + scene content + log.
-//! DungeonExplore uses a split layout: 3D view (left) + minimap (right).
+//! DungeonExplore uses a split layout: 2D map (left) + controls (right).
 //! Overlays (inventory, shop, status) are full-screen replacements.
 
 use std::cell::RefCell;
@@ -387,29 +387,51 @@ fn render_dungeon_explore(
     let theme = floor_theme(map.floor_num);
     let is_narrow = is_narrow_layout(area.width);
 
-    // Split horizontally: left = 3D view + controls, right = minimap + text
-    if !is_narrow && area.width >= 50 {
-        // Wide layout: side by side
+    if !is_narrow && area.width >= 40 {
+        // Wide layout: 2D map (left) + controls panel (right)
+        // Compute map cell count based on available height
+        let inner_h = area.height.saturating_sub(2) as usize; // minus borders
+        let n = {
+            let by_h = if inner_h >= 5 { (inner_h - 1) / 2 } else { 3 };
+            let mut v = by_h.min(11);
+            if v % 2 == 0 { v = v.saturating_sub(1); }
+            v.clamp(5, 11)
+        };
+        let map_w = (n * 3 + 1 + 2) as u16; // +2 for borders
+
         let h_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(29), Constraint::Min(20)])
+            .constraints([Constraint::Length(map_w), Constraint::Min(18)])
             .split(area);
 
-        render_3d_view(state, f, h_chunks[0], borders, theme);
-        render_explore_panel(state, f, h_chunks[1], borders, click_state, false);
+        render_2d_map(state, f, h_chunks[0], borders, theme);
+        render_explore_panel(state, f, h_chunks[1], borders, click_state);
     } else {
-        // Narrow layout: stacked vertically (14 = 11 view + 1 desc + 2 border)
+        // Narrow layout: 2D map (top) + controls (bottom)
+        let inner_w = area.width.saturating_sub(2) as usize;
+        let inner_h_total = area.height.saturating_sub(2) as usize;
+        // Reserve at least 7 rows for controls
+        let map_max_h = inner_h_total.saturating_sub(7);
+        let n = {
+            let by_w = if inner_w >= 7 { (inner_w - 1) / 3 } else { 3 };
+            let by_h = if map_max_h >= 5 { (map_max_h - 1) / 2 } else { 3 };
+            let mut v = by_w.min(by_h).min(9);
+            if v % 2 == 0 { v = v.saturating_sub(1); }
+            v.clamp(5, 9)
+        };
+        let map_h = (n * 2 + 1 + 2) as u16; // +2 for borders
+
         let v_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(14), Constraint::Min(6)])
+            .constraints([Constraint::Length(map_h), Constraint::Min(6)])
             .split(area);
 
-        render_3d_view(state, f, v_chunks[0], borders, theme);
-        render_explore_panel(state, f, v_chunks[1], borders, click_state, true);
+        render_2d_map(state, f, v_chunks[0], borders, theme);
+        render_explore_panel(state, f, v_chunks[1], borders, click_state);
     }
 }
 
-fn render_3d_view(
+fn render_2d_map(
     state: &RpgState,
     f: &mut Frame,
     area: Rect,
@@ -421,21 +443,26 @@ fn render_3d_view(
         None => return,
     };
 
-    let view = dungeon_view::compute_view(map);
-    let mut view_lines = dungeon_view::render_view(&view, theme);
+    let inner_w = area.width.saturating_sub(2) as usize;
+    let inner_h = area.height.saturating_sub(2) as usize;
 
-    // Add description line below the 3D art
+    let mut map_lines = dungeon_view::render_map_2d(map, theme, inner_w, inner_h);
+
+    // Add description line if there's room
+    let view = dungeon_view::compute_view(map);
     let desc = dungeon_view::describe_view(&view);
-    view_lines.push(Line::from(Span::styled(
-        format!(" {}", desc),
-        Style::default().fg(Color::DarkGray),
-    )));
+    if map_lines.len() < inner_h {
+        map_lines.push(Line::from(Span::styled(
+            format!(" {}", desc),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
 
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
 
-    f.render_widget(Paragraph::new(view_lines).block(block), area);
+    f.render_widget(Paragraph::new(map_lines).block(block), area);
 }
 
 fn render_explore_panel(
@@ -444,46 +471,28 @@ fn render_explore_panel(
     area: Rect,
     borders: Borders,
     click_state: &Rc<RefCell<ClickState>>,
-    compact: bool,
 ) {
     let map = match &state.dungeon {
         Some(m) => m,
         None => return,
     };
-    let theme = floor_theme(map.floor_num);
 
     let mut cl = ClickableList::new();
 
-    if compact {
-        // Narrow/mobile: controls + compact minimap
-        render_movement_controls(&mut cl, map);
-        cl.push(Line::from(""));
-        let minimap_lines = dungeon_view::render_minimap_compact(map, theme);
-        for line in minimap_lines {
-            cl.push(line);
+    // Scene text (atmosphere)
+    for text in &state.scene_text {
+        if !text.is_empty() {
+            cl.push(Line::from(Span::styled(
+                format!(" {}", text),
+                Style::default().fg(Color::DarkGray),
+            )));
         }
-        render_hp_warning(&mut cl, state);
-        push_overlay_hints(&mut cl);
-    } else {
-        // Wide: full minimap + atmosphere + controls
-        let minimap_lines = dungeon_view::render_minimap(map, theme);
-        for line in minimap_lines {
-            cl.push(line);
-        }
-        cl.push(Line::from(""));
-        for text in &state.scene_text {
-            if !text.is_empty() {
-                cl.push(Line::from(Span::styled(
-                    format!(" {}", text),
-                    Style::default().fg(Color::DarkGray),
-                )));
-            }
-        }
-        render_hp_warning(&mut cl, state);
-        cl.push(Line::from(""));
-        render_movement_controls(&mut cl, map);
-        push_overlay_hints(&mut cl);
     }
+
+    render_hp_warning(&mut cl, state);
+    cl.push(Line::from(""));
+    render_movement_controls(&mut cl, map);
+    push_overlay_hints(&mut cl);
 
     let block = Block::default()
         .borders(borders)
