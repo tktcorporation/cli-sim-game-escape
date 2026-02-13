@@ -178,7 +178,30 @@ fn handle_dungeon_explore_click(state: &mut RpgState, id: u16) -> bool {
         TURN_LEFT => logic::turn_left(state),
         TURN_RIGHT => logic::turn_right(state),
         TURN_AROUND => logic::turn_around(state),
-        _ => handle_map_tap(state, id) || handle_overlay_open_click(state, id),
+        _ => {
+            handle_dpad_tap(state, id)
+                || handle_map_tap(state, id)
+                || handle_overlay_open_click(state, id)
+        }
+    }
+}
+
+/// Handle a tap on the on-screen D-pad (1 step, no auto-walk).
+fn handle_dpad_tap(state: &mut RpgState, id: u16) -> bool {
+    use crate::widgets::ClickableGrid;
+    let Some((col, row)) = ClickableGrid::decode(DPAD_BASE, 3, id) else {
+        return false;
+    };
+    let dir = match (col, row) {
+        (1, 0) => Some(state::Facing::North),
+        (0, 1) => Some(state::Facing::West),
+        (2, 1) => Some(state::Facing::East),
+        (1, 2) => Some(state::Facing::South),
+        _ => None,
+    };
+    match dir {
+        Some(d) => logic::move_step(state, d),
+        None => false,
     }
 }
 
@@ -752,6 +775,32 @@ mod tests {
             assert!(result);
             let map = g.state.dungeon.as_ref().unwrap();
             assert_eq!(map.facing, state::Facing::North);
+        }
+    }
+
+    #[test]
+    fn dpad_moves_one_step() {
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1')); // Enter dungeon
+        assert_eq!(g.state.scene, Scene::DungeonExplore);
+
+        let map = g.state.dungeon.as_ref().unwrap();
+        let start_x = map.player_x;
+        let start_y = map.player_y;
+
+        // D-pad south (row=2, col=1 in 3×3 grid = DPAD_BASE + 2*3 + 1)
+        let south_id = DPAD_BASE + 7; // col=1, row=2
+        let south_open = !map.player_cell().wall(state::Facing::South);
+        if south_open {
+            let result = g.handle_input(&InputEvent::Click(south_id));
+            assert!(result);
+            let map = g.state.dungeon.as_ref().unwrap();
+            assert_eq!(map.facing, state::Facing::South);
+            // D-pad moves exactly 1 step (no auto-walk)
+            assert_eq!(map.player_x, start_x);
+            assert_eq!(map.player_y, start_y + 1);
         }
     }
 }
