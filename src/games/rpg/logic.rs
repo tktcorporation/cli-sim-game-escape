@@ -8,7 +8,7 @@ use super::events::{generate_event, resolve_event, EventOutcome};
 use super::lore::{atmosphere_text, floor_entry_text, floor_theme};
 use super::state::{
     enemy_info, floor_enemies, item_info, level_stats, shop_items, skill_element, skill_info,
-    BattleEnemy, BattlePhase, BattleState, CellType, EnemyKind,
+    BattleEnemy, BattlePhase, BattleState, CellType, EnemyKind, Facing,
     InventoryItem, ItemCategory, ItemKind, Overlay, RoomResult, RpgState, Scene,
     SkillKind, ALL_SKILLS, MAX_FLOOR, MAX_LEVEL,
 };
@@ -183,8 +183,8 @@ pub fn enter_dungeon(state: &mut RpgState, floor: u32) {
     // First dungeon entry: add control guide
     if first_entry {
         texts.push(String::new());
-        texts.push("※ ボタンをタップして移動".into());
-        texts.push("  (WASDキーにも対応)".into());
+        texts.push("※ マップタップ or 矢印キーで移動".into());
+        texts.push("  (WASD: 向き基準の操作も可能)".into());
     }
 
     state.scene_text = texts;
@@ -266,6 +266,91 @@ pub fn move_forward(state: &mut RpgState) -> bool {
     }
 
     true
+}
+
+/// Move in an absolute cardinal direction (arrow key / map tap).
+///
+/// Auto-faces the given direction, then moves forward. If the destination
+/// is a plain corridor with only one exit (besides where we came from),
+/// auto-walk continues until a junction, event, or dead end.
+pub fn move_direction(state: &mut RpgState, dir: Facing) -> bool {
+    // Face the direction
+    if let Some(map) = &mut state.dungeon {
+        map.facing = dir;
+    } else {
+        return false;
+    }
+
+    // Try to move forward
+    if !move_forward(state) {
+        return false;
+    }
+
+    // Auto-walk: continue through corridors until junction/event/dead-end
+    let mut steps = 0;
+    let max_steps = 8;
+    while steps < max_steps && state.scene == Scene::DungeonExplore {
+        let next_dir = match auto_walk_direction(state) {
+            Some(d) => d,
+            None => break,
+        };
+
+        if let Some(map) = &mut state.dungeon {
+            map.facing = next_dir;
+        }
+
+        if !move_forward(state) {
+            break;
+        }
+        steps += 1;
+    }
+
+    if steps > 0 {
+        let total = steps + 1;
+        state.scene_text.insert(0, format!("通路を{}歩進んだ。", total));
+    }
+
+    true
+}
+
+/// Returns the only exit direction from the current cell (excluding the
+/// direction we came from). Returns `None` if there are 0 or 2+ exits
+/// (dead-end or junction), or if the cell has an unresolved event.
+fn auto_walk_direction(state: &RpgState) -> Option<Facing> {
+    let map = match &state.dungeon {
+        Some(m) => m,
+        None => return None,
+    };
+
+    let cell = map.player_cell();
+
+    // Don't auto-walk if this cell has an unresolved event
+    if cell.cell_type != CellType::Corridor && !cell.event_done {
+        return None;
+    }
+
+    // Don't auto-walk from entrance or stairs (important navigation points)
+    if cell.cell_type == CellType::Entrance || cell.cell_type == CellType::Stairs {
+        return None;
+    }
+
+    let came_from = map.facing.reverse();
+    let mut exits = Vec::new();
+
+    for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+        if dir == came_from {
+            continue;
+        }
+        if !cell.wall(dir) {
+            exits.push(dir);
+        }
+    }
+
+    if exits.len() == 1 {
+        Some(exits[0])
+    } else {
+        None
+    }
 }
 
 /// Turn the player left (counter-clockwise).
@@ -356,12 +441,16 @@ pub fn resolve_event_choice(state: &mut RpgState, choice_index: usize) -> bool {
         enter_dungeon(state, next_floor);
     } else if outcome.return_to_town {
         retreat_to_town(state);
-    } else {
-        // Return to exploration
-        state.room_result = Some(RoomResult {
-            description: outcome.description,
-        });
-        state.scene = Scene::DungeonResult;
+    } else if state.dungeon.is_some() {
+        // Skip result screen — show outcome in log and scene text, then
+        // return directly to exploration for smoother flow.
+        for desc in &outcome.description {
+            if !desc.is_empty() {
+                state.add_log(desc);
+            }
+        }
+        state.scene_text = outcome.description;
+        state.scene = Scene::DungeonExplore;
     }
 
     true
@@ -1246,5 +1335,67 @@ mod tests {
         continue_exploration(&mut s);
         assert_eq!(s.scene, Scene::DungeonExplore);
         assert!(s.room_result.is_none());
+    }
+
+    #[test]
+    fn move_direction_faces_and_moves() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        assert_eq!(s.dungeon.as_ref().unwrap().facing, Facing::North);
+
+        // Try moving east (absolute direction)
+        let map = s.dungeon.as_ref().unwrap();
+        let cell = map.player_cell();
+        let east_open = !cell.wall(Facing::East);
+        if east_open {
+            let old_pos = (map.player_x, map.player_y);
+            assert!(move_direction(&mut s, Facing::East));
+            let map = s.dungeon.as_ref().unwrap();
+            // Player should have moved (auto-walk may change facing further)
+            let new_pos = (map.player_x, map.player_y);
+            assert_ne!(old_pos, new_pos);
+        }
+    }
+
+    #[test]
+    fn move_direction_blocked_by_wall() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+
+        // Find a direction with a wall
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            let cell = s.dungeon.as_ref().unwrap().player_cell();
+            if cell.wall(dir) {
+                let old_pos = (
+                    s.dungeon.as_ref().unwrap().player_x,
+                    s.dungeon.as_ref().unwrap().player_y,
+                );
+                assert!(!move_direction(&mut s, dir));
+                let new_pos = (
+                    s.dungeon.as_ref().unwrap().player_x,
+                    s.dungeon.as_ref().unwrap().player_y,
+                );
+                assert_eq!(old_pos, new_pos);
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn auto_walk_stops_at_junction() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+
+        // After move_direction, should still be in DungeonExplore
+        // (auto-walk stops at junctions/events, not outside the dungeon)
+        let map = s.dungeon.as_ref().unwrap();
+        if !map.player_cell().wall(Facing::North) {
+            move_direction(&mut s, Facing::North);
+            // Should still be exploring (not crashed or stuck)
+            assert!(
+                s.scene == Scene::DungeonExplore
+                    || s.scene == Scene::DungeonEvent
+            );
+        }
     }
 }

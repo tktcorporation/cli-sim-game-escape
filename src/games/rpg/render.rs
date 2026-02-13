@@ -491,13 +491,16 @@ fn render_explore_panel(
 
     let mut cl = ClickableList::new();
 
-    // Tap hint (most important for mobile users)
+    // Tap / arrow key hint
     cl.push(Line::from(Span::styled(
-        " ↑←→↓ マップをタップ",
+        " マップタップ / 矢印キーで移動",
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     )));
+
+    // Compass: show what's in each cardinal direction
+    render_compass_line(&mut cl, map);
 
     render_hp_warning(&mut cl, state);
 
@@ -564,6 +567,66 @@ fn render_movement_controls(cl: &mut ClickableList, map: &super::state::DungeonM
         ]),
         TURN_AROUND,
     );
+}
+
+/// Render a compass line showing what's in each cardinal direction.
+fn render_compass_line(cl: &mut ClickableList, map: &super::state::DungeonMap) {
+    use super::state::{CellType, Facing, MapCell};
+
+    fn compass_marker(cell: &MapCell) -> (&'static str, Color) {
+        if !cell.visited {
+            return ("?", Color::DarkGray);
+        }
+        if !cell.event_done {
+            match cell.cell_type {
+                CellType::Enemy => ("!", Color::Red),
+                CellType::Treasure => ("\u{25c6}", Color::Yellow),
+                CellType::Spring => ("~", Color::Cyan),
+                CellType::Lore => ("\u{2726}", Color::Yellow),
+                CellType::Npc => ("?", Color::Magenta),
+                CellType::Stairs => ("\u{25bc}", Color::Green),
+                CellType::Entrance => ("\u{25c7}", Color::Green),
+                _ => ("\u{00b7}", Color::White),
+            }
+        } else {
+            ("\u{00b7}", Color::White)
+        }
+    }
+
+    let cell = map.player_cell();
+    let mut spans: Vec<Span> = Vec::new();
+
+    for &(dir, arrow) in &[
+        (Facing::North, "\u{2191}"),
+        (Facing::East, "\u{2192}"),
+        (Facing::South, "\u{2193}"),
+        (Facing::West, "\u{2190}"),
+    ] {
+        if cell.wall(dir) {
+            spans.push(Span::styled(
+                format!(" {}\u{58c1}", arrow),
+                Style::default().fg(Color::DarkGray),
+            ));
+        } else {
+            let nx = map.player_x as i32 + dir.dx();
+            let ny = map.player_y as i32 + dir.dy();
+            if map.in_bounds(nx, ny) {
+                let adj = map.cell(nx as usize, ny as usize);
+                let (marker, color) = compass_marker(adj);
+                spans.push(Span::styled(
+                    format!(" {}{}", arrow, marker),
+                    Style::default().fg(color),
+                ));
+            } else {
+                spans.push(Span::styled(
+                    format!(" {}\u{58c1}", arrow),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+        }
+    }
+
+    cl.push(Line::from(spans));
 }
 
 fn render_hp_warning(cl: &mut ClickableList, state: &RpgState) {

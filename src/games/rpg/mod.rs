@@ -149,11 +149,16 @@ fn handle_town_click(state: &mut RpgState, id: u16) -> bool {
 
 fn handle_dungeon_explore_key(state: &mut RpgState, ch: char) -> bool {
     match ch {
-        // WASD movement
+        // WASD movement (relative to facing)
         'W' | 'w' => logic::move_forward(state),
         'A' | 'a' => logic::turn_left(state),
         'D' | 'd' => logic::turn_right(state),
         'X' | 'x' => logic::turn_around(state),
+        // Arrow keys / hjkl (absolute cardinal direction, with auto-walk)
+        'k' => logic::move_direction(state, state::Facing::North),
+        'l' => logic::move_direction(state, state::Facing::East),
+        'j' => logic::move_direction(state, state::Facing::South),
+        'h' => logic::move_direction(state, state::Facing::West),
         // Overlays
         'I' | 'i' => {
             state.overlay = Some(Overlay::Inventory);
@@ -177,8 +182,8 @@ fn handle_dungeon_explore_click(state: &mut RpgState, id: u16) -> bool {
     }
 }
 
-/// Handle a tap on the 2D map. Decode the 3×3 grid position and convert
-/// the screen cardinal direction to a facing-relative movement action.
+/// Handle a tap on the 2D map. Decode the 3×3 grid position and move in
+/// the corresponding absolute cardinal direction (with auto-walk).
 fn handle_map_tap(state: &mut RpgState, id: u16) -> bool {
     use crate::widgets::ClickableGrid;
     let Some((col, row)) = ClickableGrid::decode(MAP_TAP_BASE, 3, id) else {
@@ -189,47 +194,12 @@ fn handle_map_tap(state: &mut RpgState, id: u16) -> bool {
         (_, 0) => Some(state::Facing::North),     // top row
         (0, 1) => Some(state::Facing::West),      // middle-left
         (2, 1) => Some(state::Facing::East),      // middle-right
-        (_, 2) => Some(state::Facing::South),      // bottom row
-        _ => None,                                  // center (1,1): forward
+        (_, 2) => Some(state::Facing::South),     // bottom row
+        _ => None,                                 // center (1,1): forward
     };
-    let facing = match &state.dungeon {
-        Some(m) => m.facing,
-        None => return false,
-    };
-    let action = match screen_dir {
-        Some(dir) => screen_dir_to_action(facing, dir),
-        None => MOVE_FORWARD, // center tap = forward
-    };
-    match action {
-        MOVE_FORWARD => logic::move_forward(state),
-        TURN_LEFT => logic::turn_left(state),
-        TURN_RIGHT => logic::turn_right(state),
-        TURN_AROUND => logic::turn_around(state),
-        _ => false,
-    }
-}
-
-/// Convert a screen cardinal direction to a movement action based on facing.
-/// `turns = (screen_dir - facing) mod 4`: 0=fwd, 1=right, 2=back, 3=left.
-fn screen_dir_to_action(facing: state::Facing, screen_dir: state::Facing) -> u16 {
-    let facing_idx = match facing {
-        state::Facing::North => 0u16,
-        state::Facing::East => 1,
-        state::Facing::South => 2,
-        state::Facing::West => 3,
-    };
-    let screen_idx = match screen_dir {
-        state::Facing::North => 0u16,
-        state::Facing::East => 1,
-        state::Facing::South => 2,
-        state::Facing::West => 3,
-    };
-    match (screen_idx + 4 - facing_idx) % 4 {
-        0 => MOVE_FORWARD,
-        1 => TURN_RIGHT,
-        2 => TURN_AROUND,
-        3 => TURN_LEFT,
-        _ => unreachable!(),
+    match screen_dir {
+        Some(dir) => logic::move_direction(state, dir),
+        None => logic::move_forward(state), // center tap = forward relative to facing
     }
 }
 
@@ -742,5 +712,46 @@ mod tests {
         });
         g.handle_input(&InputEvent::Key('1'));
         assert_eq!(g.state.scene, Scene::DungeonExplore);
+    }
+
+    #[test]
+    fn arrow_key_moves_in_absolute_direction() {
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1')); // Enter dungeon
+        assert_eq!(g.state.scene, Scene::DungeonExplore);
+
+        // 'k' = Up arrow = North (absolute direction)
+        let map = g.state.dungeon.as_ref().unwrap();
+        let north_open = !map.player_cell().wall(state::Facing::North);
+        if north_open {
+            let old_y = map.player_y;
+            g.handle_input(&InputEvent::Key('k'));
+            let map = g.state.dungeon.as_ref().unwrap();
+            assert_eq!(map.facing, state::Facing::North);
+            // Should have moved (auto-walk may move further)
+            assert!(map.player_y <= old_y);
+        }
+    }
+
+    #[test]
+    fn map_tap_moves_absolute_direction() {
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1')); // Enter dungeon
+        assert_eq!(g.state.scene, Scene::DungeonExplore);
+
+        // Tap north on map (row=0, col=1 in 3×3 grid = MAP_TAP_BASE + 0*3 + 1)
+        let north_tap_id = MAP_TAP_BASE + 1; // col=1, row=0
+        let map = g.state.dungeon.as_ref().unwrap();
+        let north_open = !map.player_cell().wall(state::Facing::North);
+        if north_open {
+            let result = g.handle_input(&InputEvent::Click(north_tap_id));
+            assert!(result);
+            let map = g.state.dungeon.as_ref().unwrap();
+            assert_eq!(map.facing, state::Facing::North);
+        }
     }
 }
