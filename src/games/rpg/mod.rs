@@ -743,4 +743,53 @@ mod tests {
         g.handle_input(&InputEvent::Key('1'));
         assert_eq!(g.state.scene, Scene::DungeonExplore);
     }
+
+    #[test]
+    fn map_tap_turn_right() {
+        // Tapping east on the map when facing north should turn right.
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1')); // Enter dungeon
+        assert_eq!(g.state.scene, Scene::DungeonExplore);
+
+        // Ensure facing north
+        let facing = g.state.dungeon.as_ref().unwrap().facing;
+        assert_eq!(facing, state::Facing::North);
+
+        // Tap east cell: grid (2,1) → MAP_TAP_BASE + 1*3 + 2 = 145
+        let result = g.handle_input(&InputEvent::Click(MAP_TAP_BASE + 5));
+        assert!(result);
+        let new_facing = g.state.dungeon.as_ref().unwrap().facing;
+        assert_eq!(new_facing, state::Facing::East);
+    }
+
+    #[test]
+    fn map_tap_turn_left() {
+        // Tapping west on the map when facing north should turn left.
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+
+        // Tap west cell: grid (0,1) → MAP_TAP_BASE + 1*3 + 0 = 143
+        let result = g.handle_input(&InputEvent::Click(MAP_TAP_BASE + 3));
+        assert!(result);
+        let new_facing = g.state.dungeon.as_ref().unwrap().facing;
+        assert_eq!(new_facing, state::Facing::West);
+    }
+
+    #[test]
+    fn map_tap_center_forward() {
+        // Tapping center of map should attempt forward.
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+
+        // Center cell: grid (1,1) → MAP_TAP_BASE + 1*3 + 1 = 144
+        let result = g.handle_input(&InputEvent::Click(MAP_TAP_BASE + 4));
+        // Result depends on whether there's a wall ahead (may be true or false)
+        let _ = result;
+    }
 }

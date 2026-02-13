@@ -657,6 +657,37 @@ mod tests {
     }
 
     #[test]
+    fn clickable_grid_multi_row_cells() {
+        let grid = ClickableGrid::new(3, 3, 200, 4).with_cell_height(3);
+        let block = Block::default().borders(ratzilla::ratatui::widgets::Borders::ALL);
+        let area = Rect::new(0, 0, 20, 14);
+        let mut cs = ClickState::new();
+        grid.register_targets(area, &block, &mut cs, 0);
+
+        // 3×3 grid = 9 targets
+        assert_eq!(cs.targets.len(), 9);
+
+        // inner = (1, 1, 18, 12) with Borders::ALL
+        // cell (0,0): x=1, y=1, w=4, h=3 → action 200
+        assert_eq!(cs.hit_test(1, 1), Some(200));
+        assert_eq!(cs.hit_test(1, 2), Some(200)); // multi-row: row 2 still in cell
+        assert_eq!(cs.hit_test(1, 3), Some(200)); // row 3 still in cell
+
+        // cell (1,0): x=5, y=1 → action 201
+        assert_eq!(cs.hit_test(5, 1), Some(201));
+
+        // cell (0,1): x=1, y=4 (row 1*3+1=4) → action 203
+        assert_eq!(cs.hit_test(1, 4), Some(203));
+        assert_eq!(cs.hit_test(1, 5), Some(203));
+
+        // cell (2,1): x=9, y=4 → action 205
+        assert_eq!(cs.hit_test(9, 5), Some(205));
+
+        // cell (1,2): x=5, y=7 → action 207
+        assert_eq!(cs.hit_test(5, 8), Some(207));
+    }
+
+    #[test]
     fn clickable_grid_decode() {
         let view_w = 5;
         let base = 100;
