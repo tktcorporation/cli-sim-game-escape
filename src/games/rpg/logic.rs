@@ -183,8 +183,8 @@ pub fn enter_dungeon(state: &mut RpgState, floor: u32) {
     // First dungeon entry: add control guide
     if first_entry {
         texts.push(String::new());
-        texts.push("※ マップタップ or 矢印キーで移動".into());
-        texts.push("  (WASD: 向き基準の操作も可能)".into());
+        texts.push("※ ←↑↓→ で1歩ずつ移動".into());
+        texts.push("  マップタップで通路を一気に進む".into());
     }
 
     state.scene_text = texts;
@@ -268,7 +268,20 @@ pub fn move_forward(state: &mut RpgState) -> bool {
     true
 }
 
-/// Move in an absolute cardinal direction (arrow key / map tap).
+/// Move exactly one step in an absolute cardinal direction (arrow key).
+///
+/// Auto-faces the given direction, then moves forward one cell.
+/// No auto-walk — deliberate, one-step-at-a-time roguelike movement.
+pub fn move_step(state: &mut RpgState, dir: Facing) -> bool {
+    if let Some(map) = &mut state.dungeon {
+        map.facing = dir;
+    } else {
+        return false;
+    }
+    move_forward(state)
+}
+
+/// Move in an absolute cardinal direction with auto-walk (map tap).
 ///
 /// Auto-faces the given direction, then moves forward. If the destination
 /// is a plain corridor with only one exit (besides where we came from),
@@ -1335,6 +1348,50 @@ mod tests {
         continue_exploration(&mut s);
         assert_eq!(s.scene, Scene::DungeonExplore);
         assert!(s.room_result.is_none());
+    }
+
+    #[test]
+    fn move_step_moves_exactly_one_cell() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_ref().unwrap();
+        // Find an open direction
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            if !map.player_cell().wall(dir) {
+                let old_pos = (map.player_x, map.player_y);
+                assert!(move_step(&mut s, dir));
+                let map = s.dungeon.as_ref().unwrap();
+                let new_pos = (map.player_x, map.player_y);
+                // Should have moved exactly 1 cell
+                let dist = (new_pos.0 as i32 - old_pos.0 as i32).abs()
+                    + (new_pos.1 as i32 - old_pos.1 as i32).abs();
+                assert_eq!(dist, 1, "move_step should move exactly 1 cell");
+                assert_eq!(map.facing, dir);
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn move_step_blocked_by_wall() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            let cell = s.dungeon.as_ref().unwrap().player_cell();
+            if cell.wall(dir) {
+                let old_pos = (
+                    s.dungeon.as_ref().unwrap().player_x,
+                    s.dungeon.as_ref().unwrap().player_y,
+                );
+                assert!(!move_step(&mut s, dir));
+                let new_pos = (
+                    s.dungeon.as_ref().unwrap().player_x,
+                    s.dungeon.as_ref().unwrap().player_y,
+                );
+                assert_eq!(old_pos, new_pos);
+                break;
+            }
+        }
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Dungeon Dive — grid-based dungeon crawler with first-person 3D view.
 //!
-//! Game trait implementation with WASD movement and interactive events.
-//! Movement: [W] forward, [A] turn left, [D] turn right, [X] turn around.
+//! Game trait implementation with arrow-key movement and interactive events.
+//! Movement: Arrow keys (1 step), map tap (auto-walk through corridors).
 //! Events: [1]-[5] choices.  Overlays: [I] inventory, [S] status.
 
 pub mod actions;
@@ -145,7 +145,7 @@ fn handle_town_click(state: &mut RpgState, id: u16) -> bool {
     handle_overlay_open_click(state, id)
 }
 
-// ── Dungeon Explore (WASD movement) ────────────────────────
+// ── Dungeon Explore (arrow key / map tap movement) ─────────
 
 fn handle_dungeon_explore_key(state: &mut RpgState, ch: char) -> bool {
     match ch {
@@ -154,11 +154,11 @@ fn handle_dungeon_explore_key(state: &mut RpgState, ch: char) -> bool {
         'A' | 'a' => logic::turn_left(state),
         'D' | 'd' => logic::turn_right(state),
         'X' | 'x' => logic::turn_around(state),
-        // Arrow keys / hjkl (absolute cardinal direction, with auto-walk)
-        'k' => logic::move_direction(state, state::Facing::North),
-        'l' => logic::move_direction(state, state::Facing::East),
-        'j' => logic::move_direction(state, state::Facing::South),
-        'h' => logic::move_direction(state, state::Facing::West),
+        // Arrow keys / hjkl (absolute cardinal direction, 1 step)
+        'k' => logic::move_step(state, state::Facing::North),
+        'l' => logic::move_step(state, state::Facing::East),
+        'j' => logic::move_step(state, state::Facing::South),
+        'h' => logic::move_step(state, state::Facing::West),
         // Overlays
         'I' | 'i' => {
             state.overlay = Some(Overlay::Inventory);
@@ -722,7 +722,7 @@ mod tests {
         g.handle_input(&InputEvent::Key('1')); // Enter dungeon
         assert_eq!(g.state.scene, Scene::DungeonExplore);
 
-        // 'k' = Up arrow = North (absolute direction)
+        // 'k' = Up arrow = North (absolute direction, 1 step only)
         let map = g.state.dungeon.as_ref().unwrap();
         let north_open = !map.player_cell().wall(state::Facing::North);
         if north_open {
@@ -730,8 +730,8 @@ mod tests {
             g.handle_input(&InputEvent::Key('k'));
             let map = g.state.dungeon.as_ref().unwrap();
             assert_eq!(map.facing, state::Facing::North);
-            // Should have moved (auto-walk may move further)
-            assert!(map.player_y <= old_y);
+            // Should have moved exactly 1 step (no auto-walk)
+            assert_eq!(map.player_y, old_y - 1);
         }
     }
 

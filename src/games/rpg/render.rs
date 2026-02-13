@@ -491,9 +491,9 @@ fn render_explore_panel(
 
     let mut cl = ClickableList::new();
 
-    // Tap / arrow key hint
+    // Movement hint
     cl.push(Line::from(Span::styled(
-        " マップタップ / 矢印キーで移動",
+        " ←↑↓→ 移動 / マップタップ",
         Style::default()
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
@@ -515,7 +515,6 @@ fn render_explore_panel(
     }
 
     cl.push(Line::from(""));
-    render_movement_controls(&mut cl, map);
     push_overlay_hints(&mut cl);
 
     let block = Block::default()
@@ -525,49 +524,6 @@ fn render_explore_panel(
     cl.render(f, area, block, &mut cs, true, 0);
 }
 
-fn render_movement_controls(cl: &mut ClickableList, map: &super::state::DungeonMap) {
-    let cell = map.player_cell();
-    let can_fwd = !cell.wall(map.facing);
-
-    // Compact: forward + turn buttons (keyboard shortcuts shown for desktop)
-    let fwd_style = if can_fwd { Color::Cyan } else { Color::DarkGray };
-    cl.push_clickable(
-        Line::from(vec![
-            Span::styled(
-                " [W] ",
-                Style::default()
-                    .fg(fwd_style)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                if can_fwd { "▲ 前進" } else { "× 壁" },
-                Style::default().fg(if can_fwd { Color::White } else { Color::DarkGray }),
-            ),
-        ]),
-        MOVE_FORWARD,
-    );
-    cl.push_clickable(
-        Line::from(vec![
-            Span::styled(" [A] ", Style::default().fg(Color::Cyan)),
-            Span::styled("◀ 左", Style::default().fg(Color::White)),
-        ]),
-        TURN_LEFT,
-    );
-    cl.push_clickable(
-        Line::from(vec![
-            Span::styled(" [D] ", Style::default().fg(Color::Cyan)),
-            Span::styled("▶ 右", Style::default().fg(Color::White)),
-        ]),
-        TURN_RIGHT,
-    );
-    cl.push_clickable(
-        Line::from(vec![
-            Span::styled(" [X] ", Style::default().fg(Color::DarkGray)),
-            Span::styled("▼ 転回", Style::default().fg(Color::DarkGray)),
-        ]),
-        TURN_AROUND,
-    );
-}
 
 /// Render a compass line showing what's in each cardinal direction.
 fn render_compass_line(cl: &mut ClickableList, map: &super::state::DungeonMap) {
