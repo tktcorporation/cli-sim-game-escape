@@ -8,9 +8,9 @@ use super::events::{generate_event, resolve_event, EventOutcome};
 use super::lore::{atmosphere_text, floor_entry_text, floor_theme};
 use super::state::{
     enemy_info, floor_enemies, item_info, level_stats, shop_items, skill_element, skill_info,
-    BattleEnemy, BattlePhase, BattleState, CellType, EnemyKind,
+    BattleEnemy, BattlePhase, BattleState, CellType, EnemyKind, Facing,
     InventoryItem, ItemCategory, ItemKind, Overlay, RoomResult, RpgState, Scene,
-    SkillKind, ALL_SKILLS, MAX_FLOOR, MAX_LEVEL,
+    SkillKind, Tile, ALL_SKILLS, MAX_FLOOR, MAX_LEVEL,
 };
 
 // ── Tick (no-op: command-based game) ─────────────────────────
@@ -160,11 +160,15 @@ pub fn enter_dungeon(state: &mut RpgState, floor: u32) {
 
     let mut map = generate_map(floor, &mut state.rng_seed);
 
-    // Mark entrance as visited
+    // Mark entrance as visited + revealed
     let px = map.player_x;
     let py = map.player_y;
     map.grid[py][px].visited = true;
+    map.grid[py][px].revealed = true;
     map.grid[py][px].event_done = true; // Don't trigger entrance event on entry
+
+    // Reveal the starting room
+    reveal_room(&mut map, px, py);
 
     state.dungeon = Some(map);
     state.scene = Scene::DungeonExplore;
@@ -183,29 +187,57 @@ pub fn enter_dungeon(state: &mut RpgState, floor: u32) {
     // First dungeon entry: add control guide
     if first_entry {
         texts.push(String::new());
-        texts.push("※ ボタンをタップして移動".into());
-        texts.push("  (WASDキーにも対応)".into());
+        texts.push("※ ←↑↓→ で1歩ずつ移動".into());
+        texts.push("  マップタップで通路を一気に進む".into());
     }
 
     state.scene_text = texts;
     state.add_log(&format!("B{}Fに踏み込んだ…", floor));
 }
 
-/// Move forward one cell in the direction the player is facing.
-pub fn move_forward(state: &mut RpgState) -> bool {
+/// Reveal all tiles in the room containing (x, y).
+/// If the tile has a room_id, set `revealed = true` for all tiles with that room_id.
+fn reveal_room(map: &mut super::state::DungeonMap, x: usize, y: usize) {
+    let room_id = match map.grid[y][x].room_id {
+        Some(id) => id,
+        None => return,
+    };
+    for row in &mut map.grid {
+        for cell in row.iter_mut() {
+            if cell.room_id == Some(room_id) {
+                cell.revealed = true;
+            }
+        }
+    }
+}
+
+/// Check if the adjacent tile in direction `dir` from (x, y) is walkable.
+fn is_adjacent_walkable(map: &super::state::DungeonMap, x: usize, y: usize, dir: Facing) -> bool {
+    let nx = x as i32 + dir.dx();
+    let ny = y as i32 + dir.dy();
+    if !map.in_bounds(nx, ny) {
+        return false;
+    }
+    map.cell(nx as usize, ny as usize).is_walkable()
+}
+
+/// Try to move the player one cell in the given cardinal direction.
+/// Returns true if movement succeeded.
+pub fn try_move(state: &mut RpgState, dir: Facing) -> bool {
     let (can_move, nx, ny) = {
         let map = match &state.dungeon {
             Some(m) => m,
             None => return false,
         };
-        let cell = map.player_cell();
-        if cell.wall(map.facing) {
+        let tx = map.player_x as i32 + dir.dx();
+        let ty = map.player_y as i32 + dir.dy();
+        if !map.in_bounds(tx, ty) {
             (false, 0, 0)
         } else {
-            let nx = map.player_x as i32 + map.facing.dx();
-            let ny = map.player_y as i32 + map.facing.dy();
-            if map.in_bounds(nx, ny) {
-                (true, nx as usize, ny as usize)
+            let ux = tx as usize;
+            let uy = ty as usize;
+            if map.cell(ux, uy).is_walkable() {
+                (true, ux, uy)
             } else {
                 (false, 0, 0)
             }
@@ -213,39 +245,29 @@ pub fn move_forward(state: &mut RpgState) -> bool {
     };
 
     if !can_move {
-        // Give directional hint about open passages
-        let hint = {
-            let map = state.dungeon.as_ref().unwrap();
-            let cell = map.player_cell();
-            let left_open = !cell.wall(map.facing.turn_left());
-            let right_open = !cell.wall(map.facing.turn_right());
-            let back_open = !cell.wall(map.facing.reverse());
-            match (left_open, right_open, back_open) {
-                (true, true, _) => "壁だ。左右に通路がある。",
-                (true, false, _) => "壁だ。左に通路がある。",
-                (false, true, _) => "壁だ。右に通路がある。",
-                (false, false, true) => "行き止まりだ。引き返そう。",
-                _ => "壁だ。進めない。",
-            }
-        };
-        state.add_log(hint);
+        state.add_log("壁だ。進めない。");
         return false;
     }
 
     let map = state.dungeon.as_mut().unwrap();
     map.player_x = nx;
     map.player_y = ny;
+    map.last_dir = dir;
 
     let was_visited = map.grid[ny][nx].visited;
     map.grid[ny][nx].visited = true;
+    map.grid[ny][nx].revealed = true;
 
-    // Count newly explored rooms
+    // If entering a room, reveal the entire room
+    reveal_room(map, nx, ny);
+
+    // Count newly explored tiles
     if !was_visited {
         state.run_rooms_explored += 1;
     }
 
     // Atmosphere text
-    let floor = map.floor_num;
+    let floor = state.dungeon.as_ref().unwrap().floor_num;
     let theme = floor_theme(floor);
     let rng_val = rng_range(state, 100);
     let atmo = atmosphere_text(theme, rng_val);
@@ -268,34 +290,83 @@ pub fn move_forward(state: &mut RpgState) -> bool {
     true
 }
 
-/// Turn the player left (counter-clockwise).
-pub fn turn_left(state: &mut RpgState) -> bool {
-    let map = match &mut state.dungeon {
-        Some(m) => m,
-        None => return false,
-    };
-    map.facing = map.facing.turn_left();
+/// Move in an absolute cardinal direction with auto-walk (map tap).
+///
+/// Moves in the given direction. If the destination is a plain corridor
+/// with only one exit (besides where we came from), auto-walk continues
+/// until a junction, event, or dead end.
+pub fn move_direction(state: &mut RpgState, dir: Facing) -> bool {
+    // Try to move
+    if !try_move(state, dir) {
+        return false;
+    }
+
+    // Auto-walk: continue through corridors until junction/event/dead-end
+    let mut steps = 0;
+    let max_steps = 8;
+    while steps < max_steps && state.scene == Scene::DungeonExplore {
+        let next_dir = match auto_walk_direction(state) {
+            Some(d) => d,
+            None => break,
+        };
+
+        if !try_move(state, next_dir) {
+            break;
+        }
+        steps += 1;
+    }
+
+    if steps > 0 {
+        let total = steps + 1;
+        state.scene_text.insert(0, format!("通路を{}歩進んだ。", total));
+    }
+
     true
 }
 
-/// Turn the player right (clockwise).
-pub fn turn_right(state: &mut RpgState) -> bool {
-    let map = match &mut state.dungeon {
+/// Returns the only exit direction from the current cell (excluding the
+/// direction we came from). Returns `None` if there are 0 or 2+ exits
+/// (dead-end or junction), or if the cell has an unresolved event.
+fn auto_walk_direction(state: &RpgState) -> Option<Facing> {
+    let map = match &state.dungeon {
         Some(m) => m,
-        None => return false,
+        None => return None,
     };
-    map.facing = map.facing.turn_right();
-    true
-}
 
-/// Turn the player around (180 degrees).
-pub fn turn_around(state: &mut RpgState) -> bool {
-    let map = match &mut state.dungeon {
-        Some(m) => m,
-        None => return false,
-    };
-    map.facing = map.facing.reverse();
-    true
+    let cell = map.player_cell();
+
+    // Don't auto-walk if this cell has an unresolved event
+    if cell.cell_type != CellType::Corridor && !cell.event_done {
+        return None;
+    }
+
+    // Don't auto-walk from entrance or stairs (important navigation points)
+    if cell.cell_type == CellType::Entrance || cell.cell_type == CellType::Stairs {
+        return None;
+    }
+
+    // Don't auto-walk when entering a room (stop at room boundary)
+    if cell.tile == Tile::RoomFloor {
+        return None;
+    }
+
+    let came_from = map.last_dir.reverse();
+    let mut exits = Vec::new();
+
+    for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+        if dir == came_from {
+            continue;
+        }
+        if is_adjacent_walkable(map, map.player_x, map.player_y, dir) {
+            exits.push(dir);
+        }
+    }
+
+    if exits.len() == 1 {
+        Some(exits[0])
+    } else {
+        None
+    }
 }
 
 /// Resolve a dungeon event choice.
@@ -356,12 +427,16 @@ pub fn resolve_event_choice(state: &mut RpgState, choice_index: usize) -> bool {
         enter_dungeon(state, next_floor);
     } else if outcome.return_to_town {
         retreat_to_town(state);
-    } else {
-        // Return to exploration
-        state.room_result = Some(RoomResult {
-            description: outcome.description,
-        });
-        state.scene = Scene::DungeonResult;
+    } else if state.dungeon.is_some() {
+        // Skip result screen — show outcome in log and scene text, then
+        // return directly to exploration for smoother flow.
+        for desc in &outcome.description {
+            if !desc.is_empty() {
+                state.add_log(desc);
+            }
+        }
+        state.scene_text = outcome.description;
+        state.scene = Scene::DungeonExplore;
     }
 
     true
@@ -1066,61 +1141,54 @@ mod tests {
         assert!(s.dungeon.is_some());
         let d = s.dungeon.as_ref().unwrap();
         assert_eq!(d.floor_num, 1);
-        assert_eq!(d.width, 7);
-        assert_eq!(d.height, 7);
-        assert_eq!(d.facing, Facing::North);
-        // Entrance should be at bottom center
-        assert_eq!(d.player_x, 3);
-        assert_eq!(d.player_y, 6);
+        assert_eq!(d.width, 27);
+        assert_eq!(d.height, 27);
+        assert_eq!(d.last_dir, Facing::North);
+        // Player should be on entrance
+        assert_eq!(d.player_cell().cell_type, CellType::Entrance);
+        assert!(d.player_cell().is_walkable());
     }
 
     #[test]
-    fn move_forward_works() {
+    fn try_move_works() {
         let mut s = RpgState::new();
         enter_dungeon(&mut s, 1);
-        // The entrance faces north; there should be no wall north from entrance
-        // (maze generation guarantees at least one path)
+        // The entrance is in a room, so there should be walkable tiles nearby
         let map = s.dungeon.as_ref().unwrap();
-        let has_wall = map.player_cell().wall(Facing::North);
-        if !has_wall {
-            assert!(move_forward(&mut s));
-            let map = s.dungeon.as_ref().unwrap();
-            assert_eq!(map.player_y, 5); // moved north (y decreases)
-        }
-    }
-
-    #[test]
-    fn turn_left_right() {
-        let mut s = RpgState::new();
-        enter_dungeon(&mut s, 1);
-        assert_eq!(s.dungeon.as_ref().unwrap().facing, Facing::North);
-        turn_right(&mut s);
-        assert_eq!(s.dungeon.as_ref().unwrap().facing, Facing::East);
-        turn_left(&mut s);
-        assert_eq!(s.dungeon.as_ref().unwrap().facing, Facing::North);
-        turn_around(&mut s);
-        assert_eq!(s.dungeon.as_ref().unwrap().facing, Facing::South);
-    }
-
-    #[test]
-    fn cannot_move_into_wall() {
-        let mut s = RpgState::new();
-        enter_dungeon(&mut s, 1);
-        // Turn to face a direction with a wall
-        // Try all 4 directions, at least one should be blocked
-        let mut blocked = false;
-        for _ in 0..4 {
-            let map = s.dungeon.as_ref().unwrap();
-            if map.player_cell().wall(map.facing) {
-                let result = move_forward(&mut s);
-                assert!(!result);
-                blocked = true;
+        let px = map.player_x;
+        let py = map.player_y;
+        // Find an open direction
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            if is_adjacent_walkable(map, px, py, dir) {
+                assert!(try_move(&mut s, dir));
+                let map = s.dungeon.as_ref().unwrap();
+                let new_x = (px as i32 + dir.dx()) as usize;
+                let new_y = (py as i32 + dir.dy()) as usize;
+                assert_eq!(map.player_x, new_x);
+                assert_eq!(map.player_y, new_y);
+                assert_eq!(map.last_dir, dir);
                 break;
             }
-            turn_right(&mut s);
         }
-        // It's possible all directions are open (rare but possible), so just check
-        assert!(blocked || true); // always passes; we tested what we could
+    }
+
+    #[test]
+    fn try_move_blocked_by_wall() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_ref().unwrap();
+        let px = map.player_x;
+        let py = map.player_y;
+        // Find a direction that's blocked (wall tile)
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            if !is_adjacent_walkable(map, px, py, dir) {
+                let old_pos = (px, py);
+                assert!(!try_move(&mut s, dir));
+                let map = s.dungeon.as_ref().unwrap();
+                assert_eq!((map.player_x, map.player_y), old_pos);
+                break;
+            }
+        }
     }
 
     #[test]
@@ -1246,5 +1314,89 @@ mod tests {
         continue_exploration(&mut s);
         assert_eq!(s.scene, Scene::DungeonExplore);
         assert!(s.room_result.is_none());
+    }
+
+    #[test]
+    fn try_move_moves_exactly_one_cell() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_ref().unwrap();
+        let px = map.player_x;
+        let py = map.player_y;
+        // Find an open direction
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            if is_adjacent_walkable(map, px, py, dir) {
+                let old_pos = (px, py);
+                assert!(try_move(&mut s, dir));
+                let map = s.dungeon.as_ref().unwrap();
+                let new_pos = (map.player_x, map.player_y);
+                // Should have moved exactly 1 cell
+                let dist = (new_pos.0 as i32 - old_pos.0 as i32).abs()
+                    + (new_pos.1 as i32 - old_pos.1 as i32).abs();
+                assert_eq!(dist, 1, "try_move should move exactly 1 cell");
+                assert_eq!(map.last_dir, dir);
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn move_direction_moves() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        assert_eq!(s.dungeon.as_ref().unwrap().last_dir, Facing::North);
+
+        // Find an open direction
+        let map = s.dungeon.as_ref().unwrap();
+        let px = map.player_x;
+        let py = map.player_y;
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            if is_adjacent_walkable(map, px, py, dir) {
+                let old_pos = (px, py);
+                assert!(move_direction(&mut s, dir));
+                let map = s.dungeon.as_ref().unwrap();
+                let new_pos = (map.player_x, map.player_y);
+                assert_ne!(old_pos, new_pos);
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn move_direction_blocked() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+
+        let map = s.dungeon.as_ref().unwrap();
+        let px = map.player_x;
+        let py = map.player_y;
+        // Find a direction that's blocked
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            if !is_adjacent_walkable(map, px, py, dir) {
+                let old_pos = (px, py);
+                assert!(!move_direction(&mut s, dir));
+                let map = s.dungeon.as_ref().unwrap();
+                assert_eq!((map.player_x, map.player_y), old_pos);
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn auto_walk_stops_at_junction() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+
+        let map = s.dungeon.as_ref().unwrap();
+        let px = map.player_x;
+        let py = map.player_y;
+        if is_adjacent_walkable(map, px, py, Facing::North) {
+            move_direction(&mut s, Facing::North);
+            // Should still be exploring (not crashed or stuck)
+            assert!(
+                s.scene == Scene::DungeonExplore
+                    || s.scene == Scene::DungeonEvent
+            );
+        }
     }
 }

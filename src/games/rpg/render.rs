@@ -157,7 +157,12 @@ fn render_main(
 ) {
     let borders = borders_for(area.width);
     let is_narrow = is_narrow_layout(area.width);
-    let log_h: u16 = 4;
+    // Reduce log during narrow dungeon explore to make room for D-pad
+    let log_h: u16 = if is_narrow && state.scene == Scene::DungeonExplore {
+        2
+    } else {
+        4
+    };
 
     // Dungeon floor info shown when in dungeon
     let in_dungeon = state.dungeon.is_some();
@@ -389,15 +394,14 @@ fn render_dungeon_explore(
 
     if !is_narrow && area.width >= 40 {
         // Wide layout: 2D map (left) + controls panel (right)
-        // Compute map cell count based on available height
+        // Compute tile count based on available height (1 row per tile)
         let inner_h = area.height.saturating_sub(2) as usize; // minus borders
         let n = {
-            let by_h = if inner_h >= 5 { (inner_h - 1) / 2 } else { 3 };
-            let mut v = by_h.min(11);
-            if v % 2 == 0 { v = v.saturating_sub(1); }
-            v.clamp(5, 11)
+            let mut v = inner_h.min(21);
+            if v.is_multiple_of(2) { v = v.saturating_sub(1); }
+            v.clamp(11, 21)
         };
-        let map_w = (n * 3 + 1 + 2) as u16; // +2 for borders
+        let map_w = (n * 2 + 2) as u16; // 2 chars per tile + borders
 
         let h_chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -407,23 +411,23 @@ fn render_dungeon_explore(
         render_2d_map(state, f, h_chunks[0], borders, theme, click_state);
         render_explore_panel(state, f, h_chunks[1], borders, click_state);
     } else {
-        // Narrow layout: 2D map (top) + controls (bottom)
+        // Narrow layout: 2D map (top) + D-pad controller (bottom)
         let inner_w = area.width.saturating_sub(2) as usize;
         let inner_h_total = area.height.saturating_sub(2) as usize;
-        // Reserve at least 7 rows for controls
-        let map_max_h = inner_h_total.saturating_sub(7);
+        // Reserve at least 9 rows for D-pad panel (compass + dpad + hints)
+        let map_max_h = inner_h_total.saturating_sub(9);
         let n = {
-            let by_w = if inner_w >= 7 { (inner_w - 1) / 3 } else { 3 };
-            let by_h = if map_max_h >= 5 { (map_max_h - 1) / 2 } else { 3 };
-            let mut v = by_w.min(by_h).min(9);
-            if v % 2 == 0 { v = v.saturating_sub(1); }
-            v.clamp(5, 9)
+            let by_w = inner_w / 2; // 2 chars per tile
+            let by_h = map_max_h;
+            let mut v = by_w.min(by_h).min(15);
+            if v.is_multiple_of(2) { v = v.saturating_sub(1); }
+            v.clamp(11, 15)
         };
-        let map_h = (n * 2 + 1 + 2) as u16; // +2 for borders
+        let map_h = (n + 2) as u16; // 1 row per tile + borders
 
         let v_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(map_h), Constraint::Min(6)])
+            .constraints([Constraint::Length(map_h), Constraint::Min(8)])
             .split(area);
 
         render_2d_map(state, f, v_chunks[0], borders, theme, click_state);
@@ -489,81 +493,193 @@ fn render_explore_panel(
         None => return,
     };
 
-    let mut cl = ClickableList::new();
-
-    // Tap hint (most important for mobile users)
-    cl.push(Line::from(Span::styled(
-        " ↑←→↓ マップをタップ",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )));
-
-    render_hp_warning(&mut cl, state);
-
-    // Scene text (atmosphere)
-    for text in &state.scene_text {
-        if !text.is_empty() {
-            cl.push(Line::from(Span::styled(
-                format!(" {}", text),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
-    }
-
-    cl.push(Line::from(""));
-    render_movement_controls(&mut cl, map);
-    push_overlay_hints(&mut cl);
-
+    // Render outer block (borders only)
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::DarkGray));
-    let mut cs = click_state.borrow_mut();
-    cl.render(f, area, block, &mut cs, true, 0);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.height < 4 || inner.width < 6 {
+        return;
+    }
+
+    // Split inner: info (top) + D-pad (bottom 3 rows)
+    let dpad_h = 3_u16.min(inner.height.saturating_sub(1));
+    let info_h = inner.height.saturating_sub(dpad_h);
+    let info_area = Rect::new(inner.x, inner.y, inner.width, info_h);
+    let dpad_area = Rect::new(inner.x, inner.y + info_h, inner.width, dpad_h);
+
+    // Info section: compass, HP warning, overlay hints
+    {
+        let mut cl = ClickableList::new();
+        render_compass_line(&mut cl, map);
+        render_hp_warning(&mut cl, state);
+        push_overlay_hints(&mut cl);
+        let no_block = Block::default();
+        let mut cs = click_state.borrow_mut();
+        cl.render(f, info_area, no_block, &mut cs, true, 0);
+    }
+
+    // D-pad section
+    render_dpad(map, f, dpad_area, click_state);
 }
 
-fn render_movement_controls(cl: &mut ClickableList, map: &super::state::DungeonMap) {
-    let cell = map.player_cell();
-    let can_fwd = !cell.wall(map.facing);
+/// Render an on-screen D-pad controller with directional arrows.
+///
+/// Each arrow is colored based on what lies in that direction:
+/// wall → DarkGray, enemy → Red, treasure → Yellow, stairs → Green,
+/// unvisited → Cyan, otherwise → White.
+fn render_dpad(
+    map: &super::state::DungeonMap,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    use super::state::{CellType, Facing};
 
-    // Compact: forward + turn buttons (keyboard shortcuts shown for desktop)
-    let fwd_style = if can_fwd { Color::Cyan } else { Color::DarkGray };
-    cl.push_clickable(
+    if area.height < 3 || area.width < 9 {
+        return;
+    }
+
+    let col_w = area.width / 3;
+    let cell_h = (area.height / 3).max(1);
+
+    // Determine color for a direction based on what's there
+    let dir_style = |dir: Facing| -> Style {
+        let nx = map.player_x as i32 + dir.dx();
+        let ny = map.player_y as i32 + dir.dy();
+        if !map.in_bounds(nx, ny) {
+            return Style::default().fg(Color::DarkGray);
+        }
+        let adj = map.cell(nx as usize, ny as usize);
+        if !adj.is_walkable() {
+            return Style::default().fg(Color::DarkGray);
+        }
+        if !adj.visited {
+            return Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD);
+        }
+        if !adj.event_done {
+            let color = match adj.cell_type {
+                CellType::Enemy => Color::Red,
+                CellType::Treasure => Color::Yellow,
+                CellType::Stairs | CellType::Entrance => Color::Green,
+                CellType::Spring => Color::Cyan,
+                CellType::Lore | CellType::Npc => Color::Magenta,
+                _ => Color::White,
+            };
+            return Style::default().fg(color).add_modifier(Modifier::BOLD);
+        }
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    // Center a label within a given character width
+    let center_in = |label: &str, width: usize| -> String {
+        let label_len = label.chars().count();
+        let pad_left = width.saturating_sub(label_len) / 2;
+        let pad_right = width.saturating_sub(pad_left + label_len);
+        format!(
+            "{}{}{}",
+            " ".repeat(pad_left),
+            label,
+            " ".repeat(pad_right)
+        )
+    };
+
+    let cw = col_w as usize;
+    let blank = " ".repeat(cw);
+    let lines = vec![
+        // Row 0: ▲ (north)
         Line::from(vec![
-            Span::styled(
-                " [W] ",
-                Style::default()
-                    .fg(fwd_style)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                if can_fwd { "▲ 前進" } else { "× 壁" },
-                Style::default().fg(if can_fwd { Color::White } else { Color::DarkGray }),
-            ),
+            Span::raw(blank.clone()),
+            Span::styled(center_in("[ \u{25b2} ]", cw), dir_style(Facing::North)),
+            Span::raw(blank.clone()),
         ]),
-        MOVE_FORWARD,
-    );
-    cl.push_clickable(
+        // Row 1: ◀ (west) + blank + ▶ (east)
         Line::from(vec![
-            Span::styled(" [A] ", Style::default().fg(Color::Cyan)),
-            Span::styled("◀ 左", Style::default().fg(Color::White)),
+            Span::styled(center_in("[ \u{25c0} ]", cw), dir_style(Facing::West)),
+            Span::raw(blank.clone()),
+            Span::styled(center_in("[ \u{25b6} ]", cw), dir_style(Facing::East)),
         ]),
-        TURN_LEFT,
-    );
-    cl.push_clickable(
+        // Row 2: ▼ (south)
         Line::from(vec![
-            Span::styled(" [D] ", Style::default().fg(Color::Cyan)),
-            Span::styled("▶ 右", Style::default().fg(Color::White)),
+            Span::raw(blank.clone()),
+            Span::styled(center_in("[ \u{25bc} ]", cw), dir_style(Facing::South)),
+            Span::raw(blank),
         ]),
-        TURN_RIGHT,
-    );
-    cl.push_clickable(
-        Line::from(vec![
-            Span::styled(" [X] ", Style::default().fg(Color::DarkGray)),
-            Span::styled("▼ 転回", Style::default().fg(Color::DarkGray)),
-        ]),
-        TURN_AROUND,
-    );
+    ];
+
+    f.render_widget(Paragraph::new(lines), area);
+
+    // Register D-pad click targets (3×3 grid)
+    let grid = ClickableGrid::new(3, 3, DPAD_BASE, col_w).with_cell_height(cell_h);
+    let no_block = Block::default();
+    let mut cs = click_state.borrow_mut();
+    grid.register_targets(area, &no_block, &mut cs, 0);
+}
+
+
+/// Render a compass line showing what's in each cardinal direction.
+fn render_compass_line(cl: &mut ClickableList, map: &super::state::DungeonMap) {
+    use super::state::{CellType, Facing, MapCell};
+
+    fn compass_marker(cell: &MapCell) -> (&'static str, Color) {
+        if !cell.visited {
+            return ("?", Color::DarkGray);
+        }
+        if !cell.event_done {
+            match cell.cell_type {
+                CellType::Enemy => ("!", Color::Red),
+                CellType::Treasure => ("\u{25c6}", Color::Yellow),
+                CellType::Spring => ("~", Color::Cyan),
+                CellType::Lore => ("\u{2726}", Color::Yellow),
+                CellType::Npc => ("?", Color::Magenta),
+                CellType::Stairs => ("\u{25bc}", Color::Green),
+                CellType::Entrance => ("\u{25c7}", Color::Green),
+                _ => ("\u{00b7}", Color::White),
+            }
+        } else {
+            ("\u{00b7}", Color::White)
+        }
+    }
+
+    let mut spans: Vec<Span> = Vec::new();
+
+    for &(dir, arrow) in &[
+        (Facing::North, "\u{2191}"),
+        (Facing::East, "\u{2192}"),
+        (Facing::South, "\u{2193}"),
+        (Facing::West, "\u{2190}"),
+    ] {
+        let nx = map.player_x as i32 + dir.dx();
+        let ny = map.player_y as i32 + dir.dy();
+        if !map.in_bounds(nx, ny) {
+            spans.push(Span::styled(
+                format!(" {}\u{58c1}", arrow),
+                Style::default().fg(Color::DarkGray),
+            ));
+        } else {
+            let adj = map.cell(nx as usize, ny as usize);
+            if !adj.is_walkable() {
+                spans.push(Span::styled(
+                    format!(" {}\u{58c1}", arrow),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            } else {
+                let (marker, color) = compass_marker(adj);
+                spans.push(Span::styled(
+                    format!(" {}{}", arrow, marker),
+                    Style::default().fg(color),
+                ));
+            }
+        }
+    }
+
+    cl.push(Line::from(spans));
 }
 
 fn render_hp_warning(cl: &mut ClickableList, state: &RpgState) {

@@ -338,22 +338,6 @@ pub enum Facing {
 }
 
 impl Facing {
-    pub fn turn_right(self) -> Self {
-        match self {
-            Facing::North => Facing::East,
-            Facing::East => Facing::South,
-            Facing::South => Facing::West,
-            Facing::West => Facing::North,
-        }
-    }
-    pub fn turn_left(self) -> Self {
-        match self {
-            Facing::North => Facing::West,
-            Facing::West => Facing::South,
-            Facing::South => Facing::East,
-            Facing::East => Facing::North,
-        }
-    }
     pub fn reverse(self) -> Self {
         match self {
             Facing::North => Facing::South,
@@ -376,6 +360,13 @@ impl Facing {
             _ => 0,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Tile {
+    Wall,
+    RoomFloor,
+    Corridor,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -402,31 +393,27 @@ pub enum CellType {
 
 #[derive(Clone, Debug)]
 pub struct MapCell {
-    /// Walls: [North, East, South, West]. true = wall present.
-    pub walls: [bool; 4],
+    pub tile: Tile,
     pub cell_type: CellType,
     pub visited: bool,
+    pub revealed: bool,
     /// Whether the event in this cell has been resolved.
     pub event_done: bool,
+    pub room_id: Option<u8>,
 }
 
 impl MapCell {
-    pub fn wall(&self, facing: Facing) -> bool {
-        match facing {
-            Facing::North => self.walls[0],
-            Facing::East => self.walls[1],
-            Facing::South => self.walls[2],
-            Facing::West => self.walls[3],
-        }
+    pub fn is_walkable(&self) -> bool {
+        self.tile != Tile::Wall
     }
-    pub fn set_wall(&mut self, facing: Facing, val: bool) {
-        match facing {
-            Facing::North => self.walls[0] = val,
-            Facing::East => self.walls[1] = val,
-            Facing::South => self.walls[2] = val,
-            Facing::West => self.walls[3] = val,
-        }
-    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Room {
+    pub x: usize,
+    pub y: usize,
+    pub w: usize,
+    pub h: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -437,7 +424,8 @@ pub struct DungeonMap {
     pub grid: Vec<Vec<MapCell>>,
     pub player_x: usize,
     pub player_y: usize,
-    pub facing: Facing,
+    pub last_dir: Facing,
+    pub rooms: Vec<Room>,
 }
 
 impl DungeonMap {
@@ -745,25 +733,44 @@ mod tests {
     }
 
     #[test]
-    fn facing_turns() {
-        assert_eq!(Facing::North.turn_right(), Facing::East);
-        assert_eq!(Facing::East.turn_right(), Facing::South);
-        assert_eq!(Facing::North.turn_left(), Facing::West);
+    fn facing_reverse() {
         assert_eq!(Facing::North.reverse(), Facing::South);
+        assert_eq!(Facing::East.reverse(), Facing::West);
+        assert_eq!(Facing::South.reverse(), Facing::North);
+        assert_eq!(Facing::West.reverse(), Facing::East);
     }
 
     #[test]
-    fn cell_wall_access() {
-        let mut cell = MapCell {
-            walls: [true, false, true, false],
+    fn tile_walkability() {
+        let wall_cell = MapCell {
+            tile: Tile::Wall,
             cell_type: CellType::Corridor,
             visited: false,
+            revealed: false,
             event_done: false,
+            room_id: None,
         };
-        assert!(cell.wall(Facing::North));
-        assert!(!cell.wall(Facing::East));
-        cell.set_wall(Facing::East, true);
-        assert!(cell.wall(Facing::East));
+        assert!(!wall_cell.is_walkable());
+
+        let floor_cell = MapCell {
+            tile: Tile::RoomFloor,
+            cell_type: CellType::Corridor,
+            visited: false,
+            revealed: false,
+            event_done: false,
+            room_id: Some(0),
+        };
+        assert!(floor_cell.is_walkable());
+
+        let corridor_cell = MapCell {
+            tile: Tile::Corridor,
+            cell_type: CellType::Corridor,
+            visited: false,
+            revealed: false,
+            event_done: false,
+            room_id: None,
+        };
+        assert!(corridor_cell.is_walkable());
     }
 
     #[test]
