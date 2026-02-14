@@ -394,15 +394,14 @@ fn render_dungeon_explore(
 
     if !is_narrow && area.width >= 40 {
         // Wide layout: 2D map (left) + controls panel (right)
-        // Compute map cell count based on available height
+        // Compute tile count based on available height (1 row per tile)
         let inner_h = area.height.saturating_sub(2) as usize; // minus borders
         let n = {
-            let by_h = if inner_h >= 5 { (inner_h - 1) / 2 } else { 3 };
-            let mut v = by_h.min(11);
-            if v % 2 == 0 { v = v.saturating_sub(1); }
-            v.clamp(5, 11)
+            let mut v = inner_h.min(21);
+            if v.is_multiple_of(2) { v = v.saturating_sub(1); }
+            v.clamp(11, 21)
         };
-        let map_w = (n * 3 + 1 + 2) as u16; // +2 for borders
+        let map_w = (n * 2 + 2) as u16; // 2 chars per tile + borders
 
         let h_chunks = Layout::default()
             .direction(Direction::Horizontal)
@@ -418,13 +417,13 @@ fn render_dungeon_explore(
         // Reserve at least 9 rows for D-pad panel (compass + dpad + hints)
         let map_max_h = inner_h_total.saturating_sub(9);
         let n = {
-            let by_w = if inner_w >= 7 { (inner_w - 1) / 3 } else { 3 };
-            let by_h = if map_max_h >= 5 { (map_max_h - 1) / 2 } else { 3 };
-            let mut v = by_w.min(by_h).min(9);
-            if v % 2 == 0 { v = v.saturating_sub(1); }
-            v.clamp(5, 9)
+            let by_w = inner_w / 2; // 2 chars per tile
+            let by_h = map_max_h;
+            let mut v = by_w.min(by_h).min(15);
+            if v.is_multiple_of(2) { v = v.saturating_sub(1); }
+            v.clamp(11, 15)
         };
-        let map_h = (n * 2 + 1 + 2) as u16; // +2 for borders
+        let map_h = (n + 2) as u16; // 1 row per tile + borders
 
         let v_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -548,16 +547,15 @@ fn render_dpad(
 
     // Determine color for a direction based on what's there
     let dir_style = |dir: Facing| -> Style {
-        let cell = map.player_cell();
-        if cell.wall(dir) {
-            return Style::default().fg(Color::DarkGray);
-        }
         let nx = map.player_x as i32 + dir.dx();
         let ny = map.player_y as i32 + dir.dy();
         if !map.in_bounds(nx, ny) {
             return Style::default().fg(Color::DarkGray);
         }
         let adj = map.cell(nx as usize, ny as usize);
+        if !adj.is_walkable() {
+            return Style::default().fg(Color::DarkGray);
+        }
         if !adj.visited {
             return Style::default()
                 .fg(Color::Cyan)
@@ -649,7 +647,6 @@ fn render_compass_line(cl: &mut ClickableList, map: &super::state::DungeonMap) {
         }
     }
 
-    let cell = map.player_cell();
     let mut spans: Vec<Span> = Vec::new();
 
     for &(dir, arrow) in &[
@@ -658,25 +655,25 @@ fn render_compass_line(cl: &mut ClickableList, map: &super::state::DungeonMap) {
         (Facing::South, "\u{2193}"),
         (Facing::West, "\u{2190}"),
     ] {
-        if cell.wall(dir) {
+        let nx = map.player_x as i32 + dir.dx();
+        let ny = map.player_y as i32 + dir.dy();
+        if !map.in_bounds(nx, ny) {
             spans.push(Span::styled(
                 format!(" {}\u{58c1}", arrow),
                 Style::default().fg(Color::DarkGray),
             ));
         } else {
-            let nx = map.player_x as i32 + dir.dx();
-            let ny = map.player_y as i32 + dir.dy();
-            if map.in_bounds(nx, ny) {
-                let adj = map.cell(nx as usize, ny as usize);
+            let adj = map.cell(nx as usize, ny as usize);
+            if !adj.is_walkable() {
+                spans.push(Span::styled(
+                    format!(" {}\u{58c1}", arrow),
+                    Style::default().fg(Color::DarkGray),
+                ));
+            } else {
                 let (marker, color) = compass_marker(adj);
                 spans.push(Span::styled(
                     format!(" {}{}", arrow, marker),
                     Style::default().fg(color),
-                ));
-            } else {
-                spans.push(Span::styled(
-                    format!(" {}\u{58c1}", arrow),
-                    Style::default().fg(Color::DarkGray),
                 ));
             }
         }

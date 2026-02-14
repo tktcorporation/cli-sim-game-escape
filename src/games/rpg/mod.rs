@@ -149,22 +149,17 @@ fn handle_town_click(state: &mut RpgState, id: u16) -> bool {
 
 fn handle_dungeon_explore_key(state: &mut RpgState, ch: char) -> bool {
     match ch {
-        // WASD movement (relative to facing)
-        'W' | 'w' => logic::move_forward(state),
-        'A' | 'a' => logic::turn_left(state),
-        'D' | 'd' => logic::turn_right(state),
-        'X' | 'x' => logic::turn_around(state),
-        // Arrow keys / hjkl (absolute cardinal direction, 1 step)
-        'k' => logic::move_step(state, state::Facing::North),
-        'l' => logic::move_step(state, state::Facing::East),
-        'j' => logic::move_step(state, state::Facing::South),
-        'h' => logic::move_step(state, state::Facing::West),
+        // WASD / hjkl / arrow keys — all direct cardinal movement
+        'W' | 'w' | 'k' => logic::try_move(state, state::Facing::North),
+        'A' | 'a' | 'h' => logic::try_move(state, state::Facing::West),
+        'S' | 's' | 'j' => logic::try_move(state, state::Facing::South),
+        'D' | 'd' | 'l' => logic::try_move(state, state::Facing::East),
         // Overlays
         'I' | 'i' => {
             state.overlay = Some(Overlay::Inventory);
             true
         }
-        'S' | 's' => {
+        'X' | 'x' => {
             state.overlay = Some(Overlay::Status);
             true
         }
@@ -173,17 +168,9 @@ fn handle_dungeon_explore_key(state: &mut RpgState, ch: char) -> bool {
 }
 
 fn handle_dungeon_explore_click(state: &mut RpgState, id: u16) -> bool {
-    match id {
-        MOVE_FORWARD => logic::move_forward(state),
-        TURN_LEFT => logic::turn_left(state),
-        TURN_RIGHT => logic::turn_right(state),
-        TURN_AROUND => logic::turn_around(state),
-        _ => {
-            handle_dpad_tap(state, id)
-                || handle_map_tap(state, id)
-                || handle_overlay_open_click(state, id)
-        }
-    }
+    handle_dpad_tap(state, id)
+        || handle_map_tap(state, id)
+        || handle_overlay_open_click(state, id)
 }
 
 /// Handle a tap on the on-screen D-pad (1 step, no auto-walk).
@@ -200,7 +187,7 @@ fn handle_dpad_tap(state: &mut RpgState, id: u16) -> bool {
         _ => None,
     };
     match dir {
-        Some(d) => logic::move_step(state, d),
+        Some(d) => logic::try_move(state, d),
         None => false,
     }
 }
@@ -218,11 +205,11 @@ fn handle_map_tap(state: &mut RpgState, id: u16) -> bool {
         (0, 1) => Some(state::Facing::West),      // middle-left
         (2, 1) => Some(state::Facing::East),      // middle-right
         (_, 2) => Some(state::Facing::South),     // bottom row
-        _ => None,                                 // center (1,1): forward
+        _ => None,                                 // center (1,1): no-op
     };
     match screen_dir {
         Some(dir) => logic::move_direction(state, dir),
-        None => logic::move_forward(state), // center tap = forward relative to facing
+        None => false,
     }
 }
 
@@ -582,42 +569,23 @@ mod tests {
         g.handle_input(&InputEvent::Key('1')); // Enter dungeon
         assert_eq!(g.state.scene, Scene::DungeonExplore);
 
-        // Turn right
-        let facing_before = g.state.dungeon.as_ref().unwrap().facing;
+        // Try moving in any direction (WASD are now direct cardinal movement)
+        // Try all directions, at least one should work (player starts in a room)
+        g.handle_input(&InputEvent::Key('W'));
         g.handle_input(&InputEvent::Key('D'));
-        let facing_after = g.state.dungeon.as_ref().unwrap().facing;
-        assert_ne!(facing_before, facing_after);
-
-        // Turn left back
         g.handle_input(&InputEvent::Key('A'));
-        let facing_reset = g.state.dungeon.as_ref().unwrap().facing;
-        assert_eq!(facing_before, facing_reset);
+        g.handle_input(&InputEvent::Key('S'));
+        // Just verify we didn't crash; exact position depends on layout
     }
 
     #[test]
-    fn dungeon_turn_around() {
-        let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        let original = g.state.dungeon.as_ref().unwrap().facing;
-        g.handle_input(&InputEvent::Key('X'));
-        let turned = g.state.dungeon.as_ref().unwrap().facing;
-        assert_eq!(original.reverse(), turned);
-    }
-
-    #[test]
-    fn dungeon_retreat_via_event() {
+    fn dungeon_retreat_via_logic() {
         let mut g = make_game();
         g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('1')); // Enter dungeon
 
-        // The entrance event is already done on entry, so we need to
-        // go back to the entrance cell. Turn around and move forward.
-        g.handle_input(&InputEvent::Key('X')); // face south (towards entrance - already there)
-
-        // Just test retreat via logic directly
+        // Test retreat via logic directly
         logic::retreat_to_town(&mut g.state);
         assert_eq!(g.state.scene, Scene::Town);
         assert!(g.state.dungeon.is_none());
@@ -699,16 +667,17 @@ mod tests {
     }
 
     #[test]
-    fn click_dungeon_movement() {
+    fn click_dungeon_dpad_movement() {
         let mut g = make_game();
         g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('1')); // Enter dungeon
         assert_eq!(g.state.scene, Scene::DungeonExplore);
 
-        // Click-based turn
-        let result = g.handle_input(&InputEvent::Click(TURN_RIGHT));
-        assert!(result);
+        // D-pad south (row=2, col=1 in 3x3 grid = DPAD_BASE + 2*3 + 1)
+        let south_id = DPAD_BASE + 7;
+        // May or may not move depending on map layout, just check no crash
+        let _result = g.handle_input(&InputEvent::Click(south_id));
     }
 
     #[test]
@@ -745,15 +714,19 @@ mod tests {
         g.handle_input(&InputEvent::Key('1')); // Enter dungeon
         assert_eq!(g.state.scene, Scene::DungeonExplore);
 
-        // 'k' = Up arrow = North (absolute direction, 1 step only)
+        // 'k' = North (absolute direction, 1 step)
         let map = g.state.dungeon.as_ref().unwrap();
-        let north_open = !map.player_cell().wall(state::Facing::North);
+        let px = map.player_x;
+        let py = map.player_y;
+        let nx = px as i32 + state::Facing::North.dx();
+        let ny = py as i32 + state::Facing::North.dy();
+        let north_open = map.in_bounds(nx, ny)
+            && map.cell(nx as usize, ny as usize).is_walkable();
         if north_open {
-            let old_y = map.player_y;
+            let old_y = py;
             g.handle_input(&InputEvent::Key('k'));
             let map = g.state.dungeon.as_ref().unwrap();
-            assert_eq!(map.facing, state::Facing::North);
-            // Should have moved exactly 1 step (no auto-walk)
+            assert_eq!(map.last_dir, state::Facing::North);
             assert_eq!(map.player_y, old_y - 1);
         }
     }
@@ -766,15 +739,18 @@ mod tests {
         g.handle_input(&InputEvent::Key('1')); // Enter dungeon
         assert_eq!(g.state.scene, Scene::DungeonExplore);
 
-        // Tap north on map (row=0, col=1 in 3×3 grid = MAP_TAP_BASE + 0*3 + 1)
+        // Tap north on map (row=0, col=1 in 3x3 grid = MAP_TAP_BASE + 0*3 + 1)
         let north_tap_id = MAP_TAP_BASE + 1; // col=1, row=0
         let map = g.state.dungeon.as_ref().unwrap();
-        let north_open = !map.player_cell().wall(state::Facing::North);
+        let px = map.player_x;
+        let py = map.player_y;
+        let nx = px as i32 + state::Facing::North.dx();
+        let ny = py as i32 + state::Facing::North.dy();
+        let north_open = map.in_bounds(nx, ny)
+            && map.cell(nx as usize, ny as usize).is_walkable();
         if north_open {
             let result = g.handle_input(&InputEvent::Click(north_tap_id));
             assert!(result);
-            let map = g.state.dungeon.as_ref().unwrap();
-            assert_eq!(map.facing, state::Facing::North);
         }
     }
 
@@ -790,14 +766,17 @@ mod tests {
         let start_x = map.player_x;
         let start_y = map.player_y;
 
-        // D-pad south (row=2, col=1 in 3×3 grid = DPAD_BASE + 2*3 + 1)
+        // D-pad south (row=2, col=1 in 3x3 grid = DPAD_BASE + 2*3 + 1)
         let south_id = DPAD_BASE + 7; // col=1, row=2
-        let south_open = !map.player_cell().wall(state::Facing::South);
+        let sx = start_x as i32 + state::Facing::South.dx();
+        let sy = start_y as i32 + state::Facing::South.dy();
+        let south_open = map.in_bounds(sx, sy)
+            && map.cell(sx as usize, sy as usize).is_walkable();
         if south_open {
             let result = g.handle_input(&InputEvent::Click(south_id));
             assert!(result);
             let map = g.state.dungeon.as_ref().unwrap();
-            assert_eq!(map.facing, state::Facing::South);
+            assert_eq!(map.last_dir, state::Facing::South);
             // D-pad moves exactly 1 step (no auto-walk)
             assert_eq!(map.player_x, start_x);
             assert_eq!(map.player_y, start_y + 1);

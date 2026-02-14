@@ -1,16 +1,18 @@
-//! 2D dungeon map renderer with wall display and auto-mapping.
+//! 2D dungeon map renderer with tile-based display and room visibility.
 //!
-//! Renders a top-down grid map centered on the player. Visited cells show
-//! walls, cell-type markers, and the player's facing direction. Unvisited
-//! cells appear as fog. The map auto-sizes based on available terminal area.
+//! Renders a top-down tile map centered on the player. Each tile is 2 chars
+//! wide and 1 row tall. Visibility is room-aware: inside a room you see
+//! the whole room; in a corridor you see a radius-2 area.
 
 // 2D grid rendering uses index-based loops for clarity.
 #![allow(clippy::needless_range_loop)]
 
+use std::collections::HashSet;
+
 use ratzilla::ratatui::style::{Color, Style};
 use ratzilla::ratatui::text::{Line, Span};
 
-use super::state::{CellType, DungeonMap, Facing, FloorTheme};
+use super::state::{CellType, DungeonMap, FloorTheme, Tile};
 
 // ── View Data (for describe_view) ────────────────────────────
 
@@ -29,7 +31,7 @@ pub fn compute_view(map: &DungeonMap) -> ViewData {
     let mut depths = Vec::new();
     let mut x = map.player_x as i32;
     let mut y = map.player_y as i32;
-    let facing = map.facing;
+    let facing = map.last_dir;
 
     for _depth in 0..4 {
         if !map.in_bounds(x, y) {
@@ -37,7 +39,14 @@ pub fn compute_view(map: &DungeonMap) -> ViewData {
         }
 
         let cell = map.cell(x as usize, y as usize);
-        let has_front_wall = cell.wall(facing);
+        // Check if next tile in facing direction is a wall
+        let fx = x + facing.dx();
+        let fy = y + facing.dy();
+        let has_front_wall = if map.in_bounds(fx, fy) {
+            map.cell(fx as usize, fy as usize).tile == Tile::Wall
+        } else {
+            true
+        };
 
         depths.push(DepthSlice {
             wall_front: has_front_wall,
@@ -90,7 +99,7 @@ pub fn describe_view(view: &ViewData) -> String {
                 CellType::Enemy => "!敵影",
                 CellType::Spring => "~泉",
                 CellType::Npc => "?人影",
-                CellType::Lore => "✦碑文",
+                CellType::Lore => "\u{2726}碑文",
                 _ => return None,
             };
             Some(format!("{}歩先に{}", i, label))
@@ -100,6 +109,50 @@ pub fn describe_view(view: &ViewData) -> String {
         Some(m) => format!("{} {}", depth_desc, m),
         None => depth_desc,
     }
+}
+
+// ── Visibility ───────────────────────────────────────────────
+
+/// Compute the set of (x, y) coordinates that are currently visible.
+/// - In a room: all tiles with the same room_id + 1-tile border around room edges
+/// - In a corridor: all tiles within radius 2 (5x5 square)
+pub fn compute_visibility(map: &DungeonMap) -> HashSet<(usize, usize)> {
+    let mut visible = HashSet::new();
+    let px = map.player_x;
+    let py = map.player_y;
+    let cell = map.player_cell();
+
+    if let Some(room_id) = cell.room_id {
+        // In a room: find the room and reveal all tiles + 1-tile border
+        if let Some(room) = map.rooms.iter().find(|r| {
+            let rid = map.grid[r.y + r.h / 2][r.x + r.w / 2].room_id;
+            rid == Some(room_id)
+        }) {
+            let x_start = room.x.saturating_sub(1);
+            let y_start = room.y.saturating_sub(1);
+            let x_end = (room.x + room.w).min(map.width - 1);
+            let y_end = (room.y + room.h).min(map.height - 1);
+            for vy in y_start..=y_end {
+                for vx in x_start..=x_end {
+                    visible.insert((vx, vy));
+                }
+            }
+        }
+    } else {
+        // In corridor: radius 2
+        let radius: i32 = 2;
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                let vx = px as i32 + dx;
+                let vy = py as i32 + dy;
+                if map.in_bounds(vx, vy) {
+                    visible.insert((vx as usize, vy as usize));
+                }
+            }
+        }
+    }
+
+    visible
 }
 
 // ── Theme Colors ─────────────────────────────────────────────
@@ -117,168 +170,131 @@ fn theme_colors(theme: FloorTheme) -> (Color, Color) {
 
 // ── 2D Map Rendering ─────────────────────────────────────────
 
-/// Render a 2D top-down map with walls, dynamically sized to fill the area.
+/// Render a 2D top-down map with tile-based rendering, dynamically sized.
 ///
-/// Grid encoding per cell (3 cols × 2 rows):
-/// ```text
-/// row 0: [corner(1)] [h-wall(2)]
-/// row 1: [v-wall(1)] [content(2)]
-/// ```
-/// Plus trailing wall column/row for the last cells.
-/// Total: `(3n+1)` columns × `(2n+1)` rows for n×n cells.
+/// Each tile is rendered as 2 chars wide × 1 row tall.
+/// Viewport: `n * 2` columns × `n` rows.
 pub fn render_map_2d(
     map: &DungeonMap,
     theme: FloorTheme,
     max_w: usize,
     max_h: usize,
 ) -> Vec<Line<'static>> {
-    let (wall_color, floor_color) = theme_colors(theme);
+    let (wall_color, _floor_color) = theme_colors(theme);
     let fog_color = Color::Rgb(25, 25, 25);
+    let dark_wall_color = Color::Rgb(35, 35, 35);
+    let dark_floor_color = Color::Rgb(20, 20, 20);
 
-    // Compute how many cells fit
-    let cells_by_w = if max_w >= 7 { (max_w - 1) / 3 } else { 3 };
-    let cells_by_h = if max_h >= 5 { (max_h - 1) / 2 } else { 3 };
-    let mut n = cells_by_w.min(cells_by_h);
-    if n % 2 == 0 {
+    // Compute how many tiles fit
+    let tiles_by_w = max_w / 2;
+    let tiles_by_h = max_h;
+    let mut n = tiles_by_w.min(tiles_by_h);
+    if n.is_multiple_of(2) {
         n = n.saturating_sub(1);
     }
-    n = n.clamp(5, 13);
+    n = n.clamp(11, 21);
 
     let radius = (n / 2) as i32;
-    let gw = n * 3 + 1;
-    let gh = n * 2 + 1;
+    let gh = n;
 
     let px = map.player_x as i32;
     let py = map.player_y as i32;
 
-    // Buffer: (char, Color)
-    let mut buf: Vec<Vec<(char, Color)>> = vec![vec![(' ', Color::Reset); gw]; gh];
+    // Compute visibility
+    let visible = compute_visibility(map);
 
-    // Pass 1: fog for unvisited in-bounds cells
-    for cy in 0..n {
-        let my = py - radius + cy as i32;
-        for cx in 0..n {
-            let mx = px - radius + cx as i32;
-
-            if !map.in_bounds(mx, my) {
-                continue;
-            }
-
-            let cell = map.cell(mx as usize, my as usize);
-            if cell.visited {
-                continue;
-            }
-
-            // Fog content area
-            let crow = cy * 2 + 1;
-            let ccol = cx * 3 + 1;
-            buf[crow][ccol] = ('░', fog_color);
-            buf[crow][ccol + 1] = ('░', fog_color);
+    // Buffer: (2-char string, Color)
+    let mut buf: Vec<Vec<(String, Color)>> = Vec::with_capacity(gh);
+    for _row in 0..gh {
+        let mut row_data = Vec::with_capacity(n);
+        for _col in 0..n {
+            row_data.push(("  ".to_string(), Color::Reset));
         }
+        buf.push(row_data);
     }
 
-    // Pass 2: draw visited cells — walls, corners, content
-    for cy in 0..n {
-        let my = py - radius + cy as i32;
-        for cx in 0..n {
-            let mx = px - radius + cx as i32;
+    for vy in 0..n {
+        let my = py - radius + vy as i32;
+        for vx in 0..n {
+            let mx = px - radius + vx as i32;
 
             if !map.in_bounds(mx, my) {
+                buf[vy][vx] = ("  ".to_string(), Color::Reset);
                 continue;
             }
 
-            let cell = map.cell(mx as usize, my as usize);
-            if !cell.visited {
-                continue;
-            }
+            let ux = mx as usize;
+            let uy = my as usize;
+            let cell = map.cell(ux, uy);
+            let is_visible = visible.contains(&(ux, uy));
+            let is_player = mx == px && my == py;
 
-            let crow = cy * 2 + 1;
-            let ccol = cx * 3 + 1;
-            let wrow_top = cy * 2;
-            let wrow_bot = (cy + 1) * 2;
-            let wcol_left = cx * 3;
-            let wcol_right = (cx + 1) * 3;
-
-            // ── Walls ──
-            // North wall
-            if cell.wall(Facing::North) {
-                buf[wrow_top][ccol] = ('─', wall_color);
-                buf[wrow_top][ccol + 1] = ('─', wall_color);
-            }
-            // South wall
-            if wrow_bot < gh && cell.wall(Facing::South) {
-                buf[wrow_bot][ccol] = ('─', wall_color);
-                buf[wrow_bot][ccol + 1] = ('─', wall_color);
-            }
-            // West wall
-            if cell.wall(Facing::West) {
-                buf[crow][wcol_left] = ('│', wall_color);
-            }
-            // East wall
-            if wcol_right < gw && cell.wall(Facing::East) {
-                buf[crow][wcol_right] = ('│', wall_color);
-            }
-
-            // ── Corners (always draw for visited cells) ──
-            buf[wrow_top][wcol_left] = ('·', Color::DarkGray);
-            if wcol_right < gw {
-                buf[wrow_top][wcol_right] = ('·', Color::DarkGray);
-            }
-            if wrow_bot < gh {
-                buf[wrow_bot][wcol_left] = ('·', Color::DarkGray);
-                if wcol_right < gw {
-                    buf[wrow_bot][wcol_right] = ('·', Color::DarkGray);
+            if is_player {
+                buf[vy][vx] = ("\u{ff20}".to_string(), Color::White); // ＠ (fullwidth @)
+            } else if is_visible {
+                match cell.tile {
+                    Tile::Wall => {
+                        buf[vy][vx] = ("\u{2588}\u{2588}".to_string(), wall_color);
+                    }
+                    Tile::RoomFloor | Tile::Corridor => {
+                        let (ch, color) = cell_marker(cell);
+                        buf[vy][vx] = (ch, color);
+                    }
                 }
-            }
-
-            // ── Cell content ──
-            if mx == px && my == py {
-                let arrow = match map.facing {
-                    Facing::North => '▲',
-                    Facing::East => '▶',
-                    Facing::South => '▽',
-                    Facing::West => '◀',
-                };
-                buf[crow][ccol] = (arrow, Color::White);
-                buf[crow][ccol + 1] = (' ', Color::Reset);
+            } else if cell.revealed {
+                // Revealed but not currently visible — very dark
+                match cell.tile {
+                    Tile::Wall => {
+                        buf[vy][vx] = ("\u{2588}\u{2588}".to_string(), dark_wall_color);
+                    }
+                    Tile::RoomFloor | Tile::Corridor => {
+                        if ch_is_floor(cell) {
+                            buf[vy][vx] = ("\u{00b7} ".to_string(), dark_floor_color);
+                        } else {
+                            let (ch, _) = cell_marker(cell);
+                            buf[vy][vx] = (ch, dark_floor_color);
+                        }
+                    }
+                }
             } else {
-                let (ch, color) = cell_marker(cell);
-                buf[crow][ccol] = (ch, color);
-                buf[crow][ccol + 1] = (' ', Color::Reset);
-            }
-
-            // Floor dot for visited corridors (no event / event done)
-            if !(mx == px && my == py) && ch_is_floor(cell) {
-                buf[crow][ccol] = ('·', floor_color);
-                buf[crow][ccol + 1] = (' ', Color::Reset);
+                // Unexplored
+                buf[vy][vx] = ("\u{2591}\u{2591}".to_string(), fog_color);
             }
         }
     }
 
-    // Convert to Lines
+    // Convert to Lines (each tile is a 2-char span)
     buf.iter()
         .map(|row| {
             Line::from(
                 row.iter()
-                    .map(|&(ch, color)| Span::styled(ch.to_string(), Style::default().fg(color)))
+                    .map(|(ch, color)| Span::styled(ch.clone(), Style::default().fg(*color)))
                     .collect::<Vec<_>>(),
             )
         })
         .collect()
 }
 
-/// Map cell type to display character and color.
-fn cell_marker(cell: &super::state::MapCell) -> (char, Color) {
-    match cell.cell_type {
-        CellType::Entrance => ('◇', Color::Green),
-        CellType::Stairs => ('▼', Color::Green),
-        CellType::Enemy if !cell.event_done => ('!', Color::Red),
-        CellType::Treasure if !cell.event_done => ('◆', Color::Yellow),
-        CellType::Spring if !cell.event_done => ('~', Color::Cyan),
-        CellType::Lore if !cell.event_done => ('✦', Color::Yellow),
-        CellType::Npc if !cell.event_done => ('?', Color::Magenta),
-        CellType::Trap if !cell.event_done => (' ', Color::Reset), // hidden
-        _ => (' ', Color::Reset), // corridor / resolved event
+/// Map cell type to display string (2 chars wide) and color.
+fn cell_marker(cell: &super::state::MapCell) -> (String, Color) {
+    if !cell.event_done {
+        match cell.cell_type {
+            CellType::Entrance => ("\u{25c7} ".to_string(), Color::Green),
+            CellType::Stairs => ("\u{25bd} ".to_string(), Color::Green),
+            CellType::Enemy => ("\u{ff01}".to_string(), Color::Red),           // ！(fullwidth !)
+            CellType::Treasure => ("\u{25c6} ".to_string(), Color::Yellow),
+            CellType::Spring => ("~ ".to_string(), Color::Cyan),
+            CellType::Lore => ("\u{2726} ".to_string(), Color::Yellow),
+            CellType::Npc => ("? ".to_string(), Color::Magenta),
+            CellType::Trap => ("\u{00b7} ".to_string(), Color::Reset),  // hidden
+            CellType::Corridor => ("\u{00b7} ".to_string(), Color::Reset),
+        }
+    } else {
+        match cell.cell_type {
+            CellType::Entrance => ("\u{25c7} ".to_string(), Color::Green),
+            CellType::Stairs => ("\u{25bd} ".to_string(), Color::Green),
+            _ => ("\u{00b7} ".to_string(), Color::Reset), // resolved event / corridor
+        }
     }
 }
 
@@ -287,7 +303,9 @@ fn ch_is_floor(cell: &super::state::MapCell) -> bool {
     matches!(
         cell.cell_type,
         CellType::Corridor | CellType::Trap
-    ) || cell.event_done
+    ) || (cell.event_done
+        && cell.cell_type != CellType::Entrance
+        && cell.cell_type != CellType::Stairs)
 }
 
 // ── Tests ──────────────────────────────────────────────────────
@@ -302,6 +320,7 @@ mod tests {
         let mut seed = 42u64;
         let mut map = generate_map(1, &mut seed);
         map.grid[map.player_y][map.player_x].visited = true;
+        map.grid[map.player_y][map.player_x].revealed = true;
         let view = compute_view(&map);
         assert!(!view.depths.is_empty());
     }
@@ -311,12 +330,13 @@ mod tests {
         let mut seed = 42u64;
         let mut map = generate_map(1, &mut seed);
         map.grid[map.player_y][map.player_x].visited = true;
-        // Request 7×7 cell area (max_w=22, max_h=15)
-        let lines = render_map_2d(&map, FloorTheme::MossyRuins, 22, 15);
-        // 7 cells → 2*7+1 = 15 rows
-        assert_eq!(lines.len(), 15);
-        // 7 cells → 3*7+1 = 22 cols
-        assert!(lines[0].spans.len() == 22);
+        map.grid[map.player_y][map.player_x].revealed = true;
+        // Request space for 11 tiles (max_w=22, max_h=11)
+        let lines = render_map_2d(&map, FloorTheme::MossyRuins, 22, 11);
+        // 11 tiles → 11 rows
+        assert_eq!(lines.len(), 11);
+        // 11 tiles → 11 spans (each 2-char wide)
+        assert_eq!(lines[0].spans.len(), 11);
     }
 
     #[test]
@@ -324,14 +344,13 @@ mod tests {
         let mut seed = 42u64;
         let mut map = generate_map(1, &mut seed);
         map.grid[map.player_y][map.player_x].visited = true;
-        map.facing = Facing::North;
-        let lines = render_map_2d(&map, FloorTheme::Underground, 22, 15);
-        // Player should be at the center cell
-        // Center cell row = radius*2 + 1, col = radius*3 + 1
-        // For 7×7: radius=3, row=7, col=10
-        let center_row = &lines[7];
-        let center_char = &center_row.spans[10];
-        assert_eq!(center_char.content.as_ref(), "▲");
+        map.grid[map.player_y][map.player_x].revealed = true;
+        let lines = render_map_2d(&map, FloorTheme::Underground, 22, 11);
+        // Player should be at the center
+        let center_row = lines.len() / 2;
+        let center_col = lines[0].spans.len() / 2;
+        let center_span = &lines[center_row].spans[center_col];
+        assert_eq!(center_span.content.as_ref(), "\u{ff20}"); // ＠
     }
 
     #[test]
@@ -363,5 +382,17 @@ mod tests {
         let desc = describe_view(&view);
         assert!(desc.contains("1マス"));
         assert!(desc.contains("宝箱"));
+    }
+
+    #[test]
+    fn compute_visibility_room() {
+        let mut seed = 42u64;
+        let map = generate_map(1, &mut seed);
+        // Player starts in a room
+        let vis = compute_visibility(&map);
+        // Should see multiple tiles (the room)
+        assert!(vis.len() > 4);
+        // Player position should be visible
+        assert!(vis.contains(&(map.player_x, map.player_y)));
     }
 }
