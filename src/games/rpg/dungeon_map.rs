@@ -308,7 +308,8 @@ fn carve_vertical_segment(
 }
 
 /// Ensure all rooms are connected via BFS. If disconnected components exist,
-/// add corridors to link them.
+/// add corridors to link them. Re-runs BFS after each round of connections
+/// to handle chained unreachable rooms.
 #[allow(clippy::too_many_arguments)]
 fn ensure_connectivity(
     grid: &mut [Vec<MapCell>],
@@ -324,72 +325,84 @@ fn ensure_connectivity(
         return;
     }
 
-    // BFS from the first room center
     let start_room = &rooms[0];
     let sx = start_room.x + start_room.w / 2;
     let sy = start_room.y + start_room.h / 2;
-    let distances = bfs_distances(grid, w, h, sx, sy);
 
-    // Check which rooms are reachable
-    let mut unreachable: Vec<usize> = Vec::new();
-    for (i, room) in rooms.iter().enumerate() {
-        let cx = room.x + room.w / 2;
-        let cy = room.y + room.h / 2;
-        if distances[cy][cx] == 0 && (cx != sx || cy != sy) {
-            unreachable.push(i);
-        }
-    }
+    loop {
+        // BFS from the first room center
+        let distances = bfs_distances(grid, w, h, sx, sy);
 
-    // For each unreachable room, find its section neighbor and force a corridor
-    for &room_idx in &unreachable {
-        // Find which section this room belongs to
-        let sec_idx = room_section_map
+        // Check which rooms are reachable
+        let unreachable: Vec<usize> = rooms
             .iter()
-            .position(|&ri| ri == room_idx)
-            .unwrap_or(0);
-
-        let sec_row = sec_idx / 3;
-        let sec_col = sec_idx % 3;
-
-        // Try adjacent sections in all 4 directions
-        let neighbors: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
-        for &(dc, dr) in &neighbors {
-            let nr = sec_row as i32 + dr;
-            let nc = sec_col as i32 + dc;
-            if !(0..3).contains(&nr) || !(0..3).contains(&nc) {
-                continue;
-            }
-            let neighbor_sec = nr as usize * 3 + nc as usize;
-            if room_section_map[neighbor_sec] == usize::MAX {
-                continue;
-            }
-            let neighbor_room_idx = room_section_map[neighbor_sec];
-            let neighbor_room = &rooms[neighbor_room_idx];
-            let nr_cx = neighbor_room.x + neighbor_room.w / 2;
-            let nr_cy = neighbor_room.y + neighbor_room.h / 2;
-
-            // Check if neighbor is reachable from start
-            if distances[nr_cy][nr_cx] > 0 || (nr_cx == sx && nr_cy == sy) {
-                // Connect this room to the neighbor
-                let this_room = &rooms[room_idx];
-                if dc != 0 {
-                    // Horizontal connection
-                    let (left, right) = if dc > 0 {
-                        (this_room, neighbor_room)
-                    } else {
-                        (neighbor_room, this_room)
-                    };
-                    carve_horizontal_corridor(grid, w, h, left, right, sec_w, rng_seed);
+            .enumerate()
+            .filter_map(|(i, room)| {
+                let cx = room.x + room.w / 2;
+                let cy = room.y + room.h / 2;
+                if distances[cy][cx] == 0 && (cx != sx || cy != sy) {
+                    Some(i)
                 } else {
-                    // Vertical connection
-                    let (top, bot) = if dr > 0 {
-                        (this_room, neighbor_room)
-                    } else {
-                        (neighbor_room, this_room)
-                    };
-                    carve_vertical_corridor(grid, w, h, top, bot, sec_h, rng_seed);
+                    None
                 }
-                break;
+            })
+            .collect();
+
+        if unreachable.is_empty() {
+            break;
+        }
+
+        // For each unreachable room, find its section neighbor and force a corridor
+        for &room_idx in &unreachable {
+            // Find which section this room belongs to
+            let sec_idx = room_section_map
+                .iter()
+                .position(|&ri| ri == room_idx)
+                .unwrap_or(0);
+
+            let sec_row = sec_idx / 3;
+            let sec_col = sec_idx % 3;
+
+            // Try adjacent sections in all 4 directions
+            let neighbors: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
+            for &(dc, dr) in &neighbors {
+                let nr = sec_row as i32 + dr;
+                let nc = sec_col as i32 + dc;
+                if !(0..3).contains(&nr) || !(0..3).contains(&nc) {
+                    continue;
+                }
+                let neighbor_sec = nr as usize * 3 + nc as usize;
+                if room_section_map[neighbor_sec] == usize::MAX {
+                    continue;
+                }
+                let neighbor_room_idx = room_section_map[neighbor_sec];
+                let neighbor_room = &rooms[neighbor_room_idx];
+                let nr_cx = neighbor_room.x + neighbor_room.w / 2;
+                let nr_cy = neighbor_room.y + neighbor_room.h / 2;
+
+                // Check if neighbor is reachable from start
+                if distances[nr_cy][nr_cx] > 0 || (nr_cx == sx && nr_cy == sy) {
+                    // Connect this room to the neighbor
+                    let this_room = &rooms[room_idx];
+                    if dc != 0 {
+                        // Horizontal connection
+                        let (left, right) = if dc > 0 {
+                            (this_room, neighbor_room)
+                        } else {
+                            (neighbor_room, this_room)
+                        };
+                        carve_horizontal_corridor(grid, w, h, left, right, sec_w, rng_seed);
+                    } else {
+                        // Vertical connection
+                        let (top, bot) = if dr > 0 {
+                            (this_room, neighbor_room)
+                        } else {
+                            (neighbor_room, this_room)
+                        };
+                        carve_vertical_corridor(grid, w, h, top, bot, sec_h, rng_seed);
+                    }
+                    break;
+                }
             }
         }
     }

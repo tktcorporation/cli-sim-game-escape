@@ -124,10 +124,7 @@ pub fn compute_visibility(map: &DungeonMap) -> HashSet<(usize, usize)> {
 
     if let Some(room_id) = cell.room_id {
         // In a room: find the room and reveal all tiles + 1-tile border
-        if let Some(room) = map.rooms.iter().find(|r| {
-            let rid = map.grid[r.y + r.h / 2][r.x + r.w / 2].room_id;
-            rid == Some(room_id)
-        }) {
+        if let Some(room) = map.rooms.get(room_id as usize) {
             let x_start = room.x.saturating_sub(1);
             let y_start = room.y.saturating_sub(1);
             let x_end = (room.x + room.w).min(map.width - 1);
