@@ -16,8 +16,17 @@ use super::actions::*;
 use super::grid::{anchor_of, machine_at, Cell, MachineKind, MinerMode, GRID_H, GRID_W, VIEW_H, VIEW_W};
 use super::state::{FactoryState, PlacementTool};
 
-/// Spinner for active machines.
+/// Braille spinner for active machines (smooth 10-frame).
+const BRAILLE_SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Legacy spinner for quick reference.
 const SPINNER: &[char] = &['◐', '◓', '◑', '◒'];
+
+/// Animated empty belt characters (pulsing conveyor, 4-frame).
+const BELT_EMPTY: &[&str] = &["░ ", "▒ ", "░ ", "▓ "];
+
+/// Machine activity sparks (visual feedback for working machines).
+const MACHINE_SPARK: &[char] = &['✦', '✧', '⚡', '✦'];
 
 pub fn render(
     state: &FactoryState,
@@ -88,10 +97,10 @@ fn render_narrow(
 }
 
 fn render_header(state: &FactoryState, f: &mut Frame, area: Rect, is_narrow: bool) {
-    // Animated money indicator
+    // Animated money indicator with braille spinner
     let money_anim = if state.total_exported > 0 {
-        let idx = (state.anim_frame / 3) as usize % SPINNER.len();
-        format!("{} ", SPINNER[idx])
+        let idx = (state.anim_frame / 2) as usize % BRAILLE_SPINNER.len();
+        format!("{} ", BRAILLE_SPINNER[idx])
     } else {
         "  ".to_string()
     };
@@ -109,9 +118,10 @@ fn render_header(state: &FactoryState, f: &mut Frame, area: Rect, is_narrow: boo
         String::new()
     };
 
-    // Export flash: show earned amount
+    // Export flash: show earned amount with animated decoration
     let flash_str = if state.export_flash > 0 {
-        format!(" +${}", state.last_export_value)
+        let spark = MACHINE_SPARK[(state.anim_frame / 2) as usize % MACHINE_SPARK.len()];
+        format!(" {} +${} {}", spark, state.last_export_value, spark)
     } else {
         String::new()
     };
@@ -168,12 +178,20 @@ fn render_header(state: &FactoryState, f: &mut Frame, area: Rect, is_narrow: boo
         ]
     };
 
+    // Animated title decoration
+    let spark = MACHINE_SPARK[(state.anim_frame / 4) as usize % MACHINE_SPARK.len()];
+    let title = if state.export_flash > 0 {
+        format!(" {} Tiny Factory {} ", spark, spark)
+    } else {
+        format!(" {} Tiny Factory ", spark)
+    };
+
     let widget = Paragraph::new(Line::from(spans))
         .block(
             Block::default()
                 .borders(borders)
                 .border_style(Style::default().fg(Color::Yellow))
-                .title(" Tiny Factory "),
+                .title(title),
         )
         .alignment(Alignment::Center);
 
@@ -460,7 +478,9 @@ fn render_grid(
                                 .add_modifier(Modifier::BOLD),
                         )
                     } else {
-                        ("░ ".to_string(), Style::default().fg(Color::DarkGray))
+                        // Animated empty belt conveyor pattern
+                        let belt_idx = ((state.anim_frame / 3) as usize + x + y) % BELT_EMPTY.len();
+                        (BELT_EMPTY[belt_idx].to_string(), Style::default().fg(Color::DarkGray))
                     }
                 }
             };
@@ -487,9 +507,10 @@ fn render_grid(
         lines.push(Line::from(spans));
     }
 
+    let grid_spin = SPINNER[(state.anim_frame / 4) as usize % SPINNER.len()];
     let title = format!(
-        " Grid ({},{}) {}×{} ",
-        state.cursor_x, state.cursor_y, GRID_W, GRID_H
+        " {} Grid ({},{}) {}×{} ",
+        grid_spin, state.cursor_x, state.cursor_y, GRID_W, GRID_H
     );
     let block = Block::default()
         .borders(Borders::ALL)
@@ -580,9 +601,10 @@ fn render_stats(state: &FactoryState, f: &mut Frame, area: Rect) {
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // Summary header
+    // Summary header with animated spinner
+    let spin = BRAILLE_SPINNER[(state.anim_frame / 2) as usize % BRAILLE_SPINNER.len()];
     lines.push(Line::from(vec![
-        Span::styled(format!(" ${:<8}", state.money), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(format!(" {} ${:<8}", spin, state.money), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::styled(format!(" 出荷:{}", state.total_exported), Style::default().fg(Color::Green)),
     ]));
     lines.push(Line::from(""));

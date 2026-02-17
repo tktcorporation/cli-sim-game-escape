@@ -16,25 +16,37 @@ use super::actions::*;
 use super::logic::format_number;
 use super::state::{CookieState, ParticleStyle};
 
-/// Compact cookie art — 3 lines, 8 chars wide. Shared across all screen sizes.
+/// Compact cookie art — 3 lines, 8 chars wide. 8-frame smooth animation.
 const COOKIE_ART: &[&[&str]] = &[
     &["╭━●━●━╮ ", "━●━━●━●━", "╰━●━●━╯ "],
-    &["╭━○━○━╮ ", "━○━━○━○━", "╰━○━○━╯ "],
+    &["╭━●━◉━╮ ", "━◉━━●━●━", "╰━●━◉━╯ "],
     &["╭━◉━◉━╮ ", "━◉━━◉━◉━", "╰━◉━◉━╯ "],
+    &["╭━◉━○━╮ ", "━○━━◉━◉━", "╰━◉━○━╯ "],
     &["╭━○━○━╮ ", "━○━━○━○━", "╰━○━○━╯ "],
+    &["╭━○━◎━╮ ", "━◎━━○━○━", "╰━○━◎━╯ "],
+    &["╭━◎━◎━╮ ", "━◎━━◎━◎━", "╰━◎━◎━╯ "],
+    &["╭━◎━●━╮ ", "━●━━◎━◎━", "╰━◎━●━╯ "],
 ];
 
-/// Compact cookie art — "pressed" state when clicked.
+/// Compact cookie art — "pressed" state when clicked (3-frame bounce).
 const COOKIE_CLICK_ART: &[&[&str]] = &[
     &["╭●●●●●╮ ", "●●━━━●●━", "╰●●●●●╯ "],
     &[" ╭━●━╮  ", " ━●●●━  ", " ╰━●━╯  "],
+    &["╭━◉◉◉━╮ ", "━◉━━━◉━━", "╰━◉◉◉━╯ "],
 ];
 
 /// Sparkline characters for CPS graph (8 levels of height).
 const SPARKLINE_CHARS: &[char] = &[' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇'];
 
-/// Spinner characters for production indicator.
-const SPINNER: &[char] = &['◐', '◓', '◑', '◒'];
+/// Braille spinner for CPS indicator (smooth 10-frame rotation).
+const BRAILLE_SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Moon phase spinner for prestige/special effects.
+const MOON_SPINNER: &[char] = &['◑', '◒', '◐', '◓'];
+
+/// Dot wave for production activity (4-frame).
+const DOT_WAVE: &[&str] = &["⣀⣠⣤⣶⣿", "⣿⣶⣤⣠⣀", "⣠⣤⣶⣿⣶", "⣶⣿⣶⣤⣠"];
+
 
 /// Estimate the number of visual rows a set of Lines will occupy when wrapped
 /// to the given inner width (content area excluding left/right borders).
@@ -198,8 +210,9 @@ fn render_cookie_display(
     let cookies_str = format_number(state.cookies.floor());
     let cps = state.total_cps();
     let cps_str = format_number(cps);
-    let spinner_idx = (state.anim_frame / 3) as usize % SPINNER.len();
-    let spinner = if cps > 0.0 { SPINNER[spinner_idx] } else { ' ' };
+    // Use braille spinner for smooth CPS indicator
+    let spinner_idx = (state.anim_frame / 2) as usize % BRAILLE_SPINNER.len();
+    let spinner = if cps > 0.0 { BRAILLE_SPINNER[spinner_idx] } else { ' ' };
 
     let click_power = state.effective_click_power();
     let click_style = if state.click_flash > 0 {
@@ -226,12 +239,15 @@ fn render_cookie_display(
         Color::Yellow
     };
 
-    let title = if state.purchase_flash > 0 {
-        " ✦ Cookie Factory ✦ "
+    // Animated title with Unicode decorations
+    let moon = MOON_SPINNER[(state.anim_frame / 4) as usize % MOON_SPINNER.len()];
+    let title: String = if state.purchase_flash > 0 {
+        format!(" ✦ Cookie Factory ✦ {}", moon)
     } else if !state.active_buffs.is_empty() {
-        " Cookie Factory ⚡ "
+        let dot_idx = (state.anim_frame / 3) as usize % DOT_WAVE.len();
+        format!(" {} Cookie Factory ⚡ ", DOT_WAVE[dot_idx])
     } else {
-        " Cookie Factory "
+        format!(" {} Cookie Factory ", moon)
     };
 
     // --- Unified art selection (same on all screen widths) ---
@@ -381,11 +397,18 @@ fn render_cookie_display(
             spans
         }));
 
-        // --- Row 5: Production header ---
-        lines.push(Line::from(Span::styled(
-            " ┄┄ PRODUCTION ┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄┄",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-        )));
+        // --- Row 5: Production header with animated separator ---
+        let prod_dot_idx = (state.anim_frame / 3) as usize % DOT_WAVE.len();
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {} PRODUCTION ", DOT_WAVE[prod_dot_idx]),
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "┄┄┄┄┄┄┄┄┄┄┄",
+                Style::default().fg(Color::Green),
+            ),
+        ]));
 
         // --- Rows 6+: Producer contribution bars (dynamically sized) ---
         let contributions = state.producer_contributions();
@@ -553,14 +576,16 @@ fn build_sparkline(history: &[f64], max_width: usize) -> String {
         .collect()
 }
 
-/// Get a cycling color based on animation frame for visual effects.
+/// Get a cycling color based on animation frame for visual effects (6-phase rainbow).
 fn cycling_color(anim_frame: u32, speed: u32) -> Color {
-    let phase = (anim_frame / speed) % 4;
+    let phase = (anim_frame / speed) % 6;
     match phase {
         0 => Color::Cyan,
-        1 => Color::Green,
-        2 => Color::Blue,
-        _ => Color::Magenta,
+        1 => Color::LightCyan,
+        2 => Color::Green,
+        3 => Color::Blue,
+        4 => Color::Magenta,
+        _ => Color::LightBlue,
     }
 }
 
@@ -830,8 +855,8 @@ fn render_producers(
             // Compact format for narrow screens: "◆Name 2x $15 +0.1/s 30s"
             let best_marker = if is_best_roi { "◆" } else { " " };
             let prod_indicator = if p.count > 0 {
-                let idx = (state.anim_frame as usize / 5 + p.kind.key() as usize) % SPINNER.len();
-                format!("{}", SPINNER[idx])
+                let idx = (state.anim_frame as usize / 3 + p.kind.key() as usize) % BRAILLE_SPINNER.len();
+                format!("{}", BRAILLE_SPINNER[idx])
             } else {
                 " ".to_string()
             };
@@ -852,8 +877,8 @@ fn render_producers(
         } else {
             // Full format for wide screens
             let prod_indicator = if p.count > 0 {
-                let idx = (state.anim_frame as usize / 5 + p.kind.key() as usize) % SPINNER.len();
-                format!("{} ", SPINNER[idx])
+                let idx = (state.anim_frame as usize / 3 + p.kind.key() as usize) % BRAILLE_SPINNER.len();
+                format!("{} ", BRAILLE_SPINNER[idx])
             } else {
                 "  ".to_string()
             };

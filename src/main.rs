@@ -3,7 +3,7 @@ mod input;
 mod time;
 mod widgets;
 
-use std::{cell::RefCell, io, rc::Rc};
+use std::{cell::Cell, cell::RefCell, io, rc::Rc};
 
 use games::{create_game, AppState, GameChoice};
 use input::{is_narrow_layout, ClickState, InputEvent};
@@ -219,6 +219,7 @@ fn main() -> io::Result<()> {
     let app_state = Rc::new(RefCell::new(AppState::Menu));
     let click_state = Rc::new(RefCell::new(ClickState::new()));
     let game_time = Rc::new(RefCell::new(GameTime::new(10)));
+    let menu_anim = Rc::new(Cell::new(0u32));
     let backend = DomBackend::new()?;
     let terminal = Terminal::new(backend)?;
 
@@ -262,6 +263,7 @@ fn main() -> io::Result<()> {
     terminal.draw_web({
         let click_state = click_state.clone();
         let game_time = game_time.clone();
+        let menu_anim = menu_anim.clone();
         move |f| {
             let size = f.area();
 
@@ -280,10 +282,15 @@ fn main() -> io::Result<()> {
                 .unwrap_or(0.0);
             let delta_ticks = game_time.borrow_mut().update(now_ms);
 
+            // Increment menu animation counter
+            if delta_ticks > 0 {
+                menu_anim.set(menu_anim.get().wrapping_add(delta_ticks));
+            }
+
             let mut state = app_state.borrow_mut();
             match &mut *state {
                 AppState::Menu => {
-                    render_menu(f, size, &click_state);
+                    render_menu(f, size, &click_state, menu_anim.get());
                 }
                 AppState::Settings { confirm_reset } => {
                     render_settings(f, size, &click_state, confirm_reset.as_ref());
@@ -315,114 +322,211 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+// ── Menu animation constants ──────────────────────────────────
+/// Braille spinner for menu decorations (smooth 8-frame rotation).
+const MENU_SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// Animated game icons for each menu entry (cycle per game).
+const ICON_COOKIE: &[&str] = &["🍪", "🍩", "🍪", "✨"];
+const ICON_FACTORY: &[&str] = &["⚙", "⛏", "🔧", "⚡"];
+const ICON_CAREER: &[&str] = &["💼", "📈", "🎓", "💰"];
+const ICON_RPG: &[&str] = &["⚔", "🛡", "🗡", "🐉"];
+
+/// Wave characters for footer animation.
+const WAVE: &[&str] = &[
+    "░▒▓█▓▒░  ",
+    " ░▒▓█▓▒░ ",
+    "  ░▒▓█▓▒░",
+    " ░▒▓█▓▒░ ",
+];
+
 fn render_menu(
     f: &mut ratzilla::ratatui::Frame,
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
+    anim_frame: u32,
 ) {
     let is_narrow = is_narrow_layout(area.width);
+
+    // Title height: 5 lines for wide (banner), 3 for narrow
+    let title_height = if is_narrow { 3 } else { 5 };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Title
-            Constraint::Min(8),   // Menu items
-            Constraint::Length(3), // Footer
+            Constraint::Length(title_height), // Title banner
+            Constraint::Min(8),              // Menu items
+            Constraint::Length(3),            // Footer
         ])
         .split(area);
 
-    // Title
-    let title = if is_narrow {
-        "Game Select"
-    } else {
-        "Game Select - ゲームを選んでください"
-    };
     let borders = if is_narrow {
         Borders::TOP | Borders::BOTTOM
     } else {
         Borders::ALL
     };
-    let title_widget = Paragraph::new(Line::from(Span::styled(
-        title,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    )))
-    .block(
-        Block::default()
-            .borders(borders)
-            .border_style(Style::default().fg(Color::Cyan)),
-    )
-    .alignment(Alignment::Center);
-    f.render_widget(title_widget, chunks[0]);
 
-    // Menu items — title + description rows share the same action ID
+    // ── Animated title banner ──
+    let spinner_idx = (anim_frame / 2) as usize % MENU_SPINNER.len();
+    let spinner = MENU_SPINNER[spinner_idx];
+
+    // Color cycling for title
+    let title_color = match (anim_frame / 8) % 4 {
+        0 => Color::Cyan,
+        1 => Color::LightCyan,
+        2 => Color::White,
+        _ => Color::LightCyan,
+    };
+
+    let border_color = match (anim_frame / 12) % 3 {
+        0 => Color::Cyan,
+        1 => Color::Blue,
+        _ => Color::LightCyan,
+    };
+
+    if is_narrow {
+        let title_widget = Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!("{} ", spinner),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(
+                "Game Select",
+                Style::default()
+                    .fg(title_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {}", spinner),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]))
+        .block(
+            Block::default()
+                .borders(borders)
+                .border_style(Style::default().fg(border_color)),
+        )
+        .alignment(Alignment::Center);
+        f.render_widget(title_widget, chunks[0]);
+    } else {
+        // Wide: Animated ASCII art banner
+        let deco_phase = (anim_frame / 4) as usize % 4;
+        let deco_chars = ["╍╍╍", "━━━", "═══", "━━━"];
+        let deco = deco_chars[deco_phase];
+
+        let mut title_lines = Vec::new();
+        title_lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {} ╔{}╗ ", spinner, "═".repeat(32)),
+                Style::default().fg(border_color),
+            ),
+        ]));
+        title_lines.push(Line::from(vec![
+            Span::styled("   ║  ", Style::default().fg(border_color)),
+            Span::styled(
+                format!("{} GAME SELECT {}", deco, deco),
+                Style::default()
+                    .fg(title_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("   ║ {}", spinner),
+                Style::default().fg(border_color),
+            ),
+        ]));
+        title_lines.push(Line::from(vec![
+            Span::styled(
+                format!("   ╚{}╝  ", "═".repeat(32)),
+                Style::default().fg(border_color),
+            ),
+        ]));
+
+        let title_widget = Paragraph::new(title_lines).block(
+            Block::default()
+                .borders(borders)
+                .border_style(Style::default().fg(border_color)),
+        );
+        f.render_widget(title_widget, chunks[0]);
+    }
+
+    // ── Menu items with animated game icons ──
     let mut cl = ClickableList::new();
+    let icon_phase = (anim_frame / 5) as usize;
 
+    // Cookie Factory
+    let cookie_icon = ICON_COOKIE[icon_phase % ICON_COOKIE.len()];
     cl.push(Line::from(""));
     cl.push_clickable(Line::from(vec![
         Span::styled(
-            " ▶ ",
+            format!(" {} ", cookie_icon),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Cookie Factory", Style::default().fg(Color::White)),
+        Span::styled("Cookie Factory", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
     ]), MENU_SELECT_COOKIE);
     cl.push_clickable(Line::from(Span::styled(
         "    クッキーをクリックして増やす放置ゲーム",
         Style::default().fg(Color::DarkGray),
     )), MENU_SELECT_COOKIE);
 
+    // Tiny Factory
+    let factory_icon = ICON_FACTORY[icon_phase % ICON_FACTORY.len()];
     cl.push(Line::from(""));
     cl.push_clickable(Line::from(vec![
         Span::styled(
-            " ▶ ",
+            format!(" {} ", factory_icon),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Tiny Factory", Style::default().fg(Color::White)),
+        Span::styled("Tiny Factory", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
     ]), MENU_SELECT_FACTORY);
     cl.push_clickable(Line::from(Span::styled(
         "    工場を作って生産ラインを最適化する放置ゲーム",
         Style::default().fg(Color::DarkGray),
     )), MENU_SELECT_FACTORY);
 
+    // Career Simulator
+    let career_icon = ICON_CAREER[icon_phase % ICON_CAREER.len()];
     cl.push(Line::from(""));
     cl.push_clickable(Line::from(vec![
         Span::styled(
-            " ▶ ",
+            format!(" {} ", career_icon),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Career Simulator", Style::default().fg(Color::White)),
+        Span::styled("Career Simulator", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
     ]), MENU_SELECT_CAREER);
     cl.push_clickable(Line::from(Span::styled(
         "    スキルを磨いて転職・投資でキャリアを築くシミュレーション",
         Style::default().fg(Color::DarkGray),
     )), MENU_SELECT_CAREER);
 
+    // Dungeon Dive
+    let rpg_icon = ICON_RPG[icon_phase % ICON_RPG.len()];
     cl.push(Line::from(""));
     cl.push_clickable(Line::from(vec![
         Span::styled(
-            " ▶ ",
+            format!(" {} ", rpg_icon),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Red)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("Dungeon Dive", Style::default().fg(Color::White)),
+        Span::styled("Dungeon Dive", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
     ]), MENU_SELECT_RPG);
     cl.push_clickable(Line::from(Span::styled(
         "    ダンジョンを探索して帰還するローグライト風RPG",
         Style::default().fg(Color::DarkGray),
     )), MENU_SELECT_RPG);
 
+    // Settings
+    let settings_spin = if (anim_frame / 6).is_multiple_of(2) { "⚙" } else { "⛭" };
     cl.push(Line::from(""));
     cl.push_clickable(Line::from(vec![
         Span::styled(
-            " ⚙ ",
+            format!(" {} ", settings_spin),
             Style::default()
                 .fg(Color::Gray)
                 .add_modifier(Modifier::BOLD),
@@ -443,11 +547,23 @@ fn render_menu(
         cl.render(f, chunks[1], menu_block, &mut cs, false, 0);
     }
 
-    // Footer
-    let footer_widget = Paragraph::new(Line::from(Span::styled(
-        "タップでゲームを選択",
-        Style::default().fg(Color::DarkGray),
-    )))
+    // ── Animated footer ──
+    let wave_idx = (anim_frame / 3) as usize % WAVE.len();
+    let wave = WAVE[wave_idx];
+    let footer_color = match (anim_frame / 10) % 3 {
+        0 => Color::DarkGray,
+        1 => Color::Gray,
+        _ => Color::DarkGray,
+    };
+
+    let footer_widget = Paragraph::new(Line::from(vec![
+        Span::styled(wave, Style::default().fg(footer_color)),
+        Span::styled(
+            " タップでゲームを選択 ",
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(wave, Style::default().fg(footer_color)),
+    ]))
     .block(
         Block::default()
             .borders(borders)
