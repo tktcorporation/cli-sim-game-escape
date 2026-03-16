@@ -3,3 +3,4 @@
 *.wasm
 .serena/
 node_modules/
+proptest-regressions/
