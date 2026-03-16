@@ -101,13 +101,13 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
         render_buffs_and_golden(state, f, chunks[1], click_state);
     }
     render_tab_bar(state, f, chunks[2], click_state);
-    if state.show_prestige {
+    if state.show_prestige && state.is_tab_unlocked("prestige") {
         render_prestige(state, f, chunks[3], click_state);
     } else if state.show_milestones {
         render_milestones(state, f, chunks[3], click_state);
-    } else if state.show_research {
+    } else if state.show_research && state.is_tab_unlocked("research") {
         render_research(state, f, chunks[3], click_state);
-    } else if state.show_upgrades {
+    } else if state.show_upgrades && state.is_tab_unlocked("upgrades") {
         render_upgrades(state, f, chunks[3], click_state);
     } else {
         render_producers(state, f, chunks[3], click_state);
@@ -177,13 +177,19 @@ fn render_tab_bar(
     let separator = if is_narrow { "|" } else { " │ " };
 
     let mut cs = click_state.borrow_mut();
-    TabBar::new(separator)
-        .tab("生産", tab_style(0, Color::Green), TAB_PRODUCERS)
-        .tab("強化", tab_style(1, Color::Magenta), TAB_UPGRADES)
-        .tab("研究", tab_style(2, Color::Cyan), TAB_RESEARCH)
-        .tab(milestone_label, tab_style(3, milestone_color), TAB_MILESTONES)
-        .tab(prestige_label, tab_style(4, prestige_color), TAB_PRESTIGE)
-        .render(f, area, &mut cs);
+    let mut bar = TabBar::new(separator);
+    bar = bar.tab("生産", tab_style(0, Color::Green), TAB_PRODUCERS);
+    if state.is_tab_unlocked("upgrades") {
+        bar = bar.tab("強化", tab_style(1, Color::Magenta), TAB_UPGRADES);
+    }
+    if state.is_tab_unlocked("research") {
+        bar = bar.tab("研究", tab_style(2, Color::Cyan), TAB_RESEARCH);
+    }
+    bar = bar.tab(milestone_label, tab_style(3, milestone_color), TAB_MILESTONES);
+    if state.is_tab_unlocked("prestige") {
+        bar = bar.tab(prestige_label, tab_style(4, prestige_color), TAB_PRESTIGE);
+    }
+    bar.render(f, area, &mut cs);
 }
 
 fn render_cookie_display(
@@ -352,6 +358,40 @@ fn render_cookie_display(
         }
         spans
     }));
+
+    // --- Next Goal row: always visible, shows best next purchase with progress ---
+    if let Some(goal) = state.best_next_purchase() {
+        let bar_width = 10usize;
+        let filled = (goal.progress * bar_width as f64).round() as usize;
+        let bar: String = "█".repeat(filled.min(bar_width))
+            + &"░".repeat(bar_width.saturating_sub(filled));
+        let remaining = goal.cost - state.cookies;
+
+        if goal.affordable {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" ◆ {} を買おう！", goal.name),
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(" ◆ 次: ", Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    goal.name.clone(),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" {} ", bar),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    format!("あと{}", format_number(remaining.ceil())),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ]));
+        }
+    }
 
     // --- Wide-only rows: sparkline and production bars ---
     if w >= 60 {
@@ -777,7 +817,13 @@ fn render_producers(
 
     let mut cl = ClickableList::new();
 
-    for p in &state.producers {
+    let visible_count = state.visible_producer_count();
+
+    for (idx, p) in state.producers.iter().enumerate() {
+        // Progressive disclosure: only show producers up to visible_count
+        if idx >= visible_count {
+            break;
+        }
         let eff_cost = p.cost() * (1.0 - state.active_discount);
         let can_afford = state.cookies >= eff_cost;
         let cost_str = if has_discount {
@@ -923,6 +969,19 @@ fn render_producers(
         };
 
         cl.push_clickable(line, BUY_PRODUCER_BASE + p.kind.index() as u16);
+    }
+
+    // Show teaser for next hidden producer tier
+    if visible_count < state.producers.len() {
+        let next = &state.producers[visible_count];
+        let cost = next.kind.base_cost();
+        let teaser_line = Line::from(vec![
+            Span::styled(
+                format!("  ??? — {} で開放", format_number(cost)),
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+            ),
+        ]);
+        cl.push(teaser_line);
     }
 
     let producer_border_color = if state.purchase_flash > 0 {

@@ -521,29 +521,50 @@ pub fn buy_producer(state: &mut CookieState, kind: &ProducerKind) -> bool {
     let base_cost = state.producers[idx].cost();
     let cost = base_cost * state.total_cost_modifier();
     if state.cookies >= cost {
+        // Determine purchase quality BEFORE mutating state
+        let is_best_roi = is_best_roi_producer(state, kind);
+        let is_crash = state.market_phase == MarketPhase::Crash;
+
         state.cookies -= cost;
         state.producers[idx].count += 1;
-        state.purchase_flash = 5; // flash for 5 ticks (0.5s)
-        let modifier = state.total_cost_modifier();
-        if modifier < 0.99 {
-            state.add_log(
-                &format!(
-                    "{} を購入！ ({}台) 💰割引適用！",
-                    state.producers[idx].kind.name(),
-                    state.producers[idx].count
-                ),
-                false,
-            );
+
+        // Quality-based feedback: better purchases get stronger flash + message
+        let (flash_ticks, quality_msg) = if is_best_roi && is_crash {
+            (20, " ✦GREAT DEAL!✦")
+        } else if is_best_roi {
+            (10, " ◆Good!")
+        } else if is_crash {
+            (10, " 💰安い！")
         } else {
-            state.add_log(
-                &format!(
-                    "{} を購入！ ({}台)",
-                    state.producers[idx].kind.name(),
-                    state.producers[idx].count
-                ),
-                false,
-            );
+            (5, "")
+        };
+        state.purchase_flash = flash_ticks;
+
+        let modifier = state.total_cost_modifier();
+        let discount_msg = if modifier < 0.99 { " 💰割引適用！" } else { "" };
+        state.add_log(
+            &format!(
+                "{} を購入！ ({}台){}{}",
+                state.producers[idx].kind.name(),
+                state.producers[idx].count,
+                discount_msg,
+                quality_msg,
+            ),
+            is_best_roi && is_crash, // important log for great deals
+        );
+
+        // Spawn quality feedback particle for good purchases
+        if is_best_roi {
+            state.particles.push(Particle {
+                text: if is_crash { "GREAT DEAL!".into() } else { "Good!".into() },
+                col_offset: 0,
+                life: 15,
+                max_life: 15,
+                style: ParticleStyle::Celebration,
+                row_offset: 0,
+            });
         }
+
         // Consume active discount after purchase
         if state.active_discount > 0.0 {
             state.active_discount = 0.0;
@@ -552,6 +573,36 @@ pub fn buy_producer(state: &mut CookieState, kind: &ProducerKind) -> bool {
     } else {
         false
     }
+}
+
+/// Check if a producer is the best ROI option among affordable producers.
+fn is_best_roi_producer(state: &CookieState, kind: &ProducerKind) -> bool {
+    let target_idx = kind.index();
+    let target_syn = state.synergy_bonus(kind);
+    let target_payback = state.producers[target_idx].payback_seconds_with_synergy(target_syn);
+
+    let target_pb = match target_payback {
+        Some(pb) => pb,
+        None => return false,
+    };
+
+    // Check if any other affordable producer has a better payback
+    for p in &state.producers {
+        if p.kind == *kind {
+            continue;
+        }
+        let eff_cost = p.cost() * state.total_cost_modifier();
+        if state.cookies < eff_cost {
+            continue;
+        }
+        let syn = state.synergy_bonus(&p.kind);
+        if let Some(pb) = p.payback_seconds_with_synergy(syn) {
+            if pb < target_pb - 0.01 {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Try to buy an upgrade by index. Returns true if successful.

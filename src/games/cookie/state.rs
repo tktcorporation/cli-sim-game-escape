@@ -159,6 +159,19 @@ impl ProducerKind {
     }
 }
 
+/// Next purchase goal for the "next goal" UI display.
+#[derive(Clone, Debug)]
+pub struct NextGoal {
+    /// Display name of the target.
+    pub name: String,
+    /// Effective cost (after modifiers).
+    pub cost: f64,
+    /// Whether the player can afford it now.
+    pub affordable: bool,
+    /// Progress toward affording it (0.0 to 1.0).
+    pub progress: f64,
+}
+
 /// ROI (Return on Investment) information for a producer.
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
@@ -2607,6 +2620,79 @@ impl CookieState {
     /// Count of ready-to-claim milestones.
     pub fn ready_milestone_count(&self) -> usize {
         self.milestones.iter().filter(|m| m.status == MilestoneStatus::Ready).count()
+    }
+
+    /// Number of producers to show in the UI.
+    /// Rule: show up to 2 tiers above the highest owned producer (min 3).
+    pub fn visible_producer_count(&self) -> usize {
+        let highest_owned = self.producers.iter()
+            .rposition(|p| p.count > 0)
+            .map(|i| i + 1)  // convert to count
+            .unwrap_or(0);
+        // Show at least 3 (Cursor, Grandma, Farm), up to highest_owned + 2
+        (highest_owned + 2).max(3).min(self.producers.len())
+    }
+
+    /// Best next purchase: the affordable or nearly-affordable item with the best ROI.
+    /// Returns (name, cost, is_affordable, progress_fraction).
+    pub fn best_next_purchase(&self) -> Option<NextGoal> {
+        let mut best: Option<(f64, NextGoal)> = None; // (payback, goal)
+
+        // Check producers (visible ones only)
+        let visible = self.visible_producer_count();
+        for p in self.producers.iter().take(visible) {
+            let eff_cost = p.cost() * self.total_cost_modifier();
+            let syn = self.synergy_bonus(&p.kind);
+            if let Some(payback) = p.payback_seconds_with_synergy(syn) {
+                let dominated = best.as_ref().is_some_and(|(bp, _)| *bp <= payback);
+                if !dominated {
+                    let progress = (self.cookies / eff_cost).min(1.0);
+                    best = Some((payback, NextGoal {
+                        name: p.kind.name().to_string(),
+                        cost: eff_cost,
+                        affordable: self.cookies >= eff_cost,
+                        progress,
+                    }));
+                }
+            }
+        }
+
+        // Check unlocked, unpurchased upgrades
+        for upgrade in &self.upgrades {
+            if upgrade.purchased || !self.is_upgrade_unlocked(upgrade) {
+                continue;
+            }
+            let eff_cost = upgrade.cost * self.total_cost_modifier();
+            // Estimate payback: for upgrades, use cost / (total_cps * 0.5) as rough estimate
+            let cps = self.total_cps();
+            if cps > 0.0 {
+                let payback = eff_cost / (cps * 0.5);
+                let dominated = best.as_ref().is_some_and(|(bp, _)| *bp <= payback);
+                if !dominated {
+                    let progress = (self.cookies / eff_cost).min(1.0);
+                    best = Some((payback, NextGoal {
+                        name: upgrade.name.clone(),
+                        cost: eff_cost,
+                        affordable: self.cookies >= eff_cost,
+                        progress,
+                    }));
+                }
+            }
+        }
+
+        best.map(|(_, goal)| goal)
+    }
+
+    /// Check if a specific tab should be visible based on game progression.
+    pub fn is_tab_unlocked(&self, tab: &str) -> bool {
+        match tab {
+            "producers" => true,
+            "upgrades" => self.producers.iter().any(|p| p.count > 0),
+            "research" => self.total_cps() >= 1000.0 || self.cookies_all_time >= 100_000.0,
+            "milestones" => true,
+            "prestige" => self.cookies_all_time >= 1_000_000_000.0 || self.prestige_count > 0,
+            _ => true,
+        }
     }
 
     /// Calculate the synergy bonus for a specific producer kind.
