@@ -464,6 +464,16 @@ fn render_cookie_display(
             ));
         }
     }
+    // Buff combo indicator
+    {
+        let combo = state.buff_combo_multiplier();
+        if combo > 1.0 {
+            status_spans.push(Span::styled(
+                format!(" ⚡COMBO×{:.1}", combo),
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
     if state.golden_event.is_some() {
         let golden_blink = (state.anim_frame / 2).is_multiple_of(2);
         status_spans.push(Span::styled(
@@ -484,6 +494,8 @@ fn render_cookie_display(
             MarketPhase::Bull => (Color::Red, true),
             MarketPhase::Bear => (Color::Blue, true),
             MarketPhase::Normal => (Color::DarkGray, false),
+            MarketPhase::Bubble => (Color::Magenta, true),
+            MarketPhase::Crash => (Color::Yellow, true),
         };
         let secs_left = state.market_ticks_left / 10;
         let style = if market_blink && (state.anim_frame / 4).is_multiple_of(2) {
@@ -894,6 +906,19 @@ fn render_producers(
                 spans.push(Span::styled(format!(" {}", syn_str), syn_style));
             }
 
+            // Show savings bonus impact when affordable
+            if can_afford {
+                let current_savings = state.savings_bonus();
+                let after_savings = state.savings_bonus_after_spend(eff_cost);
+                let loss_pct = (current_savings - after_savings) * 100.0;
+                if loss_pct > 0.5 {
+                    spans.push(Span::styled(
+                        format!(" 💎-{:.0}%", loss_pct),
+                        Style::default().fg(Color::Red),
+                    ));
+                }
+            }
+
             Line::from(spans)
         };
 
@@ -944,18 +969,42 @@ fn render_upgrades(
         let cost_str = format_number(upgrade.cost);
 
         if *unlocked {
-            let text_style = if can_afford {
-                Style::default().fg(Color::White)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
+            // Check if this upgrade is blocked by exclusive group
+            let group_blocked = upgrade.exclusive_group.is_some_and(|g| {
+                state.upgrades.iter().any(|u| u.purchased && u.exclusive_group == Some(g))
+            });
 
-            cl.push_clickable(Line::from(vec![
-                Span::styled(
+            if group_blocked {
+                // Another choice in the same group was already purchased
+                cl.push_clickable(Line::from(vec![
+                    Span::styled(
+                        format!(" {} - {} ", upgrade.name, upgrade.description),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                    Span::styled("⛔選択済", Style::default().fg(Color::Red)),
+                ]), BUY_UPGRADE_BASE + i as u16);
+            } else {
+                let text_style = if can_afford {
+                    Style::default().fg(Color::White)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+
+                let mut spans = vec![Span::styled(
                     format!(" {} - {} ({})", upgrade.name, upgrade.description, cost_str),
                     text_style,
-                ),
-            ]), BUY_UPGRADE_BASE + i as u16);
+                )];
+
+                // Show exclusive group indicator
+                if upgrade.exclusive_group.is_some() {
+                    spans.push(Span::styled(
+                        " ⚔択一",
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    ));
+                }
+
+                cl.push_clickable(Line::from(spans), BUY_UPGRADE_BASE + i as u16);
+            }
         } else {
             let hint = match &upgrade.unlock_condition {
                 Some((kind, count)) => {

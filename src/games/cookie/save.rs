@@ -97,7 +97,7 @@ struct GameSave {
     research_purchased: Vec<bool>,
 
     // マーケット
-    market_phase: u8, // 0=Bull, 1=Bear, 2=Normal
+    market_phase: u8, // 0=Bull, 1=Bear, 2=Normal, 3=Bubble, 4=Crash
     market_ticks_left: u32,
 
     // ドラゴン
@@ -176,6 +176,8 @@ fn extract_save(state: &CookieState) -> SaveData {
                 MarketPhase::Bull => 0,
                 MarketPhase::Bear => 1,
                 MarketPhase::Normal => 2,
+                MarketPhase::Bubble => 3,
+                MarketPhase::Crash => 4,
             },
             market_ticks_left: state.market_ticks_left,
             // Dragon
@@ -292,6 +294,8 @@ fn apply_save(state: &mut CookieState, save: &GameSave) {
     state.market_phase = match save.market_phase {
         0 => MarketPhase::Bull,
         1 => MarketPhase::Bear,
+        3 => MarketPhase::Bubble,
+        4 => MarketPhase::Crash,
         _ => MarketPhase::Normal,
     };
     state.market_ticks_left = save.market_ticks_left;
