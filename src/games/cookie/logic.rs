@@ -574,6 +574,18 @@ pub fn buy_upgrade(state: &mut CookieState, upgrade_idx: usize) -> bool {
         return false;
     }
 
+    // Check exclusive group: if another upgrade in the same group is already purchased, block
+    if let Some(group) = state.upgrades[upgrade_idx].exclusive_group {
+        let group_conflict = state
+            .upgrades
+            .iter()
+            .enumerate()
+            .any(|(i, u)| i != upgrade_idx && u.purchased && u.exclusive_group == Some(group));
+        if group_conflict {
+            return false;
+        }
+    }
+
     state.cookies -= cost;
     if state.active_discount > 0.0 {
         state.active_discount = 0.0;
@@ -1084,27 +1096,71 @@ pub fn toggle_auto_clicker(state: &mut CookieState) -> bool {
 /// Tick the market phase timer and transition when expired.
 fn tick_market(state: &mut CookieState, delta_ticks: u32) {
     state.market_ticks_left = state.market_ticks_left.saturating_sub(delta_ticks);
+
+    // Forecast warning: show "signs of change" 5 seconds before phase shift
+    if state.market_ticks_left == 50 {
+        let warning = match &state.market_phase {
+            MarketPhase::Normal => "📢 市場に変動の兆候...",
+            MarketPhase::Bull => "📢 好景気に陰り...",
+            MarketPhase::Bear => "📢 不景気に底打ちの兆し...",
+            MarketPhase::Bubble => "📢 バブル崩壊の予兆！！",
+            MarketPhase::Crash => "📢 暴落からの回復の兆候...",
+        };
+        state.add_log(warning, true);
+    }
+
     if state.market_ticks_left == 0 {
-        // Pick next phase (never same as current)
-        let r = state.next_random() % 3;
-        let next = match (&state.market_phase, r) {
-            (MarketPhase::Normal, 0) => MarketPhase::Bull,
-            (MarketPhase::Normal, _) => MarketPhase::Bear,
-            (MarketPhase::Bull, 0) => MarketPhase::Normal,
-            (MarketPhase::Bull, _) => MarketPhase::Bear,
-            (MarketPhase::Bear, 0) => MarketPhase::Normal,
-            (MarketPhase::Bear, _) => MarketPhase::Bull,
+        // Pick next phase with weighted probabilities
+        // Extreme phases (Bubble/Crash) are rarer but impactful
+        let r = state.next_random() % 100;
+        let next = match &state.market_phase {
+            MarketPhase::Normal => match r {
+                0..=34 => MarketPhase::Bull,
+                35..=69 => MarketPhase::Bear,
+                70..=84 => MarketPhase::Bubble,  // 15% chance
+                _ => MarketPhase::Crash,          // 15% chance
+            },
+            MarketPhase::Bull => match r {
+                0..=39 => MarketPhase::Normal,
+                40..=64 => MarketPhase::Bear,
+                65..=89 => MarketPhase::Bubble,   // Bull can escalate to Bubble
+                _ => MarketPhase::Crash,           // 10% sudden crash
+            },
+            MarketPhase::Bear => match r {
+                0..=39 => MarketPhase::Normal,
+                40..=64 => MarketPhase::Bull,
+                65..=84 => MarketPhase::Crash,    // Bear can deepen to Crash
+                _ => MarketPhase::Bubble,          // 15% rebound to Bubble
+            },
+            MarketPhase::Bubble => match r {
+                0..=49 => MarketPhase::Crash,     // 50%: Bubble pops into Crash!
+                50..=79 => MarketPhase::Bear,
+                _ => MarketPhase::Normal,
+            },
+            MarketPhase::Crash => match r {
+                0..=39 => MarketPhase::Bear,      // 40%: slow recovery
+                40..=69 => MarketPhase::Normal,   // 30%: normalization
+                _ => MarketPhase::Bull,           // 30%: bounce back hard
+            },
         };
 
-        // Duration: 45-90 seconds (450-900 ticks)
-        let duration = 450 + (state.next_random() % 450);
+        // Duration varies by phase: extreme phases are shorter (more urgent)
+        let duration = match &next {
+            MarketPhase::Normal => 500 + (state.next_random() % 400),  // 50-90s
+            MarketPhase::Bull => 400 + (state.next_random() % 300),    // 40-70s
+            MarketPhase::Bear => 400 + (state.next_random() % 300),    // 40-70s
+            MarketPhase::Bubble => 150 + (state.next_random() % 200),  // 15-35s (short!)
+            MarketPhase::Crash => 200 + (state.next_random() % 200),   // 20-40s (act fast!)
+        };
         state.market_phase = next.clone();
         state.market_ticks_left = duration;
 
         let msg = match &next {
-            MarketPhase::Bull => "📈 好景気到来！CPS↑ コスト↑",
-            MarketPhase::Bear => "📉 不景気…CPS↓ コスト↓",
+            MarketPhase::Bull => "📈 好景気到来！CPS×1.5 コスト×1.6",
+            MarketPhase::Bear => "📉 不景気…CPS×0.7 コスト×0.5",
             MarketPhase::Normal => "📊 市場安定",
+            MarketPhase::Bubble => "🚀 バブル発生！CPS×3 コスト×3！稼ぎ時！",
+            MarketPhase::Crash => "💥 市場暴落！CPS×0.3 コスト75%OFF！買い時！",
         };
         state.add_log(msg, true);
     }
@@ -1440,7 +1496,8 @@ mod tests {
         state.cookies = 1000.0;
         buy_producer(&mut state, &ProducerKind::Cursor);
         let cost_after_1 = state.producers[0].cost();
-        let expected = 15.0 * 1.15;
+        // Cursor has cost_growth_rate 1.20
+        let expected = 15.0 * 1.20;
         assert!((cost_after_1 - expected).abs() < 0.01);
     }
 
@@ -1968,7 +2025,7 @@ mod proptests {
         }
 
         #[test]
-        fn prop_producer_cost_ratio_is_1_15(
+        fn prop_producer_cost_ratio_matches_growth_rate(
             kind in arb_producer_kind(),
             count in 0u32..150,
         ) {
@@ -1978,8 +2035,9 @@ mod proptests {
             p.count = count + 1;
             let cost_b = p.cost();
             let ratio = cost_b / cost_a;
-            prop_assert!((ratio - 1.15).abs() < 0.0001,
-                "expected ratio 1.15, got {} (count={})", ratio, count);
+            let expected_rate = kind.cost_growth_rate();
+            prop_assert!((ratio - expected_rate).abs() < 0.0001,
+                "expected ratio {}, got {} (kind={}, count={})", expected_rate, ratio, kind.name(), count);
         }
     }
 

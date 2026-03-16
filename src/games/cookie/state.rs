@@ -73,6 +73,10 @@ impl ProducerKind {
     }
 
     /// Base cookies per second per unit.
+    ///
+    /// Design: lower-tier producers have better initial cost/rate ratio
+    /// but higher-tier ones scale better with count (see `cost_growth_rate`).
+    /// This creates a "cheap & capped vs expensive & scaling" dilemma.
     pub fn base_rate(&self) -> f64 {
         match self {
             ProducerKind::Cursor => 0.1,
@@ -87,6 +91,29 @@ impl ProducerKind {
             ProducerKind::Portal => 1_600_000.0,
             ProducerKind::TimeMachine => 9_800_000.0,
             ProducerKind::AntimatterCondenser => 64_000_000.0,
+        }
+    }
+
+    /// Cost growth rate per additional unit purchased.
+    ///
+    /// Lower-tier producers have higher growth rates (costs skyrocket fast),
+    /// while higher-tier producers grow more slowly (stay investable longer).
+    /// This means cheap producers are great early but hit a wall,
+    /// while expensive producers become the better long-term investment.
+    pub fn cost_growth_rate(&self) -> f64 {
+        match self {
+            ProducerKind::Cursor => 1.20,           // Cheap but costs explode
+            ProducerKind::Grandma => 1.18,
+            ProducerKind::Farm => 1.17,
+            ProducerKind::Mine => 1.16,
+            ProducerKind::Factory => 1.15,           // Middle ground
+            ProducerKind::Temple => 1.14,
+            ProducerKind::WizardTower => 1.13,
+            ProducerKind::Shipment => 1.12,
+            ProducerKind::AlchemyLab => 1.11,
+            ProducerKind::Portal => 1.10,
+            ProducerKind::TimeMachine => 1.09,
+            ProducerKind::AntimatterCondenser => 1.08, // Expensive but scales well
         }
     }
 
@@ -165,8 +192,11 @@ impl Producer {
     }
 
     /// Current cost to buy the next one.
+    ///
+    /// Each producer has its own cost growth rate: cheap producers
+    /// escalate faster (1.20x) while expensive ones grow slower (1.08x).
     pub fn cost(&self) -> f64 {
-        self.kind.base_cost() * 1.15_f64.powi(self.count as i32)
+        self.kind.base_cost() * self.kind.cost_growth_rate().powi(self.count as i32)
     }
 
     /// Base CPS from this producer type (without synergy).
@@ -249,6 +279,10 @@ pub struct Upgrade {
     pub effect: UpgradeEffect,
     /// Unlock condition: requires this producer to have >= count.
     pub unlock_condition: Option<(ProducerKind, u32)>,
+    /// Exclusive group: only ONE upgrade per group can be purchased.
+    /// `None` = no exclusivity (can always buy).
+    /// `Some(n)` = buying this locks out all other upgrades in group `n`.
+    pub exclusive_group: Option<u8>,
 }
 
 /// Golden cookie bonus effect types.
@@ -577,6 +611,16 @@ pub struct ResearchNode {
 // ═══════════════════════════════════════════════════════
 
 /// Market phase — cycles periodically, affects CPS and costs.
+///
+/// Design: Market phases create "buy timing" decisions.
+/// - Normal: baseline, no pressure
+/// - Bull: CPS high but costs high — good for earning, bad for buying
+/// - Bear: CPS low but costs low — bad for earning, great for buying
+/// - Bubble: extreme Bull — massive CPS but costs are absurd
+/// - Crash: extreme Bear — CPS tanks but everything is dirt cheap (BUY NOW!)
+///
+/// The key insight: Crash + Bubble create dramatic "act NOW" moments.
+/// A crash is an opportunity disguised as disaster.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MarketPhase {
     /// 好景気: CPS↑, costs↑
@@ -585,22 +629,30 @@ pub enum MarketPhase {
     Bear,
     /// 通常
     Normal,
+    /// バブル: CPS大幅↑, costs大幅↑ — earn big but can't buy efficiently
+    Bubble,
+    /// 暴落: CPS大幅↓, costs大幅↓ — everything on sale, buy buy buy!
+    Crash,
 }
 
 impl MarketPhase {
     pub fn cps_multiplier(&self) -> f64 {
         match self {
-            MarketPhase::Bull => 1.3,
-            MarketPhase::Bear => 0.8,
+            MarketPhase::Bull => 1.5,
+            MarketPhase::Bear => 0.7,
             MarketPhase::Normal => 1.0,
+            MarketPhase::Bubble => 3.0,
+            MarketPhase::Crash => 0.3,
         }
     }
 
     pub fn cost_multiplier(&self) -> f64 {
         match self {
-            MarketPhase::Bull => 1.4,
-            MarketPhase::Bear => 0.6,
+            MarketPhase::Bull => 1.6,
+            MarketPhase::Bear => 0.5,
             MarketPhase::Normal => 1.0,
+            MarketPhase::Bubble => 3.0,
+            MarketPhase::Crash => 0.25,
         }
     }
 
@@ -609,6 +661,8 @@ impl MarketPhase {
             MarketPhase::Bull => "好景気",
             MarketPhase::Bear => "不景気",
             MarketPhase::Normal => "通常",
+            MarketPhase::Bubble => "バブル！",
+            MarketPhase::Crash => "暴落！",
         }
     }
 
@@ -617,6 +671,8 @@ impl MarketPhase {
             MarketPhase::Bull => "📈",
             MarketPhase::Bear => "📉",
             MarketPhase::Normal => "📊",
+            MarketPhase::Bubble => "🚀",
+            MarketPhase::Crash => "💥",
         }
     }
 }
@@ -932,6 +988,7 @@ impl CookieState {
                 purchased: false,
                 effect: UpgradeEffect::ClickPower(1.0),
                 unlock_condition: None,
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Cursor x2".into(),
@@ -943,6 +1000,7 @@ impl CookieState {
                     multiplier: 2.0,
                 },
                 unlock_condition: None,
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Grandma x2".into(),
@@ -954,6 +1012,7 @@ impl CookieState {
                     multiplier: 2.0,
                 },
                 unlock_condition: None,
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Farm x2".into(),
@@ -965,6 +1024,7 @@ impl CookieState {
                     multiplier: 2.0,
                 },
                 unlock_condition: None,
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Mine x2".into(),
@@ -976,6 +1036,7 @@ impl CookieState {
                     multiplier: 2.0,
                 },
                 unlock_condition: None,
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Factory x2".into(),
@@ -987,6 +1048,7 @@ impl CookieState {
                     multiplier: 2.0,
                 },
                 unlock_condition: None,
+                exclusive_group: None,
             },
             // === Phase 2: Synergy upgrades (unlocked by milestones) ===
             Upgrade {
@@ -1000,6 +1062,7 @@ impl CookieState {
                     bonus_per_unit: 0.01,
                 },
                 unlock_condition: Some((ProducerKind::Grandma, 5)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "農場の恵み".into(),
@@ -1012,6 +1075,7 @@ impl CookieState {
                     bonus_per_unit: 0.02,
                 },
                 unlock_condition: Some((ProducerKind::Farm, 5)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "鉱石の肥料".into(),
@@ -1024,6 +1088,7 @@ impl CookieState {
                     bonus_per_unit: 0.03,
                 },
                 unlock_condition: Some((ProducerKind::Mine, 5)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "工場の掘削機".into(),
@@ -1036,6 +1101,7 @@ impl CookieState {
                     bonus_per_unit: 0.05,
                 },
                 unlock_condition: Some((ProducerKind::Factory, 5)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "自動制御システム".into(),
@@ -1048,6 +1114,7 @@ impl CookieState {
                     bonus_per_unit: 0.001,
                 },
                 unlock_condition: Some((ProducerKind::Cursor, 25)),
+                exclusive_group: None,
             },
             // === Phase 3: Advanced multipliers (unlocked by count milestones) ===
             Upgrade {
@@ -1060,6 +1127,7 @@ impl CookieState {
                     multiplier: 3.0,
                 },
                 unlock_condition: Some((ProducerKind::Cursor, 25)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Grandma x3".into(),
@@ -1071,6 +1139,7 @@ impl CookieState {
                     multiplier: 3.0,
                 },
                 unlock_condition: Some((ProducerKind::Grandma, 25)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Farm x3".into(),
@@ -1082,6 +1151,7 @@ impl CookieState {
                     multiplier: 3.0,
                 },
                 unlock_condition: Some((ProducerKind::Farm, 25)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "シナジー倍化".into(),
@@ -1092,6 +1162,7 @@ impl CookieState {
                     target: ProducerKind::Factory,
                 },
                 unlock_condition: Some((ProducerKind::Factory, 10)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "超強化クリック".into(),
@@ -1100,6 +1171,7 @@ impl CookieState {
                 purchased: false,
                 effect: UpgradeEffect::ClickPower(5.0),
                 unlock_condition: Some((ProducerKind::Cursor, 50)),
+                exclusive_group: None,
             },
             // === Phase 3.5: Missing x3 multipliers for Mine/Factory ===
             Upgrade {
@@ -1112,6 +1184,7 @@ impl CookieState {
                     multiplier: 3.0,
                 },
                 unlock_condition: Some((ProducerKind::Mine, 15)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Factory x3".into(),
@@ -1123,6 +1196,7 @@ impl CookieState {
                     multiplier: 3.0,
                 },
                 unlock_condition: Some((ProducerKind::Factory, 10)),
+                exclusive_group: None,
             },
             // === Phase 4: x5 multipliers (通常強化・上位) ===
             Upgrade {
@@ -1135,6 +1209,7 @@ impl CookieState {
                     multiplier: 5.0,
                 },
                 unlock_condition: Some((ProducerKind::Cursor, 50)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Grandma x5".into(),
@@ -1146,6 +1221,7 @@ impl CookieState {
                     multiplier: 5.0,
                 },
                 unlock_condition: Some((ProducerKind::Grandma, 50)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Farm x5".into(),
@@ -1157,6 +1233,7 @@ impl CookieState {
                     multiplier: 5.0,
                 },
                 unlock_condition: Some((ProducerKind::Farm, 30)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Mine x5".into(),
@@ -1168,6 +1245,7 @@ impl CookieState {
                     multiplier: 5.0,
                 },
                 unlock_condition: Some((ProducerKind::Mine, 25)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Factory x5".into(),
@@ -1179,6 +1257,7 @@ impl CookieState {
                     multiplier: 5.0,
                 },
                 unlock_condition: Some((ProducerKind::Factory, 15)),
+                exclusive_group: None,
             },
             // === Phase 5: 大幅強化 — 台数ボーナス (CountScaling) ===
             // Each unit boosts all same-type units → quadratic growth
@@ -1192,6 +1271,7 @@ impl CookieState {
                     bonus_per_unit: 0.005,
                 },
                 unlock_condition: Some((ProducerKind::Cursor, 40)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Grandmaの結束".into(),
@@ -1203,6 +1283,7 @@ impl CookieState {
                     bonus_per_unit: 0.01,
                 },
                 unlock_condition: Some((ProducerKind::Grandma, 30)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Farmの結束".into(),
@@ -1214,6 +1295,7 @@ impl CookieState {
                     bonus_per_unit: 0.015,
                 },
                 unlock_condition: Some((ProducerKind::Farm, 20)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Mineの結束".into(),
@@ -1225,6 +1307,7 @@ impl CookieState {
                     bonus_per_unit: 0.02,
                 },
                 unlock_condition: Some((ProducerKind::Mine, 15)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Factoryの結束".into(),
@@ -1236,6 +1319,7 @@ impl CookieState {
                     bonus_per_unit: 0.03,
                 },
                 unlock_condition: Some((ProducerKind::Factory, 10)),
+                exclusive_group: None,
             },
             // === Phase 6: CPS連動ボーナス ===
             // Each unit adds a % of total CPS — rewards balanced growth
@@ -1249,6 +1333,7 @@ impl CookieState {
                     percentage: 0.0001,
                 },
                 unlock_condition: Some((ProducerKind::Cursor, 60)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "CPS吸収:Grandma".into(),
@@ -1260,6 +1345,7 @@ impl CookieState {
                     percentage: 0.0002,
                 },
                 unlock_condition: Some((ProducerKind::Grandma, 50)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "CPS吸収:Farm".into(),
@@ -1271,6 +1357,7 @@ impl CookieState {
                     percentage: 0.0005,
                 },
                 unlock_condition: Some((ProducerKind::Farm, 30)),
+                exclusive_group: None,
             },
             // === Phase 7: 超強化クリック上位 & シナジー倍化2 ===
             Upgrade {
@@ -1280,6 +1367,7 @@ impl CookieState {
                 purchased: false,
                 effect: UpgradeEffect::ClickPower(50.0),
                 unlock_condition: Some((ProducerKind::Cursor, 75)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "シナジー倍化II".into(),
@@ -1290,6 +1378,7 @@ impl CookieState {
                     target: ProducerKind::Factory,
                 },
                 unlock_condition: Some((ProducerKind::Factory, 15)),
+                exclusive_group: None,
             },
             // === Kitten upgrades (scale with milk from milestones) ===
             // === Phase 4.5: New producer base multipliers ===
@@ -1303,6 +1392,7 @@ impl CookieState {
                     multiplier: 2.0,
                 },
                 unlock_condition: Some((ProducerKind::Temple, 1)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "WzTower x2".into(),
@@ -1314,6 +1404,7 @@ impl CookieState {
                     multiplier: 2.0,
                 },
                 unlock_condition: Some((ProducerKind::WizardTower, 1)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Shipment x2".into(),
@@ -1325,6 +1416,7 @@ impl CookieState {
                     multiplier: 2.0,
                 },
                 unlock_condition: Some((ProducerKind::Shipment, 1)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Temple x3".into(),
@@ -1336,6 +1428,7 @@ impl CookieState {
                     multiplier: 3.0,
                 },
                 unlock_condition: Some((ProducerKind::Temple, 10)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "WzTower x3".into(),
@@ -1347,6 +1440,7 @@ impl CookieState {
                     multiplier: 3.0,
                 },
                 unlock_condition: Some((ProducerKind::WizardTower, 10)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Shipment x3".into(),
@@ -1358,6 +1452,7 @@ impl CookieState {
                     multiplier: 3.0,
                 },
                 unlock_condition: Some((ProducerKind::Shipment, 10)),
+                exclusive_group: None,
             },
             // === Alchemy Lab upgrades ===
             Upgrade {
@@ -1370,6 +1465,7 @@ impl CookieState {
                     multiplier: 2.0,
                 },
                 unlock_condition: Some((ProducerKind::AlchemyLab, 1)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Alchemy x3".into(),
@@ -1381,6 +1477,7 @@ impl CookieState {
                     multiplier: 3.0,
                 },
                 unlock_condition: Some((ProducerKind::AlchemyLab, 10)),
+                exclusive_group: None,
             },
             // === Portal upgrades ===
             Upgrade {
@@ -1393,6 +1490,7 @@ impl CookieState {
                     multiplier: 2.0,
                 },
                 unlock_condition: Some((ProducerKind::Portal, 1)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Portal x3".into(),
@@ -1404,6 +1502,7 @@ impl CookieState {
                     multiplier: 3.0,
                 },
                 unlock_condition: Some((ProducerKind::Portal, 10)),
+                exclusive_group: None,
             },
             // === Time Machine upgrades ===
             Upgrade {
@@ -1416,6 +1515,7 @@ impl CookieState {
                     multiplier: 2.0,
                 },
                 unlock_condition: Some((ProducerKind::TimeMachine, 1)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "TimeMchn x3".into(),
@@ -1427,6 +1527,7 @@ impl CookieState {
                     multiplier: 3.0,
                 },
                 unlock_condition: Some((ProducerKind::TimeMachine, 10)),
+                exclusive_group: None,
             },
             // === Antimatter Condenser upgrades ===
             Upgrade {
@@ -1439,6 +1540,7 @@ impl CookieState {
                     multiplier: 2.0,
                 },
                 unlock_condition: Some((ProducerKind::AntimatterCondenser, 1)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Antimtr x3".into(),
@@ -1450,6 +1552,7 @@ impl CookieState {
                     multiplier: 3.0,
                 },
                 unlock_condition: Some((ProducerKind::AntimatterCondenser, 10)),
+                exclusive_group: None,
             },
             // === New producer synergy upgrades ===
             Upgrade {
@@ -1463,6 +1566,7 @@ impl CookieState {
                     bonus_per_unit: 0.04,
                 },
                 unlock_condition: Some((ProducerKind::Temple, 5)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "魔法の加速".into(),
@@ -1475,6 +1579,7 @@ impl CookieState {
                     bonus_per_unit: 0.03,
                 },
                 unlock_condition: Some((ProducerKind::WizardTower, 5)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "星間輸送網".into(),
@@ -1487,6 +1592,7 @@ impl CookieState {
                     bonus_per_unit: 0.02,
                 },
                 unlock_condition: Some((ProducerKind::Shipment, 5)),
+                exclusive_group: None,
             },
             // === New producer count scaling ===
             Upgrade {
@@ -1499,6 +1605,7 @@ impl CookieState {
                     bonus_per_unit: 0.02,
                 },
                 unlock_condition: Some((ProducerKind::Temple, 15)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "WzTowerの結束".into(),
@@ -1510,6 +1617,7 @@ impl CookieState {
                     bonus_per_unit: 0.025,
                 },
                 unlock_condition: Some((ProducerKind::WizardTower, 15)),
+                exclusive_group: None,
             },
             Upgrade {
                 name: "Shipmentの結束".into(),
@@ -1521,6 +1629,7 @@ impl CookieState {
                     bonus_per_unit: 0.03,
                 },
                 unlock_condition: Some((ProducerKind::Shipment, 15)),
+                exclusive_group: None,
             },
             // === Kitten upgrades (scale with milk from milestones) ===
             Upgrade {
@@ -1530,6 +1639,7 @@ impl CookieState {
                 purchased: false,
                 effect: UpgradeEffect::KittenBoost { multiplier: 0.05 },
                 unlock_condition: None, // unlocked by milk check in logic
+                exclusive_group: None,
             },
             Upgrade {
                 name: "子猫の労働者".into(),
@@ -1538,6 +1648,7 @@ impl CookieState {
                 purchased: false,
                 effect: UpgradeEffect::KittenBoost { multiplier: 0.10 },
                 unlock_condition: None,
+                exclusive_group: None,
             },
             Upgrade {
                 name: "子猫のエンジニア".into(),
@@ -1546,6 +1657,7 @@ impl CookieState {
                 purchased: false,
                 effect: UpgradeEffect::KittenBoost { multiplier: 0.20 },
                 unlock_condition: None,
+                exclusive_group: None,
             },
             Upgrade {
                 name: "子猫のマネージャー".into(),
@@ -1554,6 +1666,108 @@ impl CookieState {
                 purchased: false,
                 effect: UpgradeEffect::KittenBoost { multiplier: 0.30 },
                 unlock_condition: None,
+                exclusive_group: None,
+            },
+            // ═══════════════════════════════════════════════════════
+            // Exclusive Choice Upgrades — pick ONE per group
+            // These create "which path?" dilemmas at key progression points
+            // ═══════════════════════════════════════════════════════
+
+            // --- Group 1: Grandma specialization (unlocks at 10 Grandma) ---
+            Upgrade {
+                name: "おばあちゃん特化".into(),
+                description: "Grandma×5倍！(他の低Tier無効)".into(),
+                cost: 5_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Grandma,
+                    multiplier: 5.0,
+                },
+                unlock_condition: Some((ProducerKind::Grandma, 10)),
+                exclusive_group: Some(1),
+            },
+            Upgrade {
+                name: "万能おばあちゃん".into(),
+                description: "全生産者×1.3倍(広く薄く)".into(),
+                cost: 5_000.0,
+                purchased: false,
+                effect: UpgradeEffect::CpsPercentBonus {
+                    target: ProducerKind::Grandma,
+                    percentage: 0.002,
+                },
+                unlock_condition: Some((ProducerKind::Grandma, 10)),
+                exclusive_group: Some(1),
+            },
+            // --- Group 2: Mine vs Farm focus (unlocks at 10 Mine) ---
+            Upgrade {
+                name: "深層採掘".into(),
+                description: "Mine×4倍＋コスト上昇緩和".into(),
+                cost: 500_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Mine,
+                    multiplier: 4.0,
+                },
+                unlock_condition: Some((ProducerKind::Mine, 10)),
+                exclusive_group: Some(2),
+            },
+            Upgrade {
+                name: "有機農法".into(),
+                description: "Farm×6倍(安い方を極める)".into(),
+                cost: 500_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Farm,
+                    multiplier: 6.0,
+                },
+                unlock_condition: Some((ProducerKind::Mine, 10)),
+                exclusive_group: Some(2),
+            },
+            // --- Group 3: Click vs Idle (unlocks at 100 total clicks) ---
+            Upgrade {
+                name: "クリック狂戦士".into(),
+                description: "クリック+10, CPS-20%".into(),
+                cost: 200_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ClickPower(10.0),
+                unlock_condition: Some((ProducerKind::Cursor, 30)),
+                exclusive_group: Some(3),
+            },
+            Upgrade {
+                name: "放置の達人".into(),
+                description: "CPS×1.5倍(クリック変化なし)".into(),
+                cost: 200_000.0,
+                purchased: false,
+                effect: UpgradeEffect::SynergyBoost {
+                    target: ProducerKind::Factory,
+                },
+                unlock_condition: Some((ProducerKind::Cursor, 30)),
+                exclusive_group: Some(3),
+            },
+            // --- Group 4: Late-game specialization (unlocks at 5 Temple) ---
+            Upgrade {
+                name: "神殿の集中".into(),
+                description: "Temple×8倍(Temple特化)".into(),
+                cost: 50_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Temple,
+                    multiplier: 8.0,
+                },
+                unlock_condition: Some((ProducerKind::Temple, 5)),
+                exclusive_group: Some(4),
+            },
+            Upgrade {
+                name: "産業革命".into(),
+                description: "Factory×8倍(Factory特化)".into(),
+                cost: 50_000_000.0,
+                purchased: false,
+                effect: UpgradeEffect::ProducerMultiplier {
+                    target: ProducerKind::Factory,
+                    multiplier: 8.0,
+                },
+                unlock_condition: Some((ProducerKind::Temple, 5)),
+                exclusive_group: Some(4),
             },
         ]
     }
@@ -2510,13 +2724,16 @@ impl CookieState {
             }
         }
 
+        // Step 7.5: Buff combo bonus — stacking different buff types is rewarded
+        let combo_mult = self.buff_combo_multiplier();
+
         // Step 8: Apply sugar boost
         let sugar_mult = self.sugar_boost_multiplier();
 
         // Step 9: Apply savings bonus (reward for holding cookies)
         let savings = self.savings_bonus();
 
-        after_market * multiplier * sugar_mult * savings
+        after_market * multiplier * combo_mult * sugar_mult * savings
     }
 
     /// Combo click multiplier: +2% per combo hit, max 3x at 100 combo.
@@ -2529,13 +2746,71 @@ impl CookieState {
         (0.03 + self.combo_count as f64 * 0.001).min(0.15)
     }
 
-    /// Savings bonus multiplier: holding more cookies gives a small CPS bonus.
-    /// +0.5% per order of magnitude of saved cookies.
+    /// Savings bonus multiplier: holding more cookies gives a significant CPS bonus.
+    ///
+    /// Design: creates a "spend vs save" dilemma. Buying producers/upgrades
+    /// costs cookies, which reduces this bonus. Players must weigh
+    /// "is this purchase worth losing X% savings bonus?"
+    ///
+    /// +3% per order of magnitude of saved cookies (was 0.5%, now much stronger).
+    /// At 1M cookies saved: +18%, at 1B: +27%, at 1T: +36%
     pub fn savings_bonus(&self) -> f64 {
         if self.cookies > 10.0 {
-            1.0 + self.cookies.log10() * 0.005
+            1.0 + self.cookies.log10() * 0.03
         } else {
             1.0
+        }
+    }
+
+    /// Calculate what the savings bonus would be after spending `amount` cookies.
+    /// Used by render to show "Savings bonus: X% → Y%" on purchase buttons.
+    pub fn savings_bonus_after_spend(&self, amount: f64) -> f64 {
+        let remaining = (self.cookies - amount).max(0.0);
+        if remaining > 10.0 {
+            1.0 + remaining.log10() * 0.03
+        } else {
+            1.0
+        }
+    }
+
+    /// Buff combo multiplier: having multiple DIFFERENT buff types active
+    /// simultaneously gives a stacking bonus. This rewards skilled play
+    /// (catching golden cookies while buffs are active).
+    ///
+    /// - 1 buff type: ×1.0 (no bonus)
+    /// - 2 different buff types: ×1.5
+    /// - 3 different buff types: ×3.0 (jackpot!)
+    /// - Market Bubble/Crash also count as a "buff type" for combo purposes
+    pub fn buff_combo_multiplier(&self) -> f64 {
+        let mut distinct_types = 0u8;
+        let mut has_production = false;
+        let mut has_click = false;
+        for buff in &self.active_buffs {
+            match &buff.effect {
+                GoldenEffect::ProductionFrenzy { .. } if !has_production => {
+                    has_production = true;
+                    distinct_types += 1;
+                }
+                GoldenEffect::ClickFrenzy { .. } if !has_click => {
+                    has_click = true;
+                    distinct_types += 1;
+                }
+                _ => {}
+            }
+        }
+        if self.active_sugar_boost.is_some() {
+            distinct_types += 1;
+        }
+        // Extreme market phases count as a combo element
+        if matches!(self.market_phase, MarketPhase::Bubble | MarketPhase::Crash) {
+            distinct_types += 1;
+        }
+
+        match distinct_types {
+            0 | 1 => 1.0,
+            2 => 1.5,
+            3 => 3.0,
+            _ => 5.0, // 4+ = legendary combo
         }
     }
 
@@ -2686,14 +2961,27 @@ mod tests {
 
     #[test]
     fn producer_cost_scales() {
+        // Cursor has cost_growth_rate 1.20
         let mut p = Producer::new(ProducerKind::Cursor);
         p.count = 1;
-        let expected = 15.0 * 1.15;
+        let expected = 15.0 * 1.20;
         assert!((p.cost() - expected).abs() < 0.01);
 
         p.count = 10;
-        let expected = 15.0 * 1.15_f64.powi(10);
+        let expected = 15.0 * 1.20_f64.powi(10);
         assert!((p.cost() - expected).abs() < 0.1);
+
+        // Factory has cost_growth_rate 1.15
+        let mut p2 = Producer::new(ProducerKind::Factory);
+        p2.count = 5;
+        let expected2 = ProducerKind::Factory.base_cost() * 1.15_f64.powi(5);
+        assert!((p2.cost() - expected2).abs() < 0.1);
+
+        // AntimatterCondenser has cost_growth_rate 1.08
+        let mut p3 = Producer::new(ProducerKind::AntimatterCondenser);
+        p3.count = 5;
+        let expected3 = ProducerKind::AntimatterCondenser.base_cost() * 1.08_f64.powi(5);
+        assert!((p3.cost() - expected3).abs() < 1.0);
     }
 
     #[test]
