@@ -1,7 +1,7 @@
 //! Rendering for the Café game.
 //!
 //! Story mode: novel-ADV style text display with speaker names and monologue.
-//! Business mode: café management UI with tabs and menu.
+//! Business mode: café management UI with stamina, missions, and menu.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -17,14 +17,118 @@ use crate::widgets::ClickableList;
 
 use super::actions::*;
 use super::scenario::PROLOGUE_SCENES;
+use super::social::{self, STAMINA_MAX};
 use super::state::{CafeState, GamePhase};
 
 /// Main render dispatcher.
 pub fn render(state: &CafeState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+    // Popups are drawn on top of any phase
+    if state.pending_login_reward.is_some() || state.pending_recovery_bonus.is_some() {
+        render_popup(state, f, area, click_state);
+        return;
+    }
+
     match state.phase {
         GamePhase::Story => render_story(state, f, area, click_state),
         GamePhase::Business => render_business(state, f, area, click_state),
         GamePhase::DayResult => render_day_result(state, f, area, click_state),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════
+// Popup Overlay (Login Bonus / Recovery Bonus)
+// ═══════════════════════════════════════════════════════════
+
+fn render_popup(
+    state: &CafeState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(3),   // spacer
+            Constraint::Length(9), // popup
+            Constraint::Min(3),   // spacer
+        ])
+        .split(area);
+
+    let popup_area = chunks[1];
+
+    let mut cl = ClickableList::new();
+
+    if let Some(reward) = state.pending_login_reward {
+        // Login bonus popup
+        let day = state.login_bonus.total_login_days;
+        cl.push(Line::from(""));
+        cl.push(Line::from(Span::styled(
+            "  🎁 ログインボーナス",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+        cl.push(Line::from(""));
+        cl.push(Line::from(Span::styled(
+            format!("  ログイン {day}日目"),
+            Style::default().fg(Color::White),
+        )));
+        cl.push(Line::from(Span::styled(
+            format!("  報酬: ¥{reward}"),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )));
+        cl.push(Line::from(""));
+        cl.push_clickable(
+            Line::from(Span::styled(
+                "  ▶ 受け取る",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            STORY_ADVANCE,
+        );
+    } else if let Some(bonus) = state.pending_recovery_bonus {
+        // Recovery bonus popup
+        let days = state.login_bonus.absence_days;
+        cl.push(Line::from(""));
+        cl.push(Line::from(Span::styled(
+            "  🏠 おかえりなさい！",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        cl.push(Line::from(""));
+        cl.push(Line::from(Span::styled(
+            format!("  {days}日ぶりのご来店です"),
+            Style::default().fg(Color::White),
+        )));
+        cl.push(Line::from(Span::styled(
+            format!("  復帰ボーナス: ¥{bonus}"),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )));
+        cl.push(Line::from(""));
+        cl.push_clickable(
+            Line::from(Span::styled(
+                "  ▶ 受け取る",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            STORY_ADVANCE,
+        );
+    }
+
+    let popup_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" お知らせ ");
+    {
+        let mut cs = click_state.borrow_mut();
+        cl.render(f, popup_area, popup_block, &mut cs, false, 0);
     }
 }
 
@@ -148,33 +252,25 @@ fn render_business(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let has_missions = !state.daily_missions.missions.is_empty();
+    let mission_height = if has_missions {
+        (state.daily_missions.missions.len() as u16) + 4 // header + missions + all-clear + border
+    } else {
+        0
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // header (day + money)
-            Constraint::Min(8),   // main content
+            Constraint::Length(5), // header (day + money + stamina)
+            Constraint::Min(6),   // menu
+            Constraint::Length(mission_height), // daily missions
             Constraint::Length(3), // action bar
         ])
         .split(area);
 
-    // ── Header ──
-    let header_text = format!(
-        " Day {} │ 所持金: ¥{} │ 累計客数: {}",
-        state.day, state.money, state.total_customers_served
-    );
-    let header = Paragraph::new(Line::from(Span::styled(
-        header_text,
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    )))
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow))
-            .title(" 月灯り "),
-    );
-    f.render_widget(header, chunks[0]);
+    // ── Header with stamina ──
+    render_business_header(state, f, chunks[0]);
 
     // ── Menu list ──
     let mut cl = ClickableList::new();
@@ -224,24 +320,160 @@ fn render_business(
         cl.render(f, chunks[1], menu_block, &mut cs, false, 0);
     }
 
-    // ── Action bar ──
+    // ── Daily missions ──
+    if has_missions {
+        render_daily_missions(state, f, chunks[2]);
+    }
+
+    // ── Action bar with stamina cost ──
+    let enough_stamina = state.stamina.current >= super::social::BUSINESS_DAY_COST;
+    let button_style = if enough_stamina {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let button_label = if enough_stamina {
+        format!(
+            " ▶ 営業開始！ (予算 -{} 消費)",
+            super::social::BUSINESS_DAY_COST
+        )
+    } else {
+        format!(
+            " × 予算不足… (必要: {} / 現在: {})",
+            super::social::BUSINESS_DAY_COST,
+            state.stamina.current
+        )
+    };
+
     let mut action_cl = ClickableList::new();
     action_cl.push_clickable(
-        Line::from(Span::styled(
-            " ▶ 営業開始！",
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        )),
+        Line::from(Span::styled(button_label, button_style)),
         SERVE_CONFIRM,
     );
     let action_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green));
+        .border_style(Style::default().fg(if enough_stamina {
+            Color::Green
+        } else {
+            Color::DarkGray
+        }));
     {
         let mut cs = click_state.borrow_mut();
-        action_cl.render(f, chunks[2], action_block, &mut cs, false, 0);
+        action_cl.render(f, chunks[2 + if has_missions { 1 } else { 0 }], action_block, &mut cs, false, 0);
     }
+}
+
+/// Render the business mode header with stamina gauge.
+fn render_business_header(state: &CafeState, f: &mut Frame, area: Rect) {
+    let now = social::now_ms();
+    let stamina = &state.stamina;
+
+    // Stamina gauge: █░ style
+    let gauge_width = 20u32;
+    let filled = (stamina.current as f64 / STAMINA_MAX as f64 * gauge_width as f64) as u32;
+    let empty = gauge_width - filled;
+    let gauge: String = "█".repeat(filled as usize) + &"░".repeat(empty as usize);
+
+    let stamina_color = if stamina.current >= 40 {
+        Color::Green
+    } else if stamina.current >= 20 {
+        Color::Yellow
+    } else {
+        Color::Red
+    };
+
+    // Recovery timer
+    let recovery_info = if stamina.current < STAMINA_MAX {
+        let secs = stamina.seconds_to_next(now);
+        let mins = stamina.minutes_to_full(now);
+        format!(" (次: {secs}秒 / 全回復: {mins}分)")
+    } else {
+        " (MAX)".to_string()
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!(" Day {} │ ", state.day),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("所持金: ¥{}", state.money),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                format!(" │ 累計客数: {}", state.total_customers_served),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(" 仕入予算: ", Style::default().fg(Color::Cyan)),
+            Span::styled(gauge, Style::default().fg(stamina_color)),
+            Span::styled(
+                format!(" {}/{}", stamina.current, STAMINA_MAX),
+                Style::default().fg(stamina_color),
+            ),
+            Span::styled(recovery_info, Style::default().fg(Color::DarkGray)),
+        ]),
+    ];
+
+    let header = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(" 月灯り "),
+    );
+    f.render_widget(header, area);
+}
+
+/// Render daily mission progress.
+fn render_daily_missions(state: &CafeState, f: &mut Frame, area: Rect) {
+    let missions = &state.daily_missions;
+    let mut lines: Vec<Line> = Vec::new();
+
+    for m in &missions.missions {
+        let check = if m.completed { "✓" } else { " " };
+        let progress_str = format!("{}/{}", m.progress, m.target);
+        let style = if m.completed {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let reward_style = if m.completed {
+            Style::default().fg(Color::DarkGray)
+        } else {
+            Style::default().fg(Color::Green)
+        };
+
+        lines.push(Line::from(vec![
+            Span::styled(format!(" [{check}] "), Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{} ", m.name), style),
+            Span::styled(progress_str, Style::default().fg(Color::Cyan)),
+            Span::styled(format!("  ¥{}", m.reward_money), reward_style),
+        ]));
+    }
+
+    // All-clear bonus
+    if missions.all_complete() && !missions.all_clear_claimed {
+        lines.push(Line::from(Span::styled(
+            " ★ 全ミッション達成！ボーナス ¥500",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(" デイリーミッション ");
+
+    let paragraph = Paragraph::new(lines).block(block);
+    f.render_widget(paragraph, area);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -300,6 +532,8 @@ fn render_day_result(
     }
 
     cl.push(Line::from(""));
+
+    // Revenue summary
     cl.push(Line::from(Span::styled(
         format!(
             " 売上: ¥{} │ 経費: ¥{} │ 利益: ¥{}",
@@ -310,6 +544,12 @@ fn render_day_result(
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
+    )));
+
+    // Stamina remaining
+    cl.push(Line::from(Span::styled(
+        format!(" 残り予算: {}/{}", state.stamina.current, STAMINA_MAX),
+        Style::default().fg(Color::Cyan),
     )));
 
     let result_block = Block::default()

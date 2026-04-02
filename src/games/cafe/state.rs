@@ -1,5 +1,7 @@
 //! Pure data structures for the Café game.
 
+use super::social::{DailyMissionState, LoginBonusState, StaminaState};
+
 /// Which phase the game is currently in.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GamePhase {
@@ -68,8 +70,18 @@ pub struct CafeState {
     pub today_visits: Vec<CustomerVisit>,
     pub total_customers_served: u32,
 
+    // ── Social game systems ─────────────────────────────
+    pub stamina: StaminaState,
+    pub daily_missions: DailyMissionState,
+    pub login_bonus: LoginBonusState,
+    /// Pending login bonus popup (shown once on game start).
+    pub pending_login_reward: Option<i64>,
+    /// Pending recovery bonus (shown once after absence).
+    pub pending_recovery_bonus: Option<i64>,
+    /// Total business runs today (for mission tracking).
+    pub today_business_runs: u32,
+
     // ── UI state ───────────────────────────────────────
-    // Phase 2+: pub active_tab: u8,
     pub selected_menu_item: usize,
 }
 
@@ -104,6 +116,12 @@ impl CafeState {
             ],
             today_visits: Vec::new(),
             total_customers_served: 0,
+            stamina: StaminaState::default(),
+            daily_missions: DailyMissionState::default(),
+            login_bonus: LoginBonusState::default(),
+            pending_login_reward: None,
+            pending_recovery_bonus: None,
+            today_business_runs: 0,
             selected_menu_item: 0,
         }
     }
