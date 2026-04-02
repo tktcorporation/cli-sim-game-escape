@@ -1,5 +1,6 @@
 //! Game trait and game selection logic.
 
+pub mod cafe;
 pub mod career;
 pub mod cookie;
 pub mod factory;
@@ -32,6 +33,7 @@ pub enum GameChoice {
     Factory,
     Career,
     Rpg,
+    Cafe,
 }
 
 /// Top-level application state.
@@ -56,5 +58,6 @@ pub fn create_game(choice: &GameChoice) -> Box<dyn Game> {
         GameChoice::Factory => Box::new(factory::FactoryGame::new()),
         GameChoice::Career => Box::new(career::CareerGame::new()),
         GameChoice::Rpg => Box::new(rpg::RpgGame::new()),
+        GameChoice::Cafe => Box::new(cafe::CafeGame::new()),
     }
 }

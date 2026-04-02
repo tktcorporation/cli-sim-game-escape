@@ -23,7 +23,8 @@ pub const MENU_SELECT_COOKIE: u16 = 1;
 pub const MENU_SELECT_FACTORY: u16 = 2;
 pub const MENU_SELECT_CAREER: u16 = 3;
 pub const MENU_SELECT_RPG: u16 = 4;
-pub const MENU_SELECT_SETTINGS: u16 = 5;
+pub const MENU_SELECT_CAFE: u16 = 5;
+pub const MENU_SELECT_SETTINGS: u16 = 6;
 pub const BACK_TO_MENU: u16 = 65535;
 
 // ── Settings action IDs ─────────────────────────────────────────
@@ -140,6 +141,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 InputEvent::Key('4') | InputEvent::Click(MENU_SELECT_RPG) => {
                     Some(GameChoice::Rpg)
                 }
+                InputEvent::Key('5') | InputEvent::Click(MENU_SELECT_CAFE) => {
+                    Some(GameChoice::Cafe)
+                }
                 _ => None,
             };
             if let Some(choice) = choice {
@@ -147,7 +151,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 *state = AppState::Playing { game };
             } else if matches!(
                 event,
-                InputEvent::Key('5') | InputEvent::Click(MENU_SELECT_SETTINGS)
+                InputEvent::Key('6') | InputEvent::Click(MENU_SELECT_SETTINGS)
             ) {
                 *state = AppState::Settings {
                     confirm_reset: None,
@@ -422,6 +426,21 @@ fn render_menu(
     cl.push(Line::from(""));
     cl.push_clickable(Line::from(vec![
         Span::styled(
+            " ▶ ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("廃墟カフェ復興記", Style::default().fg(Color::White)),
+    ]), MENU_SELECT_CAFE);
+    cl.push_clickable(Line::from(Span::styled(
+        "    廃墟カフェを復興するシナリオ経営SLG",
+        Style::default().fg(Color::DarkGray),
+    )), MENU_SELECT_CAFE);
+
+    cl.push(Line::from(""));
+    cl.push_clickable(Line::from(vec![
+        Span::styled(
             " ⚙ ",
             Style::default()
                 .fg(Color::Gray)
@@ -588,6 +607,7 @@ fn render_confirm_dialog(
     let game_name = match game {
         GameChoice::Cookie => "Cookie Factory",
         GameChoice::Career => "Career Simulator",
+        GameChoice::Cafe => "廃墟カフェ復興記",
         _ => "Unknown",
     };
 
