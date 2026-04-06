@@ -77,6 +77,7 @@ impl StaminaState {
     }
 
     /// Seconds until next stamina point recovery.
+    #[allow(dead_code)] // Used in render for recovery timer display
     pub fn seconds_to_next(&self, now_ms: f64) -> u32 {
         if self.current >= STAMINA_MAX {
             return 0;
@@ -308,6 +309,34 @@ impl LoginBonusState {
             0
         }
     }
+}
+
+// ── AP (Action Points) Daily Reset ───────────────────────
+
+/// AP daily reset state.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApResetState {
+    /// JST day number of last AP reset.
+    pub last_reset_day: u32,
+}
+
+impl ApResetState {
+    /// Check if AP needs resetting for a new day. Returns true if reset.
+    pub fn check_reset(&mut self, now_ms: f64) -> bool {
+        let current_day = jst_day_number(now_ms);
+        if current_day != self.last_reset_day {
+            self.last_reset_day = current_day;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+/// Get current JST day number (public for card daily reset).
+pub fn current_jst_day(now_ms: f64) -> u32 {
+    jst_day_number(now_ms)
 }
 
 // ── Time Utilities ────────────────────────────────────────

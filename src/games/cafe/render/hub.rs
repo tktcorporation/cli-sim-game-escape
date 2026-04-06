@@ -1,0 +1,274 @@
+//! Hub (main screen with tabs) rendering.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use ratzilla::ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratzilla::ratatui::style::{Color, Modifier, Style};
+use ratzilla::ratatui::text::{Line, Span};
+use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
+use ratzilla::ratatui::Frame;
+
+use crate::input::ClickState;
+use crate::widgets::ClickableList;
+
+use super::super::actions::*;
+use super::super::affinity::CharacterId;
+use super::super::cards::{card_def, GACHA_SINGLE_COST, GACHA_TEN_COST};
+use super::super::scenario;
+use super::super::social::{self, STAMINA_MAX};
+use super::super::state::{CafeState, HubTab, AP_MAX};
+
+pub(super) fn render_hub(
+    state: &CafeState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // header
+            Constraint::Length(2), // tab bar
+            Constraint::Min(8),   // content
+        ])
+        .split(area);
+
+    // Header
+    let header = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled(format!(" Rank {} ", state.player_rank.level), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+            Span::styled(format!("│ ¥{} ", state.money), Style::default().fg(Color::White)),
+            Span::styled(format!("│ 💎{} ", state.card_state.gems), Style::default().fg(Color::Cyan)),
+            Span::styled(format!("│ AP {}/{}", state.ap_current, AP_MAX), Style::default().fg(Color::Green)),
+        ]),
+    ]).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)).title(" 月灯り "));
+    f.render_widget(header, chunks[0]);
+
+    // Tab bar
+    let tabs = [
+        (HubTab::Home, "ホーム", TAB_HOME),
+        (HubTab::Characters, "常連", TAB_CHARACTERS),
+        (HubTab::Cards, "カード", TAB_CARDS),
+        (HubTab::Missions, "任務", TAB_MISSIONS),
+    ];
+    let mut tab_cl = ClickableList::new();
+    let mut spans = Vec::new();
+    for (tab, name, _id) in &tabs {
+        let style = if state.hub_tab == *tab {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        spans.push(Span::styled(format!(" [{name}] "), style));
+    }
+    tab_cl.push(Line::from(spans));
+    // Register each tab as clickable on separate lines for simplicity
+    for (tab, name, id) in &tabs {
+        if state.hub_tab != *tab {
+            tab_cl.push_clickable(Line::from(""), *id); // invisible target
+            let _ = name; // used above
+        }
+    }
+    {
+        let mut cs = click_state.borrow_mut();
+        // Register tab click targets manually
+        let tab_w = area.width / 4;
+        for (i, (_tab, _name, id)) in tabs.iter().enumerate() {
+            let tab_rect = Rect::new(area.x + (i as u16) * tab_w, chunks[1].y, tab_w, 2);
+            #[allow(clippy::disallowed_methods)] // tab bar click targets
+            cs.add_click_target(tab_rect, *id);
+        }
+    }
+    let tab_block = Block::default().borders(Borders::BOTTOM);
+    {
+        let mut tab_list = ClickableList::new();
+        let mut tspans = Vec::new();
+        for (tab, name, _) in &tabs {
+            let style = if state.hub_tab == *tab {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            tspans.push(Span::styled(format!(" [{name}] "), style));
+        }
+        tab_list.push(Line::from(tspans));
+        let mut cs = click_state.borrow_mut();
+        tab_list.render(f, chunks[1], tab_block, &mut cs, false, 0);
+    }
+
+    // Content area
+    match state.hub_tab {
+        HubTab::Home => render_hub_home(state, f, chunks[2], click_state),
+        HubTab::Characters => render_hub_characters(state, f, chunks[2], click_state),
+        HubTab::Cards => render_hub_cards(state, f, chunks[2], click_state),
+        HubTab::Missions => render_hub_missions(state, f, chunks[2], click_state),
+    }
+}
+
+fn render_hub_home(state: &CafeState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+    let mut cl = ClickableList::new();
+    cl.push(Line::from(""));
+    cl.push(Line::from(Span::styled(format!(" Day {} │ Rank {} (EXP {}/{})", state.day, state.player_rank.level, state.player_rank.exp, state.player_rank.exp_to_next()), Style::default().fg(Color::White))));
+    cl.push(Line::from(Span::styled(format!(" 所持金 ¥{} │ 💎{} │ 🪙{}", state.money, state.card_state.gems, state.card_state.coins), Style::default().fg(Color::Cyan))));
+    cl.push(Line::from(""));
+
+    // Story button
+    let next_ch = super::super::logic::next_available_chapter(state);
+    if let Some(ch) = next_ch {
+        let title = scenario::chapter_title(ch);
+        cl.push_clickable(Line::from(Span::styled(format!(" ▶ Ch.{ch} 「{title}」を読む"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))), HUB_STORY);
+    } else {
+        cl.push(Line::from(Span::styled(" (次のチャプターはまだ解放されていません)", Style::default().fg(Color::DarkGray))));
+    }
+    cl.push(Line::from(""));
+
+    // Character interaction
+    cl.push_clickable(Line::from(Span::styled(" ▶ 常連客と交流する", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))), CHARACTER_BASE);
+    cl.push(Line::from(""));
+
+    // Business
+    let enough = state.stamina.current >= super::super::social::BUSINESS_DAY_COST;
+    if enough {
+        cl.push_clickable(Line::from(Span::styled(format!(" ▶ 営業する (予算-{})", super::super::social::BUSINESS_DAY_COST), Style::default().fg(Color::Green))), HUB_BUSINESS);
+    } else {
+        cl.push(Line::from(Span::styled(format!(" × 予算不足 ({}/{})", state.stamina.current, super::super::social::BUSINESS_DAY_COST), Style::default().fg(Color::DarkGray))));
+    }
+    cl.push(Line::from(""));
+
+    // Memories
+    if !state.memories.is_empty() {
+        cl.push(Line::from(Span::styled(format!(" 思い出: {}個獲得", state.memories.len()), Style::default().fg(Color::Magenta))));
+    }
+
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Green)).title(" ホーム ");
+    {
+        let mut cs = click_state.borrow_mut();
+        cl.render(f, area, block, &mut cs, false, 0);
+    }
+}
+
+fn render_hub_characters(state: &CafeState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+    let mut cl = ClickableList::new();
+    cl.push(Line::from(""));
+
+    let unlocked = state.unlocked_characters();
+    for (i, ch) in unlocked.iter().enumerate() {
+        let aff = state.affinities.get(ch);
+        let (level, stars) = aff.map(|a| (a.axes.level(), a.axes.star_rank())).unwrap_or((0, 1));
+        let star_str = "★".repeat(stars as usize);
+        cl.push_clickable(Line::from(vec![
+            Span::styled(format!(" [{}] ", i + 1), Style::default().fg(Color::Yellow)),
+            Span::styled(ch.name(), Style::default().fg(Color::White)),
+            Span::styled(format!("  {star_str} Lv.{level}"), Style::default().fg(Color::Cyan)),
+        ]), CHARACTER_BASE + i as u16);
+        if let Some(a) = aff {
+            cl.push(Line::from(Span::styled(format!("     信頼:{} 理解:{} 共感:{}", a.axes.trust, a.axes.understanding, a.axes.empathy), Style::default().fg(Color::DarkGray))));
+        }
+    }
+
+    for ch in CharacterId::ALL {
+        if !unlocked.contains(ch) {
+            cl.push(Line::from(Span::styled(format!("   ??? (Ch.{}で解放)", ch.unlock_chapter()), Style::default().fg(Color::DarkGray))));
+        }
+    }
+
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Cyan)).title(" 常連客 ");
+    {
+        let mut cs = click_state.borrow_mut();
+        cl.render(f, area, block, &mut cs, false, 0);
+    }
+}
+
+pub(super) fn render_hub_cards(state: &CafeState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+    let mut cl = ClickableList::new();
+    cl.push(Line::from(Span::styled(format!(" 💎{} │ 🪙{}", state.card_state.gems, state.card_state.coins), Style::default().fg(Color::Cyan))));
+    cl.push(Line::from(""));
+
+    // Equipped card
+    if let Some(idx) = state.card_state.equipped_card {
+        if let Some(owned) = state.card_state.cards.get(idx) {
+            if let Some(def) = card_def(owned.card_id) {
+                cl.push(Line::from(Span::styled(format!(" 装備中: {} {} Lv.{} (x{:.2})", def.rarity.label(), def.name, owned.level, owned.multiplier()), Style::default().fg(Color::Yellow))));
+            }
+        }
+    } else {
+        cl.push(Line::from(Span::styled(" 装備中: なし", Style::default().fg(Color::DarkGray))));
+    }
+    cl.push(Line::from(""));
+
+    // Gacha buttons
+    if !state.card_state.daily_draw_used {
+        cl.push_clickable(Line::from(Span::styled(" ▶ デイリードロー (無料)", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))), CARD_DAILY_DRAW);
+    } else {
+        cl.push(Line::from(Span::styled(" ✓ デイリードロー済み", Style::default().fg(Color::DarkGray))));
+    }
+    if state.card_state.gems >= GACHA_SINGLE_COST {
+        cl.push_clickable(Line::from(Span::styled(format!(" ▶ ガチャ単発 (💎{})", GACHA_SINGLE_COST), Style::default().fg(Color::Cyan))), CARD_GACHA_SINGLE);
+    }
+    if state.card_state.gems >= GACHA_TEN_COST {
+        cl.push_clickable(Line::from(Span::styled(format!(" ▶ ガチャ10連 (💎{})", GACHA_TEN_COST), Style::default().fg(Color::Cyan))), CARD_GACHA_TEN);
+    }
+    cl.push(Line::from(""));
+
+    // Card list
+    for (i, owned) in state.card_state.cards.iter().enumerate().take(15) {
+        if let Some(def) = card_def(owned.card_id) {
+            let equipped = state.card_state.equipped_card == Some(i);
+            let marker = if equipped { "▶" } else { " " };
+            cl.push_clickable(Line::from(vec![
+                Span::styled(format!(" {marker} "), Style::default().fg(Color::Yellow)),
+                Span::styled(format!("{} ", def.rarity.label()), Style::default().fg(Color::Magenta)),
+                Span::styled(def.name, Style::default().fg(Color::White)),
+                Span::styled(format!(" Lv.{}", owned.level), Style::default().fg(Color::Cyan)),
+            ]), CARD_EQUIP_BASE + i as u16);
+        }
+    }
+
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Magenta)).title(" カード ");
+    {
+        let mut cs = click_state.borrow_mut();
+        cl.render(f, area, block, &mut cs, false, 0);
+    }
+}
+
+fn render_hub_missions(state: &CafeState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+    let mut cl = ClickableList::new();
+    let now = social::now_ms();
+    let stamina = &state.stamina;
+
+    // Stamina gauge
+    let gauge_w = 20u32;
+    let filled = (stamina.current as f64 / STAMINA_MAX as f64 * gauge_w as f64) as u32;
+    let empty = gauge_w - filled;
+    let gauge: String = "\u{2588}".repeat(filled as usize) + &"\u{2591}".repeat(empty as usize);
+    let stam_color = if stamina.current >= 40 { Color::Green } else if stamina.current >= 20 { Color::Yellow } else { Color::Red };
+    let recovery = if stamina.current < STAMINA_MAX { format!(" (全回復: {}分)", stamina.minutes_to_full(now)) } else { " (MAX)".into() };
+    cl.push(Line::from(vec![
+        Span::styled(" 予算: ", Style::default().fg(Color::Cyan)),
+        Span::styled(gauge, Style::default().fg(stam_color)),
+        Span::styled(format!(" {}/{}{}", stamina.current, STAMINA_MAX, recovery), Style::default().fg(stam_color)),
+    ]));
+    cl.push(Line::from(""));
+
+    // Missions
+    cl.push(Line::from(Span::styled(" デイリーミッション", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+    for m in &state.daily_missions.missions {
+        let check = if m.completed { "✓" } else { " " };
+        let style = if m.completed { Style::default().fg(Color::DarkGray) } else { Style::default().fg(Color::White) };
+        cl.push(Line::from(vec![
+            Span::styled(format!(" [{check}] "), Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{} {}/{}", m.name, m.progress, m.target), style),
+            Span::styled(format!("  ¥{}", m.reward_money), if m.completed { Style::default().fg(Color::DarkGray) } else { Style::default().fg(Color::Green) }),
+        ]));
+    }
+    if state.daily_missions.all_complete() && !state.daily_missions.all_clear_claimed {
+        cl.push(Line::from(Span::styled(" ★ 全達成ボーナス ¥500", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+    }
+
+    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Magenta)).title(" 任務・ステータス ");
+    {
+        let mut cs = click_state.borrow_mut();
+        cl.render(f, area, block, &mut cs, false, 0);
+    }
+}
