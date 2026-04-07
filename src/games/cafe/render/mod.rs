@@ -4,6 +4,7 @@ mod day_result;
 mod gacha;
 mod hub;
 mod interaction;
+mod produce;
 mod story;
 
 use std::cell::RefCell;
@@ -36,16 +37,16 @@ pub fn render(state: &CafeState, f: &mut Frame, area: Rect, click_state: &Rc<Ref
         GamePhase::ActionResult { target, action, trust_gain, understanding_gain, empathy_gain } => {
             interaction::render_action_result(f, area, click_state, *target, *action, *trust_gain, *understanding_gain, *empathy_gain);
         }
+        GamePhase::CharacterDetail { target } => interaction::render_character_detail(state, f, area, click_state, *target),
         GamePhase::CardScreen => gacha::render_card_screen(state, f, area, click_state),
         GamePhase::GachaResult { card_ids } => gacha::render_gacha_result(f, area, click_state, card_ids),
-        GamePhase::CharacterDetail { target } => interaction::render_character_detail(state, f, area, click_state, *target),
+        GamePhase::ProduceCharSelect => produce::render_produce_char_select(state, f, area, click_state),
+        GamePhase::ProduceTraining => produce::render_produce_training(state, f, area, click_state),
+        GamePhase::ProduceTurnResult { training } => produce::render_produce_turn_result(state, f, area, click_state, *training),
+        GamePhase::ProduceResult => produce::render_produce_result(state, f, area, click_state),
         GamePhase::DayResult => day_result::render_day_result(state, f, area, click_state),
     }
 }
-
-// ═══════════════════════════════════════════════════════════
-// Popup Overlay (Login Bonus / Recovery Bonus)
-// ═══════════════════════════════════════════════════════════
 
 fn render_popup(
     state: &CafeState,
@@ -56,25 +57,22 @@ fn render_popup(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(3),   // spacer
-            Constraint::Length(9), // popup
-            Constraint::Min(3),   // spacer
+            Constraint::Min(3),
+            Constraint::Length(9),
+            Constraint::Min(3),
         ])
         .split(area);
 
     let popup_area = chunks[1];
-
     let mut cl = ClickableList::new();
 
     if let Some(reward) = state.pending_login_reward {
-        // Login bonus popup
         let day = state.login_bonus.total_login_days;
+        let gems = state.pending_login_gems.unwrap_or(0);
         cl.push(Line::from(""));
         cl.push(Line::from(Span::styled(
-            "  🎁 ログインボーナス",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            "  ログインボーナス",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         )));
         cl.push(Line::from(""));
         cl.push(Line::from(Span::styled(
@@ -82,30 +80,23 @@ fn render_popup(
             Style::default().fg(Color::White),
         )));
         cl.push(Line::from(Span::styled(
-            format!("  報酬: ¥{reward}"),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            format!("  報酬: ¥{reward} + 💎{gems}"),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         )));
         cl.push(Line::from(""));
         cl.push_clickable(
             Line::from(Span::styled(
                 "  ▶ 受け取る",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             )),
             STORY_ADVANCE,
         );
     } else if let Some(bonus) = state.pending_recovery_bonus {
-        // Recovery bonus popup
         let days = state.login_bonus.absence_days;
         cl.push(Line::from(""));
         cl.push(Line::from(Span::styled(
-            "  🏠 おかえりなさい！",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            "  おかえりなさい！",
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         )));
         cl.push(Line::from(""));
         cl.push(Line::from(Span::styled(
@@ -114,17 +105,13 @@ fn render_popup(
         )));
         cl.push(Line::from(Span::styled(
             format!("  復帰ボーナス: ¥{bonus}"),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         )));
         cl.push(Line::from(""));
         cl.push_clickable(
             Line::from(Span::styled(
                 "  ▶ 受け取る",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             )),
             STORY_ADVANCE,
         );

@@ -13,7 +13,7 @@ use crate::input::ClickState;
 use crate::widgets::ClickableList;
 
 use super::super::actions::*;
-use super::super::cards::{self, card_def};
+use super::super::gacha::{self, card_def};
 use super::super::state::CafeState;
 
 pub(super) fn render_card_screen(state: &CafeState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
@@ -29,9 +29,9 @@ pub(super) fn render_gacha_result(f: &mut Frame, area: Rect, click_state: &Rc<Re
     for &id in card_ids {
         if let Some(def) = card_def(id) {
             let color = match def.rarity {
-                cards::Rarity::Star3 => Color::Yellow,
-                cards::Rarity::Star2 => Color::Cyan,
-                cards::Rarity::Star1 => Color::White,
+                gacha::Rarity::Star3 => Color::Yellow,
+                gacha::Rarity::Star2 => Color::Cyan,
+                gacha::Rarity::Star1 => Color::White,
             };
             cl.push(Line::from(vec![
                 Span::styled(format!(" {} ", def.rarity.label()), Style::default().fg(color).add_modifier(Modifier::BOLD)),

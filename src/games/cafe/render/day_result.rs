@@ -13,7 +13,7 @@ use crate::input::ClickState;
 use crate::widgets::ClickableList;
 
 use super::super::actions::*;
-use super::super::social::STAMINA_MAX;
+use super::super::social_sys::STAMINA_MAX;
 use super::super::state::CafeState;
 
 pub(super) fn render_day_result(

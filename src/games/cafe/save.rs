@@ -1,6 +1,7 @@
 //! Save/load for the Café game using localStorage.
 //!
-//! Version 2: Adds affinity, cards, player rank, memories, AP.
+//! Version 3: Adds character data (levels/stars/shards), weekly missions,
+//! produce completions, login gems.
 
 #[cfg(target_arch = "wasm32")]
 use serde::{Deserialize, Serialize};
@@ -9,11 +10,13 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[cfg(target_arch = "wasm32")]
-use super::affinity::{CharacterAffinity, CharacterId};
+use super::characters::affinity::CharacterAffinity;
 #[cfg(target_arch = "wasm32")]
-use super::cards::CardState;
+use super::characters::{CharacterData, CharacterId};
 #[cfg(target_arch = "wasm32")]
-use super::social::{DailyMissionState, LoginBonusState, StaminaState};
+use super::gacha::CardState;
+#[cfg(target_arch = "wasm32")]
+use super::social_sys::{DailyMissionState, LoginBonusState, StaminaState, WeeklyMissionState};
 #[cfg(target_arch = "wasm32")]
 use super::state::{CafeState, GamePhase, Memory, PlayerRank};
 #[cfg(not(target_arch = "wasm32"))]
@@ -22,7 +25,7 @@ use super::state::CafeState;
 #[cfg(target_arch = "wasm32")]
 const STORAGE_KEY: &str = "cafe_save";
 #[cfg(target_arch = "wasm32")]
-const SAVE_VERSION: u32 = 2;
+const SAVE_VERSION: u32 = 3;
 #[cfg(target_arch = "wasm32")]
 const MIN_COMPATIBLE_VERSION: u32 = 1;
 
@@ -53,7 +56,8 @@ struct GameSave {
     // Player rank
     player_rank: PlayerRank,
 
-    // Affinities
+    // Characters (v3: separate data + affinity)
+    character_data: HashMap<CharacterId, CharacterData>,
     affinities: HashMap<CharacterId, CharacterAffinity>,
 
     // Cards
@@ -66,10 +70,13 @@ struct GameSave {
     // Social systems
     stamina: StaminaState,
     daily_missions: DailyMissionState,
+    weekly_missions: WeeklyMissionState,
     login_bonus: LoginBonusState,
+
+    // Produce
+    total_produce_completions: u32,
 }
 
-/// Extract saveable data from game state.
 #[cfg(target_arch = "wasm32")]
 fn extract_save(state: &CafeState) -> SaveData {
     SaveData {
@@ -85,18 +92,20 @@ fn extract_save(state: &CafeState) -> SaveData {
             ap_current: state.ap_current,
             actions_today: state.actions_today,
             player_rank: state.player_rank.clone(),
+            character_data: state.character_data.clone(),
             affinities: state.affinities.clone(),
             card_state: state.card_state.clone(),
             memories: state.memories.clone(),
             equipped_memories: state.equipped_memories.clone(),
             stamina: state.stamina.clone(),
             daily_missions: state.daily_missions.clone(),
+            weekly_missions: state.weekly_missions.clone(),
             login_bonus: state.login_bonus.clone(),
+            total_produce_completions: state.total_produce_completions,
         },
     }
 }
 
-/// Apply saved data to game state.
 #[cfg(target_arch = "wasm32")]
 fn apply_save(state: &mut CafeState, save: GameSave) {
     state.chapters_completed = save.chapters_completed;
@@ -114,14 +123,19 @@ fn apply_save(state: &mut CafeState, save: GameSave) {
     state.equipped_memories = save.equipped_memories;
     state.stamina = save.stamina;
     state.daily_missions = save.daily_missions;
+    state.weekly_missions = save.weekly_missions;
     state.login_bonus = save.login_bonus;
+    state.total_produce_completions = save.total_produce_completions;
 
-    // Merge affinities (keep defaults for any missing characters)
+    // Merge character data (keep defaults for missing)
+    for (ch, data) in save.character_data {
+        state.character_data.insert(ch, data);
+    }
     for (ch, aff) in save.affinities {
         state.affinities.insert(ch, aff);
     }
 
-    // Set phase based on saved state
+    // Set phase
     if state.chapters_completed > 0 || state.day > 1 {
         state.phase = GamePhase::Hub;
     } else {
@@ -129,7 +143,6 @@ fn apply_save(state: &mut CafeState, save: GameSave) {
     }
 }
 
-/// Save game to localStorage.
 pub fn save_game(state: &CafeState) {
     #[cfg(target_arch = "wasm32")]
     {
@@ -147,7 +160,6 @@ pub fn save_game(state: &CafeState) {
     let _ = state;
 }
 
-/// Load game from localStorage.
 pub fn load_game(state: &mut CafeState) -> bool {
     #[cfg(target_arch = "wasm32")]
     {
@@ -174,7 +186,6 @@ pub fn load_game(state: &mut CafeState) -> bool {
     }
 }
 
-/// Delete save data.
 #[allow(dead_code)]
 pub fn delete_save() {
     #[cfg(target_arch = "wasm32")]

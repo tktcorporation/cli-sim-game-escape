@@ -1,21 +1,23 @@
 //! 廃墟カフェ復興記 — Ruined Café Revival
 //!
-//! A story-driven café management game with social game systems:
-//! - AP action system (5 AP/day, 4 action types)
-//! - Multi-axis character affinity (Trust/Understanding/Empathy)
-//! - Card collection & gacha
-//! - Player rank & story progression
-//! - Memory equipment system
+//! BA/学マス風ソシャゲシステム:
+//! - キャラクター育成 (レベル/★昇格/スキル)
+//! - 3軸親密度 (信頼/理解/共感)
+//! - ガチャ (天井/すり抜け/ピックアップ)
+//! - プロデュースモード (学マス風5ターン訓練)
+//! - デイリー/ウィークリーミッション
+//! - ログインボーナス/スタミナ
 
 mod actions;
-pub mod affinity;
-pub mod cards;
+pub mod characters;
+pub mod gacha;
 mod input_handler;
 mod logic;
+pub mod produce;
 mod render;
 pub mod save;
 mod scenario;
-pub mod social;
+pub mod social_sys;
 pub mod state;
 
 use std::cell::RefCell;
@@ -31,7 +33,6 @@ use state::CafeState;
 pub struct CafeGame {
     state: CafeState,
     initialized: bool,
-    /// Tick counter for periodic save (every ~10 seconds = 100 ticks).
     save_tick_counter: u32,
 }
 
@@ -57,16 +58,17 @@ impl super::Game for CafeGame {
     }
 
     fn tick(&mut self, delta_ticks: u32) {
-        let now = social::now_ms();
+        let now = social_sys::now_ms();
 
-        // First tick: process login, recover stamina, check daily reset
+        // First tick: process login, recover stamina, check resets
         if !self.initialized && now > 0.0 {
             self.initialized = true;
             self.state.stamina.recover(now);
 
-            // Login bonus
+            // Login bonus (now gives gems too)
             if let Some(reward) = self.state.login_bonus.process_login(now) {
                 self.state.pending_login_reward = Some(reward.money);
+                self.state.pending_login_gems = Some(reward.gems);
             }
             // Recovery bonus
             if self.state.login_bonus.has_recovery_bonus() {
@@ -76,10 +78,12 @@ impl super::Game for CafeGame {
             }
             // Daily mission reset
             self.state.daily_missions.check_reset(now);
+            // Weekly mission reset
+            self.state.weekly_missions.check_reset(now);
 
             // AP daily reset
-            let jst_day = social::current_jst_day(now);
-            let mut ap_reset = social::ApResetState {
+            let jst_day = social_sys::current_jst_day(now);
+            let mut ap_reset = social_sys::ApResetState {
                 last_reset_day: self.state.day,
             };
             if ap_reset.check_reset(now) {

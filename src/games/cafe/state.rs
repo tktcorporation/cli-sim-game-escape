@@ -1,36 +1,36 @@
 //! Pure data structures for the Café game.
 //!
-//! Revamped with social game systems inspired by adv-game-candy:
-//! - AP action system (5 AP/day)
-//! - Multi-axis affinity per character
-//! - Card collection & gacha
+//! BA/学マス style:
+//! - Character data with levels, stars, shards, skills
+//! - 3-axis affinity per character
+//! - Card collection & gacha with spark
 //! - Player rank
-//! - Memory (思い出) equipment
+//! - Produce mode state
+//! - Memory equipment
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::affinity::{ActionType, CharacterAffinity, CharacterId};
-use super::cards::CardState;
-use super::social::{DailyMissionState, LoginBonusState, StaminaState};
+use super::characters::affinity::CharacterAffinity;
+use super::characters::{ActionType, CharacterData, CharacterId};
+use super::gacha::CardState;
+use super::produce::{ProduceState, TrainingType};
+use super::social_sys::{DailyMissionState, LoginBonusState, StaminaState, WeeklyMissionState};
 
 // ── Game Phase ────────────────────────────────────────────
 
-/// Which phase/screen the game is currently in.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GamePhase {
-    /// Displaying story text (novel ADV mode).
+    /// Story text display (novel ADV).
     Story,
-    /// Main hub — choose actions, view status.
+    /// Main hub — tabs, actions.
     Hub,
     /// Selecting a character to interact with.
     CharacterSelect,
     /// Choosing an action for a character.
-    ActionSelect {
-        target: CharacterId,
-    },
-    /// Showing action result (affinity gains, etc.).
+    ActionSelect { target: CharacterId },
+    /// Showing action result.
     ActionResult {
         target: CharacterId,
         action: ActionType,
@@ -38,34 +38,33 @@ pub enum GamePhase {
         understanding_gain: u32,
         empathy_gain: u32,
     },
+    /// Character detail (level up, star promote, skills, affinity).
+    CharacterDetail { target: CharacterId },
     /// Card collection & gacha screen.
     CardScreen,
     /// Gacha result display.
-    GachaResult {
-        card_ids: Vec<u32>,
-    },
-    /// Character detail (affinity, episodes).
-    CharacterDetail {
-        target: CharacterId,
-    },
-    /// Showing daily results after a business day.
+    GachaResult { card_ids: Vec<u32> },
+    /// Produce: character select.
+    ProduceCharSelect,
+    /// Produce: training turn (choose training type).
+    ProduceTraining,
+    /// Produce: turn result (show what happened).
+    ProduceTurnResult { training: TrainingType },
+    /// Produce: final evaluation.
+    ProduceResult,
+    /// Day result after business.
     DayResult,
 }
 
 // ── Story Line ────────────────────────────────────────────
 
-/// A line of story text with optional speaker name.
 #[derive(Debug, Clone)]
 pub struct StoryLine {
-    /// Speaker name. None = narration / monologue.
     pub speaker: Option<&'static str>,
-    /// The text content.
     pub text: &'static str,
-    /// Whether this is a monologue (rendered in parentheses).
     pub is_monologue: bool,
 }
 
-/// A complete story scene (sequence of lines).
 #[derive(Debug, Clone)]
 pub struct StoryScene {
     pub lines: &'static [StoryLine],
@@ -73,18 +72,16 @@ pub struct StoryScene {
 
 // ── Menu Item ─────────────────────────────────────────────
 
-/// A menu item that can be served to customers.
 #[derive(Debug, Clone)]
 pub struct MenuItem {
     pub name: &'static str,
-    #[allow(dead_code)] // Phase 2+ profit calculation
+    #[allow(dead_code)] // Phase 2+: menu management UI
     pub cost: u32,
     pub price: u32,
-    #[allow(dead_code)] // Phase 2+ menu display
+    #[allow(dead_code)] // Phase 2+: menu detail UI
     pub description: &'static str,
 }
 
-/// A customer visit during the day.
 #[derive(Debug, Clone)]
 pub struct CustomerVisit {
     pub name: &'static str,
@@ -93,9 +90,8 @@ pub struct CustomerVisit {
     pub revenue: u32,
 }
 
-// ── Memory (思い出) Equipment ──────────────────────────────
+// ── Memory Equipment ──────────────────────────────────────
 
-/// A memory (思い出) — passive bonus earned by meeting conditions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
     pub id: u32,
@@ -108,7 +104,6 @@ pub struct Memory {
 
 // ── Player Rank ───────────────────────────────────────────
 
-/// Player rank (commander level) — gates story chapters.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlayerRank {
@@ -117,12 +112,10 @@ pub struct PlayerRank {
 }
 
 impl PlayerRank {
-    /// EXP needed for next level.
     pub fn exp_to_next(&self) -> u32 {
         30 + self.level * 20
     }
 
-    /// Add EXP and handle level ups. Returns number of levels gained.
     pub fn add_exp(&mut self, amount: u32) -> u32 {
         self.exp += amount;
         let mut levels_gained = 0;
@@ -139,7 +132,6 @@ impl PlayerRank {
         levels_gained
     }
 
-    /// Chapter unlocked at this rank.
     pub fn max_chapter(&self) -> u32 {
         match self.level {
             0 => 0,
@@ -155,100 +147,92 @@ impl PlayerRank {
     }
 }
 
+// ── Hub Tabs ──────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum HubTab {
+    Home,
+    Characters,
+    Cards,
+    Produce,
+    Missions,
+}
+
+// ── AP Constants ──────────────────────────────────────────
+
+pub const AP_MAX: u32 = 5;
+
 // ── Complete Game State ───────────────────────────────────
 
-/// The complete game state.
 #[derive(Debug, Clone)]
 pub struct CafeState {
-    // ── Phase management ───────────────────────────────
+    // ── Phase ─────────────────────────────────────────
     pub phase: GamePhase,
 
-    // ── Story state ────────────────────────────────────
-    /// Which chapter is currently being viewed.
+    // ── Story ─────────────────────────────────────────
     pub current_chapter: u32,
-    /// Index of the current scene being displayed.
     pub current_scene_index: usize,
-    /// Index of the current line within the scene.
     pub current_line_index: usize,
-    /// Highest chapter completed (0 = prologue done).
     pub chapters_completed: u32,
 
-    // ── Business / Economy ─────────────────────────────
+    // ── Economy ───────────────────────────────────────
     pub day: u32,
     pub money: i64,
     pub menu: Vec<MenuItem>,
     pub today_visits: Vec<CustomerVisit>,
     pub total_customers_served: u32,
 
-    // ── AP Action System ───────────────────────────────
-    /// Action Points remaining today (max 5).
+    // ── AP ────────────────────────────────────────────
     pub ap_current: u32,
-    /// Total actions performed today.
     pub actions_today: u32,
 
-    // ── Player Rank ────────────────────────────────────
+    // ── Player Rank ───────────────────────────────────
     pub player_rank: PlayerRank,
 
-    // ── Character Affinities ───────────────────────────
+    // ── Characters (BA-style) ─────────────────────────
+    /// Per-character progression (level, stars, shards, skills).
+    pub character_data: HashMap<CharacterId, CharacterData>,
+    /// Per-character affinity (3-axis bond).
     pub affinities: HashMap<CharacterId, CharacterAffinity>,
 
-    // ── Card System ────────────────────────────────────
+    // ── Cards / Gacha ─────────────────────────────────
     pub card_state: CardState,
 
-    // ── Memory Equipment ───────────────────────────────
+    // ── Memory Equipment ──────────────────────────────
     pub memories: Vec<Memory>,
-    /// Indices into `memories` for equipped slots (max 3).
     pub equipped_memories: Vec<usize>,
 
-    // ── Social game systems ─────────────────────────────
+    // ── Produce ───────────────────────────────────────
+    /// Active produce run (None if not in produce).
+    pub produce: Option<ProduceState>,
+    /// Total produce completions (for missions).
+    pub total_produce_completions: u32,
+
+    // ── Social Systems ────────────────────────────────
     pub stamina: StaminaState,
     pub daily_missions: DailyMissionState,
+    pub weekly_missions: WeeklyMissionState,
     pub login_bonus: LoginBonusState,
-    /// Pending login bonus popup (shown once on game start).
     pub pending_login_reward: Option<i64>,
-    /// Pending recovery bonus (shown once after absence).
+    pub pending_login_gems: Option<u32>,
     pub pending_recovery_bonus: Option<i64>,
-    /// Total business runs today (for mission tracking).
     pub today_business_runs: u32,
 
-    // ── UI state ───────────────────────────────────────
-    #[allow(dead_code)] // Phase 2+ menu selection UI
-    pub selected_menu_item: usize,
-    /// Current tab in hub view.
+    // ── UI ────────────────────────────────────────────
     pub hub_tab: HubTab,
-    /// Scroll offset for lists.
-    #[allow(dead_code)] // Phase 2+ scrollable lists
-    pub scroll_offset: usize,
 }
-
-/// Tabs in the hub screen.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum HubTab {
-    /// Main hub: status, actions, story
-    Home,
-    /// Character list & affinity
-    Characters,
-    /// Card collection & gacha
-    Cards,
-    /// Settings / missions
-    Missions,
-}
-
-// ── AP Constants ───────────────────────────────────────────
-
-pub const AP_MAX: u32 = 5;
 
 impl CafeState {
     pub fn new() -> Self {
-        // Initialize affinity for all characters (locked by default)
+        let mut character_data = HashMap::new();
         let mut affinities = HashMap::new();
         for &ch in CharacterId::ALL {
-            let mut aff = CharacterAffinity::default();
-            // Sakura is unlocked from start (appears in Ch.0)
+            let mut cd = CharacterData::with_stars(ch.base_stars());
             if ch == CharacterId::Sakura {
-                aff.unlocked = true;
+                cd.unlocked = true;
             }
-            affinities.insert(ch, aff);
+            character_data.insert(ch, cd);
+            affinities.insert(ch, CharacterAffinity::default());
         }
 
         Self {
@@ -260,61 +244,42 @@ impl CafeState {
             day: 1,
             money: 1000,
             menu: vec![
-                MenuItem {
-                    name: "ブレンドコーヒー",
-                    cost: 50,
-                    price: 300,
-                    description: "基本のドリップコーヒー",
-                },
-                MenuItem {
-                    name: "カフェラテ",
-                    cost: 80,
-                    price: 400,
-                    description: "エスプレッソ + ミルク",
-                },
-                MenuItem {
-                    name: "ほうじ茶",
-                    cost: 30,
-                    price: 250,
-                    description: "香ばしい和のお茶",
-                },
+                MenuItem { name: "ブレンドコーヒー", cost: 50, price: 300, description: "基本のドリップコーヒー" },
+                MenuItem { name: "カフェラテ", cost: 80, price: 400, description: "エスプレッソ + ミルク" },
+                MenuItem { name: "ほうじ茶", cost: 30, price: 250, description: "香ばしい和のお茶" },
             ],
             today_visits: Vec::new(),
             total_customers_served: 0,
             ap_current: AP_MAX,
             actions_today: 0,
             player_rank: PlayerRank::default(),
+            character_data,
             affinities,
             card_state: CardState::default(),
             memories: Vec::new(),
             equipped_memories: Vec::new(),
+            produce: None,
+            total_produce_completions: 0,
             stamina: StaminaState::default(),
             daily_missions: DailyMissionState::default(),
+            weekly_missions: WeeklyMissionState::default(),
             login_bonus: LoginBonusState::default(),
             pending_login_reward: None,
+            pending_login_gems: None,
             pending_recovery_bonus: None,
             today_business_runs: 0,
-            selected_menu_item: 0,
             hub_tab: HubTab::Home,
-            scroll_offset: 0,
         }
     }
 
-    /// Calculate today's total revenue.
     pub fn today_revenue(&self) -> u32 {
         self.today_visits.iter().map(|v| v.revenue).sum()
     }
 
-    /// Calculate today's total cost.
     pub fn today_cost(&self) -> u32 {
-        self.today_visits
-            .iter()
-            .filter(|v| v.satisfied)
-            .count() as u32
-            * 50
+        self.today_visits.iter().filter(|v| v.satisfied).count() as u32 * 50
     }
 
-    /// Total memory bonuses for equipped memories.
     pub fn memory_bonuses(&self) -> (u32, u32, u32) {
         let mut trust = 0u32;
         let mut understanding = 0u32;
@@ -334,9 +299,9 @@ impl CafeState {
         CharacterId::ALL
             .iter()
             .filter(|ch| {
-                self.affinities
+                self.character_data
                     .get(ch)
-                    .is_some_and(|a| a.unlocked)
+                    .is_some_and(|d| d.unlocked)
             })
             .copied()
             .collect()
