@@ -7,7 +7,7 @@ use std::{cell::RefCell, io, rc::Rc};
 
 use games::{create_game, AppState, GameChoice};
 use input::{is_narrow_layout, ClickState, InputEvent};
-use widgets::ClickableList;
+use widgets::{Clickable, ClickableList};
 use time::GameTime;
 
 use ratzilla::event::{KeyCode, MouseButton, MouseEventKind};
@@ -300,17 +300,18 @@ fn main() -> io::Result<()> {
 
                     game.render(f, size, &click_state);
 
-                    // Overlay back button in top-left corner
+                    // Overlay back button in top-left corner.  Registered
+                    // last so it wins over any game-area target on overlap.
                     let back_area = Rect::new(size.x, size.y, 6, 1);
                     let back = Paragraph::new(Span::styled(
                         " ◀戻る",
                         Style::default().fg(Color::DarkGray),
                     ));
-                    f.render_widget(back, back_area);
-                    #[allow(clippy::disallowed_methods)] // single back button
-                    click_state
-                        .borrow_mut()
-                        .add_click_target(back_area, BACK_TO_MENU);
+                    Clickable::new(back, BACK_TO_MENU).render(
+                        f,
+                        back_area,
+                        &mut click_state.borrow_mut(),
+                    );
                 }
             }
         }

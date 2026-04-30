@@ -10,7 +10,7 @@ use ratzilla::ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap
 use ratzilla::ratatui::Frame;
 
 use crate::input::ClickState;
-use crate::widgets::{ClickableList, TabBar};
+use crate::widgets::{Clickable, ClickableList, TabBar};
 
 use super::actions::*;
 use super::logic::format_number;
@@ -573,15 +573,10 @@ fn render_cookie_display(
             .border_style(Style::default().fg(border_color))
             .title(title),
     );
-    f.render_widget(widget, area);
+    Clickable::new(widget, CLICK_COOKIE).render(f, area, &mut click_state.borrow_mut());
 
-    // Particles render on all screen sizes
+    // Particles render on top of the cookie display
     render_particles(state, f, area);
-
-    // Register the whole cookie display area as a click target
-    let mut cs = click_state.borrow_mut();
-    #[allow(clippy::disallowed_methods)] // full-area single target, no builder needed
-    cs.add_click_target(area, CLICK_COOKIE);
 }
 
 /// Build a sparkline string from a history of values.
@@ -734,11 +729,6 @@ fn render_buffs_and_golden(
                 Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
             ),
         ]));
-
-        // Register golden cookie click target
-        let mut cs = click_state.borrow_mut();
-        #[allow(clippy::disallowed_methods)] // transient single target
-        cs.add_click_target(area, CLAIM_GOLDEN);
     }
 
     // Active buffs
@@ -787,7 +777,17 @@ fn render_buffs_and_golden(
                 .borders(Borders::LEFT | Borders::RIGHT)
                 .border_style(Style::default().fg(Color::Yellow)),
         );
-        f.render_widget(widget, area);
+        // When a golden cookie is present, the entire panel acts as the
+        // claim button — keeps the tap target large for fast-fingered taps.
+        if state.golden_event.is_some() {
+            Clickable::new(widget, CLAIM_GOLDEN).render(
+                f,
+                area,
+                &mut click_state.borrow_mut(),
+            );
+        } else {
+            f.render_widget(widget, area);
+        }
     }
 }
 
@@ -1594,10 +1594,11 @@ fn render_prestige(
             content_area.width.saturating_sub(2),
             1,
         );
-        f.render_widget(indicator, indicator_area);
-        let mut cs = click_state.borrow_mut();
-        #[allow(clippy::disallowed_methods)] // scroll indicator, single row target
-        cs.add_row_target(content_area, content_area.y, PRESTIGE_SCROLL_UP);
+        Clickable::new(indicator, PRESTIGE_SCROLL_UP).render(
+            f,
+            indicator_area,
+            &mut click_state.borrow_mut(),
+        );
     }
 
     if can_scroll_down {
@@ -1612,10 +1613,11 @@ fn render_prestige(
             content_area.width.saturating_sub(2),
             1,
         );
-        f.render_widget(indicator, indicator_area);
-        let mut cs = click_state.borrow_mut();
-        #[allow(clippy::disallowed_methods)] // scroll indicator, single row target
-        cs.add_row_target(content_area, bottom_row, PRESTIGE_SCROLL_DOWN);
+        Clickable::new(indicator, PRESTIGE_SCROLL_DOWN).render(
+            f,
+            indicator_area,
+            &mut click_state.borrow_mut(),
+        );
     }
 }
 
