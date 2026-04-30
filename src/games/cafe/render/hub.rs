@@ -10,7 +10,7 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::ClickState;
-use crate::widgets::ClickableList;
+use crate::widgets::{ClickableList, TabBar};
 
 use super::super::actions::*;
 use super::super::characters::CharacterId;
@@ -55,28 +55,24 @@ pub(super) fn render_hub(
         (HubTab::Missions, "任務", TAB_MISSIONS),
     ];
 
+    // Build the tab bar via the shared `TabBar` widget so that click rects
+    // are computed from real CJK-aware label widths instead of `area.width
+    // / tabs.len()`.  The label is wrapped in `[...]` to preserve the
+    // existing visual exactly (TabBar pads each label with a single space
+    // on each side, so passing `[ホーム]` renders as ` [ホーム] `).
     {
-        let mut tab_list = ClickableList::new();
-        let mut tspans = Vec::new();
-        for (tab, name, _) in &tabs {
+        let mut bar = TabBar::new("").block(
+            Block::default().borders(Borders::BOTTOM),
+        );
+        for (tab, name, id) in &tabs {
             let style = if state.hub_tab == *tab {
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::DarkGray)
             };
-            tspans.push(Span::styled(format!(" [{name}] "), style));
+            bar = bar.tab(format!("[{name}]"), style, *id);
         }
-        tab_list.push(Line::from(tspans));
-        let tab_block = Block::default().borders(Borders::BOTTOM);
-        let mut cs = click_state.borrow_mut();
-        // Register tab click targets
-        let tab_w = area.width / tabs.len() as u16;
-        for (i, (_tab, _name, id)) in tabs.iter().enumerate() {
-            let tab_rect = Rect::new(area.x + (i as u16) * tab_w, chunks[1].y, tab_w, 2);
-            #[allow(clippy::disallowed_methods)]
-            cs.add_click_target(tab_rect, *id);
-        }
-        tab_list.render(f, chunks[1], tab_block, &mut cs, false, 0);
+        bar.render(f, chunks[1], &mut click_state.borrow_mut());
     }
 
     // Content area
