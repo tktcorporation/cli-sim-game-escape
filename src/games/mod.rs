@@ -17,6 +17,10 @@ use crate::input::{ClickState, InputEvent};
 
 /// Trait that all games implement.
 pub trait Game {
+    /// Identify which game this is.  Used by the dispatcher to validate
+    /// `ClickScope::Game(_)` events match the currently active game.
+    fn choice(&self) -> GameChoice;
+
     /// Handle an input event. Returns true if the event was consumed.
     fn handle_input(&mut self, event: &InputEvent) -> bool;
 

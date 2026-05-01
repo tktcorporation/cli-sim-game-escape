@@ -12,7 +12,7 @@ use std::rc::Rc;
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
 
-use crate::games::Game;
+use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
 use actions::*;
@@ -205,10 +205,14 @@ impl CareerGame {
 }
 
 impl Game for CareerGame {
+    fn choice(&self) -> GameChoice {
+        GameChoice::Career
+    }
+
     fn handle_input(&mut self, event: &InputEvent) -> bool {
         let consumed = match event {
             InputEvent::Key(c) => self.handle_key(*c),
-            InputEvent::Click(id) => self.handle_click(*id),
+            InputEvent::Click(_, id) => self.handle_click(*id),
         };
         if consumed {
             #[cfg(target_arch = "wasm32")]
@@ -229,6 +233,12 @@ impl Game for CareerGame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::ClickScope;
+
+    /// Build a `Click` event scoped to this game.
+    fn click(id: u16) -> InputEvent {
+        InputEvent::Click(ClickScope::Game(GameChoice::Career), id)
+    }
 
     #[test]
     fn career_game_training_via_subscreen() {
@@ -349,7 +359,7 @@ mod tests {
     #[test]
     fn career_game_advance_month_via_click() {
         let mut game = CareerGame::new();
-        game.handle_input(&InputEvent::Click(ADVANCE_MONTH));
+        game.handle_input(&click(ADVANCE_MONTH));
         assert_eq!(game.state.screen, Screen::Report);
         assert!(game.state.money > 0.0);
         assert_eq!(game.state.months_elapsed, 1);
@@ -420,10 +430,10 @@ mod tests {
     fn click_action_training() {
         let mut game = CareerGame::new();
         // Navigate to training via click
-        game.handle_input(&InputEvent::Click(GO_TRAINING));
+        game.handle_input(&click(GO_TRAINING));
         assert_eq!(game.state.screen, Screen::Training);
         // Free self-study via click (index 0)
-        game.handle_input(&InputEvent::Click(TRAINING_BASE + 0));
+        game.handle_input(&click(TRAINING_BASE + 0));
         assert_eq!(game.state.knowledge, 2.0);
     }
 
@@ -432,41 +442,41 @@ mod tests {
         let mut game = CareerGame::new();
         assert_eq!(game.state.screen, Screen::Main);
 
-        game.handle_input(&InputEvent::Click(GO_TRAINING));
+        game.handle_input(&click(GO_TRAINING));
         assert_eq!(game.state.screen, Screen::Training);
 
-        game.handle_input(&InputEvent::Click(BACK_FROM_TRAINING));
+        game.handle_input(&click(BACK_FROM_TRAINING));
         assert_eq!(game.state.screen, Screen::Main);
 
-        game.handle_input(&InputEvent::Click(GO_JOB_MARKET));
+        game.handle_input(&click(GO_JOB_MARKET));
         assert_eq!(game.state.screen, Screen::JobMarket);
 
-        game.handle_input(&InputEvent::Click(BACK_FROM_JOBS));
+        game.handle_input(&click(BACK_FROM_JOBS));
         assert_eq!(game.state.screen, Screen::Main);
 
-        game.handle_input(&InputEvent::Click(GO_INVEST));
+        game.handle_input(&click(GO_INVEST));
         assert_eq!(game.state.screen, Screen::Invest);
 
-        game.handle_input(&InputEvent::Click(BACK_FROM_INVEST));
+        game.handle_input(&click(BACK_FROM_INVEST));
         assert_eq!(game.state.screen, Screen::Main);
 
-        game.handle_input(&InputEvent::Click(GO_BUDGET));
+        game.handle_input(&click(GO_BUDGET));
         assert_eq!(game.state.screen, Screen::Budget);
 
-        game.handle_input(&InputEvent::Click(BACK_FROM_BUDGET));
+        game.handle_input(&click(BACK_FROM_BUDGET));
         assert_eq!(game.state.screen, Screen::Main);
 
-        game.handle_input(&InputEvent::Click(GO_LIFESTYLE));
+        game.handle_input(&click(GO_LIFESTYLE));
         assert_eq!(game.state.screen, Screen::Lifestyle);
 
-        game.handle_input(&InputEvent::Click(BACK_FROM_LIFESTYLE));
+        game.handle_input(&click(BACK_FROM_LIFESTYLE));
         assert_eq!(game.state.screen, Screen::Main);
     }
 
     #[test]
     fn click_action_networking() {
         let mut game = CareerGame::new();
-        game.handle_input(&InputEvent::Click(DO_NETWORKING));
+        game.handle_input(&click(DO_NETWORKING));
         assert_eq!(game.state.social, 2.0);
         assert_eq!(game.state.reputation, 3.0);
     }
@@ -475,7 +485,7 @@ mod tests {
     fn click_action_side_job() {
         let mut game = CareerGame::new();
         game.state.technical = 10.0;
-        game.handle_input(&InputEvent::Click(DO_SIDE_JOB));
+        game.handle_input(&click(DO_SIDE_JOB));
         assert!(game.state.money > 5_000.0);
     }
 
@@ -483,7 +493,7 @@ mod tests {
     fn click_action_job_apply() {
         let mut game = CareerGame::new();
         game.state.knowledge = 10.0;
-        game.handle_input(&InputEvent::Click(APPLY_JOB_BASE + 1)); // office clerk
+        game.handle_input(&click(APPLY_JOB_BASE + 1)); // office clerk
         assert_eq!(game.state.job, state::JobKind::OfficeClerk);
     }
 
@@ -491,7 +501,7 @@ mod tests {
     fn click_action_invest() {
         let mut game = CareerGame::new();
         // Starting money is 5000
-        game.handle_input(&InputEvent::Click(INVEST_SAVINGS));
+        game.handle_input(&click(INVEST_SAVINGS));
         assert_eq!(game.state.savings, 1_000.0);
         assert_eq!(game.state.money, 4_000.0);
     }
@@ -499,10 +509,10 @@ mod tests {
     #[test]
     fn click_action_lifestyle() {
         let mut game = CareerGame::new();
-        game.handle_input(&InputEvent::Click(GO_LIFESTYLE));
+        game.handle_input(&click(GO_LIFESTYLE));
         assert_eq!(game.state.screen, Screen::Lifestyle);
 
-        game.handle_input(&InputEvent::Click(LIFESTYLE_BASE + 1)); // Normal
+        game.handle_input(&click(LIFESTYLE_BASE + 1)); // Normal
         assert_eq!(game.state.lifestyle, state::LifestyleLevel::Normal);
         assert_eq!(game.state.screen, Screen::Main);
     }

@@ -20,7 +20,7 @@ use std::rc::Rc;
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
 
-use crate::games::Game;
+use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
 use actions::*;
@@ -129,10 +129,14 @@ impl AbyssGame {
 }
 
 impl Game for AbyssGame {
+    fn choice(&self) -> GameChoice {
+        GameChoice::Abyss
+    }
+
     fn handle_input(&mut self, event: &InputEvent) -> bool {
         match event {
             InputEvent::Key(c) => self.handle_key(*c),
-            InputEvent::Click(id) => self.handle_click(*id),
+            InputEvent::Click(_, id) => self.handle_click(*id),
         }
     }
 
@@ -148,6 +152,12 @@ impl Game for AbyssGame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::ClickScope;
+
+    /// Build a `Click` event scoped to this game.
+    fn click(id: u16) -> InputEvent {
+        InputEvent::Click(ClickScope::Game(GameChoice::Abyss), id)
+    }
 
     #[test]
     fn create_game() {
@@ -158,11 +168,11 @@ mod tests {
     #[test]
     fn click_tab_switch() {
         let mut g = AbyssGame::new();
-        g.handle_input(&InputEvent::Click(TAB_SOULS));
+        g.handle_input(&click(TAB_SOULS));
         assert_eq!(g.state.tab, Tab::Souls);
-        g.handle_input(&InputEvent::Click(TAB_STATS));
+        g.handle_input(&click(TAB_STATS));
         assert_eq!(g.state.tab, Tab::Stats);
-        g.handle_input(&InputEvent::Click(TAB_UPGRADES));
+        g.handle_input(&click(TAB_UPGRADES));
         assert_eq!(g.state.tab, Tab::Upgrades);
     }
 
@@ -186,7 +196,7 @@ mod tests {
         g.state.gold = 1000;
         // タブが Souls でもクリックなら反応
         g.state.tab = Tab::Souls;
-        g.handle_input(&InputEvent::Click(BUY_UPGRADE_BASE));
+        g.handle_input(&click(BUY_UPGRADE_BASE));
         assert_eq!(g.state.upgrades[UpgradeKind::Sword.index()], 1);
     }
 

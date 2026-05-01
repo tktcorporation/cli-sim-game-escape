@@ -6,7 +6,9 @@ mod widgets;
 use std::{cell::RefCell, io, rc::Rc};
 
 use games::{create_game, AppState, GameChoice};
-use input::{is_narrow_layout, ClickState, InputEvent};
+use input::{
+    is_narrow_layout, pixel_x_to_col, pixel_y_to_row, ClickScope, ClickState, InputEvent,
+};
 use widgets::{Clickable, ClickableList};
 use time::GameTime;
 
@@ -96,12 +98,49 @@ fn find_ancestor_pre(el: &web_sys::Element) -> Option<web_sys::Element> {
     None
 }
 
+/// Fallback: derive `(row, col)` from the click position relative to the grid
+/// container's bounding rect.  Used when [`dom_element_to_cell`] returns
+/// `None` — typically because an overlay element, browser zoom, or CSS
+/// transform put something other than `<pre>` at the click point.
+///
+/// Less precise than the elementFromPoint path (assumes uniform cell size,
+/// which can be off by a sub-pixel under zoom), but covers cases where the
+/// primary path silently fails.
+fn pixel_fallback_to_cell(
+    client_x: f64,
+    client_y: f64,
+    terminal_cols: u16,
+    terminal_rows: u16,
+) -> Option<(u16, u16)> {
+    let window = web_sys::window()?;
+    let document = window.document()?;
+    let grid = document
+        .get_element_by_id("grid")
+        .or_else(|| document.query_selector("body > div").ok().flatten())?;
+    let rect = grid.get_bounding_client_rect();
+    let local_x = client_x - rect.left();
+    let local_y = client_y - rect.top();
+    let row = pixel_y_to_row(local_y, rect.height(), terminal_rows)?;
+    let col = pixel_x_to_col(local_x, rect.width(), terminal_cols)?;
+    Some((row, col))
+}
+
+/// Read the current high-resolution timestamp (ms since page navigation).
+/// Falls back to `0.0` when the Performance API is unavailable, which
+/// effectively disables dedup — acceptable for the (rare) headless case.
+fn now_ms() -> f64 {
+    web_sys::window()
+        .and_then(|w| w.performance())
+        .map(|p| p.now())
+        .unwrap_or(0.0)
+}
+
 /// Process a tap/click at the given client coordinates.
 ///
-/// The `tap_handled` guard in [`ClickState`] ensures that only the first
-/// mouse event per render frame is dispatched.  This prevents the same
-/// physical tap from being processed twice when the browser fires both a
-/// synthetic (from our touchstart handler) and a compatibility mouse event.
+/// `ClickState::try_consume_tap` drops compatibility mouse events that the
+/// browser fires for the same touch (timestamp-based dedup), so a single
+/// physical tap is dispatched once even if the render loop stutters between
+/// the two synthesized events.
 fn handle_tap(
     client_x: f64,
     client_y: f64,
@@ -109,43 +148,94 @@ fn handle_tap(
     click_state: &Rc<RefCell<ClickState>>,
 ) {
     let mut cs = click_state.borrow_mut();
-    if cs.tap_handled {
-        return;
-    }
     let (row, col) = match dom_element_to_cell(client_x, client_y, cs.terminal_cols) {
         Some(r) => r,
-        None => return,
+        None => {
+            // elementFromPoint missed the <pre> row.  Try the pixel-based
+            // fallback so an overlay or zoom edge case doesn't leave the
+            // user with a silently dead tap.  Warn so the frequency is
+            // observable in DevTools.
+            web_sys::console::warn_1(
+                &"click missed <pre>; trying pixel fallback".into(),
+            );
+            match pixel_fallback_to_cell(
+                client_x,
+                client_y,
+                cs.terminal_cols,
+                cs.terminal_rows,
+            ) {
+                Some(r) => r,
+                None => return,
+            }
+        }
     };
 
+    if !cs.try_consume_tap(col, row, now_ms()) {
+        return;
+    }
+
     if let Some(action_id) = cs.hit_test(col, row) {
-        cs.tap_handled = true;
+        // Pair the action ID with the scope that registered the target so
+        // the dispatcher can verify the click is bound for the screen the
+        // user actually saw — protecting against late-arriving compatibility
+        // events crossing a screen transition.
+        let scope = cs
+            .current_scope()
+            .cloned()
+            .unwrap_or(ClickScope::Menu);
         drop(cs);
-        dispatch_event(&InputEvent::Click(action_id), app_state);
+        dispatch_event(&InputEvent::Click(scope, action_id), app_state);
+    }
+}
+
+/// Returns `true` if the click's scope matches the currently active screen.
+/// Stale clicks from a previous screen (rare but possible at screen
+/// transitions) are caught here in debug builds and silently dropped in
+/// release.
+fn click_scope_matches_state(scope: &ClickScope, state: &AppState) -> bool {
+    match (scope, state) {
+        (ClickScope::Menu, AppState::Menu) => true,
+        (ClickScope::Settings, AppState::Settings { .. }) => true,
+        (ClickScope::Game(c), AppState::Playing { game }) => *c == game.choice(),
+        _ => false,
     }
 }
 
 /// Dispatch an input event to the current app state.
 fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
     let mut state = app_state.borrow_mut();
+
+    if let InputEvent::Click(scope, _) = event {
+        if !click_scope_matches_state(scope, &state) {
+            debug_assert!(
+                false,
+                "click scope {:?} doesn't match active state",
+                scope,
+            );
+            // In release: drop the stale click rather than misroute it.
+            return;
+        }
+    }
+
     match &mut *state {
         AppState::Menu => {
             let choice = match event {
-                InputEvent::Key('1') | InputEvent::Click(MENU_SELECT_COOKIE) => {
+                InputEvent::Key('1') | InputEvent::Click(_, MENU_SELECT_COOKIE) => {
                     Some(GameChoice::Cookie)
                 }
-                InputEvent::Key('2') | InputEvent::Click(MENU_SELECT_FACTORY) => {
+                InputEvent::Key('2') | InputEvent::Click(_, MENU_SELECT_FACTORY) => {
                     Some(GameChoice::Factory)
                 }
-                InputEvent::Key('3') | InputEvent::Click(MENU_SELECT_CAREER) => {
+                InputEvent::Key('3') | InputEvent::Click(_, MENU_SELECT_CAREER) => {
                     Some(GameChoice::Career)
                 }
-                InputEvent::Key('4') | InputEvent::Click(MENU_SELECT_RPG) => {
+                InputEvent::Key('4') | InputEvent::Click(_, MENU_SELECT_RPG) => {
                     Some(GameChoice::Rpg)
                 }
-                InputEvent::Key('5') | InputEvent::Click(MENU_SELECT_CAFE) => {
+                InputEvent::Key('5') | InputEvent::Click(_, MENU_SELECT_CAFE) => {
                     Some(GameChoice::Cafe)
                 }
-                InputEvent::Key('6') | InputEvent::Click(MENU_SELECT_ABYSS) => {
+                InputEvent::Key('6') | InputEvent::Click(_, MENU_SELECT_ABYSS) => {
                     Some(GameChoice::Abyss)
                 }
                 _ => None,
@@ -155,7 +245,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 *state = AppState::Playing { game };
             } else if matches!(
                 event,
-                InputEvent::Key('7') | InputEvent::Click(MENU_SELECT_SETTINGS)
+                InputEvent::Key('7') | InputEvent::Click(_, MENU_SELECT_SETTINGS)
             ) {
                 *state = AppState::Settings {
                     confirm_reset: None,
@@ -166,7 +256,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
             if confirm_reset.is_some() {
                 // Confirmation dialog is active
                 match event {
-                    InputEvent::Key('y') | InputEvent::Click(SETTINGS_CONFIRM_YES) => {
+                    InputEvent::Key('y') | InputEvent::Click(_, SETTINGS_CONFIRM_YES) => {
                         let game = confirm_reset.take().unwrap();
                         perform_reset(&game);
                         *state = AppState::Settings {
@@ -175,20 +265,20 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     }
                     InputEvent::Key('n')
                     | InputEvent::Key('q')
-                    | InputEvent::Click(SETTINGS_CONFIRM_NO) => {
+                    | InputEvent::Click(_, SETTINGS_CONFIRM_NO) => {
                         *confirm_reset = None;
                     }
                     _ => {}
                 }
             } else {
                 match event {
-                    InputEvent::Key('1') | InputEvent::Click(SETTINGS_RESET_COOKIE) => {
+                    InputEvent::Key('1') | InputEvent::Click(_, SETTINGS_RESET_COOKIE) => {
                         *confirm_reset = Some(GameChoice::Cookie);
                     }
-                    InputEvent::Key('2') | InputEvent::Click(SETTINGS_RESET_CAREER) => {
+                    InputEvent::Key('2') | InputEvent::Click(_, SETTINGS_RESET_CAREER) => {
                         *confirm_reset = Some(GameChoice::Career);
                     }
-                    InputEvent::Key('q') | InputEvent::Click(BACK_TO_MENU) => {
+                    InputEvent::Key('q') | InputEvent::Click(_, BACK_TO_MENU) => {
                         *state = AppState::Menu;
                     }
                     _ => {}
@@ -196,7 +286,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
             }
         }
         AppState::Playing { game } => {
-            if matches!(event, InputEvent::Key('q') | InputEvent::Click(BACK_TO_MENU)) {
+            if matches!(event, InputEvent::Key('q') | InputEvent::Click(_, BACK_TO_MENU)) {
                 // Let the game handle back first (e.g., sub-screen → main screen).
                 // Only go to menu if the game didn't consume it.
                 if !game.handle_input(event) {
@@ -282,13 +372,17 @@ fn main() -> io::Result<()> {
             }
 
             // Get current timestamp for game time
-            let now_ms = web_sys::window()
-                .and_then(|w| w.performance())
-                .map(|p| p.now())
-                .unwrap_or(0.0);
-            let delta_ticks = game_time.borrow_mut().update(now_ms);
+            let delta_ticks = game_time.borrow_mut().update(now_ms());
 
             let mut state = app_state.borrow_mut();
+            // Stamp the frame with the scope of click targets it'll register,
+            // so handle_tap can pair it with the action ID for dispatch-time
+            // validation.
+            click_state.borrow_mut().set_scope(match &*state {
+                AppState::Menu => ClickScope::Menu,
+                AppState::Settings { .. } => ClickScope::Settings,
+                AppState::Playing { game } => ClickScope::Game(game.choice()),
+            });
             match &mut *state {
                 AppState::Menu => {
                     render_menu(f, size, &click_state);

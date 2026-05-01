@@ -4,14 +4,31 @@
 
 use ratzilla::ratatui::layout::Rect;
 
+use crate::games::GameChoice;
+
+/// Identifies which screen / game owns a click event.
+///
+/// Action IDs are scoped to a `ClickScope`, so the global `u16` namespace no
+/// longer has to be partitioned by hand across screens.  Dispatchers can
+/// detect cross-screen mis-routing (e.g. a stale `Game(Career)` click hitting
+/// `Menu` after a screen transition) instead of silently triggering an
+/// unrelated action that happens to share the same numeric ID.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClickScope {
+    Menu,
+    Settings,
+    Game(GameChoice),
+}
+
 /// All possible input events, normalized from keyboard, mouse, and touch sources.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputEvent {
     /// A key press from keyboard.
     Key(char),
-    /// A click/tap on a registered target, identified by a semantic action ID.
-    /// Each game defines its own action ID constants.
-    Click(u16),
+    /// A click/tap on a registered target.  The first field is the scope of
+    /// the screen/game that registered the target; the second is a semantic
+    /// action ID defined within that scope.
+    Click(ClickScope, u16),
 }
 
 /// A region on screen that can be tapped/clicked to trigger an action.
@@ -23,15 +40,29 @@ pub struct ClickTarget {
     pub action_id: u16,
 }
 
+/// Window (in milliseconds) within which a second tap on the same cell is
+/// treated as a duplicate compatibility event and dropped.  Tuned to be:
+/// - longer than the worst-case render-frame stutter on slow devices
+/// - shorter than human rapid-tap intervals (Cookie Factory's deliberate
+///   spamming is well over 50ms even at full speed)
+pub const TAP_DEDUP_MS: f64 = 30.0;
+
 /// Shared state between the render loop and click handler.
 pub struct ClickState {
     pub targets: Vec<ClickTarget>,
     pub terminal_cols: u16,
     pub terminal_rows: u16,
-    /// Guard flag: set when a tap/click is processed, cleared each render frame.
-    /// Prevents the same physical tap from being dispatched twice (e.g. when the
-    /// browser fires both a synthetic and a compatibility mouse event for one touch).
-    pub tap_handled: bool,
+    /// Timestamp of the most recently accepted tap (ms, from `performance.now`).
+    /// Used together with [`last_tap_pos`] to drop the browser's compatibility
+    /// mouse event that follows our synthetic mousedown for the same touch.
+    last_tap_at: Option<f64>,
+    last_tap_pos: Option<(u16, u16)>,
+    /// Scope of click targets registered during the current frame.  Set once
+    /// at the start of each render path (menu / settings / game).  When a tap
+    /// hits a target, the scope is paired with the action ID into
+    /// [`InputEvent::Click`] so the dispatcher can verify the click is bound
+    /// for the currently active screen.
+    current_scope: Option<ClickScope>,
 }
 
 impl ClickState {
@@ -40,15 +71,54 @@ impl ClickState {
             targets: Vec::new(),
             terminal_cols: 0,
             terminal_rows: 0,
-            tap_handled: false,
+            last_tap_at: None,
+            last_tap_pos: None,
+            current_scope: None,
         }
     }
 
-    /// Clear all click targets and reset the per-frame tap guard.
-    /// Called once at the start of each render frame.
+    /// Clear all click targets.  Called once at the start of each render frame.
+    /// The tap-dedup state intentionally outlives a single frame because frame
+    /// stutter can push the browser's compatibility mouse event past the next
+    /// frame boundary.  The scope is also cleared so a missing
+    /// [`set_scope`](Self::set_scope) call cannot leak a stale value into the
+    /// next frame.
     pub fn clear_targets(&mut self) {
         self.targets.clear();
-        self.tap_handled = false;
+        self.current_scope = None;
+    }
+
+    /// Declare which scope the click targets registered during this frame
+    /// belong to.  Must be called by each render path before registering
+    /// targets so [`current_scope`](Self::current_scope) is available when a
+    /// tap is dispatched.
+    pub fn set_scope(&mut self, scope: ClickScope) {
+        self.current_scope = Some(scope);
+    }
+
+    /// Read the active scope.  `None` if no render path has set it yet
+    /// (only true between construction and the first frame).
+    pub fn current_scope(&self) -> Option<&ClickScope> {
+        self.current_scope.as_ref()
+    }
+
+    /// Atomically check-and-record a tap at `(col, row)` happening at `now_ms`.
+    ///
+    /// Returns `true` if the tap should be processed, `false` if it duplicates
+    /// the most recent tap on the same cell within [`TAP_DEDUP_MS`].
+    ///
+    /// The timestamp dedup is independent of frame timing, so it stays correct
+    /// even when the render loop stutters.  Identical-cell rapid taps from a
+    /// human (Cookie Factory's clicker) are ~100ms apart and therefore unaffected.
+    pub fn try_consume_tap(&mut self, col: u16, row: u16, now_ms: f64) -> bool {
+        if let (Some(at), Some(pos)) = (self.last_tap_at, self.last_tap_pos) {
+            if now_ms - at < TAP_DEDUP_MS && pos == (col, row) {
+                return false;
+            }
+        }
+        self.last_tap_at = Some(now_ms);
+        self.last_tap_pos = Some((col, row));
+        true
     }
 
     /// Register a click target with a rectangular hit region and a semantic action ID.
@@ -157,7 +227,9 @@ pub fn is_narrow_layout(width: u16) -> bool {
 /// `terminal_rows` is the number of rows in the terminal.
 ///
 /// Returns `None` if the click is outside the grid or inputs are invalid.
-#[cfg(test)]
+///
+/// Used both as a unit-test helper and as the production fallback when
+/// `elementFromPoint` cannot locate a `<pre>` row element.
 pub fn pixel_y_to_row(click_y: f64, grid_height: f64, terminal_rows: u16) -> Option<u16> {
     if grid_height <= 0.0 || terminal_rows == 0 || click_y < 0.0 {
         return None;
@@ -174,7 +246,9 @@ pub fn pixel_y_to_row(click_y: f64, grid_height: f64, terminal_rows: u16) -> Opt
 }
 
 /// Convert a pixel X coordinate to a terminal column index.
-#[cfg(test)]
+///
+/// Used both as a unit-test helper and as the production fallback when
+/// `elementFromPoint` cannot locate a `<pre>` row element.
 pub fn pixel_x_to_col(click_x: f64, grid_width: f64, terminal_cols: u16) -> Option<u16> {
     if grid_width <= 0.0 || terminal_cols == 0 || click_x < 0.0 {
         return None;
@@ -290,6 +364,70 @@ mod tests {
         cs.clear_targets();
         assert_eq!(cs.targets.len(), 0);
         assert_eq!(cs.hit_test(0, 1), None);
+    }
+
+    // ── try_consume_tap (timestamp-based dedup) tests ─────────────
+
+    #[test]
+    fn dedup_first_tap_is_accepted() {
+        let mut cs = ClickState::new();
+        assert!(cs.try_consume_tap(5, 10, 1000.0));
+    }
+
+    #[test]
+    fn dedup_same_cell_within_window_is_dropped() {
+        let mut cs = ClickState::new();
+        assert!(cs.try_consume_tap(5, 10, 1000.0));
+        // 29ms later — still inside the 30ms dedup window
+        assert!(!cs.try_consume_tap(5, 10, 1029.0));
+    }
+
+    #[test]
+    fn dedup_same_cell_outside_window_is_accepted() {
+        let mut cs = ClickState::new();
+        assert!(cs.try_consume_tap(5, 10, 1000.0));
+        // 31ms later — outside the dedup window
+        assert!(cs.try_consume_tap(5, 10, 1031.0));
+    }
+
+    #[test]
+    fn dedup_different_cell_within_window_is_accepted() {
+        let mut cs = ClickState::new();
+        assert!(cs.try_consume_tap(5, 10, 1000.0));
+        // Same time window, different cell → not a duplicate compat event
+        assert!(cs.try_consume_tap(6, 10, 1010.0));
+    }
+
+    #[test]
+    fn dedup_state_survives_clear_targets() {
+        // Frame stutter must not let the second compatibility event slip
+        // through just because clear_targets() ran in between.
+        let mut cs = ClickState::new();
+        assert!(cs.try_consume_tap(5, 10, 1000.0));
+        cs.clear_targets();
+        assert!(!cs.try_consume_tap(5, 10, 1010.0));
+    }
+
+    #[test]
+    fn dedup_window_boundary_exact() {
+        // Boundary: exactly TAP_DEDUP_MS later should be accepted (strict <).
+        let mut cs = ClickState::new();
+        assert!(cs.try_consume_tap(5, 10, 1000.0));
+        assert!(cs.try_consume_tap(5, 10, 1000.0 + TAP_DEDUP_MS));
+    }
+
+    #[test]
+    fn dedup_rapid_clicker_pace_passes() {
+        // A human furiously tapping the cookie ~ every 100ms must not be
+        // throttled by the dedup window.
+        let mut cs = ClickState::new();
+        let mut accepted = 0;
+        for i in 0..10 {
+            if cs.try_consume_tap(40, 12, 1000.0 + i as f64 * 100.0) {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, 10);
     }
 
     // ── Layout responsive tests ────────────────────────────────────

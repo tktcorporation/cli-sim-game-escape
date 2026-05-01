@@ -50,10 +50,14 @@ impl CafeGame {
 }
 
 impl super::Game for CafeGame {
+    fn choice(&self) -> super::GameChoice {
+        super::GameChoice::Cafe
+    }
+
     fn handle_input(&mut self, event: &InputEvent) -> bool {
         match event {
             InputEvent::Key(ch) => input_handler::handle_key(&mut self.state, *ch),
-            InputEvent::Click(id) => input_handler::handle_click(&mut self.state, *id),
+            InputEvent::Click(_, id) => input_handler::handle_click(&mut self.state, *id),
         }
     }
 
