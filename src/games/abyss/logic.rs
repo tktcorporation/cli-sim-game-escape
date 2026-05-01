@@ -1,0 +1,489 @@
+//! 深淵潜行 — 純粋ロジック関数群。
+//!
+//! tick / spawn / 攻撃判定 / 強化購入など全てここに集約する。
+//! `state.rs` のフィールドだけを操作し、IOやレンダーは触らない。
+
+use super::state::{enemies_per_floor, AbyssState, Enemy, SoulPerk, Tab, UpgradeKind};
+
+/// メインの tick 処理。delta_ticks 回ぶん戦闘を進める。
+pub fn tick(state: &mut AbyssState, delta_ticks: u32) {
+    if delta_ticks == 0 {
+        return;
+    }
+
+    // 演出 tick の減衰
+    state.hero_hurt_flash = state.hero_hurt_flash.saturating_sub(delta_ticks);
+    state.enemy_hurt_flash = state.enemy_hurt_flash.saturating_sub(delta_ticks);
+    state.descent_flash = state.descent_flash.saturating_sub(delta_ticks);
+    if let Some((_, ref mut life, _)) = state.last_enemy_damage {
+        *life = life.saturating_sub(delta_ticks);
+    }
+    if let Some((_, ref mut life)) = state.last_hero_damage {
+        *life = life.saturating_sub(delta_ticks);
+    }
+    if matches!(state.last_enemy_damage, Some((_, 0, _))) {
+        state.last_enemy_damage = None;
+    }
+    if matches!(state.last_hero_damage, Some((_, 0))) {
+        state.last_hero_damage = None;
+    }
+
+    // tick を 1 ステップずつ処理する (敵の交代が連続で起きうるため)。
+    for _ in 0..delta_ticks {
+        step_one_tick(state);
+        state.total_ticks += 1;
+    }
+}
+
+fn step_one_tick(state: &mut AbyssState) {
+    // ── HP regen (10 tick = 1秒 → 1秒あたりの規定値を 10 tick に分散) ──
+    if state.hero_hp > 0 && state.hero_hp < state.hero_max_hp() {
+        // regen_per_sec * 100 を 10tickで足す → 1tickあたり regen_per_sec * 10
+        let regen_per_tick_x100 = (state.hero_regen_per_sec() * 10.0).round() as u32;
+        state.hero_regen_acc_x100 = state.hero_regen_acc_x100.saturating_add(regen_per_tick_x100);
+        if state.hero_regen_acc_x100 >= 100 {
+            let heal = (state.hero_regen_acc_x100 / 100) as u64;
+            state.hero_regen_acc_x100 %= 100;
+            let max = state.hero_max_hp();
+            state.hero_hp = (state.hero_hp + heal).min(max);
+        }
+    }
+
+    // ── 敵が居ない (HP 0 のプレースホルダ) → 新しい敵スポーン ──
+    if state.current_enemy.hp == 0 || state.current_enemy.max_hp == 0 {
+        spawn_next_enemy(state);
+        return;
+    }
+
+    // ── hero attack ──
+    state.hero_atk_cooldown = state.hero_atk_cooldown.saturating_sub(1);
+    if state.hero_atk_cooldown == 0 {
+        let crit = roll_crit(state);
+        let raw = state.hero_atk();
+        let dmg_after_def = raw.saturating_sub(state.current_enemy.def).max(1);
+        let dmg = if crit { dmg_after_def * 2 } else { dmg_after_def };
+        let actual = dmg.min(state.current_enemy.hp);
+        state.current_enemy.hp -= actual;
+        state.last_enemy_damage = Some((actual, 6, crit));
+        state.enemy_hurt_flash = 3;
+        state.hero_atk_cooldown = state.hero_atk_period();
+
+        if state.current_enemy.hp == 0 {
+            on_enemy_killed(state);
+            return;
+        }
+    }
+
+    // ── enemy attack ──
+    state.current_enemy.atk_cooldown = state.current_enemy.atk_cooldown.saturating_sub(1);
+    if state.current_enemy.atk_cooldown == 0 {
+        let raw = state.current_enemy.atk;
+        let dmg = raw.saturating_sub(state.hero_def()).max(1);
+        let actual = dmg.min(state.hero_hp);
+        state.hero_hp -= actual;
+        state.last_hero_damage = Some((actual, 6));
+        state.hero_hurt_flash = 3;
+        state.current_enemy.atk_cooldown = state.current_enemy.atk_period;
+
+        if state.hero_hp == 0 {
+            on_hero_died(state);
+        }
+    }
+}
+
+/// 撃破時の処理: gold/魂を加算し、kill カウンタを進める。
+fn on_enemy_killed(state: &mut AbyssState) {
+    let was_boss = state.current_enemy.is_boss;
+    let gold_drop = (state.current_enemy.gold as f64 * state.gold_multiplier()).round() as u64;
+    state.gold = state.gold.saturating_add(gold_drop);
+    state.run_gold_earned = state.run_gold_earned.saturating_add(gold_drop);
+
+    // 魂はフロア深度に応じてドロップ。雑魚は floor/5 切り上げ、ボスは floor*2。
+    let base_souls = if was_boss {
+        (state.floor as u64) * 2
+    } else {
+        state.floor.div_ceil(5) as u64
+    };
+    let souls = (base_souls as f64 * state.soul_multiplier()).round() as u64;
+    state.souls = state.souls.saturating_add(souls);
+
+    state.run_kills = state.run_kills.saturating_add(1);
+    state.total_kills = state.total_kills.saturating_add(1);
+
+    if was_boss {
+        state.add_log(format!(
+            "▶ ボス {} 撃破！ +{}g +{}魂",
+            state.current_enemy.name, gold_drop, souls
+        ));
+        // ボス撃破 → 次階層へ進むか、現フロアに留まるか
+        if state.auto_descend {
+            descend_to_next_floor(state);
+        } else {
+            // 自動潜行 OFF → 同じフロアに留まり、kill カウンタをリセット (=次のボスへ向けて再周回)
+            state.kills_on_floor = 0;
+            spawn_next_enemy(state);
+        }
+    } else {
+        state.kills_on_floor = state.kills_on_floor.saturating_add(1);
+        spawn_next_enemy(state);
+    }
+}
+
+fn descend_to_next_floor(state: &mut AbyssState) {
+    state.floor = state.floor.saturating_add(1);
+    if state.floor > state.max_floor {
+        state.max_floor = state.floor;
+    }
+    if state.floor > state.deepest_floor_ever {
+        state.deepest_floor_ever = state.floor;
+    }
+    state.kills_on_floor = 0;
+    state.descent_flash = 8;
+    state.add_log(format!("▼ B{}F に到達", state.floor));
+    spawn_next_enemy(state);
+}
+
+fn on_hero_died(state: &mut AbyssState) {
+    state.deaths = state.deaths.saturating_add(1);
+    let bonus_souls = ((state.floor as u64).saturating_mul(3)) as f64 * state.soul_multiplier();
+    let bonus_souls = bonus_souls.round() as u64;
+    state.souls = state.souls.saturating_add(bonus_souls);
+
+    state.add_log(format!(
+        "✝ B{}F で力尽きた… +{}魂 / 浅瀬に帰還",
+        state.floor, bonus_souls
+    ));
+
+    // ラン開始地点に戻る
+    state.floor = 1;
+    state.kills_on_floor = 0;
+    state.run_kills = 0;
+    state.run_gold_earned = 0;
+    state.hero_hp = state.hero_max_hp();
+    state.hero_atk_cooldown = state.hero_atk_period();
+    state.hero_regen_acc_x100 = 0;
+    spawn_next_enemy(state);
+}
+
+/// 次の敵 (雑魚 or ボス) を生成して current_enemy にセット。
+fn spawn_next_enemy(state: &mut AbyssState) {
+    let is_boss = state.kills_on_floor >= enemies_per_floor();
+    state.current_enemy = make_enemy(state.floor, is_boss, &mut state.rng_state);
+}
+
+/// シンプルな擬似乱数 (xorshift32)。
+fn rng_next(seed: &mut u32) -> u32 {
+    let mut x = *seed;
+    if x == 0 {
+        x = 0xDEAD_BEEF;
+    }
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *seed = x;
+    x
+}
+
+fn roll_crit(state: &mut AbyssState) -> bool {
+    let r = rng_next(&mut state.rng_state) % 1000;
+    let threshold = (state.hero_crit_rate() * 1000.0) as u32;
+    r < threshold
+}
+
+/// 与えられた floor / boss フラグから敵を生成する。
+fn make_enemy(floor: u32, is_boss: bool, rng_seed: &mut u32) -> Enemy {
+    // 名前テーブル (フロア帯ごとに変わる)。
+    let normal_names: &[&str] = match floor {
+        1..=2 => &["スライム", "大ネズミ", "コウモリ"],
+        3..=5 => &["ゴブリン", "スケルトン", "影の犬"],
+        6..=9 => &["オーガ", "リッチ", "屍鬼"],
+        10..=14 => &["ガーゴイル", "ワイト", "影食らい"],
+        15..=19 => &["デーモン", "屍王", "鋼の番兵"],
+        20..=29 => &["古代の悪魔", "灼熱竜", "虚無の使徒"],
+        _ => &["奈落の主", "深淵の眷属", "終焉の影"],
+    };
+    let boss_names: &[&str] = match floor {
+        1..=4 => &["ゴブリン王", "巨大スライム", "墓守"],
+        5..=9 => &["ミノタウロス", "リッチロード", "石化竜"],
+        10..=14 => &["デーモンロード", "黒鎧将軍"],
+        15..=19 => &["堕天の王", "魔神ベルゼブ"],
+        20..=29 => &["竜帝バハムート", "深淵の門番"],
+        _ => &["奈落王", "終焉竜", "深淵そのもの"],
+    };
+
+    let names = if is_boss { boss_names } else { normal_names };
+    let r = (rng_next(rng_seed) as usize) % names.len();
+    let name = names[r].to_string();
+
+    // 雑魚のスケーリング
+    let f = floor as f64;
+    // HP scaling: base 14, 1.32^f
+    let mut hp = 14.0 * 1.32_f64.powf(f - 1.0);
+    let mut atk = 4.0 * 1.22_f64.powf(f - 1.0);
+    let mut def = 1.0 + (f - 1.0) * 0.5;
+    let mut gold = 4.0 * 1.40_f64.powf(f - 1.0);
+
+    if is_boss {
+        hp *= 5.0;
+        atk *= 1.5;
+        def *= 1.6;
+        gold *= 8.0;
+    }
+
+    let max_hp = hp.round().max(1.0) as u64;
+    let atk = atk.round().max(1.0) as u64;
+    let def = def.round() as u64;
+    let gold = gold.round().max(1.0) as u64;
+
+    // 攻撃間隔: 雑魚は 18 tick (=1.8秒)、ボスは 14 tick で激しい
+    let atk_period = if is_boss { 14 } else { 18 };
+
+    Enemy {
+        name,
+        max_hp,
+        hp: max_hp,
+        atk,
+        def,
+        gold,
+        is_boss,
+        atk_cooldown: atk_period,
+        atk_period,
+    }
+}
+
+// ── プレイヤーアクション ──
+
+/// 強化を 1 段階購入する。gold が足りなければ false。
+pub fn buy_upgrade(state: &mut AbyssState, kind: UpgradeKind) -> bool {
+    let cost = state.upgrade_cost(kind);
+    if state.gold < cost {
+        return false;
+    }
+    state.gold -= cost;
+    state.upgrades[kind.index()] = state.upgrades[kind.index()].saturating_add(1);
+
+    // Vitality を取った瞬間は最大値が増えるので、現HPもそのぶん増えると気持ち良い
+    if matches!(kind, UpgradeKind::Vitality) {
+        state.hero_hp = state.hero_hp.saturating_add(10);
+        let max = state.hero_max_hp();
+        if state.hero_hp > max {
+            state.hero_hp = max;
+        }
+    }
+
+    state.add_log(format!("◆ {} Lv.{}", kind.name(), state.upgrades[kind.index()]));
+    true
+}
+
+/// 魂強化を 1 段階購入する。
+pub fn buy_soul_perk(state: &mut AbyssState, perk: SoulPerk) -> bool {
+    let cost = state.soul_perk_cost(perk);
+    if state.souls < cost {
+        return false;
+    }
+    state.souls -= cost;
+    state.soul_perks[perk.index()] = state.soul_perks[perk.index()].saturating_add(1);
+
+    if matches!(perk, SoulPerk::Endurance) {
+        let max = state.hero_max_hp();
+        if state.hero_hp > max {
+            state.hero_hp = max;
+        }
+    }
+
+    state.add_log(format!("✦ {} Lv.{}", perk.name(), state.soul_perks[perk.index()]));
+    true
+}
+
+/// 自動潜行のON/OFFを切替。
+pub fn toggle_auto_descend(state: &mut AbyssState) {
+    state.auto_descend = !state.auto_descend;
+    if state.auto_descend {
+        state.add_log("▼ 自動潜行 ON");
+    } else {
+        state.add_log("■ 自動潜行 OFF (現フロアで周回)");
+    }
+}
+
+/// タブ切替。
+pub fn set_tab(state: &mut AbyssState, tab: Tab) {
+    state.tab = tab;
+}
+
+/// 自分の意思で浅瀬 (B1F) に戻る。死亡扱いにはしない (魂ボーナスなし)。
+pub fn retreat(state: &mut AbyssState) {
+    if state.floor == 1 {
+        state.add_log("既に B1F に居る");
+        return;
+    }
+    state.add_log(format!("△ 自主撤退: B{}F → B1F", state.floor));
+    state.floor = 1;
+    state.kills_on_floor = 0;
+    state.hero_hp = state.hero_max_hp();
+    state.hero_atk_cooldown = state.hero_atk_period();
+    spawn_next_enemy(state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ticked_state() -> AbyssState {
+        let mut s = AbyssState::new();
+        // 最初は placeholder なので 1 tick 進めて初期敵を作る
+        tick(&mut s, 1);
+        s
+    }
+
+    #[test]
+    fn first_tick_spawns_enemy() {
+        let s = ticked_state();
+        assert!(s.current_enemy.max_hp > 0);
+        assert!(!s.current_enemy.name.is_empty());
+        assert!(!s.current_enemy.is_boss);
+    }
+
+    #[test]
+    fn hero_attacks_enemy_over_time() {
+        let mut s = ticked_state();
+        let initial_hp = s.current_enemy.hp;
+        // hero_atk_period (12) tick 進めれば 1 攻撃は確実に発生
+        tick(&mut s, 30);
+        assert!(s.current_enemy.hp < initial_hp || s.run_kills > 0);
+    }
+
+    #[test]
+    fn killing_enemies_advances_floor_with_auto_descend() {
+        let mut s = AbyssState::new();
+        // 大量の強化で確実にフロアを進める
+        s.upgrades[UpgradeKind::Sword.index()] = 50;
+        s.upgrades[UpgradeKind::Speed.index()] = 10;
+        s.upgrades[UpgradeKind::Vitality.index()] = 50;
+        s.hero_hp = s.hero_max_hp();
+        s.auto_descend = true;
+        // 適度に長く進める
+        tick(&mut s, 2000);
+        assert!(s.floor >= 2, "floor should advance, got {}", s.floor);
+    }
+
+    #[test]
+    fn no_descend_when_auto_descend_off() {
+        let mut s = AbyssState::new();
+        s.upgrades[UpgradeKind::Sword.index()] = 50;
+        s.upgrades[UpgradeKind::Vitality.index()] = 50;
+        s.upgrades[UpgradeKind::Speed.index()] = 10;
+        s.hero_hp = s.hero_max_hp();
+        s.auto_descend = false;
+        tick(&mut s, 2000);
+        assert_eq!(s.floor, 1);
+        assert!(s.run_kills > enemies_per_floor() as u64);
+    }
+
+    #[test]
+    fn weak_hero_dies_eventually() {
+        let mut s = AbyssState::new();
+        // 弱い hero / 強い floor
+        s.floor = 30;
+        s.auto_descend = false;
+        s.upgrades[UpgradeKind::Vitality.index()] = 0;
+        s.hero_hp = s.hero_max_hp();
+        tick(&mut s, 10_000);
+        // 死亡しているか、何度かリセットされて floor=1 に戻っているはず
+        assert!(s.deaths > 0 || s.floor == 1);
+    }
+
+    #[test]
+    fn buy_upgrade_with_enough_gold() {
+        let mut s = ticked_state();
+        s.gold = 1_000_000;
+        let before_atk = s.hero_atk();
+        let ok = buy_upgrade(&mut s, UpgradeKind::Sword);
+        assert!(ok);
+        assert_eq!(s.upgrades[UpgradeKind::Sword.index()], 1);
+        assert!(s.hero_atk() > before_atk);
+    }
+
+    #[test]
+    fn buy_upgrade_fails_without_gold() {
+        let mut s = ticked_state();
+        s.gold = 0;
+        let ok = buy_upgrade(&mut s, UpgradeKind::Sword);
+        assert!(!ok);
+        assert_eq!(s.upgrades[UpgradeKind::Sword.index()], 0);
+    }
+
+    #[test]
+    fn vitality_increases_current_hp_too() {
+        let mut s = ticked_state();
+        s.gold = 1_000_000;
+        // ダメージを受けた状態を作る
+        let max = s.hero_max_hp();
+        s.hero_hp = max - 5;
+        let before_hp = s.hero_hp;
+        buy_upgrade(&mut s, UpgradeKind::Vitality);
+        assert!(s.hero_hp > before_hp);
+    }
+
+    #[test]
+    fn soul_perk_purchase() {
+        let mut s = AbyssState::new();
+        s.souls = 1000;
+        let ok = buy_soul_perk(&mut s, SoulPerk::Might);
+        assert!(ok);
+        assert_eq!(s.soul_perks[SoulPerk::Might.index()], 1);
+    }
+
+    #[test]
+    fn toggle_auto_descend_works() {
+        let mut s = AbyssState::new();
+        let before = s.auto_descend;
+        toggle_auto_descend(&mut s);
+        assert_ne!(s.auto_descend, before);
+    }
+
+    #[test]
+    fn retreat_resets_floor() {
+        let mut s = AbyssState::new();
+        s.floor = 5;
+        s.hero_hp = 1;
+        retreat(&mut s);
+        assert_eq!(s.floor, 1);
+        assert!(s.hero_hp > 1);
+    }
+
+    #[test]
+    fn boss_spawns_after_enough_kills() {
+        let mut s = AbyssState::new();
+        s.kills_on_floor = enemies_per_floor();
+        // 1 tick 進めれば boss spawn
+        tick(&mut s, 1);
+        assert!(s.current_enemy.is_boss);
+    }
+
+    #[test]
+    fn rng_state_advances() {
+        let mut seed = 12345;
+        let a = rng_next(&mut seed);
+        let b = rng_next(&mut seed);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn enemy_scaling_with_floor() {
+        let mut seed = 1;
+        let e1 = make_enemy(1, false, &mut seed);
+        let e10 = make_enemy(10, false, &mut seed);
+        assert!(e10.max_hp > e1.max_hp);
+        assert!(e10.atk > e1.atk);
+        assert!(e10.gold > e1.gold);
+    }
+
+    #[test]
+    fn boss_is_tougher() {
+        let mut seed = 1;
+        let normal = make_enemy(5, false, &mut seed);
+        let boss = make_enemy(5, true, &mut seed);
+        assert!(boss.max_hp > normal.max_hp);
+        assert!(boss.gold > normal.gold);
+    }
+}

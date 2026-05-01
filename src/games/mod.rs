@@ -1,5 +1,6 @@
 //! Game trait and game selection logic.
 
+pub mod abyss;
 pub mod cafe;
 pub mod career;
 pub mod cookie;
@@ -34,6 +35,7 @@ pub enum GameChoice {
     Career,
     Rpg,
     Cafe,
+    Abyss,
 }
 
 /// Top-level application state.
@@ -59,5 +61,6 @@ pub fn create_game(choice: &GameChoice) -> Box<dyn Game> {
         GameChoice::Career => Box::new(career::CareerGame::new()),
         GameChoice::Rpg => Box::new(rpg::RpgGame::new()),
         GameChoice::Cafe => Box::new(cafe::CafeGame::new()),
+        GameChoice::Abyss => Box::new(abyss::AbyssGame::new()),
     }
 }
