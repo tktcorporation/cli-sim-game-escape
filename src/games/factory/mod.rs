@@ -12,7 +12,7 @@ use std::rc::Rc;
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
 
-use crate::games::Game;
+use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
 use actions::*;
@@ -142,10 +142,14 @@ impl FactoryGame {
 }
 
 impl Game for FactoryGame {
+    fn choice(&self) -> GameChoice {
+        GameChoice::Factory
+    }
+
     fn handle_input(&mut self, event: &InputEvent) -> bool {
         match event {
             InputEvent::Key(c) => self.handle_key(*c),
-            InputEvent::Click(id) => self.handle_click(*id),
+            InputEvent::Click(_, id) => self.handle_click(*id),
         }
     }
 
@@ -161,6 +165,12 @@ impl Game for FactoryGame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::ClickScope;
+
+    /// Build a `Click` event scoped to this game.
+    fn click(id: u16) -> InputEvent {
+        InputEvent::Click(ClickScope::Game(GameChoice::Factory), id)
+    }
 
     #[test]
     fn factory_game_select_tool() {
@@ -210,11 +220,11 @@ mod tests {
     #[test]
     fn click_action_select_tool() {
         let mut game = FactoryGame::new();
-        game.handle_input(&InputEvent::Click(SELECT_MINER));
+        game.handle_input(&click(SELECT_MINER));
         assert_eq!(game.state.tool, PlacementTool::Miner);
-        game.handle_input(&InputEvent::Click(SELECT_BELT));
+        game.handle_input(&click(SELECT_BELT));
         assert_eq!(game.state.tool, PlacementTool::Belt);
-        game.handle_input(&InputEvent::Click(SELECT_DELETE));
+        game.handle_input(&click(SELECT_DELETE));
         assert_eq!(game.state.tool, PlacementTool::Delete);
     }
 }

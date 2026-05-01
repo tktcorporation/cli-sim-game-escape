@@ -15,7 +15,7 @@ use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
 
 use crate::input::{ClickState, InputEvent};
-use crate::games::Game;
+use crate::games::{Game, GameChoice};
 
 use actions::*;
 use state::{CookieState, DragonAura, ProducerKind, SugarBoostKind};
@@ -373,10 +373,14 @@ impl CookieGame {
 }
 
 impl Game for CookieGame {
+    fn choice(&self) -> GameChoice {
+        GameChoice::Cookie
+    }
+
     fn handle_input(&mut self, event: &InputEvent) -> bool {
         match event {
             InputEvent::Key(c) => self.handle_key(*c),
-            InputEvent::Click(id) => self.handle_click(*id),
+            InputEvent::Click(_, id) => self.handle_click(*id),
         }
     }
 
@@ -400,6 +404,14 @@ impl Game for CookieGame {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::ClickScope;
+
+    /// Build a `Click` event scoped to this game.  Tests don't care about the
+    /// scope itself; this just satisfies the new `InputEvent::Click(scope, id)`
+    /// shape without rewriting every call site to spell out the scope.
+    fn click(id: u16) -> InputEvent {
+        InputEvent::Click(ClickScope::Game(GameChoice::Cookie), id)
+    }
 
     // ── Keyboard input tests (same as before) ────────────────────
 
@@ -642,7 +654,7 @@ mod tests {
     #[test]
     fn click_action_produces_cookies() {
         let mut game = CookieGame::new();
-        game.handle_input(&InputEvent::Click(CLICK_COOKIE));
+        game.handle_input(&click(CLICK_COOKIE));
         assert!((game.state.cookies - 1.0).abs() < 0.001);
     }
 
@@ -650,7 +662,7 @@ mod tests {
     fn click_action_buy_producer() {
         let mut game = CookieGame::new();
         game.state.cookies = 100.0;
-        game.handle_input(&InputEvent::Click(BUY_PRODUCER_BASE)); // Cursor
+        game.handle_input(&click(BUY_PRODUCER_BASE)); // Cursor
         assert_eq!(game.state.producers[0].count, 1);
     }
 
@@ -660,16 +672,16 @@ mod tests {
         game.state.cookies = 100.0;
         // Even with upgrades tab open, click action directly buys producer
         game.state.show_upgrades = true;
-        game.handle_input(&InputEvent::Click(BUY_PRODUCER_BASE));
+        game.handle_input(&click(BUY_PRODUCER_BASE));
         assert_eq!(game.state.producers[0].count, 1);
     }
 
     #[test]
     fn click_action_tab_navigation() {
         let mut game = CookieGame::new();
-        game.handle_input(&InputEvent::Click(TAB_UPGRADES));
+        game.handle_input(&click(TAB_UPGRADES));
         assert!(game.state.show_upgrades);
-        game.handle_input(&InputEvent::Click(TAB_PRODUCERS));
+        game.handle_input(&click(TAB_PRODUCERS));
         assert!(!game.state.show_upgrades);
     }
 
@@ -681,7 +693,7 @@ mod tests {
             appear_ticks_left: 50,
             claimed: false,
         });
-        game.handle_input(&InputEvent::Click(CLAIM_GOLDEN));
+        game.handle_input(&click(CLAIM_GOLDEN));
         assert!(game.state.golden_event.is_none());
     }
 
@@ -690,7 +702,7 @@ mod tests {
         let mut game = CookieGame::new();
         game.state.cookies = 1e15;
         game.state.cookies_all_time = 1e15;
-        game.handle_input(&InputEvent::Click(PRESTIGE_RESET));
+        game.handle_input(&click(PRESTIGE_RESET));
         // After prestige, cookies should be reset
         assert!(game.state.cookies < 1.0);
     }

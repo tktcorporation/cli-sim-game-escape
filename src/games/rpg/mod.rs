@@ -19,7 +19,7 @@ use std::rc::Rc;
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
 
-use crate::games::Game;
+use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
 use actions::*;
@@ -38,10 +38,14 @@ impl RpgGame {
 }
 
 impl Game for RpgGame {
+    fn choice(&self) -> GameChoice {
+        GameChoice::Rpg
+    }
+
     fn handle_input(&mut self, event: &InputEvent) -> bool {
         match event {
             InputEvent::Key(ch) => handle_key(&mut self.state, *ch),
-            InputEvent::Click(id) => handle_click(&mut self.state, *id),
+            InputEvent::Click(_, id) => handle_click(&mut self.state, *id),
         }
     }
 
@@ -532,9 +536,15 @@ fn handle_game_clear_click(_state: &mut RpgState, id: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::ClickScope;
 
     fn make_game() -> RpgGame {
         RpgGame::new()
+    }
+
+    /// Build a `Click` event scoped to this game.
+    fn click(id: u16) -> InputEvent {
+        InputEvent::Click(ClickScope::Game(GameChoice::Rpg), id)
     }
 
     #[test]
@@ -620,7 +630,7 @@ mod tests {
     #[test]
     fn click_intro() {
         let mut g = make_game();
-        g.handle_input(&InputEvent::Click(CHOICE_BASE));
+        g.handle_input(&click(CHOICE_BASE));
         assert_eq!(g.state.scene, Scene::Intro(1));
     }
 
@@ -629,7 +639,7 @@ mod tests {
         let mut g = make_game();
         g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('1'));
-        let result = g.handle_input(&InputEvent::Click(CHOICE_BASE));
+        let result = g.handle_input(&click(CHOICE_BASE));
         assert!(result);
     }
 
@@ -650,7 +660,7 @@ mod tests {
         g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('1'));
         assert_eq!(g.state.scene, Scene::Town);
-        let result = g.handle_input(&InputEvent::Click(OPEN_INVENTORY));
+        let result = g.handle_input(&click(OPEN_INVENTORY));
         assert!(result);
         assert_eq!(g.state.overlay, Some(Overlay::Inventory));
     }
@@ -661,7 +671,7 @@ mod tests {
         g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('1'));
         assert_eq!(g.state.scene, Scene::Town);
-        let result = g.handle_input(&InputEvent::Click(OPEN_STATUS));
+        let result = g.handle_input(&click(OPEN_STATUS));
         assert!(result);
         assert_eq!(g.state.overlay, Some(Overlay::Status));
     }
@@ -677,7 +687,7 @@ mod tests {
         // D-pad south (row=2, col=1 in 3x3 grid = DPAD_BASE + 2*3 + 1)
         let south_id = DPAD_BASE + 7;
         // May or may not move depending on map layout, just check no crash
-        let _result = g.handle_input(&InputEvent::Click(south_id));
+        let _result = g.handle_input(&click(south_id));
     }
 
     #[test]
@@ -687,7 +697,7 @@ mod tests {
         g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('1')); // Enter dungeon
         assert_eq!(g.state.scene, Scene::DungeonExplore);
-        let result = g.handle_input(&InputEvent::Click(OPEN_INVENTORY));
+        let result = g.handle_input(&click(OPEN_INVENTORY));
         assert!(result);
         assert_eq!(g.state.overlay, Some(Overlay::Inventory));
     }
@@ -749,7 +759,7 @@ mod tests {
         let north_open = map.in_bounds(nx, ny)
             && map.cell(nx as usize, ny as usize).is_walkable();
         if north_open {
-            let result = g.handle_input(&InputEvent::Click(north_tap_id));
+            let result = g.handle_input(&click(north_tap_id));
             assert!(result);
         }
     }
@@ -773,7 +783,7 @@ mod tests {
         let south_open = map.in_bounds(sx, sy)
             && map.cell(sx as usize, sy as usize).is_walkable();
         if south_open {
-            let result = g.handle_input(&InputEvent::Click(south_id));
+            let result = g.handle_input(&click(south_id));
             assert!(result);
             let map = g.state.dungeon.as_ref().unwrap();
             assert_eq!(map.last_dir, state::Facing::South);
