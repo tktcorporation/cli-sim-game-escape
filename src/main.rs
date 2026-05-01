@@ -24,7 +24,8 @@ pub const MENU_SELECT_FACTORY: u16 = 2;
 pub const MENU_SELECT_CAREER: u16 = 3;
 pub const MENU_SELECT_RPG: u16 = 4;
 pub const MENU_SELECT_CAFE: u16 = 5;
-pub const MENU_SELECT_SETTINGS: u16 = 6;
+pub const MENU_SELECT_ABYSS: u16 = 6;
+pub const MENU_SELECT_SETTINGS: u16 = 7;
 pub const BACK_TO_MENU: u16 = 65535;
 
 // ── Settings action IDs ─────────────────────────────────────────
@@ -144,6 +145,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 InputEvent::Key('5') | InputEvent::Click(MENU_SELECT_CAFE) => {
                     Some(GameChoice::Cafe)
                 }
+                InputEvent::Key('6') | InputEvent::Click(MENU_SELECT_ABYSS) => {
+                    Some(GameChoice::Abyss)
+                }
                 _ => None,
             };
             if let Some(choice) = choice {
@@ -151,7 +155,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 *state = AppState::Playing { game };
             } else if matches!(
                 event,
-                InputEvent::Key('6') | InputEvent::Click(MENU_SELECT_SETTINGS)
+                InputEvent::Key('7') | InputEvent::Click(MENU_SELECT_SETTINGS)
             ) {
                 *state = AppState::Settings {
                     confirm_reset: None,
@@ -442,6 +446,21 @@ fn render_menu(
     cl.push(Line::from(""));
     cl.push_clickable(Line::from(vec![
         Span::styled(
+            " ▶ ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("深淵潜行 (Abyss Idle)", Style::default().fg(Color::White)),
+    ]), MENU_SELECT_ABYSS);
+    cl.push_clickable(Line::from(Span::styled(
+        "    自動戦闘で深層を目指す放置型ローグダンジョン",
+        Style::default().fg(Color::DarkGray),
+    )), MENU_SELECT_ABYSS);
+
+    cl.push(Line::from(""));
+    cl.push_clickable(Line::from(vec![
+        Span::styled(
             " ⚙ ",
             Style::default()
                 .fg(Color::Gray)
@@ -580,7 +599,7 @@ fn render_settings_main(
     cl.push(Line::from(""));
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
-        " ※ Tiny Factory と Dungeon Dive は",
+        " ※ Tiny Factory / Dungeon Dive / 深淵潜行 は",
         Style::default().fg(Color::DarkGray),
     )));
     cl.push(Line::from(Span::styled(
