@@ -126,13 +126,14 @@ fn pixel_fallback_to_cell(
 }
 
 /// Read the current high-resolution timestamp (ms since page navigation).
-/// Falls back to `0.0` when the Performance API is unavailable, which
-/// effectively disables dedup — acceptable for the (rare) headless case.
-fn now_ms() -> f64 {
+/// Returns `None` when the Performance API is unavailable (rare, e.g.
+/// headless or sandboxed contexts); callers must decide what `None` means
+/// for them — for tap dedup, that means *skip* dedup rather than treating
+/// every tap as happening "now".
+fn now_ms() -> Option<f64> {
     web_sys::window()
         .and_then(|w| w.performance())
         .map(|p| p.now())
-        .unwrap_or(0.0)
 }
 
 /// Process a tap/click at the given client coordinates.
@@ -170,8 +171,15 @@ fn handle_tap(
         }
     };
 
-    if !cs.try_consume_tap(col, row, now_ms()) {
-        return;
+    // Skip dedup entirely when the high-resolution clock is unavailable;
+    // JS-side `e.preventDefault()` already suppresses the compatibility
+    // event, so the only loss is the second-line-of-defence guarantee.
+    // (Dropping every tap on the same cell because we'd otherwise compare
+    // `0.0 - 0.0 < 30ms` would be a far worse failure mode.)
+    if let Some(t) = now_ms() {
+        if !cs.try_consume_tap(col, row, t) {
+            return;
+        }
     }
 
     if let Some(action_id) = cs.hit_test(col, row) {
@@ -371,8 +379,10 @@ fn main() -> io::Result<()> {
                 cs.clear_targets();
             }
 
-            // Get current timestamp for game time
-            let delta_ticks = game_time.borrow_mut().update(now_ms());
+            // Get current timestamp for game time.  Without a high-res clock
+            // the game effectively pauses (delta_ticks stays 0), which is
+            // acceptable for the rare headless / no-Performance-API case.
+            let delta_ticks = game_time.borrow_mut().update(now_ms().unwrap_or(0.0));
 
             let mut state = app_state.borrow_mut();
             // Stamp the frame with the scope of click targets it'll register,

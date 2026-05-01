@@ -430,6 +430,19 @@ mod tests {
         assert_eq!(accepted, 10);
     }
 
+    #[test]
+    fn dedup_with_stuck_clock_would_swallow_taps() {
+        // Regression guard for codex review on PR #68: if the caller feeds
+        // the same timestamp (e.g. 0.0 from `unwrap_or(0.0)`) on every call,
+        // dedup will silently drop every same-cell tap after the first.
+        // This test pins that down so it stays the *caller's* responsibility
+        // to skip dedup when no high-resolution clock is available.
+        let mut cs = ClickState::new();
+        assert!(cs.try_consume_tap(5, 10, 0.0));
+        assert!(!cs.try_consume_tap(5, 10, 0.0));
+        assert!(!cs.try_consume_tap(5, 10, 0.0));
+    }
+
     // ── Layout responsive tests ────────────────────────────────────
 
     #[test]
