@@ -5,12 +5,15 @@
 //! Events: numbered choices.  Overlays: inventory / status.
 
 pub mod actions;
+pub mod balance;
+pub mod commands;
 pub mod dungeon_map;
 pub mod dungeon_view;
 pub mod events;
 pub mod logic;
 pub mod lore;
 pub mod render;
+pub mod simulator;
 pub mod state;
 
 use std::cell::RefCell;
@@ -23,6 +26,7 @@ use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
 use actions::*;
+use commands::{apply_action, PlayerAction};
 use state::{BattlePhase, Overlay, RpgState, Scene};
 
 pub struct RpgGame {
@@ -97,18 +101,14 @@ fn handle_click(state: &mut RpgState, id: u16) -> bool {
 
 fn handle_intro_key(state: &mut RpgState, ch: char) -> bool {
     match ch {
-        '1' | '2' | ' ' => {
-            logic::advance_intro(state);
-            true
-        }
+        '1' | '2' | ' ' => apply_action(state, PlayerAction::AdvanceIntro),
         _ => false,
     }
 }
 
 fn handle_intro_click(state: &mut RpgState, id: u16) -> bool {
     if (CHOICE_BASE..CHOICE_BASE + 5).contains(&id) {
-        logic::advance_intro(state);
-        return true;
+        return apply_action(state, PlayerAction::AdvanceIntro);
     }
     false
 }
@@ -125,18 +125,12 @@ fn handle_town_key(state: &mut RpgState, ch: char) -> bool {
         _ => None,
     };
     if let Some(idx) = choice_index {
-        return logic::execute_town_choice(state, idx);
+        return apply_action(state, PlayerAction::TownChoice(idx));
     }
 
     match ch {
-        'I' | 'i' => {
-            state.overlay = Some(Overlay::Inventory);
-            true
-        }
-        'S' | 's' => {
-            state.overlay = Some(Overlay::Status);
-            true
-        }
+        'I' | 'i' => apply_action(state, PlayerAction::OpenInventory),
+        'S' | 's' => apply_action(state, PlayerAction::OpenStatus),
         _ => false,
     }
 }
@@ -144,7 +138,7 @@ fn handle_town_key(state: &mut RpgState, ch: char) -> bool {
 fn handle_town_click(state: &mut RpgState, id: u16) -> bool {
     if (CHOICE_BASE..CHOICE_BASE + 10).contains(&id) {
         let index = (id - CHOICE_BASE) as usize;
-        return logic::execute_town_choice(state, index);
+        return apply_action(state, PlayerAction::TownChoice(index));
     }
     handle_overlay_open_click(state, id)
 }
@@ -154,19 +148,13 @@ fn handle_town_click(state: &mut RpgState, id: u16) -> bool {
 fn handle_dungeon_explore_key(state: &mut RpgState, ch: char) -> bool {
     match ch {
         // WASD / hjkl / arrow keys — all direct cardinal movement
-        'W' | 'w' | 'k' => logic::try_move(state, state::Facing::North),
-        'A' | 'a' | 'h' => logic::try_move(state, state::Facing::West),
-        'S' | 's' | 'j' => logic::try_move(state, state::Facing::South),
-        'D' | 'd' | 'l' => logic::try_move(state, state::Facing::East),
+        'W' | 'w' | 'k' => apply_action(state, PlayerAction::Move(state::Facing::North)),
+        'A' | 'a' | 'h' => apply_action(state, PlayerAction::Move(state::Facing::West)),
+        'S' | 's' | 'j' => apply_action(state, PlayerAction::Move(state::Facing::South)),
+        'D' | 'd' | 'l' => apply_action(state, PlayerAction::Move(state::Facing::East)),
         // Overlays
-        'I' | 'i' => {
-            state.overlay = Some(Overlay::Inventory);
-            true
-        }
-        'X' | 'x' => {
-            state.overlay = Some(Overlay::Status);
-            true
-        }
+        'I' | 'i' => apply_action(state, PlayerAction::OpenInventory),
+        'X' | 'x' => apply_action(state, PlayerAction::OpenStatus),
         _ => false,
     }
 }
@@ -191,7 +179,7 @@ fn handle_dpad_tap(state: &mut RpgState, id: u16) -> bool {
         _ => None,
     };
     match dir {
-        Some(d) => logic::try_move(state, d),
+        Some(d) => apply_action(state, PlayerAction::Move(d)),
         None => false,
     }
 }
@@ -212,7 +200,7 @@ fn handle_map_tap(state: &mut RpgState, id: u16) -> bool {
         _ => None,                                 // center (1,1): no-op
     };
     match screen_dir {
-        Some(dir) => logic::move_direction(state, dir),
+        Some(dir) => apply_action(state, PlayerAction::MoveAuto(dir)),
         None => false,
     }
 }
@@ -229,14 +217,11 @@ fn handle_dungeon_event_key(state: &mut RpgState, ch: char) -> bool {
         _ => None,
     };
     if let Some(idx) = choice_index {
-        return logic::resolve_event_choice(state, idx);
+        return apply_action(state, PlayerAction::PickEventChoice(idx));
     }
 
     match ch {
-        'I' | 'i' => {
-            state.overlay = Some(Overlay::Inventory);
-            true
-        }
+        'I' | 'i' => apply_action(state, PlayerAction::OpenInventory),
         _ => false,
     }
 }
@@ -244,7 +229,7 @@ fn handle_dungeon_event_key(state: &mut RpgState, ch: char) -> bool {
 fn handle_dungeon_event_click(state: &mut RpgState, id: u16) -> bool {
     if (EVENT_CHOICE_BASE..EVENT_CHOICE_BASE + 10).contains(&id) {
         let index = (id - EVENT_CHOICE_BASE) as usize;
-        return logic::resolve_event_choice(state, index);
+        return apply_action(state, PlayerAction::PickEventChoice(index));
     }
     handle_overlay_open_click(state, id)
 }
@@ -253,26 +238,16 @@ fn handle_dungeon_event_click(state: &mut RpgState, id: u16) -> bool {
 
 fn handle_dungeon_result_key(state: &mut RpgState, ch: char) -> bool {
     match ch {
-        '1' | ' ' => {
-            logic::continue_exploration(state);
-            true
-        }
-        'I' | 'i' => {
-            state.overlay = Some(Overlay::Inventory);
-            true
-        }
-        'S' | 's' => {
-            state.overlay = Some(Overlay::Status);
-            true
-        }
+        '1' | ' ' => apply_action(state, PlayerAction::ContinueExploration),
+        'I' | 'i' => apply_action(state, PlayerAction::OpenInventory),
+        'S' | 's' => apply_action(state, PlayerAction::OpenStatus),
         _ => false,
     }
 }
 
 fn handle_dungeon_result_click(state: &mut RpgState, id: u16) -> bool {
     if id == CHOICE_BASE {
-        logic::continue_exploration(state);
-        return true;
+        return apply_action(state, PlayerAction::ContinueExploration);
     }
     handle_overlay_open_click(state, id)
 }
@@ -287,76 +262,31 @@ fn handle_battle_key(state: &mut RpgState, ch: char) -> bool {
 
     match battle.phase {
         BattlePhase::SelectAction => match ch {
-            '1' => logic::battle_attack(state),
-            '2' => {
-                if !logic::available_skills(state.level).is_empty() {
-                    if let Some(b) = &mut state.battle {
-                        b.phase = BattlePhase::SelectSkill;
-                    }
-                    true
-                } else {
-                    false
-                }
-            }
-            '3' => {
-                if !logic::battle_consumables(state).is_empty() {
-                    if let Some(b) = &mut state.battle {
-                        b.phase = BattlePhase::SelectItem;
-                    }
-                    true
-                } else {
-                    false
-                }
-            }
-            '4' => logic::battle_flee(state),
+            '1' => apply_action(state, PlayerAction::BattleAttack),
+            '2' => apply_action(state, PlayerAction::BattleOpenSkillMenu),
+            '3' => apply_action(state, PlayerAction::BattleOpenItemMenu),
+            '4' => apply_action(state, PlayerAction::BattleFlee),
             _ => false,
         },
         BattlePhase::SelectSkill => match ch {
-            '0' | '-' => {
-                if let Some(b) = &mut state.battle {
-                    b.phase = BattlePhase::SelectAction;
-                }
-                true
-            }
+            '0' | '-' => apply_action(state, PlayerAction::BattleBackToActions),
             '1'..='9' => {
                 let idx = (ch as u32 - '1' as u32) as usize;
-                logic::battle_use_skill(state, idx)
+                apply_action(state, PlayerAction::BattleUseSkill(idx))
             }
             _ => false,
         },
         BattlePhase::SelectItem => match ch {
-            '0' | '-' => {
-                if let Some(b) = &mut state.battle {
-                    b.phase = BattlePhase::SelectAction;
-                }
-                true
-            }
+            '0' | '-' => apply_action(state, PlayerAction::BattleBackToActions),
             '1'..='9' => {
                 let idx = (ch as u32 - '1' as u32) as usize;
-                logic::battle_use_item(state, idx)
+                apply_action(state, PlayerAction::BattleUseItem(idx))
             }
             _ => false,
         },
-        BattlePhase::Victory => {
+        BattlePhase::Victory | BattlePhase::Defeat | BattlePhase::Fled => {
             if ch == '1' || ch == ' ' {
-                logic::process_victory(state);
-                true
-            } else {
-                false
-            }
-        }
-        BattlePhase::Defeat => {
-            if ch == '1' || ch == ' ' {
-                logic::process_defeat(state);
-                true
-            } else {
-                false
-            }
-        }
-        BattlePhase::Fled => {
-            if ch == '1' || ch == ' ' {
-                logic::process_fled(state);
-                true
+                apply_action(state, PlayerAction::BattleAcknowledgeOutcome)
             } else {
                 false
             }
@@ -373,69 +303,46 @@ fn handle_battle_click(state: &mut RpgState, id: u16) -> bool {
     match battle.phase {
         BattlePhase::SelectAction => {
             if id == CHOICE_BASE {
-                return logic::battle_attack(state);
+                return apply_action(state, PlayerAction::BattleAttack);
             }
-            if id == CHOICE_BASE + 1 && !logic::available_skills(state.level).is_empty() {
-                if let Some(b) = &mut state.battle {
-                    b.phase = BattlePhase::SelectSkill;
-                }
-                return true;
+            if id == CHOICE_BASE + 1 {
+                return apply_action(state, PlayerAction::BattleOpenSkillMenu);
             }
-            if id == CHOICE_BASE + 2 && !logic::battle_consumables(state).is_empty() {
-                if let Some(b) = &mut state.battle {
-                    b.phase = BattlePhase::SelectItem;
-                }
-                return true;
+            if id == CHOICE_BASE + 2 {
+                return apply_action(state, PlayerAction::BattleOpenItemMenu);
             }
             if id == CHOICE_BASE + 3 {
-                return logic::battle_flee(state);
+                return apply_action(state, PlayerAction::BattleFlee);
             }
             false
         }
         BattlePhase::SelectSkill => {
             if id == BATTLE_BACK {
-                if let Some(b) = &mut state.battle {
-                    b.phase = BattlePhase::SelectAction;
-                }
-                return true;
+                return apply_action(state, PlayerAction::BattleBackToActions);
             }
             if (SKILL_BASE..SKILL_BASE + 10).contains(&id) {
-                return logic::battle_use_skill(state, (id - SKILL_BASE) as usize);
+                return apply_action(
+                    state,
+                    PlayerAction::BattleUseSkill((id - SKILL_BASE) as usize),
+                );
             }
             false
         }
         BattlePhase::SelectItem => {
             if id == BATTLE_BACK {
-                if let Some(b) = &mut state.battle {
-                    b.phase = BattlePhase::SelectAction;
-                }
-                return true;
+                return apply_action(state, PlayerAction::BattleBackToActions);
             }
             if (BATTLE_ITEM_BASE..BATTLE_ITEM_BASE + 10).contains(&id) {
-                return logic::battle_use_item(state, (id - BATTLE_ITEM_BASE) as usize);
+                return apply_action(
+                    state,
+                    PlayerAction::BattleUseItem((id - BATTLE_ITEM_BASE) as usize),
+                );
             }
             false
         }
-        BattlePhase::Victory => {
+        BattlePhase::Victory | BattlePhase::Defeat | BattlePhase::Fled => {
             if id == CHOICE_BASE {
-                logic::process_victory(state);
-                true
-            } else {
-                false
-            }
-        }
-        BattlePhase::Defeat => {
-            if id == CHOICE_BASE {
-                logic::process_defeat(state);
-                true
-            } else {
-                false
-            }
-        }
-        BattlePhase::Fled => {
-            if id == CHOICE_BASE {
-                logic::process_fled(state);
-                true
+                apply_action(state, PlayerAction::BattleAcknowledgeOutcome)
             } else {
                 false
             }
@@ -447,14 +354,8 @@ fn handle_battle_click(state: &mut RpgState, id: u16) -> bool {
 
 fn handle_overlay_open_click(state: &mut RpgState, id: u16) -> bool {
     match id {
-        OPEN_INVENTORY => {
-            state.overlay = Some(Overlay::Inventory);
-            true
-        }
-        OPEN_STATUS => {
-            state.overlay = Some(Overlay::Status);
-            true
-        }
+        OPEN_INVENTORY => apply_action(state, PlayerAction::OpenInventory),
+        OPEN_STATUS => apply_action(state, PlayerAction::OpenStatus),
         _ => false,
     }
 }
@@ -464,31 +365,24 @@ fn handle_overlay_open_click(state: &mut RpgState, id: u16) -> bool {
 fn handle_overlay_key(state: &mut RpgState, ch: char) -> bool {
     match state.overlay {
         Some(Overlay::Inventory) => match ch {
-            '0' | '-' => {
-                state.overlay = None;
-                true
-            }
+            '0' | '-' => apply_action(state, PlayerAction::CloseOverlay),
             '1'..='9' => {
                 let idx = (ch as u32 - '1' as u32) as usize;
-                logic::use_item(state, idx)
+                apply_action(state, PlayerAction::UseInventoryItem(idx))
             }
             _ => false,
         },
         Some(Overlay::Shop) => match ch {
-            '0' | '-' => {
-                state.overlay = None;
-                true
-            }
+            '0' | '-' => apply_action(state, PlayerAction::CloseOverlay),
             '1'..='9' => {
                 let idx = (ch as u32 - '1' as u32) as usize;
-                logic::buy_item(state, idx)
+                apply_action(state, PlayerAction::BuyShopItem(idx))
             }
             _ => false,
         },
         Some(Overlay::Status) => {
             if ch == '0' || ch == '-' {
-                state.overlay = None;
-                true
+                apply_action(state, PlayerAction::CloseOverlay)
             } else {
                 false
             }
@@ -499,20 +393,25 @@ fn handle_overlay_key(state: &mut RpgState, ch: char) -> bool {
 
 fn handle_overlay_click(state: &mut RpgState, id: u16) -> bool {
     if id == CLOSE_OVERLAY {
-        state.overlay = None;
-        return true;
+        return apply_action(state, PlayerAction::CloseOverlay);
     }
 
     match state.overlay {
         Some(Overlay::Inventory) => {
             if (INV_USE_BASE..INV_USE_BASE + 20).contains(&id) {
-                return logic::use_item(state, (id - INV_USE_BASE) as usize);
+                return apply_action(
+                    state,
+                    PlayerAction::UseInventoryItem((id - INV_USE_BASE) as usize),
+                );
             }
             false
         }
         Some(Overlay::Shop) => {
             if (SHOP_BUY_BASE..SHOP_BUY_BASE + 20).contains(&id) {
-                return logic::buy_item(state, (id - SHOP_BUY_BASE) as usize);
+                return apply_action(
+                    state,
+                    PlayerAction::BuyShopItem((id - SHOP_BUY_BASE) as usize),
+                );
             }
             false
         }

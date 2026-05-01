@@ -3,6 +3,8 @@
 //! Design: "Dungeon Crawler" — room-by-room exploration with
 //! risk/reward resource management across dungeon floors.
 
+use super::balance::BalanceConfig;
+
 // ── Elements ──────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -615,6 +617,9 @@ pub struct RpgState {
 
     // Lore collected
     pub lore_found: Vec<u32>,
+
+    // Difficulty knobs (defaults to vanilla balance).
+    pub difficulty: BalanceConfig,
 }
 
 impl RpgState {
@@ -651,6 +656,7 @@ impl RpgState {
             run_enemies_killed: 0,
             run_rooms_explored: 0,
             lore_found: Vec::new(),
+            difficulty: BalanceConfig::standard(),
         }
     }
 

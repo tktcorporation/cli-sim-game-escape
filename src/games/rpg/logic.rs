@@ -443,10 +443,11 @@ pub fn resolve_event_choice(state: &mut RpgState, choice_index: usize) -> bool {
 }
 
 fn apply_event_outcome(state: &mut RpgState, outcome: &EventOutcome) {
-    // Gold
+    // Gold (scaled by difficulty)
     if outcome.gold > 0 {
-        state.gold += outcome.gold as u32;
-        state.run_gold_earned += outcome.gold as u32;
+        let gold = state.difficulty.scale_gold(outcome.gold as u32);
+        state.gold += gold;
+        state.run_gold_earned += gold;
     }
 
     // HP change
@@ -455,7 +456,10 @@ fn apply_event_outcome(state: &mut RpgState, outcome: &EventOutcome) {
         let heal = state.max_hp / 4;
         state.hp = (state.hp + heal).min(state.max_hp);
     } else if outcome.hp_change < 0 {
-        let damage = (-outcome.hp_change) as u32;
+        // Negative hp_change == hazard damage (trap, surprise, etc).
+        // Scale with trap_damage_mul so difficulty knobs affect dungeon hazards.
+        let raw = (-outcome.hp_change) as u32;
+        let damage = state.difficulty.scale_trap_damage(raw);
         state.hp = state.hp.saturating_sub(damage);
     } else if outcome.hp_change > 0 {
         state.hp = (state.hp + outcome.hp_change as u32).min(state.max_hp);
@@ -560,11 +564,13 @@ pub fn continue_exploration(state: &mut RpgState) {
 
 pub fn start_battle(state: &mut RpgState, enemy_kind: EnemyKind, is_boss: bool) {
     let info = enemy_info(enemy_kind);
+    let floor = state.dungeon.as_ref().map(|d| d.floor_num).unwrap_or(1);
+    let scaled_hp = state.difficulty.scale_enemy_hp(info.max_hp, floor);
     state.battle = Some(BattleState {
         enemy: BattleEnemy {
             kind: enemy_kind,
-            hp: info.max_hp,
-            max_hp: info.max_hp,
+            hp: scaled_hp,
+            max_hp: scaled_hp,
         },
         phase: BattlePhase::SelectAction,
         player_def_boost: 0,
@@ -590,7 +596,8 @@ pub fn battle_attack(state: &mut RpgState) -> bool {
     let total_atk = player_atk + battle.player_atk_boost;
     let enemy_kind = battle.enemy.kind;
     let einfo = enemy_info(enemy_kind);
-    let base_damage = total_atk.saturating_sub(einfo.def / 2).max(1);
+    let scaled_def = state.difficulty.scale_enemy_def(einfo.def);
+    let base_damage = total_atk.saturating_sub(scaled_def / 2).max(1);
 
     // Critical hit: 10% chance, 1.5x damage
     let crit_roll = rng_range(state, 100);
@@ -644,6 +651,7 @@ pub fn battle_use_skill(state: &mut RpgState, skill_index: usize) -> bool {
         None => return false,
     };
     let einfo = enemy_info(enemy_kind);
+    let scaled_def = state.difficulty.scale_enemy_def(einfo.def);
 
     // Check elemental weakness
     let element = skill_element(skill_kind);
@@ -659,7 +667,7 @@ pub fn battle_use_skill(state: &mut RpgState, skill_index: usize) -> bool {
     match skill_kind {
         SkillKind::Fire => {
             let base = (mag * sinfo.value)
-                .saturating_sub(einfo.def / 3)
+                .saturating_sub(scaled_def / 3)
                 .max(1);
             let damage = if is_weak { base * 3 / 2 } else { base };
             battle
@@ -680,7 +688,7 @@ pub fn battle_use_skill(state: &mut RpgState, skill_index: usize) -> bool {
         }
         SkillKind::IceBlade => {
             let base = (player_atk / 2 + mag * sinfo.value)
-                .saturating_sub(einfo.def / 3)
+                .saturating_sub(scaled_def / 3)
                 .max(1);
             let damage = if is_weak { base * 3 / 2 } else { base };
             battle
@@ -690,7 +698,7 @@ pub fn battle_use_skill(state: &mut RpgState, skill_index: usize) -> bool {
         }
         SkillKind::Thunder => {
             let base = (mag * sinfo.value)
-                .saturating_sub(einfo.def / 4)
+                .saturating_sub(scaled_def / 4)
                 .max(1);
             let damage = if is_weak { base * 3 / 2 } else { base };
             battle
@@ -700,7 +708,7 @@ pub fn battle_use_skill(state: &mut RpgState, skill_index: usize) -> bool {
         }
         SkillKind::Drain => {
             let damage = (mag * sinfo.value)
-                .saturating_sub(einfo.def / 3)
+                .saturating_sub(scaled_def / 3)
                 .max(1);
             let heal = damage / 2;
             state.hp = (state.hp + heal).min(max_hp);
@@ -830,10 +838,12 @@ fn process_enemy_turn(state: &mut RpgState) {
 
     let _ = enemy_hp;
     let einfo = enemy_info(enemy_kind);
+    let floor = state.dungeon.as_ref().map(|d| d.floor_num).unwrap_or(1);
+    let scaled_atk = state.difficulty.scale_enemy_atk(einfo.atk, floor);
     let total_def = player_def + def_boost;
 
     if is_charging {
-        let damage = (einfo.atk * 2).saturating_sub(total_def / 2).max(1);
+        let damage = (scaled_atk * 2).saturating_sub(total_def / 2).max(1);
         let battle = state.battle.as_mut().unwrap();
         battle.enemy_charging = false;
         let msg = match enemy_kind {
@@ -860,7 +870,7 @@ fn process_enemy_turn(state: &mut RpgState) {
             return;
         } else {
             let battle = state.battle.as_mut().unwrap();
-            let damage = einfo.atk.saturating_sub(total_def / 2).max(1);
+            let damage = scaled_atk.saturating_sub(total_def / 2).max(1);
             battle
                 .log
                 .push(format!("{}の攻撃！ {}ダメージ！", einfo.name, damage));
@@ -868,7 +878,7 @@ fn process_enemy_turn(state: &mut RpgState) {
         }
     } else {
         let battle = state.battle.as_mut().unwrap();
-        let damage = einfo.atk.saturating_sub(total_def / 2).max(1);
+        let damage = scaled_atk.saturating_sub(total_def / 2).max(1);
         battle
             .log
             .push(format!("{}の攻撃！ {}ダメージ！", einfo.name, damage));
@@ -889,15 +899,17 @@ pub fn process_victory(state: &mut RpgState) {
     };
     let enemy_kind = battle.enemy.kind;
     let einfo = enemy_info(enemy_kind);
+    let exp_gain = state.difficulty.scale_exp(einfo.exp);
+    let gold_gain = state.difficulty.scale_gold(einfo.gold);
 
-    state.exp += einfo.exp;
-    state.gold += einfo.gold;
-    state.run_gold_earned += einfo.gold;
-    state.run_exp_earned += einfo.exp;
+    state.exp += exp_gain;
+    state.gold += gold_gain;
+    state.run_gold_earned += gold_gain;
+    state.run_exp_earned += exp_gain;
     state.run_enemies_killed += 1;
     state.add_log(&format!(
         "{}を倒した！ EXP+{} {}G",
-        einfo.name, einfo.exp, einfo.gold
+        einfo.name, exp_gain, gold_gain
     ));
 
     // Item drop
@@ -924,7 +936,7 @@ pub fn process_victory(state: &mut RpgState) {
     state.room_result = Some(RoomResult {
         description: vec![
             format!("{}を倒した！", einfo.name),
-            format!("EXP+{} {}G獲得", einfo.exp, einfo.gold),
+            format!("EXP+{} {}G獲得", exp_gain, gold_gain),
         ],
     });
 }
