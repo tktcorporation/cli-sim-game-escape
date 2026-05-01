@@ -9,6 +9,7 @@
 //! - [`TabBar`] — Horizontal tab navigation (rendering + click targets).
 //! - [`ClickableList`] — Vertical list with per-row click targets.
 //! - [`ClickableGrid`] — 2D grid with per-cell click targets.
+//! - [`Clickable`] — Wrap any [`Widget`] with a single full-area click target.
 //!
 //! These builders are the **only** sanctioned way to register click targets.
 //! Direct calls to `ClickState::add_click_target` / `add_row_target` are
@@ -18,7 +19,7 @@
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::style::{Color, Style};
 use ratzilla::ratatui::text::{Line, Span};
-use ratzilla::ratatui::widgets::{Block, Paragraph, Wrap};
+use ratzilla::ratatui::widgets::{Block, Paragraph, Widget, Wrap};
 use ratzilla::ratatui::Frame;
 
 use crate::input::ClickState;
@@ -408,6 +409,57 @@ impl ClickableGrid {
     }
 }
 
+// ── Clickable ─────────────────────────────────────────────────
+
+/// Wraps a [`Widget`] so that rendering and click-target registration happen
+/// in a single call.
+///
+/// This is the primitive for the "render some pixels and the whole rect is
+/// one button" pattern.  Use it for cases that don't fit [`TabBar`],
+/// [`ClickableList`], or [`ClickableGrid`]:
+///
+/// - Always-on overlays (back button, status bar buttons)
+/// - Full-area interactive surfaces (the cookie itself, drop zones)
+/// - Transient overlays that appear/disappear (golden cookie, modals)
+/// - Single arbitrary-position rows (scroll indicators)
+///
+/// # Why this primitive exists
+///
+/// Hand-rolled `f.render_widget(...) + cs.add_click_target(...)` pairs drift
+/// out of sync as layout changes: the widget moves but the rect doesn't.
+/// `Clickable` co-locates the two so the `area` passed to render is the
+/// same `area` registered as the hit region.  There is exactly one
+/// [`render`](Clickable::render) call per construction, and it cannot
+/// register a target without also drawing.
+///
+/// # Example
+/// ```ignore
+/// use ratzilla::ratatui::widgets::Paragraph;
+/// let para = Paragraph::new(" ◀戻る");
+/// Clickable::new(para, BACK_TO_MENU).render(f, area, &mut cs);
+/// ```
+pub struct Clickable<W: Widget> {
+    widget: W,
+    action_id: u16,
+}
+
+impl<W: Widget> Clickable<W> {
+    /// Wrap `widget` with a single click target identified by `action_id`.
+    pub fn new(widget: W, action_id: u16) -> Self {
+        Self { widget, action_id }
+    }
+
+    /// Render the wrapped widget into `area` and register `area` as a click
+    /// target.  The order is: register-first, then render — this matches
+    /// `ClickableList::render` so that callers expecting "later widgets win"
+    /// can still register an overlay after this and have it take priority
+    /// (see [`ClickState::hit_test`](crate::input::ClickState::hit_test)).
+    pub fn render(self, f: &mut Frame, area: Rect, cs: &mut ClickState) {
+        cs.add_click_target(area, self.action_id);
+        f.render_widget(self.widget, area);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -667,5 +719,62 @@ mod tests {
         assert_eq!(ClickableGrid::decode(base, view_w, 100), Some((0, 0)));
         // Below base → None
         assert_eq!(ClickableGrid::decode(base, view_w, 99), None);
+    }
+
+    // ── Clickable tests ───────────────────────────────────────
+
+    /// Verify that `Clickable::render` registers exactly the `area` it is
+    /// rendered into.  Render output itself isn't asserted — the hit-test
+    /// rect is what determines whether taps reach the right action.
+    #[test]
+    fn clickable_registers_full_area() {
+        use ratzilla::ratatui::backend::TestBackend;
+        use ratzilla::ratatui::Terminal;
+
+        let mut cs = ClickState::new();
+        let area = Rect::new(3, 5, 6, 1);
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        terminal
+            .draw(|f| {
+                let para = Paragraph::new(" ◀戻る");
+                Clickable::new(para, 999).render(f, area, &mut cs);
+            })
+            .unwrap();
+
+        // Every cell of the area is the click target
+        for x in 3..9 {
+            assert_eq!(cs.hit_test(x, 5), Some(999));
+        }
+        // Just outside the area is not
+        assert_eq!(cs.hit_test(2, 5), None);
+        assert_eq!(cs.hit_test(9, 5), None);
+        assert_eq!(cs.hit_test(5, 4), None);
+        assert_eq!(cs.hit_test(5, 6), None);
+    }
+
+    /// Overlay precedence: a `Clickable` registered after another target on
+    /// the same row wins on overlap, because [`ClickState::hit_test`]
+    /// iterates in reverse registration order.  This is the contract the
+    /// back button and golden-cookie overlays rely on.
+    #[test]
+    fn clickable_later_registration_wins_on_overlap() {
+        use ratzilla::ratatui::backend::TestBackend;
+        use ratzilla::ratatui::Terminal;
+
+        let mut cs = ClickState::new();
+        let row = Rect::new(0, 5, 80, 1);
+        let overlay = Rect::new(0, 5, 6, 1);
+        let mut terminal = Terminal::new(TestBackend::new(80, 20)).unwrap();
+        terminal
+            .draw(|f| {
+                Clickable::new(Paragraph::new("background"), 1).render(f, row, &mut cs);
+                Clickable::new(Paragraph::new(" back "), 2).render(f, overlay, &mut cs);
+            })
+            .unwrap();
+
+        // Inside the overlay → overlay wins
+        assert_eq!(cs.hit_test(2, 5), Some(2));
+        // Outside the overlay → background
+        assert_eq!(cs.hit_test(20, 5), Some(1));
     }
 }
