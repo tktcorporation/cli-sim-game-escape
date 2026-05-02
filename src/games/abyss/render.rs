@@ -24,7 +24,7 @@ pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<Re
     //   - 1行: トグル行 (自動潜行 / 撤退)
     //   - 1行: タブバー
     //   - 残り: タブコンテンツ + ログ
-    let combat_height: u16 = if narrow { 7 } else { 8 };
+    let combat_height: u16 = if narrow { 8 } else { 9 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -199,6 +199,16 @@ fn render_hero_panel(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool
         progress,
         bar_width,
         Color::Yellow,
+    )));
+
+    // 戦闘集中バー (focus)。攻撃成功で溜まり、被弾で削れる。
+    let focus_max = state.config.hero.focus_max.max(1);
+    let focus_frac = state.combat_focus as f32 / focus_max as f32;
+    lines.push(Line::from(make_progress_line(
+        " 集中",
+        focus_frac.clamp(0.0, 1.0),
+        bar_width,
+        Color::LightCyan,
     )));
 
     if !narrow {
@@ -535,6 +545,15 @@ fn render_stats(state: &AbyssState, f: &mut Frame, area: Rect) {
     lines.push(stat_line(
         "攻撃間隔",
         format!("{:.1}秒/回", state.hero_atk_period() as f32 / 10.0),
+    ));
+    lines.push(stat_line(
+        "戦闘集中",
+        format!(
+            "{}/{} (-{}%)",
+            state.combat_focus,
+            state.config.hero.focus_max,
+            ((1.0 - state.focus_factor()) * 100.0).round() as u32
+        ),
     ));
     lines.push(stat_line(
         "HP回復",

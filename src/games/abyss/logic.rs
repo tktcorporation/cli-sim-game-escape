@@ -77,6 +77,10 @@ fn step_one_tick(state: &mut AbyssState) {
         state.current_enemy.hp -= actual;
         state.last_enemy_damage = Some((actual, 6, crit));
         state.enemy_hurt_flash = 3;
+
+        // 攻撃成功で focus +1。次攻撃の cooldown は焼成された focus を反映する。
+        let focus_max = state.config.hero.focus_max;
+        state.combat_focus = (state.combat_focus + 1).min(focus_max);
         state.hero_atk_cooldown = state.hero_atk_period();
 
         if state.current_enemy.hp == 0 {
@@ -220,6 +224,7 @@ fn on_hero_died(state: &mut AbyssState) {
     state.run_kills = 0;
     state.run_gold_earned = 0;
     state.hero_hp = state.hero_max_hp();
+    state.combat_focus = 0;
     state.hero_atk_cooldown = state.hero_atk_period();
     state.hero_regen_acc_x100 = 0;
     spawn_next_enemy(state);
@@ -564,6 +569,7 @@ pub fn retreat(state: &mut AbyssState) {
     state.floor_kind = FloorKind::Normal;
     state.kills_on_floor = 0;
     state.hero_hp = state.hero_max_hp();
+    state.combat_focus = 0;
     state.hero_atk_cooldown = state.hero_atk_period();
     spawn_next_enemy(state);
 }
@@ -933,6 +939,63 @@ mod tests {
         s.floor_kind = FloorKind::Treasure;
         retreat(&mut s);
         assert_eq!(s.floor_kind, FloorKind::Normal);
+    }
+
+    #[test]
+    fn combat_focus_increases_with_attacks() {
+        let mut s = ticked_state();
+        let initial_focus = s.combat_focus;
+        // hero_atk が enemy hp を上回らないように、適度に強い設定を作る。
+        // ただしすぐに敵を倒すと focus が運用しきれないので、ターゲットを高 HP に置く。
+        s.current_enemy.hp = 10_000;
+        s.current_enemy.max_hp = 10_000;
+        s.current_enemy.def = 0;
+        // 次の hero attack まで進める (atk_period 弱)
+        tick(&mut s, 100);
+        assert!(
+            s.combat_focus > initial_focus,
+            "focus should grow after attacks (got {} → {})",
+            initial_focus,
+            s.combat_focus
+        );
+    }
+
+    #[test]
+    fn combat_focus_shortens_attack_period() {
+        let mut s = AbyssState::new();
+        let period_at_zero = s.hero_atk_period();
+        s.combat_focus = s.config.hero.focus_max;
+        let period_at_max = s.hero_atk_period();
+        assert!(
+            period_at_max < period_at_zero,
+            "max focus should shorten period ({} → {})",
+            period_at_zero,
+            period_at_max
+        );
+    }
+
+    #[test]
+    fn combat_focus_reset_on_death() {
+        let mut s = AbyssState::new();
+        s.combat_focus = s.config.hero.focus_max;
+        s.floor = 30;
+        s.hero_hp = 1;
+        // 敵を強制的にスポーン → 1 tick で死亡
+        tick(&mut s, 1);
+        s.current_enemy.atk = 9999;
+        s.current_enemy.atk_cooldown = 1;
+        tick(&mut s, 1);
+        assert!(s.deaths > 0);
+        assert_eq!(s.combat_focus, 0, "death should reset focus");
+    }
+
+    #[test]
+    fn combat_focus_reset_on_retreat() {
+        let mut s = AbyssState::new();
+        s.floor = 5;
+        s.combat_focus = 20;
+        retreat(&mut s);
+        assert_eq!(s.combat_focus, 0);
     }
 
     #[test]
