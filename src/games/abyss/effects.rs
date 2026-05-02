@@ -9,13 +9,13 @@
 //! なので state 差分検知 (例: `prev_floor != state.floor`) と effect push
 //! の両方を render 冒頭でまとめて行う。
 
-use std::time::Duration;
-
 use ratzilla::ratatui::buffer::Buffer;
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::style::Color;
 use tachyonfx::fx::{self, Glitch, RepeatMode};
-use tachyonfx::{EffectManager, IntoEffect, Motion, SimpleRng};
+// NOTE: `Duration` は tachyonfx の独自型を使う (std-duration feature は wasm と
+// 排他のため有効化できない)。API は std::time::Duration と同じ from_millis 系を持つ。
+use tachyonfx::{Duration, EffectManager, IntoEffect, Motion, SimpleRng};
 
 /// AbyssGame が保持する演出マネージャ。
 ///

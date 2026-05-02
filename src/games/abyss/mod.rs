@@ -22,10 +22,12 @@ mod simulator;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use std::time::Duration;
 
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
+// tachyonfx::Duration は wasm feature 有効時に独自型 (milliseconds: u32)。
+// `wasm` と `std-duration` は排他なので std::time::Duration ではなくこちらを使う。
+use tachyonfx::Duration;
 
 use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
@@ -166,9 +168,14 @@ impl AbyssGame {
         if prev == 0.0 {
             Duration::ZERO
         } else {
-            // tab backgrounded 等で巨大な値になった場合は 100ms に clamp
+            // tab backgrounded 等で巨大な値になった場合は 100ms に clamp。
+            // NaN ガード: now / prev が NaN だと比較・clamp が NaN を返し、
+            // `as u32` で 0 → effect が永久停止するので明示的に弾く。
             let delta_ms = (now - prev).clamp(0.0, 100.0);
-            Duration::from_micros((delta_ms * 1000.0) as u64)
+            if !delta_ms.is_finite() {
+                return Duration::ZERO;
+            }
+            Duration::from_millis(delta_ms as u32)
         }
     }
 
