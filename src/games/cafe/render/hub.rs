@@ -169,7 +169,7 @@ fn render_hub_characters(state: &CafeState, f: &mut Frame, area: Rect, click_sta
         let aff_level = aff.map(|a| a.axes.level()).unwrap_or(0);
         let star_str = "★".repeat(stars as usize);
         cl.push_clickable(Line::from(vec![
-            Span::styled(format!(" [{}] ", i + 1), Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {}. ", i + 1), Style::default().fg(Color::Yellow)),
             Span::styled(ch.name(), Style::default().fg(Color::White)),
             Span::styled(format!("  {star_str}"), Style::default().fg(Color::Yellow)),
             Span::styled(format!(" Lv.{level}"), Style::default().fg(Color::Cyan)),

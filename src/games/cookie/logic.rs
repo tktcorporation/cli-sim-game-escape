@@ -146,7 +146,7 @@ fn tick_golden(state: &mut CookieState, delta_ticks: u32) {
             appear_ticks_left: 100,
             claimed: false,
         });
-        state.add_log("✦ ゴールデンクッキー出現！[G]で取得！", true);
+        state.add_log("✦ ゴールデンクッキー出現！クリックで取得！", true);
     }
 }
 
