@@ -128,8 +128,11 @@ impl AbyssGame {
             effects.push_boss_appearance(layout.combat);
         }
 
-        // ── ボス撃破 (is_boss が true → false で次の敵に切り替わった) ──
-        if prev.enemy_is_boss && !s.current_enemy.is_boss {
+        // ── ボス撃破 ──
+        // 「is_boss が true → false」だけでは撤退/死亡でも発火してしまう
+        // (retreat / on_hero_died はどちらも非ボス敵を即座に再生成する)。
+        // 真の撃破は floor が +1 されている時だけなので、それで gate する。
+        if prev.enemy_is_boss && !s.current_enemy.is_boss && s.floor > prev.floor {
             effects.push_boss_defeated(layout.enemy_panel);
         }
 
