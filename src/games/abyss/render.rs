@@ -474,18 +474,74 @@ fn render_upgrades(
 
         let label_color = if affordable { Color::White } else { Color::DarkGray };
         let label = format!(" {} ", kind.name());
-        let effect = kind.effect().to_string();
+        // 次に 1 Lv 上げた時の実増分。curve 持ち強化は段階によって変わるので
+        // `cumulative(lv+1) - cumulative(lv)` で次購入の実効値を出す。
+        // 非 curve (Crit/Regen/Gold) は固定文字列にフォールバック。
+        let effect = match state.upgrade_curve(*kind) {
+            Some(curve) => {
+                let lv = state.upgrades[kind.index()];
+                let delta = curve.cumulative(lv + 1) - curve.cumulative(lv);
+                match kind {
+                    UpgradeKind::Sword => format!("ATK+{}", delta.round() as u64),
+                    UpgradeKind::Vitality => format!("HP+{}", delta.round() as u64),
+                    UpgradeKind::Armor => format!("DEF+{}", delta.round() as u64),
+                    UpgradeKind::Speed => format!("速度+{}%", (delta * 100.0).round() as u64),
+                    _ => kind.effect().to_string(),
+                }
+            }
+            None => kind.effect().to_string(),
+        };
         let lv_str = format!(" Lv.{}", lv);
+
+        // 段階バッジ (curve 持ちのみ)
+        let tier_badge = state
+            .upgrade_tier(*kind)
+            .map(|(name, _)| format!("[{}] ", name))
+            .unwrap_or_default();
 
         cl.push_clickable(
             Line::from(vec![
                 Span::styled(label, Style::default().fg(label_color).add_modifier(Modifier::BOLD)),
+                Span::styled(tier_badge, Style::default().fg(Color::Yellow)),
                 Span::styled(format!("{:<10}", effect), Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{:>10}", cost_str), cost_style),
                 Span::styled(lv_str, Style::default().fg(Color::Magenta)),
             ]),
             BUY_UPGRADE_BASE + kind.index() as u16,
         );
+
+        // 次段階プレビュー + silhouette (curve 持ちのみ、次段階が存在するときだけ)
+        if let Some(curve) = state.upgrade_curve(*kind) {
+            let lv_u = state.upgrades[kind.index()];
+            let (cur_idx, _) = curve.tier_at(lv_u);
+            let next = curve.tier(cur_idx + 1);
+            let after_next = curve.tier(cur_idx + 2);
+            if let Some((next_lv, _, next_name)) = next {
+                // start_level は「超えると次段階」境界なので、新段階が
+                // 実際に効く最初の Lv は start_level + 1。表示はこちらを使う。
+                let mut spans = vec![
+                    Span::styled("        次: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("Lv{} [{}]", next_lv + 1, next_name),
+                        Style::default().fg(Color::Green),
+                    ),
+                ];
+                if let Some((after_lv, _, _)) = after_next {
+                    // 次のさらに先は silhouette (?) で見せる
+                    spans.push(Span::styled(
+                        format!("    その先: Lv{} [???]", after_lv + 1),
+                        Style::default().fg(Color::DarkGray),
+                    ));
+                }
+                cl.push(Line::from(spans));
+            } else if cur_idx + 1 == curve.len() {
+                // 最終段階に到達済み
+                cl.push(Line::from(vec![Span::styled(
+                    "        ▼ 最終段階到達",
+                    Style::default().fg(Color::Magenta),
+                )]));
+            }
+        }
     }
 
     let block = Block::default()

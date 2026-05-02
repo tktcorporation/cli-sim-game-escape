@@ -352,6 +352,9 @@ pub fn buy_upgrade(state: &mut AbyssState, kind: UpgradeKind) -> bool {
         None
     };
 
+    // 段階制カーブを持つ強化は、購入前後で段階名が変わったかチェックする (演出用)。
+    let tier_before = state.upgrade_tier(kind).map(|(name, _)| name);
+
     state.upgrades[kind.index()] = state.upgrades[kind.index()].saturating_add(1);
 
     if let Some(before) = max_before {
@@ -361,6 +364,20 @@ pub fn buy_upgrade(state: &mut AbyssState, kind: UpgradeKind) -> bool {
     }
 
     state.add_log(format!("◆ {} Lv.{}", kind.name(), state.upgrades[kind.index()]));
+
+    // 段階突破 → 専用ログで "層が上がった" 感を出す。
+    if let Some(before_name) = tier_before {
+        if let Some((after_name, _)) = state.upgrade_tier(kind) {
+            if before_name != after_name {
+                state.add_log(format!(
+                    "☆ {} 段階突破: {} → {}",
+                    kind.name(),
+                    before_name,
+                    after_name
+                ));
+            }
+        }
+    }
     true
 }
 
@@ -681,6 +698,7 @@ mod tests {
         // (固定 +10 を使っていた旧実装に対する回帰テスト)
         let mut cfg = BalanceConfig::default();
         cfg.hero.hp_per_vitality_lv = 25; // 既定 10 から変更
+        cfg.hero.vitality_curve = None; // 段階制を無効化して旧経路を検証
         let mut s = AbyssState::with_config(cfg);
         s.gold = 1_000_000;
         let max_before = s.hero_max_hp();
