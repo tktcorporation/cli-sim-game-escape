@@ -474,7 +474,23 @@ fn render_upgrades(
 
         let label_color = if affordable { Color::White } else { Color::DarkGray };
         let label = format!(" {} ", kind.name());
-        let effect = kind.effect().to_string();
+        // 次に 1 Lv 上げた時の実増分。curve 持ち強化は段階によって変わるので
+        // `cumulative(lv+1) - cumulative(lv)` で次購入の実効値を出す。
+        // 非 curve (Crit/Regen/Gold) は固定文字列にフォールバック。
+        let effect = match state.upgrade_curve(*kind) {
+            Some(curve) => {
+                let lv = state.upgrades[kind.index()];
+                let delta = curve.cumulative(lv + 1) - curve.cumulative(lv);
+                match kind {
+                    UpgradeKind::Sword => format!("ATK+{}", delta.round() as u64),
+                    UpgradeKind::Vitality => format!("HP+{}", delta.round() as u64),
+                    UpgradeKind::Armor => format!("DEF+{}", delta.round() as u64),
+                    UpgradeKind::Speed => format!("速度+{}%", (delta * 100.0).round() as u64),
+                    _ => kind.effect().to_string(),
+                }
+            }
+            None => kind.effect().to_string(),
+        };
         let lv_str = format!(" Lv.{}", lv);
 
         // 段階バッジ (curve 持ちのみ)
