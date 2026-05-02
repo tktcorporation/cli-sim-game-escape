@@ -53,8 +53,19 @@ pub struct AbyssGame {
     prev: Cell<PrevSnapshot>,
     /// 前回 render 時の wall-clock (ms)。effect の elapsed 計算に使う。
     last_render_ms: Cell<f64>,
-    /// オートセーブまでの残り tick 数。
-    save_countdown: u32,
+}
+
+/// この PlayerAction を適用したらセーブを発火させるか。
+/// SetTab は純粋な UI 状態なので除外し、書き込みノイズを抑える。
+fn is_save_worthy(action: PlayerAction) -> bool {
+    matches!(
+        action,
+        PlayerAction::BuyUpgrade(_)
+            | PlayerAction::BuySoulPerk(_)
+            | PlayerAction::GachaPull(_)
+            | PlayerAction::Retreat
+            | PlayerAction::ToggleAutoDescend
+    )
 }
 
 /// effect トリガ判定用の軽量 state スナップショット。Copy なフィールドだけ。
@@ -90,7 +101,6 @@ impl AbyssGame {
             effects: RefCell::new(AbyssEffects::new()),
             prev: Cell::new(prev),
             last_render_ms: Cell::new(0.0),
-            save_countdown: save::AUTOSAVE_INTERVAL,
         }
     }
 
@@ -255,7 +265,12 @@ impl Game for AbyssGame {
             InputEvent::Click(_, id) => self.click_to_action(*id),
         };
         if let Some(a) = action {
+            let save_after = is_save_worthy(a);
             logic::apply_action(&mut self.state, a);
+            if save_after {
+                #[cfg(target_arch = "wasm32")]
+                save::save_game(&self.state);
+            }
             true
         } else {
             false
@@ -263,13 +278,14 @@ impl Game for AbyssGame {
     }
 
     fn tick(&mut self, delta_ticks: u32) {
+        let prev_floor = self.state.floor;
+        let prev_deaths = self.state.deaths;
         logic::tick(&mut self.state, delta_ticks);
 
-        self.save_countdown = self.save_countdown.saturating_sub(delta_ticks);
-        if self.save_countdown == 0 {
+        // tick 内発生の進捗節目: 階層クリア (floor++) と死亡 (deaths++)。
+        if self.state.floor != prev_floor || self.state.deaths != prev_deaths {
             #[cfg(target_arch = "wasm32")]
             save::save_game(&self.state);
-            self.save_countdown = save::AUTOSAVE_INTERVAL;
         }
     }
 
@@ -369,5 +385,16 @@ mod tests {
         g.state.floor = 5;
         g.handle_input(&InputEvent::Key('p'));
         assert_eq!(g.state.floor, 1);
+    }
+
+    #[test]
+    fn save_worthy_actions_classified_correctly() {
+        assert!(is_save_worthy(PlayerAction::BuyUpgrade(UpgradeKind::Sword)));
+        assert!(is_save_worthy(PlayerAction::BuySoulPerk(SoulPerk::Might)));
+        assert!(is_save_worthy(PlayerAction::GachaPull(1)));
+        assert!(is_save_worthy(PlayerAction::Retreat));
+        assert!(is_save_worthy(PlayerAction::ToggleAutoDescend));
+        // SetTab は UI 状態のみ変化させるためセーブを発火しない。
+        assert!(!is_save_worthy(PlayerAction::SetTab(Tab::Souls)));
     }
 }

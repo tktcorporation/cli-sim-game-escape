@@ -22,9 +22,6 @@ const MIN_COMPATIBLE_VERSION: u32 = 1;
 #[cfg(target_arch = "wasm32")]
 const STORAGE_KEY: &str = "abyss_idle_save";
 
-/// オートセーブの間隔 (tick数)。10 ticks/sec × 30秒 = 300 ticks。
-pub const AUTOSAVE_INTERVAL: u32 = 300;
-
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Serialize, Deserialize)]
 struct SaveData {
