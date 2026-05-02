@@ -33,10 +33,13 @@ pub struct AbyssLayout {
 pub fn compute_layout(area: Rect) -> AbyssLayout {
     let narrow = is_narrow_layout(area.width);
     let combat_height: u16 = if narrow { 8 } else { 9 };
+    // narrow 時はヘッダを 2 行 (B/floor_kind/最深 + 通貨 3 種) に分けるため
+    // 内部 2 行 + ALL ボーダー 2 = 4。wide は従来通り 1 行 (= 3)。
+    let header_height: u16 = if narrow { 4 } else { 3 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(header_height),
             Constraint::Length(combat_height),
             Constraint::Length(3),
             Constraint::Length(1),
@@ -69,7 +72,7 @@ pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<Re
     let narrow = is_narrow_layout(area.width);
     let l = compute_layout(area);
 
-    render_header(state, f, l.header);
+    render_header(state, f, l.header, narrow);
     render_combat(state, f, l.combat, narrow);
     render_toggle_bar(state, f, l.toggle, click_state);
     render_tab_bar(state, f, l.tab_bar, click_state);
@@ -92,19 +95,18 @@ pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<Re
 
 // ── ヘッダ ─────────────────────────────────────────────────
 
-fn render_header(state: &AbyssState, f: &mut Frame, area: Rect) {
-    let mut spans: Vec<Span> = vec![
-        Span::styled(
-            format!(" B{}F ", state.floor),
-            Style::default()
-                .fg(Color::Black)
-                .bg(floor_color(state.floor))
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
+fn render_header(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool) {
+    // 1 行目: フロア / 種別 / 最深
+    let mut floor_spans: Vec<Span> = vec![Span::styled(
+        format!(" B{}F ", state.floor),
+        Style::default()
+            .fg(Color::Black)
+            .bg(floor_color(state.floor))
+            .add_modifier(Modifier::BOLD),
+    )];
     if !matches!(state.floor_kind, FloorKind::Normal) {
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(
+        floor_spans.push(Span::raw(" "));
+        floor_spans.push(Span::styled(
             format!(
                 "{}{}",
                 state.floor_kind.short_label(),
@@ -115,15 +117,16 @@ fn render_header(state: &AbyssState, f: &mut Frame, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ));
     }
-    spans.extend([
-        Span::raw(" "),
+    floor_spans.push(Span::raw(" "));
+    floor_spans.push(Span::styled(
+        format!("最深: B{}F", state.deepest_floor_ever),
+        Style::default().fg(Color::DarkGray),
+    ));
+
+    // 2 行目候補: 通貨 3 種 (gold / soul / key)
+    let currency_spans: Vec<Span> = vec![
         Span::styled(
-            format!("最深: B{}F", state.deepest_floor_ever),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("💰{}", format_num(state.gold)),
+            format!(" 💰{}", format_num(state.gold)),
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
@@ -138,10 +141,20 @@ fn render_header(state: &AbyssState, f: &mut Frame, area: Rect) {
                 .fg(Color::LightCyan)
                 .add_modifier(Modifier::BOLD),
         ),
-    ]);
-    let line = Line::from(spans);
+    ];
 
-    let widget = Paragraph::new(line).block(
+    let lines: Vec<Line> = if narrow {
+        // narrow 時は 2 行構成。compute_layout の header_height=4 と整合。
+        vec![Line::from(floor_spans), Line::from(currency_spans)]
+    } else {
+        // wide 時は従来通り 1 行に詰める。spaces で区切る。
+        let mut all = floor_spans;
+        all.push(Span::raw(" "));
+        all.extend(currency_spans);
+        vec![Line::from(all)]
+    };
+
+    let widget = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
@@ -449,6 +462,7 @@ fn render_upgrades(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let narrow = is_narrow_layout(area.width);
     let mut cl = ClickableList::new();
 
     cl.push(Line::from(vec![
@@ -511,6 +525,7 @@ fn render_upgrades(
         );
 
         // 次段階プレビュー + silhouette (curve 持ちのみ、次段階が存在するときだけ)
+        // narrow 時は「その先」を畳み、行数を抑える。詳細は B のモーダルで見せる方針。
         if let Some(curve) = state.upgrade_curve(*kind) {
             let lv_u = state.upgrades[kind.index()];
             let (cur_idx, _) = curve.tier_at(lv_u);
@@ -519,25 +534,29 @@ fn render_upgrades(
             if let Some((next_lv, _, next_name)) = next {
                 // start_level は「超えると次段階」境界なので、新段階が
                 // 実際に効く最初の Lv は start_level + 1。表示はこちらを使う。
+                let indent = if narrow { "  " } else { "        " };
                 let mut spans = vec![
-                    Span::styled("        次: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(format!("{}次: ", indent), Style::default().fg(Color::DarkGray)),
                     Span::styled(
                         format!("Lv{} [{}]", next_lv + 1, next_name),
                         Style::default().fg(Color::Green),
                     ),
                 ];
-                if let Some((after_lv, _, _)) = after_next {
-                    // 次のさらに先は silhouette (?) で見せる
-                    spans.push(Span::styled(
-                        format!("    その先: Lv{} [???]", after_lv + 1),
-                        Style::default().fg(Color::DarkGray),
-                    ));
+                if !narrow {
+                    if let Some((after_lv, _, _)) = after_next {
+                        // 次のさらに先は silhouette (?) で見せる
+                        spans.push(Span::styled(
+                            format!("    その先: Lv{} [???]", after_lv + 1),
+                            Style::default().fg(Color::DarkGray),
+                        ));
+                    }
                 }
                 cl.push(Line::from(spans));
             } else if cur_idx + 1 == curve.len() {
                 // 最終段階に到達済み
+                let indent = if narrow { "  " } else { "        " };
                 cl.push(Line::from(vec![Span::styled(
-                    "        ▼ 最終段階到達",
+                    format!("{}▼ 最終段階到達", indent),
                     Style::default().fg(Color::Magenta),
                 )]));
             }
@@ -548,7 +567,10 @@ fn render_upgrades(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
     let mut cs = click_state.borrow_mut();
-    cl.render(f, area, block, &mut cs, false, 0);
+    // narrow 時は wrap=true で長い行を折り返す。ClickableList の wrap-aware
+    // ターゲット登録 (clickable_list_wrap_covers_all_rows で保証) により、
+    // 折り返し行全体がクリック可能なまま保たれる。
+    cl.render(f, area, block, &mut cs, narrow, 0);
 }
 
 // ── 魂タブ ─────────────────────────────────────────────────
@@ -559,6 +581,7 @@ fn render_souls(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let narrow = is_narrow_layout(area.width);
     let mut cl = ClickableList::new();
 
     cl.push(Line::from(vec![
@@ -606,7 +629,7 @@ fn render_souls(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Magenta));
     let mut cs = click_state.borrow_mut();
-    cl.render(f, area, block, &mut cs, false, 0);
+    cl.render(f, area, block, &mut cs, narrow, 0);
 }
 
 // ── 統計タブ ───────────────────────────────────────────────
@@ -673,6 +696,7 @@ fn render_gacha(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let narrow = is_narrow_layout(area.width);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::LightCyan));
@@ -683,21 +707,22 @@ fn render_gacha(
         return;
     }
 
-    // 縦分割: ヘッダ + ボタン行 + 結果サマリ + テーブル
+    // narrow 時はボタンを縦積みにするので 2 倍の高さが必要 (3 → 6)。
+    let buttons_height: u16 = if narrow { 6 } else { 3 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // ヘッダ
-            Constraint::Length(3), // ボタン
-            Constraint::Length(4), // 直近結果
-            Constraint::Min(3),    // 確率テーブル
+            Constraint::Length(3),               // ヘッダ
+            Constraint::Length(buttons_height),  // ボタン
+            Constraint::Length(4),               // 直近結果
+            Constraint::Min(3),                  // 確率テーブル
         ])
         .split(inner);
 
     render_gacha_header(state, f, chunks[0]);
-    render_gacha_buttons(state, f, chunks[1], click_state);
+    render_gacha_buttons(state, f, chunks[1], click_state, narrow);
     render_gacha_last_result(state, f, chunks[2]);
-    render_gacha_table(state, f, chunks[3]);
+    render_gacha_table(state, f, chunks[3], narrow);
 }
 
 fn render_gacha_header(state: &AbyssState, f: &mut Frame, area: Rect) {
@@ -744,11 +769,20 @@ fn render_gacha_buttons(
     f: &mut Frame,
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
+    narrow: bool,
 ) {
-    let halves = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
+    // narrow: 縦並び (上 1 連, 下 10 連)。wide: 横並び 50/50。
+    let halves = if narrow {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(area)
+    };
 
     let can_one = state.keys >= 1;
     let can_ten = state.keys >= 10;
@@ -858,81 +892,75 @@ fn render_gacha_last_result(state: &AbyssState, f: &mut Frame, area: Rect) {
     f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn render_gacha_table(state: &AbyssState, f: &mut Frame, area: Rect) {
+fn render_gacha_table(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool) {
     let g = &state.config.gacha;
     let total: u32 = g.gacha_weights_milli.iter().sum::<u32>().max(1);
     let pct = |w: u32| -> String { format!("{:.1}%", (w as f64 / total as f64) * 100.0) };
 
-    let lines = vec![
-        Line::from(Span::styled(
-            " 確率テーブル",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled(
-                "  Common    ",
-                Style::default().fg(Color::Gray),
-            ),
-            Span::styled(pct(g.gacha_weights_milli[0]), Style::default().fg(Color::Gray)),
-            Span::styled(
-                "  → 💰 大量 gold",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled("  Rare      ", Style::default().fg(Color::Cyan)),
-            Span::styled(pct(g.gacha_weights_milli[1]), Style::default().fg(Color::Cyan)),
-            Span::styled(
-                "  → ◆ 強化レベル+1 (永続)",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  Epic      ",
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                pct(g.gacha_weights_milli[2]),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "  → ✦ 魂 (現フロア依存)",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
-        Line::from(vec![
-            Span::styled(
-                "  Legendary ",
-                Style::default()
-                    .fg(Color::LightYellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                pct(g.gacha_weights_milli[3]),
-                Style::default()
-                    .fg(Color::LightYellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  → 🔑+{} (連鎖チャンス)", g.legendary_keys),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            " 鍵入手: ボス +1 (Elite +2 / 10F毎 +2)",
-            Style::default().fg(Color::DarkGray),
-        )),
+    // (label, label_color, weight_idx, weight_bold, reward_text)
+    let rows: [(&'static str, Color, usize, bool, String); 4] = [
+        ("Common   ", Color::Gray, 0, false, "💰 大量 gold".to_string()),
+        ("Rare     ", Color::Cyan, 1, false, "◆ 強化レベル+1 (永続)".to_string()),
+        ("Epic     ", Color::Magenta, 2, true, "✦ 魂 (現フロア依存)".to_string()),
+        (
+            "Legendary",
+            Color::LightYellow,
+            3,
+            true,
+            format!("🔑+{} (連鎖チャンス)", g.legendary_keys),
+        ),
     ];
 
-    f.render_widget(Paragraph::new(lines), area);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        " 確率テーブル",
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    for (label, color, idx, bold, reward) in rows.iter() {
+        let mut label_style = Style::default().fg(*color);
+        let mut weight_style = Style::default().fg(*color);
+        if *bold {
+            label_style = label_style.add_modifier(Modifier::BOLD);
+            weight_style = weight_style.add_modifier(Modifier::BOLD);
+        }
+        let pct_str = pct(g.gacha_weights_milli[*idx]);
+
+        if narrow {
+            // 1 行目: 等級 + 確率。2 行目: 報酬説明 (インデント)。
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", label), label_style),
+                Span::styled(pct_str, weight_style),
+            ]));
+            lines.push(Line::from(Span::styled(
+                format!("    → {}", reward),
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", label), label_style),
+                Span::styled(pct_str, weight_style),
+                Span::styled(format!("  → {}", reward), Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " 鍵入手: ボス +1 (Elite +2 / 10F毎 +2)",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    // narrow 時は行数が増えるので wrap=true で長文を折り返す保険を入れる。
+    let para = Paragraph::new(lines);
+    let para = if narrow {
+        para.wrap(ratzilla::ratatui::widgets::Wrap { trim: false })
+    } else {
+        para
+    };
+    f.render_widget(para, area);
 }
 
 // ── ログ ───────────────────────────────────────────────────
@@ -1049,6 +1077,72 @@ mod tests {
             }
         }
         assert!(found.iter().all(|&b| b), "missing tab targets: {:?}", found);
+    }
+
+    /// narrow (40 列) でも全タブを描画してパニックしないこと、
+    /// かつタブ・主要ボタンが登録されることをスモーク確認。
+    /// レイアウト変更で行数が膨らんで Constraint が負になる回帰を防ぐ。
+    #[test]
+    fn narrow_layout_renders_all_tabs() {
+        let mut state = AbyssState::new();
+        state.keys = 100;
+        let tabs = [Tab::Upgrades, Tab::Souls, Tab::Stats, Tab::Gacha];
+        for &tab in &tabs {
+            state.tab = tab;
+            let cs = Rc::new(RefCell::new(ClickState::new()));
+            let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
+            terminal
+                .draw(|f| render(&state, f, f.area(), &cs))
+                .unwrap();
+            // narrow でも全タブターゲットが取れる (タブバーの幅切り詰めの回帰検知)
+            let cs = cs.borrow();
+            let mut found = [false; 4];
+            for y in 0..30 {
+                for x in 0..40 {
+                    match cs.hit_test(x, y) {
+                        Some(TAB_UPGRADES) => found[0] = true,
+                        Some(TAB_SOULS) => found[1] = true,
+                        Some(TAB_STATS) => found[2] = true,
+                        Some(TAB_GACHA) => found[3] = true,
+                        _ => {}
+                    }
+                }
+            }
+            assert!(
+                found.iter().all(|&b| b),
+                "narrow tab {:?}: missing targets {:?}",
+                tab,
+                found
+            );
+        }
+    }
+
+    /// narrow (40 列) ガチャタブで、縦積みになったボタンが両方登録されること。
+    /// ガチャは header + button + result + table と要素が多いので height は
+    /// 余裕を持たせる (実機モバイルでも縦は十分確保できる前提)。
+    #[test]
+    fn narrow_gacha_buttons_registered() {
+        let mut state = AbyssState::new();
+        state.tab = Tab::Gacha;
+        state.keys = 100;
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(40, 50)).unwrap();
+        terminal
+            .draw(|f| render(&state, f, f.area(), &cs))
+            .unwrap();
+        let cs = cs.borrow();
+        let mut found_one = false;
+        let mut found_ten = false;
+        for y in 0..50 {
+            for x in 0..40 {
+                match cs.hit_test(x, y) {
+                    Some(GACHA_PULL_1) => found_one = true,
+                    Some(GACHA_PULL_10) => found_ten = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(found_one && found_ten, "narrow gacha buttons missing");
     }
 
     #[test]
