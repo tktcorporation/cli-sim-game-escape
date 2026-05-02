@@ -424,7 +424,12 @@ impl AbyssState {
     /// 現在の最大 HP (upgrades + soul perks の合算)。
     pub fn hero_max_hp(&self) -> u64 {
         let h = &self.config.hero;
-        let base = h.base_hp + self.upgrades[UpgradeKind::Vitality.index()] as u64 * h.hp_per_vitality_lv;
+        let lv = self.upgrades[UpgradeKind::Vitality.index()];
+        let upgrade_hp = match &h.vitality_curve {
+            Some(curve) => curve.cumulative(lv).round() as u64,
+            None => lv as u64 * h.hp_per_vitality_lv,
+        };
+        let base = h.base_hp + upgrade_hp;
         let endurance_lv = self.soul_perks[SoulPerk::Endurance.index()];
         let mult = 1.0 + endurance_lv as f64 * h.endurance_per_lv;
         ((base as f64) * mult).round() as u64
@@ -443,21 +448,38 @@ impl AbyssState {
         ((base as f64) * mult).round() as u64
     }
 
-    /// Sword の現在の段階名と次段階の (start_level, name) を返す。UI 表示用。
-    pub fn sword_tier(&self) -> (&'static str, Option<(u32, &'static str)>) {
-        let lv = self.upgrades[UpgradeKind::Sword.index()];
-        match &self.config.hero.sword_curve {
-            Some(curve) => {
-                let (_, name) = curve.tier_at(lv);
-                (name, curve.next_tier(lv))
-            }
-            None => ("剣士", None),
+    /// 指定強化の段階カーブ参照を返す (curve 未定義なら None)。
+    pub fn upgrade_curve(&self, kind: UpgradeKind) -> Option<&super::config::TierCurve> {
+        let h = &self.config.hero;
+        match kind {
+            UpgradeKind::Sword => h.sword_curve.as_ref(),
+            UpgradeKind::Vitality => h.vitality_curve.as_ref(),
+            UpgradeKind::Armor => h.armor_curve.as_ref(),
+            UpgradeKind::Speed => h.speed_curve.as_ref(),
+            // Crit/Regen/Gold は段階制未対応 (cap や倍率の都合で別設計が必要)
+            _ => None,
         }
+    }
+
+    /// 強化の現在段階名と次段階情報を返す。UI 表示用。curve 未定義なら None。
+    pub fn upgrade_tier(
+        &self,
+        kind: UpgradeKind,
+    ) -> Option<(&'static str, Option<(u32, &'static str)>)> {
+        let curve = self.upgrade_curve(kind)?;
+        let lv = self.upgrades[kind.index()];
+        let (_, name) = curve.tier_at(lv);
+        Some((name, curve.next_tier(lv)))
     }
 
     pub fn hero_def(&self) -> u64 {
         let h = &self.config.hero;
-        h.base_def + self.upgrades[UpgradeKind::Armor.index()] as u64 * h.def_per_armor_lv
+        let lv = self.upgrades[UpgradeKind::Armor.index()];
+        let upgrade_def = match &h.armor_curve {
+            Some(curve) => curve.cumulative(lv).round() as u64,
+            None => lv as u64 * h.def_per_armor_lv,
+        };
+        h.base_def + upgrade_def
     }
 
     /// クリティカル率 (0.0..=`crit_cap`)。
@@ -471,7 +493,11 @@ impl AbyssState {
     pub fn hero_atk_period(&self) -> u32 {
         let h = &self.config.hero;
         let lv = self.upgrades[UpgradeKind::Speed.index()];
-        let speed_mult = 1.0 + lv as f64 * h.speed_per_lv;
+        let speed_bonus = match &h.speed_curve {
+            Some(curve) => curve.cumulative(lv),
+            None => lv as f64 * h.speed_per_lv,
+        };
+        let speed_mult = 1.0 + speed_bonus;
         let focus_factor = self.focus_factor();
         let period = (h.atk_period_base as f64 * focus_factor / speed_mult).round() as u32;
         period.max(h.atk_period_min)

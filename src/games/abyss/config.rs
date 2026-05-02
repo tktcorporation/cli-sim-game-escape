@@ -74,22 +74,9 @@ impl TierCurve {
 /// - **per-level delta**: 段階内でどれだけ伸びるか (旧線形は一律 2.0)
 /// - **段階名**: 未到達段階が UI に見えると「先がある」感が出る
 ///
-/// 制約:
-/// - 必ず `start_level == 0` から始める
-/// - `start_level` は厳密に昇順
-/// - 旧バランス互換のため、序盤 (Lv 1〜10) は `+2/Lv` を維持するのが安全
-///
-/// プレースホルダは旧線形と完全に一致する 1 段階のみ。
-/// ユーザが多段化することで「停滞 → ブレイクスルー」のリズムが生まれる。
+/// 序盤 (Lv 1〜10) は旧バランスと一致するスロープを維持し、
+/// Lv 11 以降で段階突破ごとにスロープが加速する。
 fn default_sword_curve() -> TierCurve {
-    // TODO(user): ここを多段にする。例:
-    //   vec![
-    //       (0,   2.0, "剣士"),
-    //       (10,  3.0, "剣豪"),
-    //       (25,  5.0, "剣聖"),
-    //       (50,  8.0, "剣神"),
-    //       (100, 12.0, "剣の化身"),
-    //   ]
     TierCurve {
         tiers: vec![
             (0, 2.0, "剣士"),
@@ -97,6 +84,45 @@ fn default_sword_curve() -> TierCurve {
             (25, 5.0, "剣聖"),
             (50, 8.0, "剣神"),
             (100, 12.0, "剣の化身"),
+        ],
+    }
+}
+
+/// 既定の Vitality (HP) 段階制カーブ。Lv 1〜10 は旧線形 (+10/Lv) と一致。
+fn default_vitality_curve() -> TierCurve {
+    TierCurve {
+        tiers: vec![
+            (0, 10.0, "凡体"),
+            (10, 15.0, "屈強"),
+            (25, 25.0, "鋼体"),
+            (50, 40.0, "不撓"),
+            (100, 60.0, "不死身"),
+        ],
+    }
+}
+
+/// 既定の Armor (DEF) 段階制カーブ。Lv 1〜10 は旧線形 (+1/Lv)。
+fn default_armor_curve() -> TierCurve {
+    TierCurve {
+        tiers: vec![
+            (0, 1.0, "軽装"),
+            (10, 2.0, "重装"),
+            (25, 3.0, "鉄壁"),
+            (50, 5.0, "神鎧"),
+            (100, 8.0, "不落"),
+        ],
+    }
+}
+
+/// 既定の Speed 段階制カーブ (倍率増分)。Lv 1〜10 は旧線形 (+0.05/Lv = 5%)。
+fn default_speed_curve() -> TierCurve {
+    TierCurve {
+        tiers: vec![
+            (0, 0.05, "軽歩"),
+            (10, 0.07, "疾風"),
+            (25, 0.10, "神速"),
+            (50, 0.15, "瞬光"),
+            (100, 0.20, "残影"),
         ],
     }
 }
@@ -124,10 +150,16 @@ pub struct HeroConfig {
     /// `None` の場合は旧線形 (`atk_per_sword_lv * level`) を使う。
     pub sword_curve: Option<TierCurve>,
     pub hp_per_vitality_lv: u64,
+    /// 段階制 HP カーブ。設定時は `hp_per_vitality_lv` を上書き。
+    pub vitality_curve: Option<TierCurve>,
     pub def_per_armor_lv: u64,
+    /// 段階制 DEF カーブ。設定時は `def_per_armor_lv` を上書き。
+    pub armor_curve: Option<TierCurve>,
     pub crit_per_lv: f64,
     pub crit_cap: f64,
     pub speed_per_lv: f64,
+    /// 段階制 Speed カーブ (倍率増分)。設定時は `speed_per_lv` を上書き。
+    pub speed_curve: Option<TierCurve>,
     pub regen_per_lv_per_sec: f64,
     pub gold_per_lv: f64,
 
@@ -224,13 +256,15 @@ impl Default for BalanceConfig {
                 focus_reduction_per_point: 0.012,
 
                 atk_per_sword_lv: 2,
-                // TODO(user): 段階制 ATK カーブを書く。下記参照。
                 sword_curve: Some(default_sword_curve()),
                 hp_per_vitality_lv: 10,
+                vitality_curve: Some(default_vitality_curve()),
                 def_per_armor_lv: 1,
+                armor_curve: Some(default_armor_curve()),
                 crit_per_lv: 0.01,
                 crit_cap: 0.60,
                 speed_per_lv: 0.05,
+                speed_curve: Some(default_speed_curve()),
                 regen_per_lv_per_sec: 0.2,
                 gold_per_lv: 0.05,
 
