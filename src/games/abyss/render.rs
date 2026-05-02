@@ -13,7 +13,7 @@ use crate::input::{is_narrow_layout, ClickState};
 use crate::widgets::{Clickable, ClickableList, TabBar};
 
 use super::actions::*;
-use super::state::{AbyssState, SoulPerk, Tab, UpgradeKind};
+use super::state::{AbyssState, FloorKind, SoulPerk, Tab, UpgradeKind};
 
 pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
     let narrow = is_narrow_layout(area.width);
@@ -53,6 +53,7 @@ pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<Re
         Tab::Upgrades => render_upgrades(state, f, body_chunks[0], click_state),
         Tab::Souls => render_souls(state, f, body_chunks[0], click_state),
         Tab::Stats => render_stats(state, f, body_chunks[0]),
+        Tab::Gacha => render_gacha(state, f, body_chunks[0], click_state),
     }
     render_log(state, f, body_chunks[1]);
 }
@@ -60,7 +61,7 @@ pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<Re
 // ── ヘッダ ─────────────────────────────────────────────────
 
 fn render_header(state: &AbyssState, f: &mut Frame, area: Rect) {
-    let line = Line::from(vec![
+    let mut spans: Vec<Span> = vec![
         Span::styled(
             format!(" B{}F ", state.floor),
             Style::default()
@@ -68,6 +69,21 @@ fn render_header(state: &AbyssState, f: &mut Frame, area: Rect) {
                 .bg(floor_color(state.floor))
                 .add_modifier(Modifier::BOLD),
         ),
+    ];
+    if !matches!(state.floor_kind, FloorKind::Normal) {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            format!(
+                "{}{}",
+                state.floor_kind.short_label(),
+                state.floor_kind.name()
+            ),
+            Style::default()
+                .fg(floor_kind_color(state.floor_kind))
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans.extend([
         Span::raw(" "),
         Span::styled(
             format!("最深: B{}F", state.deepest_floor_ever),
@@ -85,10 +101,13 @@ fn render_header(state: &AbyssState, f: &mut Frame, area: Rect) {
         ),
         Span::raw("  "),
         Span::styled(
-            format!("撃破:{}", format_num(state.total_kills)),
-            Style::default().fg(Color::DarkGray),
+            format!("🔑{}", format_num(state.keys)),
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD),
         ),
     ]);
+    let line = Line::from(spans);
 
     let widget = Paragraph::new(line).block(
         Block::default()
@@ -106,6 +125,15 @@ fn floor_color(floor: u32) -> Color {
         10..=14 => Color::LightRed,
         15..=24 => Color::Magenta,
         _ => Color::Red,
+    }
+}
+
+fn floor_kind_color(kind: FloorKind) -> Color {
+    match kind {
+        FloorKind::Normal => Color::DarkGray,
+        FloorKind::Treasure => Color::LightYellow,
+        FloorKind::Elite => Color::LightRed,
+        FloorKind::Bonanza => Color::LightCyan,
     }
 }
 
@@ -133,13 +161,17 @@ fn render_combat(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool) {
 }
 
 fn combat_title(state: &AbyssState) -> String {
+    let kind_tag = match state.floor_kind {
+        FloorKind::Normal => String::new(),
+        other => format!(" {} ", other.short_label()),
+    };
     let until = state.enemies_until_boss();
     if state.current_enemy.is_boss {
-        format!(" 戦闘 — ボス戦 (B{}F) ", state.floor)
+        format!(" 戦闘{}— ボス戦 (B{}F) ", kind_tag, state.floor)
     } else if until == 0 {
-        format!(" 戦闘 — ボス出現中 (B{}F) ", state.floor)
+        format!(" 戦闘{}— ボス出現中 (B{}F) ", kind_tag, state.floor)
     } else {
-        format!(" 戦闘 — ボスまであと {} 体 ", until)
+        format!(" 戦闘{}— ボスまであと {} 体 ", kind_tag, until)
     }
 }
 
@@ -343,6 +375,7 @@ fn render_tab_bar(
         Tab::Upgrades => 0,
         Tab::Souls => 1,
         Tab::Stats => 2,
+        Tab::Gacha => 3,
     };
     let style_for = |idx: usize, base: Color| -> Style {
         if idx == active_idx {
@@ -359,7 +392,8 @@ fn render_tab_bar(
     let bar = TabBar::new(separator)
         .tab("強化", style_for(0, Color::Green), TAB_UPGRADES)
         .tab("魂", style_for(1, Color::Magenta), TAB_SOULS)
-        .tab("統計", style_for(2, Color::Cyan), TAB_STATS);
+        .tab("統計", style_for(2, Color::Cyan), TAB_STATS)
+        .tab("ガチャ🔑", style_for(3, Color::LightCyan), TAB_GACHA);
 
     let mut cs = click_state.borrow_mut();
     bar.render(f, area, &mut cs);
@@ -524,6 +558,276 @@ fn stat_line(label: &'static str, value: String) -> Line<'static> {
     ])
 }
 
+// ── ガチャタブ ─────────────────────────────────────────────
+
+fn render_gacha(
+    state: &AbyssState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::LightCyan));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if inner.height < 3 || inner.width < 20 {
+        return;
+    }
+
+    // 縦分割: ヘッダ + ボタン行 + 結果サマリ + テーブル
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // ヘッダ
+            Constraint::Length(3), // ボタン
+            Constraint::Length(4), // 直近結果
+            Constraint::Min(3),    // 確率テーブル
+        ])
+        .split(inner);
+
+    render_gacha_header(state, f, chunks[0]);
+    render_gacha_buttons(state, f, chunks[1], click_state);
+    render_gacha_last_result(state, f, chunks[2]);
+    render_gacha_table(state, f, chunks[3]);
+}
+
+fn render_gacha_header(state: &AbyssState, f: &mut Frame, area: Rect) {
+    let g = &state.config.gacha;
+    let pity = g.gacha_pity;
+    let until_pity = pity.saturating_sub(state.pulls_since_epic);
+    let pity_str = if pity == 0 {
+        "天井無効".to_string()
+    } else if until_pity == 0 {
+        "天井: 次回 Epic+ 確定！".to_string()
+    } else {
+        format!("天井: あと {} 連で Epic+ 確定", until_pity)
+    };
+
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                " 🎲 深淵ガチャ",
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  所持: 🔑{}", format_num(state.keys)),
+                Style::default()
+                    .fg(Color::LightCyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  累計: {}回", format_num(state.total_pulls)),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(Span::styled(
+            format!(" {}", pity_str),
+            Style::default().fg(Color::Yellow),
+        )),
+    ];
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn render_gacha_buttons(
+    state: &AbyssState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let halves = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let can_one = state.keys >= 1;
+    let can_ten = state.keys >= 10;
+
+    let one_color = if can_one { Color::LightCyan } else { Color::DarkGray };
+    let ten_color = if can_ten { Color::LightYellow } else { Color::DarkGray };
+
+    let one_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(one_color));
+    let one_para = Paragraph::new(Line::from(Span::styled(
+        " 1連 (🔑1) ",
+        Style::default().fg(one_color).add_modifier(Modifier::BOLD),
+    )))
+    .alignment(Alignment::Center)
+    .block(one_block);
+
+    let ten_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ten_color));
+    let ten_para = Paragraph::new(Line::from(Span::styled(
+        " 10連 (🔑10) ",
+        Style::default().fg(ten_color).add_modifier(Modifier::BOLD),
+    )))
+    .alignment(Alignment::Center)
+    .block(ten_block);
+
+    let mut cs = click_state.borrow_mut();
+    Clickable::new(one_para, GACHA_PULL_1).render(f, halves[0], &mut cs);
+    Clickable::new(ten_para, GACHA_PULL_10).render(f, halves[1], &mut cs);
+}
+
+fn render_gacha_last_result(state: &AbyssState, f: &mut Frame, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" 直近結果 ");
+    let mut lines: Vec<Line> = Vec::new();
+
+    if let Some(r) = &state.last_gacha {
+        // 1 行目: 等級分布
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" x{} ", r.count),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("C:{} ", r.by_tier[0]),
+                Style::default().fg(Color::Gray),
+            ),
+            Span::styled(
+                format!("R:{} ", r.by_tier[1]),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(
+                format!("E:{} ", r.by_tier[2]),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("L:{} ", r.by_tier[3]),
+                Style::default()
+                    .fg(Color::LightYellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        // 2 行目: 報酬合計
+        let mut reward_spans: Vec<Span> = vec![Span::raw(" ")];
+        if r.gained_gold > 0 {
+            reward_spans.push(Span::styled(
+                format!("💰+{} ", format_num(r.gained_gold)),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        if r.gained_souls > 0 {
+            reward_spans.push(Span::styled(
+                format!("✦+{} ", format_num(r.gained_souls)),
+                Style::default().fg(Color::Magenta),
+            ));
+        }
+        if r.gained_keys > 0 {
+            reward_spans.push(Span::styled(
+                format!("🔑+{} ", r.gained_keys),
+                Style::default().fg(Color::LightCyan),
+            ));
+        }
+        if r.gained_upgrade_lv > 0 {
+            reward_spans.push(Span::styled(
+                format!("◆Lv+{} ", r.gained_upgrade_lv),
+                Style::default().fg(Color::Green),
+            ));
+        }
+        if reward_spans.len() == 1 {
+            reward_spans.push(Span::styled("—", Style::default().fg(Color::DarkGray)));
+        }
+        lines.push(Line::from(reward_spans));
+    } else {
+        lines.push(Line::from(Span::styled(
+            " (まだ引いていない)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    f.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn render_gacha_table(state: &AbyssState, f: &mut Frame, area: Rect) {
+    let g = &state.config.gacha;
+    let total: u32 = g.gacha_weights_milli.iter().sum::<u32>().max(1);
+    let pct = |w: u32| -> String { format!("{:.1}%", (w as f64 / total as f64) * 100.0) };
+
+    let lines = vec![
+        Line::from(Span::styled(
+            " 確率テーブル",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled(
+                "  Common    ",
+                Style::default().fg(Color::Gray),
+            ),
+            Span::styled(pct(g.gacha_weights_milli[0]), Style::default().fg(Color::Gray)),
+            Span::styled(
+                "  → 💰 大量 gold",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled("  Rare      ", Style::default().fg(Color::Cyan)),
+            Span::styled(pct(g.gacha_weights_milli[1]), Style::default().fg(Color::Cyan)),
+            Span::styled(
+                "  → ◆ 強化レベル+1 (永続)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Epic      ",
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                pct(g.gacha_weights_milli[2]),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  → ✦ 魂 (現フロア依存)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  Legendary ",
+                Style::default()
+                    .fg(Color::LightYellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                pct(g.gacha_weights_milli[3]),
+                Style::default()
+                    .fg(Color::LightYellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  → 🔑+{} (連鎖チャンス)", g.legendary_keys),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            " 鍵入手: ボス +1 (Elite +2 / 10F毎 +2)",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    f.render_widget(Paragraph::new(lines), area);
+}
+
 // ── ログ ───────────────────────────────────────────────────
 
 fn render_log(state: &AbyssState, f: &mut Frame, area: Rect) {
@@ -575,6 +879,70 @@ fn format_num(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::ClickState;
+    use ratzilla::ratatui::backend::TestBackend;
+    use ratzilla::ratatui::Terminal;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    /// ガチャタブを描画したとき、1連 / 10連ボタンが実描画位置に対して
+    /// クリックターゲット登録されていることを TestBackend で確認。
+    /// (CLAUDE.md: Widget Primitive 規約のチェックリスト)
+    #[test]
+    fn gacha_buttons_register_clickable_areas() {
+        let mut state = AbyssState::new();
+        state.tab = Tab::Gacha;
+        state.keys = 100;
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                render(&state, f, f.area(), &cs);
+            })
+            .unwrap();
+
+        // ボタン領域のいずれかのセルでヒットテストすると 1連/10連 ID が返る。
+        // 描画位置を厳密に固定せず、どこかで両方検出されることを確認する。
+        let cs = cs.borrow();
+        let mut found_one = false;
+        let mut found_ten = false;
+        for y in 0..30 {
+            for x in 0..80 {
+                match cs.hit_test(x, y) {
+                    Some(GACHA_PULL_1) => found_one = true,
+                    Some(GACHA_PULL_10) => found_ten = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(found_one, "GACHA_PULL_1 button not registered");
+        assert!(found_ten, "GACHA_PULL_10 button not registered");
+    }
+
+    /// 4 タブ全てがクリック可能領域として登録されていることを確認。
+    #[test]
+    fn all_tabs_registered() {
+        let state = AbyssState::new();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|f| render(&state, f, f.area(), &cs))
+            .unwrap();
+        let cs = cs.borrow();
+        let mut found = [false; 4];
+        for y in 0..30 {
+            for x in 0..80 {
+                match cs.hit_test(x, y) {
+                    Some(TAB_UPGRADES) => found[0] = true,
+                    Some(TAB_SOULS) => found[1] = true,
+                    Some(TAB_STATS) => found[2] = true,
+                    Some(TAB_GACHA) => found[3] = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(found.iter().all(|&b| b), "missing tab targets: {:?}", found);
+    }
 
     #[test]
     fn format_num_basic() {
