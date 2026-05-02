@@ -11,6 +11,7 @@
 
 pub mod actions;
 pub mod config;
+pub mod effects;
 pub mod logic;
 pub mod policy;
 pub mod render;
@@ -19,8 +20,9 @@ pub mod state;
 #[cfg(test)]
 mod simulator;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
@@ -28,18 +30,78 @@ use ratzilla::ratatui::Frame;
 use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
+/// performance.now() の薄いラッパ。失敗時 (headless 等) は None を返す。
+fn now_ms() -> Option<f64> {
+    web_sys::window().and_then(|w| w.performance()).map(|p| p.now())
+}
+
 use actions::*;
+use effects::AbyssEffects;
 use policy::PlayerAction;
 use state::{AbyssState, SoulPerk, Tab, UpgradeKind};
 
 pub struct AbyssGame {
     pub state: AbyssState,
+    /// 演出マネージャ。render 内で効果を push し、process_effects で適用する。
+    /// `Game::render(&self, ...)` が immutable なので RefCell 必須。
+    effects: RefCell<AbyssEffects>,
+    /// 前フレームの state スナップショット (差分検知用)。
+    /// Copy 可能なフィールドだけ保持する軽量スナップショット。
+    prev: Cell<PrevSnapshot>,
+    /// 前回 render 時の wall-clock (ms)。effect の elapsed 計算に使う。
+    last_render_ms: Cell<f64>,
+}
+
+/// effect トリガ判定用の軽量 state スナップショット。Copy なフィールドだけ。
+#[derive(Clone, Copy, Default)]
+struct PrevSnapshot {
+    floor: u32,
 }
 
 impl AbyssGame {
     pub fn new() -> Self {
+        let state = AbyssState::new();
+        let prev = PrevSnapshot { floor: state.floor };
         Self {
-            state: AbyssState::new(),
+            state,
+            effects: RefCell::new(AbyssEffects::new()),
+            prev: Cell::new(prev),
+            last_render_ms: Cell::new(0.0),
+        }
+    }
+
+    /// state の差分を見て、対応する効果を effects に push する。
+    /// render の冒頭 (widget 描画前) に呼ぶ。
+    ///
+    /// ### 拡張ポイント
+    /// 新しい演出を増やす時はこのメソッドに `if prev.X != state.X { effects.push_Y() }`
+    /// を追加するだけ。state 自体や logic.rs を触る必要はない。
+    fn detect_transitions(&self, area: Rect) {
+        let prev = self.prev.get();
+        let mut effects = self.effects.borrow_mut();
+
+        // 階層遷移: floor が増えた瞬間に sweep_in でフラッシュ
+        if self.state.floor != prev.floor {
+            effects.push_floor_transition(area);
+        }
+
+        // 次の snapshot に更新
+        self.prev.set(PrevSnapshot {
+            floor: self.state.floor,
+        });
+    }
+
+    /// 前回 render からの経過時間を計算する。初回は 0。
+    fn compute_elapsed(&self) -> Duration {
+        let now = now_ms().unwrap_or(0.0);
+        let prev = self.last_render_ms.get();
+        self.last_render_ms.set(now);
+        if prev == 0.0 {
+            Duration::ZERO
+        } else {
+            // tab backgrounded 等で巨大な値になった場合は 100ms に clamp
+            let delta_ms = (now - prev).clamp(0.0, 100.0);
+            Duration::from_micros((delta_ms * 1000.0) as u64)
         }
     }
 
@@ -120,7 +182,17 @@ impl Game for AbyssGame {
     }
 
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+        // 1. state 差分を見て新規 effect を push (area が必要なので render 内で行う)
+        self.detect_transitions(area);
+
+        // 2. 通常の widget 描画
         render::render(&self.state, f, area, click_state);
+
+        // 3. 描画後の Buffer に effect を post-process として適用
+        let elapsed = self.compute_elapsed();
+        self.effects
+            .borrow_mut()
+            .process(elapsed, f.buffer_mut(), area);
     }
 }
 
