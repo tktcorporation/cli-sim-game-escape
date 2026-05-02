@@ -230,6 +230,9 @@ pub struct AbyssState {
     pub hero_atk_cooldown: u32,
     /// hero の HP regen の小数累積 (1.0 ごとに 1 HP 回復)。
     pub hero_regen_acc_x100: u32,
+    /// 戦闘集中 (combat focus)。攻撃成功で +1 (focus_max まで)、被弾で減少、
+    /// 死亡や撤退で 0 にリセット。攻撃間隔を微量ずつ短縮していく。
+    pub combat_focus: u32,
 
     pub current_enemy: Enemy,
 
@@ -282,6 +285,7 @@ impl AbyssState {
             hero_hp: 0,
             hero_atk_cooldown: 0,
             hero_regen_acc_x100: 0,
+            combat_focus: 0,
             current_enemy: placeholder_enemy(),
             auto_descend: true,
             tab: Tab::Upgrades,
@@ -331,13 +335,21 @@ impl AbyssState {
         (lv * h.crit_per_lv).min(h.crit_cap)
     }
 
-    /// 1 攻撃にかかる tick 数。SPD upgrade で短縮、`atk_period_min` を下限。
+    /// 1 攻撃にかかる tick 数。SPD upgrade と戦闘集中で短縮、`atk_period_min` を下限。
     pub fn hero_atk_period(&self) -> u32 {
         let h = &self.config.hero;
         let lv = self.upgrades[UpgradeKind::Speed.index()];
-        let mult = 1.0 + lv as f64 * h.speed_per_lv;
-        let period = (h.atk_period_base as f64 / mult).round() as u32;
+        let speed_mult = 1.0 + lv as f64 * h.speed_per_lv;
+        let focus_factor = self.focus_factor();
+        let period = (h.atk_period_base as f64 * focus_factor / speed_mult).round() as u32;
         period.max(h.atk_period_min)
+    }
+
+    /// 戦闘集中による攻撃間隔の倍率 (0..=1)。focus が増えるほど小さくなる。
+    pub fn focus_factor(&self) -> f64 {
+        let h = &self.config.hero;
+        let focus = self.combat_focus.min(h.focus_max) as f64;
+        (1.0 - focus * h.focus_reduction_per_point).max(0.1)
     }
 
     /// HP regen (HP/秒)。

@@ -14,10 +14,16 @@ pub struct HeroConfig {
     pub base_hp: u64,
     pub base_atk: u64,
     pub base_def: u64,
-    /// 1 攻撃あたりの基礎 tick 数 (Speed 強化で短縮)。
+    /// 1 攻撃あたりの基礎 tick 数 (Speed 強化と戦闘集中で短縮)。
     pub atk_period_base: u32,
     /// 攻撃間隔の下限 tick (これより短くしない)。
     pub atk_period_min: u32,
+
+    /// 戦闘集中 (combat focus) の上限。攻撃成功で +1、死亡や撤退で 0 にリセット。
+    pub focus_max: u32,
+    /// focus 1 ポイントごとに攻撃間隔を短縮する係数 (0.0..=1.0)。
+    /// 例: 0.01 なら 1 ポイントで 1% 短縮、focus_max が 50 なら最大 50% 短縮。
+    pub focus_reduction_per_point: f64,
 
     // upgrade per-level deltas
     pub atk_per_sword_lv: u64,
@@ -85,8 +91,11 @@ impl Default for BalanceConfig {
                 base_hp: 50,
                 base_atk: 5,
                 base_def: 2,
-                atk_period_base: 12,
+                atk_period_base: 18,
                 atk_period_min: 3,
+
+                focus_max: 50,
+                focus_reduction_per_point: 0.012,
 
                 atk_per_sword_lv: 2,
                 hp_per_vitality_lv: 10,
@@ -166,8 +175,10 @@ mod tests {
         assert_eq!(c.hero.base_hp, 50);
         assert_eq!(c.hero.base_atk, 5);
         assert_eq!(c.hero.base_def, 2);
-        assert_eq!(c.hero.atk_period_base, 12);
+        assert_eq!(c.hero.atk_period_base, 18);
         assert_eq!(c.hero.atk_period_min, 3);
+        assert_eq!(c.hero.focus_max, 50);
+        assert!((c.hero.focus_reduction_per_point - 0.012).abs() < 1e-9);
         assert_eq!(c.hero.atk_per_sword_lv, 2);
         assert_eq!(c.hero.hp_per_vitality_lv, 10);
         assert!((c.hero.crit_cap - 0.60).abs() < 1e-9);
