@@ -10,9 +10,14 @@
 //! OFF にすれば現フロアで安定して周回し gold を稼げる。
 
 pub mod actions;
+pub mod config;
 pub mod logic;
+pub mod policy;
 pub mod render;
 pub mod state;
+
+#[cfg(test)]
+mod simulator;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -24,6 +29,7 @@ use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
 use actions::*;
+use policy::PlayerAction;
 use state::{AbyssState, SoulPerk, Tab, UpgradeKind};
 
 pub struct AbyssGame {
@@ -37,79 +43,39 @@ impl AbyssGame {
         }
     }
 
-    fn handle_click(&mut self, action_id: u16) -> bool {
+    /// クリック ID を `PlayerAction` に変換する。シミュレータ Policy も同じ
+    /// `PlayerAction` を返すので、本体・sim どちらも `logic::apply_action`
+    /// 1 本道で処理される (動作の乖離はここで構造的に防ぐ)。
+    fn click_to_action(&self, action_id: u16) -> Option<PlayerAction> {
         match action_id {
-            TAB_UPGRADES => {
-                logic::set_tab(&mut self.state, Tab::Upgrades);
-                true
-            }
-            TAB_SOULS => {
-                logic::set_tab(&mut self.state, Tab::Souls);
-                true
-            }
-            TAB_STATS => {
-                logic::set_tab(&mut self.state, Tab::Stats);
-                true
-            }
-            TOGGLE_AUTO_DESCEND => {
-                logic::toggle_auto_descend(&mut self.state);
-                true
-            }
-            RETREAT_TO_SURFACE => {
-                logic::retreat(&mut self.state);
-                true
-            }
+            TAB_UPGRADES => Some(PlayerAction::SetTab(Tab::Upgrades)),
+            TAB_SOULS => Some(PlayerAction::SetTab(Tab::Souls)),
+            TAB_STATS => Some(PlayerAction::SetTab(Tab::Stats)),
+            TOGGLE_AUTO_DESCEND => Some(PlayerAction::ToggleAutoDescend),
+            RETREAT_TO_SURFACE => Some(PlayerAction::Retreat),
             id if (BUY_UPGRADE_BASE..BUY_UPGRADE_BASE + 7).contains(&id) => {
                 let idx = (id - BUY_UPGRADE_BASE) as usize;
-                if let Some(kind) = UpgradeKind::from_index(idx) {
-                    logic::buy_upgrade(&mut self.state, kind);
-                }
-                true
+                UpgradeKind::from_index(idx).map(PlayerAction::BuyUpgrade)
             }
             id if (BUY_SOUL_PERK_BASE..BUY_SOUL_PERK_BASE + 4).contains(&id) => {
                 let idx = (id - BUY_SOUL_PERK_BASE) as usize;
-                if let Some(perk) = SoulPerk::from_index(idx) {
-                    logic::buy_soul_perk(&mut self.state, perk);
-                }
-                true
+                SoulPerk::from_index(idx).map(PlayerAction::BuySoulPerk)
             }
-            _ => false,
+            _ => None,
         }
     }
 
-    fn handle_key(&mut self, ch: char) -> bool {
+    fn key_to_action(&self, ch: char) -> Option<PlayerAction> {
         match ch {
-            // タブ切替: { | }
-            '{' => {
-                logic::set_tab(&mut self.state, Tab::Upgrades);
-                true
-            }
-            '|' => {
-                logic::set_tab(&mut self.state, Tab::Souls);
-                true
-            }
-            '}' => {
-                logic::set_tab(&mut self.state, Tab::Stats);
-                true
-            }
-            // トグル
-            'a' | 'A' => {
-                logic::toggle_auto_descend(&mut self.state);
-                true
-            }
-            'p' | 'P' => {
-                logic::retreat(&mut self.state);
-                true
-            }
-            // 強化購入: 1..=7 (Upgrades タブ時)
+            '{' => Some(PlayerAction::SetTab(Tab::Upgrades)),
+            '|' => Some(PlayerAction::SetTab(Tab::Souls)),
+            '}' => Some(PlayerAction::SetTab(Tab::Stats)),
+            'a' | 'A' => Some(PlayerAction::ToggleAutoDescend),
+            'p' | 'P' => Some(PlayerAction::Retreat),
             '1'..='7' if matches!(self.state.tab, Tab::Upgrades) => {
                 let idx = (ch as u8 - b'1') as usize;
-                if let Some(kind) = UpgradeKind::from_index(idx) {
-                    logic::buy_upgrade(&mut self.state, kind);
-                }
-                true
+                UpgradeKind::from_index(idx).map(PlayerAction::BuyUpgrade)
             }
-            // 魂強化購入: q,w,e,r (Souls タブ時)
             'q' | 'w' | 'e' | 'r' if matches!(self.state.tab, Tab::Souls) => {
                 let idx = match ch {
                     'q' => 0,
@@ -118,12 +84,9 @@ impl AbyssGame {
                     'r' => 3,
                     _ => unreachable!(),
                 };
-                if let Some(perk) = SoulPerk::from_index(idx) {
-                    logic::buy_soul_perk(&mut self.state, perk);
-                }
-                true
+                SoulPerk::from_index(idx).map(PlayerAction::BuySoulPerk)
             }
-            _ => false,
+            _ => None,
         }
     }
 }
@@ -134,9 +97,15 @@ impl Game for AbyssGame {
     }
 
     fn handle_input(&mut self, event: &InputEvent) -> bool {
-        match event {
-            InputEvent::Key(c) => self.handle_key(*c),
-            InputEvent::Click(_, id) => self.handle_click(*id),
+        let action = match event {
+            InputEvent::Key(c) => self.key_to_action(*c),
+            InputEvent::Click(_, id) => self.click_to_action(*id),
+        };
+        if let Some(a) = action {
+            logic::apply_action(&mut self.state, a);
+            true
+        } else {
+            false
         }
     }
 

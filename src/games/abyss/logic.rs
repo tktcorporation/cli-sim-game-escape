@@ -2,8 +2,14 @@
 //!
 //! tick / spawn / 攻撃判定 / 強化購入など全てここに集約する。
 //! `state.rs` のフィールドだけを操作し、IOやレンダーは触らない。
+//!
+//! 数値バランスは `state.config` (BalanceConfig) から取り出すので、
+//! 本体ゲームとシミュレータで完全に同じコードを通る ─ 動作の乖離は
+//! 構造的に起きない。
 
-use super::state::{enemies_per_floor, AbyssState, Enemy, SoulPerk, Tab, UpgradeKind};
+use super::config::BalanceConfig;
+use super::policy::PlayerAction;
+use super::state::{AbyssState, Enemy, SoulPerk, Tab, UpgradeKind};
 
 /// メインの tick 処理。delta_ticks 回ぶん戦闘を進める。
 pub fn tick(state: &mut AbyssState, delta_ticks: u32) {
@@ -98,11 +104,14 @@ fn on_enemy_killed(state: &mut AbyssState) {
     state.gold = state.gold.saturating_add(gold_drop);
     state.run_gold_earned = state.run_gold_earned.saturating_add(gold_drop);
 
-    // 魂はフロア深度に応じてドロップ。雑魚は floor/5 切り上げ、ボスは floor*2。
+    let pacing = &state.config.pacing;
     let base_souls = if was_boss {
-        (state.floor as u64) * 2
+        (state.floor as u64) * pacing.boss_souls_mult
     } else {
-        state.floor.div_ceil(5) as u64
+        // 0 だと div_ceil が panic するので最小 1 にクランプ。
+        // tuning config が誤って 0 を入れても fail-graceful にする。
+        let div = pacing.normal_souls_div.max(1);
+        state.floor.div_ceil(div) as u64
     };
     let souls = (base_souls as f64 * state.soul_multiplier()).round() as u64;
     state.souls = state.souls.saturating_add(souls);
@@ -145,7 +154,9 @@ fn descend_to_next_floor(state: &mut AbyssState) {
 
 fn on_hero_died(state: &mut AbyssState) {
     state.deaths = state.deaths.saturating_add(1);
-    let bonus_souls = ((state.floor as u64).saturating_mul(3)) as f64 * state.soul_multiplier();
+    let mult = state.config.pacing.death_souls_mult;
+    let bonus_souls =
+        ((state.floor as u64).saturating_mul(mult)) as f64 * state.soul_multiplier();
     let bonus_souls = bonus_souls.round() as u64;
     state.souls = state.souls.saturating_add(bonus_souls);
 
@@ -167,8 +178,8 @@ fn on_hero_died(state: &mut AbyssState) {
 
 /// 次の敵 (雑魚 or ボス) を生成して current_enemy にセット。
 fn spawn_next_enemy(state: &mut AbyssState) {
-    let is_boss = state.kills_on_floor >= enemies_per_floor();
-    state.current_enemy = make_enemy(state.floor, is_boss, &mut state.rng_state);
+    let is_boss = state.kills_on_floor >= state.enemies_per_floor();
+    state.current_enemy = make_enemy(state.floor, is_boss, &state.config, &mut state.rng_state);
 }
 
 /// シンプルな擬似乱数 (xorshift32)。
@@ -191,7 +202,8 @@ fn roll_crit(state: &mut AbyssState) -> bool {
 }
 
 /// 与えられた floor / boss フラグから敵を生成する。
-fn make_enemy(floor: u32, is_boss: bool, rng_seed: &mut u32) -> Enemy {
+/// 数値スケーリングは config から、名前テーブルは固定で持つ。
+pub fn make_enemy(floor: u32, is_boss: bool, config: &BalanceConfig, rng_seed: &mut u32) -> Enemy {
     // 名前テーブル (フロア帯ごとに変わる)。
     let normal_names: &[&str] = match floor {
         1..=2 => &["スライム", "大ネズミ", "コウモリ"],
@@ -215,19 +227,18 @@ fn make_enemy(floor: u32, is_boss: bool, rng_seed: &mut u32) -> Enemy {
     let r = (rng_next(rng_seed) as usize) % names.len();
     let name = names[r].to_string();
 
-    // 雑魚のスケーリング
+    let e = &config.enemy;
     let f = floor as f64;
-    // HP scaling: base 14, 1.32^f
-    let mut hp = 14.0 * 1.32_f64.powf(f - 1.0);
-    let mut atk = 4.0 * 1.22_f64.powf(f - 1.0);
-    let mut def = 1.0 + (f - 1.0) * 0.5;
-    let mut gold = 4.0 * 1.40_f64.powf(f - 1.0);
+    let mut hp = e.hp_base * e.hp_growth.powf(f - 1.0);
+    let mut atk = e.atk_base * e.atk_growth.powf(f - 1.0);
+    let mut def = e.def_base + (f - 1.0) * e.def_per_floor;
+    let mut gold = e.gold_base * e.gold_growth.powf(f - 1.0);
 
     if is_boss {
-        hp *= 5.0;
-        atk *= 1.5;
-        def *= 1.6;
-        gold *= 8.0;
+        hp *= e.boss_hp_mult;
+        atk *= e.boss_atk_mult;
+        def *= e.boss_def_mult;
+        gold *= e.boss_gold_mult;
     }
 
     let max_hp = hp.round().max(1.0) as u64;
@@ -235,8 +246,7 @@ fn make_enemy(floor: u32, is_boss: bool, rng_seed: &mut u32) -> Enemy {
     let def = def.round() as u64;
     let gold = gold.round().max(1.0) as u64;
 
-    // 攻撃間隔: 雑魚は 18 tick (=1.8秒)、ボスは 14 tick で激しい
-    let atk_period = if is_boss { 14 } else { 18 };
+    let atk_period = if is_boss { e.boss_atk_period } else { e.normal_atk_period };
 
     Enemy {
         name,
@@ -260,15 +270,22 @@ pub fn buy_upgrade(state: &mut AbyssState, kind: UpgradeKind) -> bool {
         return false;
     }
     state.gold -= cost;
+
+    // Vitality は最大値増加分をそのまま現 HP にも乗せて「気持ち良さ」を出す。
+    // 増分は config (hp_per_vitality_lv) と Endurance 倍率に依存するので、
+    // ハードコードせず Lv 上げ前後の hero_max_hp() の差分で計算する。
+    let max_before = if matches!(kind, UpgradeKind::Vitality) {
+        Some(state.hero_max_hp())
+    } else {
+        None
+    };
+
     state.upgrades[kind.index()] = state.upgrades[kind.index()].saturating_add(1);
 
-    // Vitality を取った瞬間は最大値が増えるので、現HPもそのぶん増えると気持ち良い
-    if matches!(kind, UpgradeKind::Vitality) {
-        state.hero_hp = state.hero_hp.saturating_add(10);
-        let max = state.hero_max_hp();
-        if state.hero_hp > max {
-            state.hero_hp = max;
-        }
+    if let Some(before) = max_before {
+        let after = state.hero_max_hp();
+        let delta = after.saturating_sub(before);
+        state.hero_hp = state.hero_hp.saturating_add(delta).min(after);
     }
 
     state.add_log(format!("◆ {} Lv.{}", kind.name(), state.upgrades[kind.index()]));
@@ -308,6 +325,28 @@ pub fn toggle_auto_descend(state: &mut AbyssState) {
 /// タブ切替。
 pub fn set_tab(state: &mut AbyssState, tab: Tab) {
     state.tab = tab;
+}
+
+/// プレイヤー行動を適用する統一エントリ。本体ゲームの入力ハンドラも、
+/// シミュレータの Policy も、最終的にこの関数を通る。返値は「行動が
+/// 何らかの状態変化を起こしたか」のフラグ (買えなかった等で false)。
+pub fn apply_action(state: &mut AbyssState, action: PlayerAction) -> bool {
+    match action {
+        PlayerAction::BuyUpgrade(kind) => buy_upgrade(state, kind),
+        PlayerAction::BuySoulPerk(perk) => buy_soul_perk(state, perk),
+        PlayerAction::ToggleAutoDescend => {
+            toggle_auto_descend(state);
+            true
+        }
+        PlayerAction::Retreat => {
+            retreat(state);
+            true
+        }
+        PlayerAction::SetTab(tab) => {
+            set_tab(state, tab);
+            true
+        }
+    }
 }
 
 /// 自分の意思で浅瀬 (B1F) に戻る。死亡扱いにはしない (魂ボーナスなし)。
@@ -374,9 +413,10 @@ mod tests {
         s.upgrades[UpgradeKind::Speed.index()] = 10;
         s.hero_hp = s.hero_max_hp();
         s.auto_descend = false;
+        let per_floor = s.enemies_per_floor() as u64;
         tick(&mut s, 2000);
         assert_eq!(s.floor, 1);
-        assert!(s.run_kills > enemies_per_floor() as u64);
+        assert!(s.run_kills > per_floor);
     }
 
     #[test]
@@ -425,12 +465,63 @@ mod tests {
     }
 
     #[test]
+    fn vitality_current_hp_bump_matches_config() {
+        // hp_per_vitality_lv を変えても、現 HP 増分と最大 HP 増分が一致することを確認。
+        // (固定 +10 を使っていた旧実装に対する回帰テスト)
+        let mut cfg = BalanceConfig::default();
+        cfg.hero.hp_per_vitality_lv = 25; // 既定 10 から変更
+        let mut s = AbyssState::with_config(cfg);
+        s.gold = 1_000_000;
+        let max_before = s.hero_max_hp();
+        s.hero_hp = max_before - 7;
+        let hp_before = s.hero_hp;
+
+        let ok = buy_upgrade(&mut s, UpgradeKind::Vitality);
+        assert!(ok);
+
+        let max_after = s.hero_max_hp();
+        // max は config 通りに増えているはず
+        assert_eq!(max_after - max_before, 25);
+        // 現 HP も同じ delta だけ増えているはず (キャップ未達の状態)
+        assert_eq!(s.hero_hp - hp_before, 25);
+    }
+
+    #[test]
+    fn vitality_current_hp_capped_at_new_max() {
+        // 満タンで Vitality を買ったら、新最大値まで bump、上回らない。
+        let mut cfg = BalanceConfig::default();
+        cfg.hero.hp_per_vitality_lv = 5;
+        let mut s = AbyssState::with_config(cfg);
+        s.gold = 1_000_000;
+        let max_before = s.hero_max_hp();
+        s.hero_hp = max_before; // 満タン
+        buy_upgrade(&mut s, UpgradeKind::Vitality);
+        let max_after = s.hero_max_hp();
+        assert_eq!(s.hero_hp, max_after);
+        assert!(s.hero_hp <= max_after);
+    }
+
+    #[test]
     fn soul_perk_purchase() {
         let mut s = AbyssState::new();
         s.souls = 1000;
         let ok = buy_soul_perk(&mut s, SoulPerk::Might);
         assert!(ok);
         assert_eq!(s.soul_perks[SoulPerk::Might.index()], 1);
+    }
+
+    #[test]
+    fn normal_souls_div_zero_does_not_panic() {
+        // tuning ミスで normal_souls_div = 0 が入っても panic せず、最低 1 にクランプされる。
+        let mut cfg = BalanceConfig::default();
+        cfg.pacing.normal_souls_div = 0;
+        let mut s = AbyssState::with_config(cfg);
+        s.upgrades[UpgradeKind::Sword.index()] = 100;
+        s.upgrades[UpgradeKind::Speed.index()] = 20;
+        s.hero_hp = s.hero_max_hp();
+        // 雑魚撃破まで進める。panic しなければ OK。
+        tick(&mut s, 5_000);
+        assert!(s.run_kills > 0);
     }
 
     #[test]
@@ -454,7 +545,7 @@ mod tests {
     #[test]
     fn boss_spawns_after_enough_kills() {
         let mut s = AbyssState::new();
-        s.kills_on_floor = enemies_per_floor();
+        s.kills_on_floor = s.enemies_per_floor();
         // 1 tick 進めれば boss spawn
         tick(&mut s, 1);
         assert!(s.current_enemy.is_boss);
@@ -470,9 +561,10 @@ mod tests {
 
     #[test]
     fn enemy_scaling_with_floor() {
+        let cfg = BalanceConfig::default();
         let mut seed = 1;
-        let e1 = make_enemy(1, false, &mut seed);
-        let e10 = make_enemy(10, false, &mut seed);
+        let e1 = make_enemy(1, false, &cfg, &mut seed);
+        let e10 = make_enemy(10, false, &cfg, &mut seed);
         assert!(e10.max_hp > e1.max_hp);
         assert!(e10.atk > e1.atk);
         assert!(e10.gold > e1.gold);
@@ -480,10 +572,25 @@ mod tests {
 
     #[test]
     fn boss_is_tougher() {
+        let cfg = BalanceConfig::default();
         let mut seed = 1;
-        let normal = make_enemy(5, false, &mut seed);
-        let boss = make_enemy(5, true, &mut seed);
+        let normal = make_enemy(5, false, &cfg, &mut seed);
+        let boss = make_enemy(5, true, &cfg, &mut seed);
         assert!(boss.max_hp > normal.max_hp);
         assert!(boss.gold > normal.gold);
+    }
+
+    #[test]
+    fn config_swap_changes_enemy_scaling() {
+        // 同 seed / 同 floor で config を変えると敵 HP が変わることを確認。
+        // 本体ゲームと sim の DI が機能している証拠。
+        let mut seed_a = 42;
+        let mut seed_b = 42;
+        let easy = BalanceConfig::easy();
+        let hard = BalanceConfig::hard();
+        let f = 15;
+        let easy_enemy = make_enemy(f, false, &easy, &mut seed_a);
+        let hard_enemy = make_enemy(f, false, &hard, &mut seed_b);
+        assert!(hard_enemy.max_hp > easy_enemy.max_hp);
     }
 }

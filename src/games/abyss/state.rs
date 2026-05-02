@@ -1,6 +1,12 @@
 //! 深淵潜行 (Abyss Idle) — game state.
 //!
 //! 純粋なデータ定義のみ。ロジックは logic.rs に置く。
+//!
+//! 数値バランス (敵スケーリング・ヒーローのレベル係数など) は
+//! `config::BalanceConfig` を介して注入される。本体ゲームは既定値を、
+//! シミュレータは差し替えた config を渡すことで難易度を変えられる。
+
+use super::config::BalanceConfig;
 
 /// 強化の種類。各強化は累積購入数 (level) を持ち、レベルが上がるほどコストも上昇する。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -199,6 +205,10 @@ pub enum Tab {
 
 /// ゲームのルート状態。
 pub struct AbyssState {
+    /// 難易度バランス。state ごとに 1 つ持ち、tick 内の計算は全てこれを参照する。
+    /// 本体ゲームは `BalanceConfig::default()`、シミュレータはカスタムを注入。
+    pub config: BalanceConfig,
+
     // ── プレイヤー (ラン中もリセットされない、永続強化分のレベル) ──
     pub upgrades: [u32; 7],
     pub soul_perks: [u32; 4],
@@ -253,7 +263,13 @@ pub struct AbyssState {
 
 impl AbyssState {
     pub fn new() -> Self {
+        Self::with_config(BalanceConfig::default())
+    }
+
+    /// 任意の難易度設定で状態を作る。シミュレータ用。
+    pub fn with_config(config: BalanceConfig) -> Self {
         let mut s = Self {
+            config,
             upgrades: [0; 7],
             soul_perks: [0; 4],
             souls: 0,
@@ -288,53 +304,64 @@ impl AbyssState {
 
     /// 現在の最大 HP (upgrades + soul perks の合算)。
     pub fn hero_max_hp(&self) -> u64 {
-        let base = 50 + self.upgrades[UpgradeKind::Vitality.index()] as u64 * 10;
+        let h = &self.config.hero;
+        let base = h.base_hp + self.upgrades[UpgradeKind::Vitality.index()] as u64 * h.hp_per_vitality_lv;
         let endurance_lv = self.soul_perks[SoulPerk::Endurance.index()];
-        let mult = 1.0 + endurance_lv as f64 * 0.05;
+        let mult = 1.0 + endurance_lv as f64 * h.endurance_per_lv;
         ((base as f64) * mult).round() as u64
     }
 
     pub fn hero_atk(&self) -> u64 {
-        let base = 5 + self.upgrades[UpgradeKind::Sword.index()] as u64 * 2;
+        let h = &self.config.hero;
+        let base = h.base_atk + self.upgrades[UpgradeKind::Sword.index()] as u64 * h.atk_per_sword_lv;
         let might_lv = self.soul_perks[SoulPerk::Might.index()];
-        let mult = 1.0 + might_lv as f64 * 0.05;
+        let mult = 1.0 + might_lv as f64 * h.might_per_lv;
         ((base as f64) * mult).round() as u64
     }
 
     pub fn hero_def(&self) -> u64 {
-        2 + self.upgrades[UpgradeKind::Armor.index()] as u64
+        let h = &self.config.hero;
+        h.base_def + self.upgrades[UpgradeKind::Armor.index()] as u64 * h.def_per_armor_lv
     }
 
-    /// クリティカル率 (0.0..=0.6)。
+    /// クリティカル率 (0.0..=`crit_cap`)。
     pub fn hero_crit_rate(&self) -> f64 {
+        let h = &self.config.hero;
         let lv = self.upgrades[UpgradeKind::Crit.index()] as f64;
-        (lv * 0.01).min(0.60)
+        (lv * h.crit_per_lv).min(h.crit_cap)
     }
 
-    /// 1 攻撃にかかる tick 数。基本は 12 tick (=1.2秒)、SPD upgrade で短縮。
+    /// 1 攻撃にかかる tick 数。SPD upgrade で短縮、`atk_period_min` を下限。
     pub fn hero_atk_period(&self) -> u32 {
+        let h = &self.config.hero;
         let lv = self.upgrades[UpgradeKind::Speed.index()];
-        let mult = 1.0 + lv as f64 * 0.05;
-        let period = (12.0 / mult).round() as u32;
-        period.max(3) // 0.3秒/攻撃 (=33攻撃/秒) を下限
+        let mult = 1.0 + lv as f64 * h.speed_per_lv;
+        let period = (h.atk_period_base as f64 / mult).round() as u32;
+        period.max(h.atk_period_min)
     }
 
     /// HP regen (HP/秒)。
     pub fn hero_regen_per_sec(&self) -> f64 {
-        self.upgrades[UpgradeKind::Regen.index()] as f64 * 0.2
+        self.upgrades[UpgradeKind::Regen.index()] as f64 * self.config.hero.regen_per_lv_per_sec
     }
 
     /// gold 取得倍率 (1.0 + upgrades + soul perks)。
     pub fn gold_multiplier(&self) -> f64 {
+        let h = &self.config.hero;
         let upgrade_lv = self.upgrades[UpgradeKind::Gold.index()];
         let fortune_lv = self.soul_perks[SoulPerk::Fortune.index()];
-        1.0 + upgrade_lv as f64 * 0.05 + fortune_lv as f64 * 0.10
+        1.0 + upgrade_lv as f64 * h.gold_per_lv + fortune_lv as f64 * h.fortune_per_lv
     }
 
     /// 撃破時の魂取得倍率 (Reaper perk 由来)。
     pub fn soul_multiplier(&self) -> f64 {
         let lv = self.soul_perks[SoulPerk::Reaper.index()];
-        1.0 + lv as f64 * 0.20
+        1.0 + lv as f64 * self.config.hero.reaper_per_lv
+    }
+
+    /// 1 階層あたりに倒すべき雑魚数。config 経由。
+    pub fn enemies_per_floor(&self) -> u32 {
+        self.config.pacing.enemies_per_floor
     }
 
     /// 強化 1 段階のコスト。
@@ -359,14 +386,8 @@ impl AbyssState {
 
     /// ボス出現までの残り敵数。0 なら現在のフロアにはボスが出現中。
     pub fn enemies_until_boss(&self) -> u32 {
-        let needed = enemies_per_floor();
-        needed.saturating_sub(self.kills_on_floor)
+        self.enemies_per_floor().saturating_sub(self.kills_on_floor)
     }
-}
-
-/// 1階層あたり、ボス出現前に倒す必要がある雑魚の数。
-pub const fn enemies_per_floor() -> u32 {
-    8
 }
 
 /// hp/max_hp が 0 だと "次の tick で本物の敵をスポーン" の合図になる。
@@ -427,8 +448,9 @@ mod tests {
     }
 
     #[test]
-    fn enemies_per_floor_const() {
-        assert_eq!(enemies_per_floor(), 8);
+    fn enemies_per_floor_default() {
+        let s = AbyssState::new();
+        assert_eq!(s.enemies_per_floor(), 8);
     }
 
     #[test]
