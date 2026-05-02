@@ -653,7 +653,7 @@ fn render_gacha_buttons(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(one_color));
     let one_para = Paragraph::new(Line::from(Span::styled(
-        " [S] 1連 (🔑1) ",
+        " 1連 (🔑1) ",
         Style::default().fg(one_color).add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center)
@@ -663,7 +663,7 @@ fn render_gacha_buttons(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(ten_color));
     let ten_para = Paragraph::new(Line::from(Span::styled(
-        " [X] 10連 (🔑10) ",
+        " 10連 (🔑10) ",
         Style::default().fg(ten_color).add_modifier(Modifier::BOLD),
     )))
     .alignment(Alignment::Center)
@@ -885,8 +885,8 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    /// ガチャタブを描画したとき、`[S]` 1連 / `[X]` 10連ボタンが
-    /// 実描画位置に対してクリックターゲット登録されていることを TestBackend で確認。
+    /// ガチャタブを描画したとき、1連 / 10連ボタンが実描画位置に対して
+    /// クリックターゲット登録されていることを TestBackend で確認。
     /// (CLAUDE.md: Widget Primitive 規約のチェックリスト)
     #[test]
     fn gacha_buttons_register_clickable_areas() {
