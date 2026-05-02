@@ -5,6 +5,11 @@ edition = "2021"
 
 [dependencies]
 ratzilla = "0.3"
+# wasm feature が必須: SimpleRng::default() が std::time::SystemTime::now() を呼ぶが
+# これは wasm32-unknown-unknown で panic する。wasm feature を有効化すると web-time
+# クレートが SystemTime を Performance.now() ベースに差し替えて回避する。
+# (std-duration は wasm と排他なので enable しない。tachyonfx::Duration を直接使う。)
+tachyonfx = { version = "0.25", features = ["wasm"] }
 console_error_panic_hook = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

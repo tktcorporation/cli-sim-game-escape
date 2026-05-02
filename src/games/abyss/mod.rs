@@ -11,6 +11,7 @@
 
 pub mod actions;
 pub mod config;
+pub mod effects;
 pub mod logic;
 pub mod policy;
 pub mod render;
@@ -19,27 +20,162 @@ pub mod state;
 #[cfg(test)]
 mod simulator;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
+// tachyonfx::Duration は wasm feature 有効時に独自型 (milliseconds: u32)。
+// `wasm` と `std-duration` は排他なので std::time::Duration ではなくこちらを使う。
+use tachyonfx::Duration;
 
 use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
+/// performance.now() の薄いラッパ。失敗時 (headless 等) は None を返す。
+fn now_ms() -> Option<f64> {
+    web_sys::window().and_then(|w| w.performance()).map(|p| p.now())
+}
+
 use actions::*;
+use effects::AbyssEffects;
 use policy::PlayerAction;
 use state::{AbyssState, SoulPerk, Tab, UpgradeKind};
 
 pub struct AbyssGame {
     pub state: AbyssState,
+    /// 演出マネージャ。render 内で効果を push し、process_effects で適用する。
+    /// `Game::render(&self, ...)` が immutable なので RefCell 必須。
+    effects: RefCell<AbyssEffects>,
+    /// 前フレームの state スナップショット (差分検知用)。
+    /// Copy 可能なフィールドだけ保持する軽量スナップショット。
+    prev: Cell<PrevSnapshot>,
+    /// 前回 render 時の wall-clock (ms)。effect の elapsed 計算に使う。
+    last_render_ms: Cell<f64>,
+}
+
+/// effect トリガ判定用の軽量 state スナップショット。Copy なフィールドだけ。
+///
+/// 「rising edge を検知したい」フィールドはここに入れる。フィールド型は state 側と
+/// 完全一致させる必要はなく、判定に必要な最小限 (例: bool, u32) で OK。
+#[derive(Clone, Copy, Default)]
+struct PrevSnapshot {
+    floor: u32,
+    enemy_hurt_flash: u32,
+    hero_hurt_flash: u32,
+    enemy_is_boss: bool,
+    /// last_enemy_damage の (amount, is_crit) 部分だけ抜いた指紋。
+    /// life_ticks は毎 tick 減るので含めない (含めると毎フレーム edge が立ってしまう)。
+    last_enemy_dmg: Option<(u64, bool)>,
+    /// gacha の累計引き回数。増えた瞬間に「新規ガチャが回った」と判定する。
+    gacha_total_pulls: u64,
 }
 
 impl AbyssGame {
     pub fn new() -> Self {
+        let state = AbyssState::new();
+        let prev = Self::snapshot(&state);
         Self {
-            state: AbyssState::new(),
+            state,
+            effects: RefCell::new(AbyssEffects::new()),
+            prev: Cell::new(prev),
+            last_render_ms: Cell::new(0.0),
+        }
+    }
+
+    /// 現在 state から PrevSnapshot を作る。new() と detect_transitions の末尾の
+    /// 両方で使う共通ヘルパ。新フィールドを足したらここにも追加するだけで済む。
+    fn snapshot(s: &AbyssState) -> PrevSnapshot {
+        PrevSnapshot {
+            floor: s.floor,
+            enemy_hurt_flash: s.enemy_hurt_flash,
+            hero_hurt_flash: s.hero_hurt_flash,
+            enemy_is_boss: s.current_enemy.is_boss,
+            last_enemy_dmg: s.last_enemy_damage.map(|(a, _, c)| (a, c)),
+            gacha_total_pulls: s.total_pulls,
+        }
+    }
+
+    /// state の差分を見て、対応する効果を effects に push する。
+    /// render の冒頭 (widget 描画前) に呼ぶ。
+    ///
+    /// ### 拡張ポイント
+    /// 新しい演出を増やす時はこのメソッドに `if prev.X != state.X { effects.push_Y() }`
+    /// を追加するだけ。state 自体や logic.rs を触る必要はない。
+    fn detect_transitions(&self, area: Rect) {
+        let prev = self.prev.get();
+        let mut effects = self.effects.borrow_mut();
+        let layout = render::compute_layout(area);
+        let s = &self.state;
+
+        // ── 階層遷移 (floor の増減で別演出) ──
+        if s.floor > prev.floor {
+            effects.push_descend(area);
+        } else if s.floor < prev.floor {
+            effects.push_ascend_or_death(area);
+        }
+
+        // ── 敵被弾 (enemy_hurt_flash の rising edge 0 → N) ──
+        if prev.enemy_hurt_flash == 0 && s.enemy_hurt_flash > 0 {
+            effects.push_enemy_hit(layout.enemy_panel);
+        }
+
+        // ── 勇者被弾 (hero_hurt_flash の rising edge) ──
+        if prev.hero_hurt_flash == 0 && s.hero_hurt_flash > 0 {
+            effects.push_hero_hit(layout.hero_panel);
+        }
+
+        // ── ボス出現 (current_enemy.is_boss が false → true) ──
+        if !prev.enemy_is_boss && s.current_enemy.is_boss {
+            effects.push_boss_appearance(layout.combat);
+        }
+
+        // ── ボス撃破 ──
+        // 「is_boss が true → false」だけでは撤退/死亡でも発火してしまう
+        // (retreat / on_hero_died はどちらも非ボス敵を即座に再生成する)。
+        // 真の撃破は floor が +1 されている時だけなので、それで gate する。
+        if prev.enemy_is_boss && !s.current_enemy.is_boss && s.floor > prev.floor {
+            effects.push_boss_defeated(layout.enemy_panel);
+        }
+
+        // ── クリティカル (新しい damage event で is_crit=true) ──
+        let cur_dmg = s.last_enemy_damage.map(|(a, _, c)| (a, c));
+        if cur_dmg != prev.last_enemy_dmg {
+            if let Some((_, true)) = cur_dmg {
+                effects.push_critical(layout.combat);
+            }
+        }
+
+        // ── ガチャ Legendary (新規ガチャで Legendary が含まれた) ──
+        // by_tier[3] = Legendary 等級の当選数
+        if s.total_pulls > prev.gacha_total_pulls {
+            if let Some(g) = &s.last_gacha {
+                if g.by_tier[3] > 0 {
+                    effects.push_gacha_legendary(layout.body);
+                }
+            }
+        }
+
+        // 次の snapshot に更新
+        self.prev.set(Self::snapshot(s));
+    }
+
+    /// 前回 render からの経過時間を計算する。初回は 0。
+    fn compute_elapsed(&self) -> Duration {
+        let now = now_ms().unwrap_or(0.0);
+        let prev = self.last_render_ms.get();
+        self.last_render_ms.set(now);
+        if prev == 0.0 {
+            Duration::ZERO
+        } else {
+            // tab backgrounded 等で巨大な値になった場合は 100ms に clamp。
+            // NaN ガード: now / prev が NaN だと比較・clamp が NaN を返し、
+            // `as u32` で 0 → effect が永久停止するので明示的に弾く。
+            let delta_ms = (now - prev).clamp(0.0, 100.0);
+            if !delta_ms.is_finite() {
+                return Duration::ZERO;
+            }
+            Duration::from_millis(delta_ms as u32)
         }
     }
 
@@ -120,7 +256,17 @@ impl Game for AbyssGame {
     }
 
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+        // 1. state 差分を見て新規 effect を push (area が必要なので render 内で行う)
+        self.detect_transitions(area);
+
+        // 2. 通常の widget 描画
         render::render(&self.state, f, area, click_state);
+
+        // 3. 描画後の Buffer に effect を post-process として適用
+        let elapsed = self.compute_elapsed();
+        self.effects
+            .borrow_mut()
+            .process(elapsed, f.buffer_mut(), area);
     }
 }
 
