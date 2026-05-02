@@ -108,7 +108,10 @@ fn on_enemy_killed(state: &mut AbyssState) {
     let base_souls = if was_boss {
         (state.floor as u64) * pacing.boss_souls_mult
     } else {
-        state.floor.div_ceil(pacing.normal_souls_div) as u64
+        // 0 だと div_ceil が panic するので最小 1 にクランプ。
+        // tuning config が誤って 0 を入れても fail-graceful にする。
+        let div = pacing.normal_souls_div.max(1);
+        state.floor.div_ceil(div) as u64
     };
     let souls = (base_souls as f64 * state.soul_multiplier()).round() as u64;
     state.souls = state.souls.saturating_add(souls);
@@ -505,6 +508,20 @@ mod tests {
         let ok = buy_soul_perk(&mut s, SoulPerk::Might);
         assert!(ok);
         assert_eq!(s.soul_perks[SoulPerk::Might.index()], 1);
+    }
+
+    #[test]
+    fn normal_souls_div_zero_does_not_panic() {
+        // tuning ミスで normal_souls_div = 0 が入っても panic せず、最低 1 にクランプされる。
+        let mut cfg = BalanceConfig::default();
+        cfg.pacing.normal_souls_div = 0;
+        let mut s = AbyssState::with_config(cfg);
+        s.upgrades[UpgradeKind::Sword.index()] = 100;
+        s.upgrades[UpgradeKind::Speed.index()] = 20;
+        s.hero_hp = s.hero_max_hp();
+        // 雑魚撃破まで進める。panic しなければ OK。
+        tick(&mut s, 5_000);
+        assert!(s.run_kills > 0);
     }
 
     #[test]

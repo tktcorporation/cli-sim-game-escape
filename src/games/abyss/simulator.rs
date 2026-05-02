@@ -296,11 +296,17 @@ impl Simulator {
             logic::apply_action(&mut self.state, a);
         }
 
+        // tick 中に死亡 → state.floor が 1 にリセットされるので、tick 前の floor を
+        // 保存しておく。Retreat などで last_seen_floor が古くなっているケースでも
+        // 「いま死んだフロア」を正しく取れる。
+        let floor_before_tick = self.state.floor;
         logic::tick(&mut self.state, 1);
 
         self.metrics.total_ticks += 1;
         let cur_tick = self.metrics.total_ticks;
 
+        // first_reached は「初到達の tick」なので、最深を上回った時だけ記録。
+        // (= last_seen_floor は「過去最深」を保持する役割)。
         if self.state.floor > self.last_seen_floor {
             for f in (self.last_seen_floor + 1)..=self.state.floor {
                 self.metrics.first_reached.push((f, cur_tick));
@@ -309,9 +315,8 @@ impl Simulator {
         }
 
         if self.state.deaths > self.last_seen_deaths {
-            self.metrics.death_floors.push(self.last_seen_floor);
+            self.metrics.death_floors.push(floor_before_tick);
             self.last_seen_deaths = self.state.deaths;
-            self.last_seen_floor = self.state.floor;
         }
 
         if self.sample_every > 0 && cur_tick.is_multiple_of(self.sample_every) {
@@ -435,6 +440,39 @@ mod sanity_tests {
             )
         };
         assert_eq!(run(), run());
+    }
+
+    #[test]
+    fn death_floor_records_actual_not_stale_max() {
+        // 不変条件: 死亡が記録される時、death_floors には「死亡 tick 直前の floor」が入る。
+        // 過去に深く潜って Retreat で戻った状態 (last_seen_floor > state.floor) を
+        // 直接組み立て、その状態で死ぬと正しく floor=1 が記録されることを確認。
+        let mut sim = Simulator::with_seed(
+            BalanceConfig::default(),
+            Box::new(NoActionPolicy),
+            0xFEED,
+        );
+        // 敵をスポーンさせる
+        sim.run(20);
+
+        // 「過去に B5F まで到達 → Retreat で B1F に戻った」状態を直接組み立てる
+        sim.state.floor = 1;
+        sim.last_seen_floor = 5;
+        sim.state.hero_hp = 1;
+        // 次 tick で確実に敵が攻撃するよう cooldown をリセット
+        sim.state.current_enemy.atk_cooldown = 1;
+
+        sim.run(50);
+
+        assert!(
+            !sim.metrics().death_floors.is_empty(),
+            "should have died at least once"
+        );
+        assert_eq!(
+            sim.metrics().death_floors[0],
+            1,
+            "death should be recorded at actual floor (1), not stale last_seen_floor (5)"
+        );
     }
 
     #[test]
