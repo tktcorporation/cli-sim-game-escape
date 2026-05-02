@@ -267,15 +267,22 @@ pub fn buy_upgrade(state: &mut AbyssState, kind: UpgradeKind) -> bool {
         return false;
     }
     state.gold -= cost;
+
+    // Vitality は最大値増加分をそのまま現 HP にも乗せて「気持ち良さ」を出す。
+    // 増分は config (hp_per_vitality_lv) と Endurance 倍率に依存するので、
+    // ハードコードせず Lv 上げ前後の hero_max_hp() の差分で計算する。
+    let max_before = if matches!(kind, UpgradeKind::Vitality) {
+        Some(state.hero_max_hp())
+    } else {
+        None
+    };
+
     state.upgrades[kind.index()] = state.upgrades[kind.index()].saturating_add(1);
 
-    // Vitality を取った瞬間は最大値が増えるので、現HPもそのぶん増えると気持ち良い
-    if matches!(kind, UpgradeKind::Vitality) {
-        state.hero_hp = state.hero_hp.saturating_add(10);
-        let max = state.hero_max_hp();
-        if state.hero_hp > max {
-            state.hero_hp = max;
-        }
+    if let Some(before) = max_before {
+        let after = state.hero_max_hp();
+        let delta = after.saturating_sub(before);
+        state.hero_hp = state.hero_hp.saturating_add(delta).min(after);
     }
 
     state.add_log(format!("◆ {} Lv.{}", kind.name(), state.upgrades[kind.index()]));
@@ -452,6 +459,43 @@ mod tests {
         let before_hp = s.hero_hp;
         buy_upgrade(&mut s, UpgradeKind::Vitality);
         assert!(s.hero_hp > before_hp);
+    }
+
+    #[test]
+    fn vitality_current_hp_bump_matches_config() {
+        // hp_per_vitality_lv を変えても、現 HP 増分と最大 HP 増分が一致することを確認。
+        // (固定 +10 を使っていた旧実装に対する回帰テスト)
+        let mut cfg = BalanceConfig::default();
+        cfg.hero.hp_per_vitality_lv = 25; // 既定 10 から変更
+        let mut s = AbyssState::with_config(cfg);
+        s.gold = 1_000_000;
+        let max_before = s.hero_max_hp();
+        s.hero_hp = max_before - 7;
+        let hp_before = s.hero_hp;
+
+        let ok = buy_upgrade(&mut s, UpgradeKind::Vitality);
+        assert!(ok);
+
+        let max_after = s.hero_max_hp();
+        // max は config 通りに増えているはず
+        assert_eq!(max_after - max_before, 25);
+        // 現 HP も同じ delta だけ増えているはず (キャップ未達の状態)
+        assert_eq!(s.hero_hp - hp_before, 25);
+    }
+
+    #[test]
+    fn vitality_current_hp_capped_at_new_max() {
+        // 満タンで Vitality を買ったら、新最大値まで bump、上回らない。
+        let mut cfg = BalanceConfig::default();
+        cfg.hero.hp_per_vitality_lv = 5;
+        let mut s = AbyssState::with_config(cfg);
+        s.gold = 1_000_000;
+        let max_before = s.hero_max_hp();
+        s.hero_hp = max_before; // 満タン
+        buy_upgrade(&mut s, UpgradeKind::Vitality);
+        let max_after = s.hero_max_hp();
+        assert_eq!(s.hero_hp, max_after);
+        assert!(s.hero_hp <= max_after);
     }
 
     #[test]
