@@ -15,6 +15,7 @@ pub mod effects;
 pub mod logic;
 pub mod policy;
 pub mod render;
+pub mod save;
 pub mod state;
 
 #[cfg(test)]
@@ -52,6 +53,21 @@ pub struct AbyssGame {
     prev: Cell<PrevSnapshot>,
     /// 前回 render 時の wall-clock (ms)。effect の elapsed 計算に使う。
     last_render_ms: Cell<f64>,
+    /// 定期オートセーブまでの残り tick 数 (イベントセーブ発火時にもリセットされる)。
+    save_countdown: u32,
+}
+
+/// この PlayerAction を適用したらセーブを発火させるか。
+/// SetTab は純粋な UI 状態なので除外し、書き込みノイズを抑える。
+fn is_save_worthy(action: PlayerAction) -> bool {
+    matches!(
+        action,
+        PlayerAction::BuyUpgrade(_)
+            | PlayerAction::BuySoulPerk(_)
+            | PlayerAction::GachaPull(_)
+            | PlayerAction::Retreat
+            | PlayerAction::ToggleAutoDescend
+    )
 }
 
 /// effect トリガ判定用の軽量 state スナップショット。Copy なフィールドだけ。
@@ -73,13 +89,21 @@ struct PrevSnapshot {
 
 impl AbyssGame {
     pub fn new() -> Self {
-        let state = AbyssState::new();
+        #[allow(unused_mut)]
+        let mut state = AbyssState::new();
+
+        #[cfg(target_arch = "wasm32")]
+        if save::load_game(&mut state) {
+            state.add_log("セーブデータをロードしました");
+        }
+
         let prev = Self::snapshot(&state);
         Self {
             state,
             effects: RefCell::new(AbyssEffects::new()),
             prev: Cell::new(prev),
             last_render_ms: Cell::new(0.0),
+            save_countdown: save::AUTOSAVE_INTERVAL,
         }
     }
 
@@ -204,6 +228,15 @@ impl AbyssGame {
         }
     }
 
+    /// localStorage に書き込み、定期セーブのカウントダウンをリセットする。
+    /// イベントセーブと時間セーブを同じ経路に通すことで、両方が短時間に
+    /// 重複発火するのを防ぐ。
+    fn flush_save(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        save::save_game(&self.state);
+        self.save_countdown = save::AUTOSAVE_INTERVAL;
+    }
+
     fn key_to_action(&self, ch: char) -> Option<PlayerAction> {
         match ch {
             '{' => Some(PlayerAction::SetTab(Tab::Upgrades)),
@@ -244,7 +277,11 @@ impl Game for AbyssGame {
             InputEvent::Click(_, id) => self.click_to_action(*id),
         };
         if let Some(a) = action {
+            let save_after = is_save_worthy(a);
             logic::apply_action(&mut self.state, a);
+            if save_after {
+                self.flush_save();
+            }
             true
         } else {
             false
@@ -252,7 +289,20 @@ impl Game for AbyssGame {
     }
 
     fn tick(&mut self, delta_ticks: u32) {
+        let prev_floor = self.state.floor;
+        let prev_deaths = self.state.deaths;
         logic::tick(&mut self.state, delta_ticks);
+
+        // tick 内発生の進捗節目: 階層クリア (floor++) と死亡 (deaths++)。
+        let event_save = self.state.floor != prev_floor || self.state.deaths != prev_deaths;
+        // 保険の定期セーブ: ミルストーンが起きない長時間プレイ
+        // (auto_descend OFF で同フロア周回 etc) でも進捗を落とさないため。
+        self.save_countdown = self.save_countdown.saturating_sub(delta_ticks);
+        let timer_save = self.save_countdown == 0;
+
+        if event_save || timer_save {
+            self.flush_save();
+        }
     }
 
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
@@ -351,5 +401,38 @@ mod tests {
         g.state.floor = 5;
         g.handle_input(&InputEvent::Key('p'));
         assert_eq!(g.state.floor, 1);
+    }
+
+    #[test]
+    fn timer_save_fires_after_autosave_interval() {
+        let mut g = AbyssGame::new();
+        // 初期状態では満タン。
+        assert_eq!(g.save_countdown, save::AUTOSAVE_INTERVAL);
+        // インターバル分まで進めると 0 に到達 → tick 内で flush されてリセット。
+        g.tick(save::AUTOSAVE_INTERVAL);
+        assert_eq!(g.save_countdown, save::AUTOSAVE_INTERVAL);
+    }
+
+    #[test]
+    fn event_save_resets_timer_to_avoid_double_write() {
+        let mut g = AbyssGame::new();
+        g.state.gold = 10_000;
+        // タイマーを少しだけ進めた状態にする (中途半端な残り時間)。
+        g.tick(100);
+        assert_eq!(g.save_countdown, save::AUTOSAVE_INTERVAL - 100);
+        // upgrade 購入 = イベントセーブ発火 → タイマーは満タンに戻るべき。
+        g.handle_input(&InputEvent::Key('1')); // タブが Upgrades なら Sword を購入
+        assert_eq!(g.save_countdown, save::AUTOSAVE_INTERVAL);
+    }
+
+    #[test]
+    fn save_worthy_actions_classified_correctly() {
+        assert!(is_save_worthy(PlayerAction::BuyUpgrade(UpgradeKind::Sword)));
+        assert!(is_save_worthy(PlayerAction::BuySoulPerk(SoulPerk::Might)));
+        assert!(is_save_worthy(PlayerAction::GachaPull(1)));
+        assert!(is_save_worthy(PlayerAction::Retreat));
+        assert!(is_save_worthy(PlayerAction::ToggleAutoDescend));
+        // SetTab は UI 状態のみ変化させるためセーブを発火しない。
+        assert!(!is_save_worthy(PlayerAction::SetTab(Tab::Souls)));
     }
 }
