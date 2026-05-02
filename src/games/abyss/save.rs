@@ -22,6 +22,11 @@ const MIN_COMPATIBLE_VERSION: u32 = 1;
 #[cfg(target_arch = "wasm32")]
 const STORAGE_KEY: &str = "abyss_idle_save";
 
+/// イベントベース保存の保険として走らせる定期セーブ間隔 (tick 数)。
+/// 10 ticks/sec × 30 秒 = 300 ticks。auto_descend OFF で同フロア周回中も
+/// gold/souls/keys が積み上がるので、ミルストーン以外のドリフトを救うため。
+pub const AUTOSAVE_INTERVAL: u32 = 300;
+
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Serialize, Deserialize)]
 struct SaveData {
