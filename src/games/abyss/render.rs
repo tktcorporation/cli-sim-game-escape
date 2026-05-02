@@ -15,39 +15,69 @@ use crate::widgets::{Clickable, ClickableList, TabBar};
 use super::actions::*;
 use super::state::{AbyssState, FloorKind, SoulPerk, Tab, UpgradeKind};
 
-pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
-    let narrow = is_narrow_layout(area.width);
+/// 主要パネルの Rect。effect 配置と通常描画の両方で同じ値を使うため切り出し。
+///
+/// AbyssGame::render から「敵パネルだけ」に effect を当てたい時、layout 計算を
+/// render.rs と mod.rs で重複させないために共通化している。
+pub struct AbyssLayout {
+    pub header: Rect,
+    pub combat: Rect,
+    pub enemy_panel: Rect,
+    pub toggle: Rect,
+    pub tab_bar: Rect,
+    pub body: Rect,
+}
 
-    // 縦分割
-    //   - 1行: ステータス (フロア, ゴールド, 魂)
-    //   - 4-5行: hero vs enemy 戦闘表示
-    //   - 1行: トグル行 (自動潜行 / 撤退)
-    //   - 1行: タブバー
-    //   - 残り: タブコンテンツ + ログ
+/// area から各パネル Rect を計算する。`render` の中でも、effect 配置時にも同じ式が使える。
+pub fn compute_layout(area: Rect) -> AbyssLayout {
+    let narrow = is_narrow_layout(area.width);
     let combat_height: u16 = if narrow { 8 } else { 9 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),                  // ヘッダ (ステータス)
-            Constraint::Length(combat_height),       // 戦闘
-            Constraint::Length(3),                   // トグル行
-            Constraint::Length(1),                   // タブバー
-            Constraint::Min(8),                      // タブコンテンツ + ログ
+            Constraint::Length(3),
+            Constraint::Length(combat_height),
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(8),
         ])
         .split(area);
 
-    render_header(state, f, chunks[0]);
-    render_combat(state, f, chunks[1], narrow);
-    render_toggle_bar(state, f, chunks[2], click_state);
-    render_tab_bar(state, f, chunks[3], click_state);
+    // render_combat 内と同じ Block::default().borders(ALL) で内側 Rect を計算する。
+    // ここを式で揃えておかないと effect の領域がずれて「枠がフラッシュ対象外」みたいに
+    // ちぐはぐになるので、Block を経由して inner を取るのがいちばん安全。
+    let combat = chunks[1];
+    let combat_inner = Block::default().borders(Borders::ALL).inner(combat);
+    let halves = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(combat_inner);
+
+    AbyssLayout {
+        header: chunks[0],
+        combat,
+        enemy_panel: halves[1],
+        toggle: chunks[2],
+        tab_bar: chunks[3],
+        body: chunks[4],
+    }
+}
+
+pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+    let narrow = is_narrow_layout(area.width);
+    let l = compute_layout(area);
+
+    render_header(state, f, l.header);
+    render_combat(state, f, l.combat, narrow);
+    render_toggle_bar(state, f, l.toggle, click_state);
+    render_tab_bar(state, f, l.tab_bar, click_state);
 
     // タブコンテンツ + ログを縦分割
     let log_h: u16 = if narrow { 4 } else { 5 };
-    let body = chunks[4];
     let body_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(5), Constraint::Length(log_h)])
-        .split(body);
+        .split(l.body);
 
     match state.tab {
         Tab::Upgrades => render_upgrades(state, f, body_chunks[0], click_state),

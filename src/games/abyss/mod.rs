@@ -53,15 +53,22 @@ pub struct AbyssGame {
 }
 
 /// effect トリガ判定用の軽量 state スナップショット。Copy なフィールドだけ。
+///
+/// 「rising edge を検知したい」フィールドはここに入れる。フィールド型は state 側と
+/// 完全一致させる必要はなく、判定に必要な最小限 (例: bool, u32) で OK。
 #[derive(Clone, Copy, Default)]
 struct PrevSnapshot {
     floor: u32,
+    enemy_hurt_flash: u32,
 }
 
 impl AbyssGame {
     pub fn new() -> Self {
         let state = AbyssState::new();
-        let prev = PrevSnapshot { floor: state.floor };
+        let prev = PrevSnapshot {
+            floor: state.floor,
+            enemy_hurt_flash: state.enemy_hurt_flash,
+        };
         Self {
             state,
             effects: RefCell::new(AbyssEffects::new()),
@@ -79,15 +86,28 @@ impl AbyssGame {
     fn detect_transitions(&self, area: Rect) {
         let prev = self.prev.get();
         let mut effects = self.effects.borrow_mut();
+        let layout = render::compute_layout(area);
 
-        // 階層遷移: floor が増えた瞬間に sweep_in でフラッシュ
-        if self.state.floor != prev.floor {
-            effects.push_floor_transition(area);
+        // 階層遷移: floor の増減で別演出
+        if self.state.floor > prev.floor {
+            // ボス撃破などで深く潜った
+            effects.push_descend(area);
+        } else if self.state.floor < prev.floor {
+            // 撤退または死亡で浅瀬に戻された
+            effects.push_ascend_or_death(area);
+        }
+
+        // 敵被弾: enemy_hurt_flash の rising edge (0 → N)
+        // logic 側で被弾時に enemy_hurt_flash = N にセットされるので、
+        // 「直前 0 で今 > 0」が「今フレームで攻撃が当たった」瞬間。
+        if prev.enemy_hurt_flash == 0 && self.state.enemy_hurt_flash > 0 {
+            effects.push_enemy_hit(layout.enemy_panel);
         }
 
         // 次の snapshot に更新
         self.prev.set(PrevSnapshot {
             floor: self.state.floor,
+            enemy_hurt_flash: self.state.enemy_hurt_flash,
         });
     }
 
