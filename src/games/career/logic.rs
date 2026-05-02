@@ -505,43 +505,43 @@ pub fn next_goal(state: &CareerState) -> &'static str {
     // Phase 1: Need to get first job upgrade
     if state.job == JobKind::Freeter {
         if state.knowledge >= 5.0 {
-            return "事務員に転職しよう[6]";
+            return "事務員に転職しよう";
         }
         if !state.training_done[0] {
-            return "独学[1]で知識を5にしよう";
+            return "独学で知識を5にしよう";
         }
         if !state.networked {
-            return "人脈作り[2]もやってみよう";
+            return "人脈作りもやってみよう";
         }
-        return "次の月へ[0]→独学を繰り返そう";
+        return "次の月へ進んで独学を繰り返そう";
     }
 
     // Phase 2: Early career - get to Tier 2
     if matches!(state.job, JobKind::OfficeClerk) {
         if can_apply(state, JobKind::Programmer) {
-            return "プログラマーに転職しよう[6]";
+            return "プログラマーに転職しよう";
         }
         if can_apply(state, JobKind::Sales) {
-            return "営業に転職しよう[6]";
+            return "営業に転職しよう";
         }
         if !state.training_done[1] && state.money >= 2_000.0 {
-            return "研修[1]でスキルを上げよう";
+            return "研修でスキルを上げよう";
         }
         if !state.training_done[0] {
-            return "独学[1]で知識を伸ばそう";
+            return "独学で知識を伸ばそう";
         }
         if !state.networked {
-            return "人脈作り[2]もやろう";
+            return "人脈作りもやろう";
         }
-        return "次の月へ[0]→研修を繰り返そう";
+        return "次の月へ進んで研修を繰り返そう";
     }
 
     // Phase 3: All monthly actions exhausted → guide to advance
     if monthly_actions_exhausted(state) {
         if state.money >= 1_000.0 {
-            return "投資[7]してから次の月へ[0]";
+            return "投資してから次の月へ";
         }
-        return "次の月へ進もう[0]";
+        return "次の月へ進もう";
     }
 
     // Phase 4: Mid career - suggest investment or higher jobs
@@ -553,21 +553,21 @@ pub fn next_goal(state: &CareerState) -> &'static str {
 
     // Suggest available training
     if !state.training_done[1] && state.money >= 2_000.0 {
-        return "研修[1]でスキルを上げよう";
+        return "研修でスキルを上げよう";
     }
     if !state.training_done[0] {
-        return "独学[1]も活用しよう";
+        return "独学も活用しよう";
     }
     if !state.networked {
-        return "人脈作り[2]で評判UP";
+        return "人脈作りで評判UP";
     }
 
     // Suggest investing if sitting on cash
     if state.money >= 30_000.0 && state.real_estate == 0.0 {
-        return "余剰資金を投資[7]に回そう";
+        return "余剰資金を投資に回そう";
     }
     if state.money >= 5_000.0 && state.stocks == 0.0 {
-        return "株式投資[7]を始めよう";
+        return "株式投資を始めよう";
     }
 
     // Suggest job upgrade
@@ -577,7 +577,7 @@ pub fn next_goal(state: &CareerState) -> &'static str {
         }
         let info = job_info(kind);
         if info.salary > job_info(state.job).salary && can_apply(state, kind) {
-            return "より高給の職に転職しよう[6]";
+            return "より高給の職に転職しよう";
         }
     }
 

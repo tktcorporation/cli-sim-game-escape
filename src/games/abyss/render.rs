@@ -308,9 +308,9 @@ fn render_toggle_bar(
         .split(inner);
 
     let auto_label = if state.auto_descend {
-        " [A] 自動潜行: ON ▼ "
+        " 自動潜行: ON ▼ "
     } else {
-        " [A] 自動潜行: OFF ■ "
+        " 自動潜行: OFF ■ "
     };
     let auto_color = if state.auto_descend { Color::Green } else { Color::Yellow };
     let auto_para = Paragraph::new(Line::from(Span::styled(
@@ -319,7 +319,7 @@ fn render_toggle_bar(
     )));
 
     let retreat_para = Paragraph::new(Line::from(Span::styled(
-        " [P] 浅瀬に戻る △",
+        " 浅瀬に戻る △",
         Style::default().fg(Color::LightCyan),
     )))
     .alignment(Alignment::Right);
@@ -387,7 +387,6 @@ fn render_upgrades(
     for kind in UpgradeKind::all() {
         let lv = state.upgrades[kind.index()];
         let cost = state.upgrade_cost(*kind);
-        let key_char = upgrade_key(*kind);
         let affordable = state.gold >= cost;
 
         let cost_str = format!("{}g", format_num(cost));
@@ -398,7 +397,7 @@ fn render_upgrades(
         };
 
         let label_color = if affordable { Color::White } else { Color::DarkGray };
-        let label = format!(" [{}] {} ", key_char, kind.name());
+        let label = format!(" {} ", kind.name());
         let effect = kind.effect().to_string();
         let lv_str = format!(" Lv.{}", lv);
 
@@ -418,18 +417,6 @@ fn render_upgrades(
         .border_style(Style::default().fg(Color::Green));
     let mut cs = click_state.borrow_mut();
     cl.render(f, area, block, &mut cs, false, 0);
-}
-
-fn upgrade_key(kind: UpgradeKind) -> char {
-    match kind {
-        UpgradeKind::Sword => '1',
-        UpgradeKind::Vitality => '2',
-        UpgradeKind::Armor => '3',
-        UpgradeKind::Crit => '4',
-        UpgradeKind::Speed => '5',
-        UpgradeKind::Regen => '6',
-        UpgradeKind::Gold => '7',
-    }
 }
 
 // ── 魂タブ ─────────────────────────────────────────────────
@@ -455,7 +442,7 @@ fn render_souls(
     )));
     cl.push(Line::from(""));
 
-    for (i, perk) in SoulPerk::all().iter().enumerate() {
+    for perk in SoulPerk::all().iter() {
         let lv = state.soul_perks[perk.index()];
         let cost = state.soul_perk_cost(*perk);
         let affordable = state.souls >= cost;
@@ -467,8 +454,7 @@ fn render_souls(
         };
         let label_color = if affordable { Color::White } else { Color::DarkGray };
 
-        let key_char = (b'q' + i as u8) as char;
-        let label = format!(" [{}] {} ", key_char, perk.name());
+        let label = format!(" {} ", perk.name());
         let effect = perk.effect().to_string();
         let lv_str = format!(" Lv.{}", lv);
         let cost_str = format!("{}✦", format_num(cost));
