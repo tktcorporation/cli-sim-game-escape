@@ -432,10 +432,27 @@ impl AbyssState {
 
     pub fn hero_atk(&self) -> u64 {
         let h = &self.config.hero;
-        let base = h.base_atk + self.upgrades[UpgradeKind::Sword.index()] as u64 * h.atk_per_sword_lv;
+        let lv = self.upgrades[UpgradeKind::Sword.index()];
+        let upgrade_atk = match &h.sword_curve {
+            Some(curve) => curve.cumulative(lv).round() as u64,
+            None => lv as u64 * h.atk_per_sword_lv,
+        };
+        let base = h.base_atk + upgrade_atk;
         let might_lv = self.soul_perks[SoulPerk::Might.index()];
         let mult = 1.0 + might_lv as f64 * h.might_per_lv;
         ((base as f64) * mult).round() as u64
+    }
+
+    /// Sword の現在の段階名と次段階の (start_level, name) を返す。UI 表示用。
+    pub fn sword_tier(&self) -> (&'static str, Option<(u32, &'static str)>) {
+        let lv = self.upgrades[UpgradeKind::Sword.index()];
+        match &self.config.hero.sword_curve {
+            Some(curve) => {
+                let (_, name) = curve.tier_at(lv);
+                (name, curve.next_tier(lv))
+            }
+            None => ("剣士", None),
+        }
     }
 
     pub fn hero_def(&self) -> u64 {

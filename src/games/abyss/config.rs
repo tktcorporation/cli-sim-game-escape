@@ -8,6 +8,93 @@
 //!
 //! 既定値は本体ゲームの現在のバランスを表す (リファクタ前後で挙動不変)。
 
+/// 段階制成長カーブ。一定 level ごとに per-level 増分が変わる区分線形関数。
+///
+/// 例: Sword の `[(0,2,"剣士"), (10,3,"剣豪"), (25,5,"剣聖")]` は
+///   Lv 1〜10  : +2/Lv → 累積 ATK = 2*Lv
+///   Lv 11〜25 : +3/Lv → 累積 ATK = 20 + 3*(Lv - 10)
+///   Lv 26〜   : +5/Lv → 累積 ATK = 20 + 45 + 5*(Lv - 25)
+///
+/// 「段階の名前」は UI に出して未到達層が "次の目的地" として見える。
+#[derive(Clone, Debug)]
+pub struct TierCurve {
+    /// `(start_level, per_level_delta, tier_name)` の昇順配列。
+    /// 最初の要素は必ず `start_level == 0`。
+    pub tiers: Vec<(u32, f64, &'static str)>,
+}
+
+impl TierCurve {
+    /// Lv `level` までの累積効果値を返す (合算)。
+    pub fn cumulative(&self, level: u32) -> f64 {
+        let mut total = 0.0;
+        for window in self.tiers.windows(2) {
+            let (start, delta, _) = window[0];
+            let (next_start, _, _) = window[1];
+            if level <= start {
+                break;
+            }
+            let span = (level.min(next_start) - start) as f64;
+            total += span * delta;
+        }
+        // 最後の段階 (上限なし)
+        if let Some(&(start, delta, _)) = self.tiers.last() {
+            if level > start {
+                let span = (level - start) as f64;
+                total += span * delta;
+            }
+        }
+        total
+    }
+
+    /// `level` が属する段階のインデックスと名前を返す。Lv 0 は最初の段階扱い。
+    pub fn tier_at(&self, level: u32) -> (usize, &'static str) {
+        let mut idx = 0;
+        for (i, &(start, _, name)) in self.tiers.iter().enumerate() {
+            if level >= start {
+                idx = i;
+                let _ = name;
+            } else {
+                break;
+            }
+        }
+        (idx, self.tiers[idx].2)
+    }
+
+    /// 次の段階 (start_level, name)。最終段なら None。
+    pub fn next_tier(&self, level: u32) -> Option<(u32, &'static str)> {
+        let (idx, _) = self.tier_at(level);
+        self.tiers.get(idx + 1).map(|&(s, _, n)| (s, n))
+    }
+}
+
+/// 既定の Sword (ATK) 段階制カーブ。
+///
+/// 設計判断ポイント:
+/// - **段階の境界 (start_level)**: どの Lv で「段階が変わった！」を体感させるか
+/// - **per-level delta**: 段階内でどれだけ伸びるか (旧線形は一律 2.0)
+/// - **段階名**: 未到達段階が UI に見えると「先がある」感が出る
+///
+/// 制約:
+/// - 必ず `start_level == 0` から始める
+/// - `start_level` は厳密に昇順
+/// - 旧バランス互換のため、序盤 (Lv 1〜10) は `+2/Lv` を維持するのが安全
+///
+/// プレースホルダは旧線形と完全に一致する 1 段階のみ。
+/// ユーザが多段化することで「停滞 → ブレイクスルー」のリズムが生まれる。
+fn default_sword_curve() -> TierCurve {
+    // TODO(user): ここを多段にする。例:
+    //   vec![
+    //       (0,   2.0, "剣士"),
+    //       (10,  3.0, "剣豪"),
+    //       (25,  5.0, "剣聖"),
+    //       (50,  8.0, "剣神"),
+    //       (100, 12.0, "剣の化身"),
+    //   ]
+    TierCurve {
+        tiers: vec![(0, 2.0, "剣士")],
+    }
+}
+
 /// ヒーローの基礎値とアップグレード効果。
 #[derive(Clone, Debug)]
 pub struct HeroConfig {
@@ -27,6 +114,9 @@ pub struct HeroConfig {
 
     // upgrade per-level deltas
     pub atk_per_sword_lv: u64,
+    /// 段階制 ATK カーブ。設定時は `atk_per_sword_lv` を上書きする。
+    /// `None` の場合は旧線形 (`atk_per_sword_lv * level`) を使う。
+    pub sword_curve: Option<TierCurve>,
     pub hp_per_vitality_lv: u64,
     pub def_per_armor_lv: u64,
     pub crit_per_lv: f64,
@@ -128,6 +218,8 @@ impl Default for BalanceConfig {
                 focus_reduction_per_point: 0.012,
 
                 atk_per_sword_lv: 2,
+                // TODO(user): 段階制 ATK カーブを書く。下記参照。
+                sword_curve: Some(default_sword_curve()),
                 hp_per_vitality_lv: 10,
                 def_per_armor_lv: 1,
                 crit_per_lv: 0.01,
@@ -236,6 +328,39 @@ mod tests {
         assert_eq!(c.enemy.boss_atk_period, 14);
         assert_eq!(c.pacing.enemies_per_floor, 8);
         assert_eq!(c.pacing.normal_souls_div, 5);
+    }
+
+    #[test]
+    fn tier_curve_single_tier_is_linear() {
+        // 1 段階のみのカーブは線形 (旧バランスと一致)
+        let c = TierCurve {
+            tiers: vec![(0, 2.0, "剣士")],
+        };
+        assert_eq!(c.cumulative(0), 0.0);
+        assert_eq!(c.cumulative(10), 20.0);
+        assert_eq!(c.cumulative(50), 100.0);
+        assert_eq!(c.tier_at(0).1, "剣士");
+        assert_eq!(c.tier_at(99).1, "剣士");
+        assert!(c.next_tier(50).is_none());
+    }
+
+    #[test]
+    fn tier_curve_multi_tier_accumulates_per_segment() {
+        let c = TierCurve {
+            tiers: vec![(0, 2.0, "剣士"), (10, 3.0, "剣豪"), (25, 5.0, "剣聖")],
+        };
+        // Lv 0..=10 は線形 (剣士)
+        assert_eq!(c.cumulative(10), 20.0);
+        // Lv 11..=25 は 20 + 3*(Lv-10)
+        assert_eq!(c.cumulative(15), 20.0 + 3.0 * 5.0);
+        assert_eq!(c.cumulative(25), 20.0 + 3.0 * 15.0); // 65
+        // Lv 26+ は 65 + 5*(Lv-25)
+        assert_eq!(c.cumulative(30), 65.0 + 5.0 * 5.0); // 90
+        // tier 名が境界で切り替わる
+        assert_eq!(c.tier_at(10).1, "剣豪");
+        assert_eq!(c.tier_at(25).1, "剣聖");
+        assert_eq!(c.next_tier(5), Some((10, "剣豪")));
+        assert!(c.next_tier(30).is_none());
     }
 
     #[test]
