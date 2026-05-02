@@ -16,14 +16,46 @@
 ///   Lv 26〜   : +5/Lv → 累積 ATK = 20 + 45 + 5*(Lv - 25)
 ///
 /// 「段階の名前」は UI に出して未到達層が "次の目的地" として見える。
+///
+/// 不正な状態 (空 tiers / start_level が 0 から始まらない / 昇順でない) は
+/// 構築時に panic させ、ランタイムの index アクセスで panic しないようにする。
 #[derive(Clone, Debug)]
 pub struct TierCurve {
-    /// `(start_level, per_level_delta, tier_name)` の昇順配列。
-    /// 最初の要素は必ず `start_level == 0`。
-    pub tiers: Vec<(u32, f64, &'static str)>,
+    /// `(start_level, per_level_delta, tier_name)` の昇順配列。空不可。
+    /// 必ず最初の要素は `start_level == 0`。
+    tiers: Vec<(u32, f64, &'static str)>,
 }
 
 impl TierCurve {
+    /// バリデーション付きコンストラクタ。空 tiers / 不正な順序を拒否する。
+    pub fn new(tiers: Vec<(u32, f64, &'static str)>) -> Self {
+        assert!(!tiers.is_empty(), "TierCurve requires at least one tier");
+        assert_eq!(
+            tiers[0].0, 0,
+            "TierCurve first tier must start at level 0 (got {})",
+            tiers[0].0
+        );
+        for w in tiers.windows(2) {
+            assert!(
+                w[0].0 < w[1].0,
+                "TierCurve start_level must be strictly ascending (got {} -> {})",
+                w[0].0,
+                w[1].0
+            );
+        }
+        Self { tiers }
+    }
+
+    /// 段階数。常に >= 1。
+    pub fn len(&self) -> usize {
+        self.tiers.len()
+    }
+
+    /// インデックス指定で段階を取り出す。境界外は None。
+    pub fn tier(&self, idx: usize) -> Option<(u32, f64, &'static str)> {
+        self.tiers.get(idx).copied()
+    }
+
     /// Lv `level` までの累積効果値を返す (合算)。
     pub fn cumulative(&self, level: u32) -> f64 {
         let mut total = 0.0;
@@ -57,6 +89,8 @@ impl TierCurve {
     ///
     /// この扱いでないと「Lv 10 で段階突破ログが出るのに伸びは Lv 11 から」
     /// というズレが生じるため、両者の境界判定を一致させている。
+    ///
+    /// `new()` で空を弾いているので `tiers[idx]` は常に有効。
     pub fn tier_at(&self, level: u32) -> (usize, &'static str) {
         let mut idx = 0;
         for (i, &(start, _, _)) in self.tiers.iter().enumerate() {
@@ -86,54 +120,46 @@ impl TierCurve {
 /// 序盤 (Lv 1〜10) は旧バランスと一致するスロープを維持し、
 /// Lv 11 以降で段階突破ごとにスロープが加速する。
 fn default_sword_curve() -> TierCurve {
-    TierCurve {
-        tiers: vec![
-            (0, 2.0, "剣士"),
-            (10, 3.0, "剣豪"),
-            (25, 5.0, "剣聖"),
-            (50, 8.0, "剣神"),
-            (100, 12.0, "剣の化身"),
-        ],
-    }
+    TierCurve::new(vec![
+        (0, 2.0, "剣士"),
+        (10, 3.0, "剣豪"),
+        (25, 5.0, "剣聖"),
+        (50, 8.0, "剣神"),
+        (100, 12.0, "剣の化身"),
+    ])
 }
 
 /// 既定の Vitality (HP) 段階制カーブ。Lv 1〜10 は旧線形 (+10/Lv) と一致。
 fn default_vitality_curve() -> TierCurve {
-    TierCurve {
-        tiers: vec![
-            (0, 10.0, "凡体"),
-            (10, 15.0, "屈強"),
-            (25, 25.0, "鋼体"),
-            (50, 40.0, "不撓"),
-            (100, 60.0, "不死身"),
-        ],
-    }
+    TierCurve::new(vec![
+        (0, 10.0, "凡体"),
+        (10, 15.0, "屈強"),
+        (25, 25.0, "鋼体"),
+        (50, 40.0, "不撓"),
+        (100, 60.0, "不死身"),
+    ])
 }
 
 /// 既定の Armor (DEF) 段階制カーブ。Lv 1〜10 は旧線形 (+1/Lv)。
 fn default_armor_curve() -> TierCurve {
-    TierCurve {
-        tiers: vec![
-            (0, 1.0, "軽装"),
-            (10, 2.0, "重装"),
-            (25, 3.0, "鉄壁"),
-            (50, 5.0, "神鎧"),
-            (100, 8.0, "不落"),
-        ],
-    }
+    TierCurve::new(vec![
+        (0, 1.0, "軽装"),
+        (10, 2.0, "重装"),
+        (25, 3.0, "鉄壁"),
+        (50, 5.0, "神鎧"),
+        (100, 8.0, "不落"),
+    ])
 }
 
 /// 既定の Speed 段階制カーブ (倍率増分)。Lv 1〜10 は旧線形 (+0.05/Lv = 5%)。
 fn default_speed_curve() -> TierCurve {
-    TierCurve {
-        tiers: vec![
-            (0, 0.05, "軽歩"),
-            (10, 0.07, "疾風"),
-            (25, 0.10, "神速"),
-            (50, 0.15, "瞬光"),
-            (100, 0.20, "残影"),
-        ],
-    }
+    TierCurve::new(vec![
+        (0, 0.05, "軽歩"),
+        (10, 0.07, "疾風"),
+        (25, 0.10, "神速"),
+        (50, 0.15, "瞬光"),
+        (100, 0.20, "残影"),
+    ])
 }
 
 /// ヒーローの基礎値とアップグレード効果。
@@ -382,9 +408,7 @@ mod tests {
     #[test]
     fn tier_curve_single_tier_is_linear() {
         // 1 段階のみのカーブは線形 (旧バランスと一致)
-        let c = TierCurve {
-            tiers: vec![(0, 2.0, "剣士")],
-        };
+        let c = TierCurve::new(vec![(0, 2.0, "剣士")]);
         assert_eq!(c.cumulative(0), 0.0);
         assert_eq!(c.cumulative(10), 20.0);
         assert_eq!(c.cumulative(50), 100.0);
@@ -394,10 +418,30 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "at least one tier")]
+    fn tier_curve_rejects_empty() {
+        let _ = TierCurve::new(vec![]);
+    }
+
+    #[test]
+    #[should_panic(expected = "must start at level 0")]
+    fn tier_curve_rejects_non_zero_start() {
+        let _ = TierCurve::new(vec![(1, 2.0, "x")]);
+    }
+
+    #[test]
+    #[should_panic(expected = "strictly ascending")]
+    fn tier_curve_rejects_non_ascending_starts() {
+        let _ = TierCurve::new(vec![(0, 2.0, "a"), (10, 3.0, "b"), (10, 5.0, "c")]);
+    }
+
+    #[test]
     fn tier_curve_multi_tier_accumulates_per_segment() {
-        let c = TierCurve {
-            tiers: vec![(0, 2.0, "剣士"), (10, 3.0, "剣豪"), (25, 5.0, "剣聖")],
-        };
+        let c = TierCurve::new(vec![
+            (0, 2.0, "剣士"),
+            (10, 3.0, "剣豪"),
+            (25, 5.0, "剣聖"),
+        ]);
         // Lv 0..=10 は線形 (剣士)
         assert_eq!(c.cumulative(10), 20.0);
         // Lv 11..=25 は 20 + 3*(Lv-10)

@@ -514,9 +514,9 @@ fn render_upgrades(
         if let Some(curve) = state.upgrade_curve(*kind) {
             let lv_u = state.upgrades[kind.index()];
             let (cur_idx, _) = curve.tier_at(lv_u);
-            let next = curve.tiers.get(cur_idx + 1);
-            let after_next = curve.tiers.get(cur_idx + 2);
-            if let Some(&(next_lv, _, next_name)) = next {
+            let next = curve.tier(cur_idx + 1);
+            let after_next = curve.tier(cur_idx + 2);
+            if let Some((next_lv, _, next_name)) = next {
                 // start_level は「超えると次段階」境界なので、新段階が
                 // 実際に効く最初の Lv は start_level + 1。表示はこちらを使う。
                 let mut spans = vec![
@@ -526,7 +526,7 @@ fn render_upgrades(
                         Style::default().fg(Color::Green),
                     ),
                 ];
-                if let Some(&(after_lv, _, _)) = after_next {
+                if let Some((after_lv, _, _)) = after_next {
                     // 次のさらに先は silhouette (?) で見せる
                     spans.push(Span::styled(
                         format!("    その先: Lv{} [???]", after_lv + 1),
@@ -534,7 +534,7 @@ fn render_upgrades(
                     ));
                 }
                 cl.push(Line::from(spans));
-            } else if cur_idx + 1 == curve.tiers.len() {
+            } else if cur_idx + 1 == curve.len() {
                 // 最終段階に到達済み
                 cl.push(Line::from(vec![Span::styled(
                     "        ▼ 最終段階到達",
