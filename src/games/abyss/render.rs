@@ -501,17 +501,19 @@ fn render_upgrades(
             let next = curve.tiers.get(cur_idx + 1);
             let after_next = curve.tiers.get(cur_idx + 2);
             if let Some(&(next_lv, _, next_name)) = next {
+                // start_level は「超えると次段階」境界なので、新段階が
+                // 実際に効く最初の Lv は start_level + 1。表示はこちらを使う。
                 let mut spans = vec![
                     Span::styled("        次: ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
-                        format!("Lv{} [{}]", next_lv, next_name),
+                        format!("Lv{} [{}]", next_lv + 1, next_name),
                         Style::default().fg(Color::Green),
                     ),
                 ];
                 if let Some(&(after_lv, _, _)) = after_next {
                     // 次のさらに先は silhouette (?) で見せる
                     spans.push(Span::styled(
-                        format!("    その先: Lv{} [???]", after_lv),
+                        format!("    その先: Lv{} [???]", after_lv + 1),
                         Style::default().fg(Color::DarkGray),
                     ));
                 }

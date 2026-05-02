@@ -46,13 +46,22 @@ impl TierCurve {
         total
     }
 
-    /// `level` が属する段階のインデックスと名前を返す。Lv 0 は最初の段階扱い。
+    /// `level` が属する段階のインデックスと名前を返す。
+    ///
+    /// 境界の解釈は `cumulative` と一致させる: `start_level` は
+    /// 「**次の段階に入るために超えるべき Lv**」であり、`level == start_level` は
+    /// まだ前段階に属する。例えば curve `[(0,…), (10,…), (25,…)]` で:
+    ///   Lv 0..=10  → 段階 0 (旧スロープ継続)
+    ///   Lv 11..=25 → 段階 1
+    ///   Lv 26..    → 段階 2
+    ///
+    /// この扱いでないと「Lv 10 で段階突破ログが出るのに伸びは Lv 11 から」
+    /// というズレが生じるため、両者の境界判定を一致させている。
     pub fn tier_at(&self, level: u32) -> (usize, &'static str) {
         let mut idx = 0;
-        for (i, &(start, _, name)) in self.tiers.iter().enumerate() {
-            if level >= start {
+        for (i, &(start, _, _)) in self.tiers.iter().enumerate() {
+            if level > start {
                 idx = i;
-                let _ = name;
             } else {
                 break;
             }
@@ -396,10 +405,17 @@ mod tests {
         assert_eq!(c.cumulative(25), 20.0 + 3.0 * 15.0); // 65
         // Lv 26+ は 65 + 5*(Lv-25)
         assert_eq!(c.cumulative(30), 65.0 + 5.0 * 5.0); // 90
-        // tier 名が境界で切り替わる
-        assert_eq!(c.tier_at(10).1, "剣豪");
-        assert_eq!(c.tier_at(25).1, "剣聖");
+
+        // tier_at は cumulative と境界を共有する:
+        //   start_level は「次段階に入るために超える Lv」なので、
+        //   level == start_level はまだ前段階。
+        assert_eq!(c.tier_at(10).1, "剣士"); // 10 まで剣士の +2 が効く
+        assert_eq!(c.tier_at(11).1, "剣豪"); // 11 から +3 に切り替わる
+        assert_eq!(c.tier_at(25).1, "剣豪"); // 25 まで剣豪
+        assert_eq!(c.tier_at(26).1, "剣聖"); // 26 から剣聖
         assert_eq!(c.next_tier(5), Some((10, "剣豪")));
+        assert_eq!(c.next_tier(10), Some((10, "剣豪"))); // Lv10 ではまだ剣士、次が剣豪
+        assert_eq!(c.next_tier(11), Some((25, "剣聖"))); // Lv11 で剣豪入り、次が剣聖
         assert!(c.next_tier(30).is_none());
     }
 
