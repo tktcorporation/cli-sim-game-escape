@@ -287,7 +287,7 @@ fn render_actions(
     cl.push_clickable(Line::from(vec![
         Span::styled(" ▶ ", Style::default().fg(training_color).add_modifier(Modifier::BOLD)),
         Span::styled(
-            format!("{} [1]", training_label),
+            training_label.to_string(),
             Style::default().fg(if training_available { Color::White } else { Color::DarkGray }),
         ),
     ]), GO_TRAINING);
@@ -299,7 +299,7 @@ fn render_actions(
     cl.push_clickable(Line::from(vec![
         Span::styled(" ▶ ", Style::default().fg(net_color).add_modifier(Modifier::BOLD)),
         Span::styled(
-            format!("{} [2]", net_label),
+            net_label.to_string(),
             Style::default().fg(if net_available { Color::White } else { Color::DarkGray }),
         ),
         Span::styled(
@@ -323,7 +323,7 @@ fn render_actions(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("{} [3]", side_label),
+            side_label.to_string(),
             Style::default().fg(if side_available { Color::White } else { Color::DarkGray }),
         ),
         Span::styled(
@@ -358,12 +358,11 @@ fn render_actions(
         let advance_color = if exhausted { Color::Yellow } else { Color::Cyan };
         let mut spans = vec![
             Span::styled(
-                " ▶▶ 次の月へ ",
+                " ▶▶ 次の月へ",
                 Style::default()
                     .fg(advance_color)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("[0]", Style::default().fg(Color::DarkGray)),
         ];
         if exhausted {
             spans.push(Span::styled(
@@ -382,25 +381,25 @@ fn render_actions(
     // Navigation (clickable)
     cl.push_clickable(Line::from(vec![
         Span::styled(" ▶ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("転職する [6]", Style::default().fg(Color::White)),
+        Span::styled("転職する", Style::default().fg(Color::White)),
         next_job_hint(state),
     ]), GO_JOB_MARKET);
 
     cl.push_clickable(Line::from(vec![
         Span::styled(" ▶ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("投資する [7]", Style::default().fg(Color::White)),
+        Span::styled("投資する", Style::default().fg(Color::White)),
     ]), GO_INVEST);
 
     cl.push_clickable(Line::from(vec![
         Span::styled(" ▶ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled("家計簿 [8]", Style::default().fg(Color::White)),
+        Span::styled("家計簿", Style::default().fg(Color::White)),
     ]), GO_BUDGET);
 
     cl.push_clickable(Line::from(vec![
         Span::styled(" ▶ ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!(
-                "生活水準 [9] (Lv.{} {})",
+                "生活水準 (Lv.{} {})",
                 lifestyle_info(state.lifestyle).level,
                 lifestyle_info(state.lifestyle).name
             ),
@@ -510,10 +509,10 @@ fn render_training(
         let effect = training_effect_str(t, state.lifestyle, state.current_event);
         let done_marker = if done { " ✓" } else { "" };
         let label = if is_narrow {
-            format!(" [{}] {} {}{}", i + 1, t.name, cost_str, done_marker)
+            format!(" {}. {} {}{}", i + 1, t.name, cost_str, done_marker)
         } else {
             format!(
-                " [{}] {:　<9} {:　<10} {}{}",
+                " {}. {:　<9} {:　<10} {}{}",
                 i + 1, t.name, effect, cost_str, done_marker
             )
         };
@@ -537,7 +536,7 @@ fn render_training(
     let mut cl_footer = ClickableList::new();
     cl_footer.push(Line::from(""));
     cl_footer.push_clickable(Line::from(Span::styled(
-        " ◀ 戻る [-]",
+        " ◀ 戻る",
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -658,7 +657,7 @@ fn render_job_market(
     let mut cl_footer = ClickableList::new();
     cl_footer.push(Line::from(""));
     cl_footer.push_clickable(Line::from(Span::styled(
-        " ◀ 戻る [-]",
+        " ◀ 戻る",
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -861,7 +860,7 @@ fn render_invest(
     let mut cl_footer = ClickableList::new();
     cl_footer.push(Line::from(""));
     cl_footer.push_clickable(Line::from(Span::styled(
-        " ◀ 戻る [-]",
+        " ◀ 戻る",
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -948,7 +947,7 @@ fn render_budget(
         Span::styled(format!(" {}%", pct), Style::default().fg(Color::White)),
     ]));
     cl_footer.push_clickable(Line::from(Span::styled(
-        " ◀ 戻る [-]",
+        " ◀ 戻る",
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
@@ -1337,15 +1336,12 @@ fn render_report(
     // Footer: continue button
     let mut cl_footer = ClickableList::new();
     cl_footer.push(Line::from(""));
-    cl_footer.push_clickable(Line::from(vec![
-        Span::styled(
-            " ▶ 続ける ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("[0]", Style::default().fg(Color::DarkGray)),
-    ]), BACK_FROM_REPORT);
+    cl_footer.push_clickable(Line::from(Span::styled(
+        " ▶ 続ける",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )), BACK_FROM_REPORT);
 
     let footer_block = Block::default()
         .borders(borders)
@@ -1449,7 +1445,7 @@ fn render_lifestyle(
     let mut cl_footer = ClickableList::new();
     cl_footer.push(Line::from(""));
     cl_footer.push_clickable(Line::from(Span::styled(
-        " ◀ 戻る [-]",
+        " ◀ 戻る",
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),

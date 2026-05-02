@@ -32,7 +32,7 @@ pub(super) fn render_character_select(state: &CafeState, f: &mut Frame, area: Re
         let level = data.map(|d| d.level).unwrap_or(1);
         let star_str = "★".repeat(stars as usize);
         cl.push_clickable(Line::from(vec![
-            Span::styled(format!(" [{}] ", i + 1), Style::default().fg(Color::Yellow)),
+            Span::styled(format!(" {}. ", i + 1), Style::default().fg(Color::Yellow)),
             Span::styled(ch.name(), Style::default().fg(Color::White)),
             Span::styled(format!("  {star_str} Lv.{level}"), Style::default().fg(Color::Cyan)),
         ]), CHARACTER_BASE + i as u16);

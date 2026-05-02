@@ -737,7 +737,7 @@ fn render_dungeon_event(
             cl.push_clickable(
                 Line::from(vec![
                     Span::styled(
-                        format!(" [{}] ", i + 1),
+                        format!(" {}. ", i + 1),
                         Style::default()
                             .fg(Color::Cyan)
                             .add_modifier(Modifier::BOLD),
@@ -917,7 +917,7 @@ fn render_battle_content(
                     cl.push_clickable(
                         Line::from(vec![
                             Span::styled(
-                                format!(" [{}] ", i + 1),
+                                format!(" {}. ", i + 1),
                                 Style::default()
                                     .fg(Color::Blue)
                                     .add_modifier(Modifier::BOLD),
@@ -928,7 +928,7 @@ fn render_battle_content(
                     );
                 } else {
                     cl.push(Line::from(Span::styled(
-                        format!(" [{}] {}", i + 1, label),
+                        format!(" {}. {}", i + 1, label),
                         Style::default().fg(Color::DarkGray),
                     )));
                 }
@@ -936,7 +936,7 @@ fn render_battle_content(
             cl.push(Line::from(""));
             cl.push_clickable(
                 Line::from(Span::styled(
-                    " [0] 戻る",
+                    " ◀ 戻る",
                     Style::default().fg(Color::Yellow),
                 )),
                 BATTLE_BACK,
@@ -949,7 +949,7 @@ fn render_battle_content(
                 cl.push_clickable(
                     Line::from(vec![
                         Span::styled(
-                            format!(" [{}] ", i + 1),
+                            format!(" {}. ", i + 1),
                             Style::default()
                                 .fg(Color::Green)
                                 .add_modifier(Modifier::BOLD),
@@ -965,7 +965,7 @@ fn render_battle_content(
             cl.push(Line::from(""));
             cl.push_clickable(
                 Line::from(Span::styled(
-                    " [0] 戻る",
+                    " ◀ 戻る",
                     Style::default().fg(Color::Yellow),
                 )),
                 BATTLE_BACK,
@@ -1051,7 +1051,7 @@ fn push_choice(cl: &mut ClickableList, index: usize, label: &str) {
     cl.push_clickable(
         Line::from(vec![
             Span::styled(
-                format!(" [{}] ", index + 1),
+                format!(" {}. ", index + 1),
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -1067,7 +1067,7 @@ fn push_overlay_hints(cl: &mut ClickableList) {
     cl.push_clickable(
         Line::from(vec![
             Span::styled(
-                " [I] ",
+                " 🎒 ",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -1079,7 +1079,7 @@ fn push_overlay_hints(cl: &mut ClickableList) {
     cl.push_clickable(
         Line::from(vec![
             Span::styled(
-                " [S] ",
+                " 📊 ",
                 Style::default()
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
@@ -1094,7 +1094,7 @@ fn push_choice_dim(cl: &mut ClickableList, index: usize, label: &str) {
     cl.push_clickable(
         Line::from(vec![
             Span::styled(
-                format!(" [{}] ", index + 1),
+                format!(" {}. ", index + 1),
                 Style::default()
                     .fg(Color::DarkGray)
                     .add_modifier(Modifier::BOLD),
@@ -1142,7 +1142,7 @@ fn render_inventory(
                 cl.push_clickable(
                     Line::from(vec![
                         Span::styled(
-                            format!(" [{}] ", i + 1),
+                            format!(" {}. ", i + 1),
                             Style::default().fg(Color::Cyan),
                         ),
                         Span::styled(
@@ -1168,7 +1168,7 @@ fn render_inventory(
     cl.push(Line::from(""));
     cl.push_clickable(
         Line::from(Span::styled(
-            " [0] 閉じる",
+            " ✕ 閉じる",
             Style::default().fg(Color::Yellow),
         )),
         CLOSE_OVERLAY,
@@ -1292,7 +1292,7 @@ fn render_status(
     cl.push(Line::from(""));
     cl.push_clickable(
         Line::from(Span::styled(
-            " [0] 閉じる",
+            " ✕ 閉じる",
             Style::default().fg(Color::Yellow),
         )),
         CLOSE_OVERLAY,
@@ -1342,7 +1342,7 @@ fn render_shop(
             cl.push_clickable(
                 Line::from(vec![
                     Span::styled(
-                        format!(" [{}] ", i + 1),
+                        format!(" {}. ", i + 1),
                         Style::default().fg(Color::DarkGray),
                     ),
                     Span::styled(
@@ -1362,7 +1362,7 @@ fn render_shop(
     cl.push(Line::from(""));
     cl.push_clickable(
         Line::from(Span::styled(
-            " [0] 閉じる",
+            " ✕ 閉じる",
             Style::default().fg(Color::Yellow),
         )),
         CLOSE_OVERLAY,

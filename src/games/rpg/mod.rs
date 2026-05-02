@@ -2,7 +2,7 @@
 //!
 //! Game trait implementation with arrow-key movement and interactive events.
 //! Movement: Arrow keys (1 step), map tap (auto-walk through corridors).
-//! Events: [1]-[5] choices.  Overlays: [I] inventory, [S] status.
+//! Events: numbered choices.  Overlays: inventory / status.
 
 pub mod actions;
 pub mod dungeon_map;

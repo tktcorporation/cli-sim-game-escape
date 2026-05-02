@@ -542,7 +542,7 @@ impl CareerState {
             screen: Screen::Main,
             log: vec![
                 "キャリアシミュレーターへようこそ！".into(),
-                "研修[1]でスキルを上げ、転職を目指そう".into(),
+                "研修でスキルを上げ、転職を目指そう".into(),
             ],
             lifestyle: LifestyleLevel::Frugal,
             month_ticks: 0,

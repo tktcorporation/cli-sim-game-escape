@@ -201,6 +201,104 @@ pub enum Tab {
     Upgrades,
     Souls,
     Stats,
+    Gacha,
+}
+
+/// 現フロアの種別。フロア降下時に抽選され、敵の数値修正と報酬倍率を変える。
+/// 1〜2 階は必ず Normal にする (序盤は把握しやすさを優先)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloorKind {
+    /// 通常フロア。
+    Normal,
+    /// 宝物フロア。雑魚も含めて gold ×3、敵 HP は通常通り。
+    Treasure,
+    /// 精鋭フロア。敵 HP/ATK ×1.5、gold ×2、ボス撃破時に鍵 +2 (合計 +3)。
+    Elite,
+    /// 豊穣フロア。敵 HP -50%、gold ×5。レアな当たり階。
+    Bonanza,
+}
+
+impl FloorKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            FloorKind::Normal => "通常",
+            FloorKind::Treasure => "宝物",
+            FloorKind::Elite => "精鋭",
+            FloorKind::Bonanza => "豊穣",
+        }
+    }
+
+    pub fn short_label(self) -> &'static str {
+        match self {
+            FloorKind::Normal => "",
+            FloorKind::Treasure => "💎",
+            FloorKind::Elite => "⚡",
+            FloorKind::Bonanza => "🌟",
+        }
+    }
+
+    /// 敵 HP の倍率。
+    pub fn enemy_hp_mult(self) -> f64 {
+        match self {
+            FloorKind::Normal => 1.0,
+            FloorKind::Treasure => 1.0,
+            FloorKind::Elite => 1.5,
+            FloorKind::Bonanza => 0.5,
+        }
+    }
+
+    /// 敵 ATK の倍率。
+    pub fn enemy_atk_mult(self) -> f64 {
+        match self {
+            FloorKind::Normal => 1.0,
+            FloorKind::Treasure => 1.0,
+            FloorKind::Elite => 1.5,
+            FloorKind::Bonanza => 1.0,
+        }
+    }
+
+    /// gold ドロップの倍率。
+    pub fn gold_mult(self) -> f64 {
+        match self {
+            FloorKind::Normal => 1.0,
+            FloorKind::Treasure => 3.0,
+            FloorKind::Elite => 2.0,
+            FloorKind::Bonanza => 5.0,
+        }
+    }
+
+    /// このフロアのボス撃破時の追加鍵数。
+    pub fn bonus_keys_on_boss(self) -> u64 {
+        match self {
+            FloorKind::Elite => 2,
+            _ => 0,
+        }
+    }
+}
+
+/// ガチャの結果カテゴリ。確率と効果は `logic::resolve_gacha_pull` で実装。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GachaTier {
+    Common,
+    Rare,
+    Epic,
+    Legendary,
+}
+
+/// 直近ガチャ結果のサマリ (UI フラッシュ用)。
+#[derive(Clone, Debug)]
+pub struct GachaResultSummary {
+    /// 引いた回数。
+    pub count: u32,
+    /// 等級ごとの当選数 [Common, Rare, Epic, Legendary]。
+    pub by_tier: [u32; 4],
+    /// 累計の獲得 gold / souls / keys / upgrade level / soul_perk level。
+    pub gained_gold: u64,
+    pub gained_souls: u64,
+    pub gained_keys: u64,
+    pub gained_upgrade_lv: u32,
+    /// 演出用残 tick。
+    pub life_ticks: u32,
 }
 
 /// ゲームのルート状態。
@@ -235,10 +333,22 @@ pub struct AbyssState {
     pub combat_focus: u32,
 
     pub current_enemy: Enemy,
+    /// 現フロアの種別。
+    pub floor_kind: FloorKind,
 
     // ── プレイヤー設定 ──
     pub auto_descend: bool,
     pub tab: Tab,
+
+    // ── ガチャ ──
+    /// 蓄積した深淵の鍵 (ガチャ通貨)。永続。
+    pub keys: u64,
+    /// 直近の Epic+ 以降に引いた回数。50 で Epic+ 確定 (天井)。
+    pub pulls_since_epic: u32,
+    /// このセッションの累計引き回数。
+    pub total_pulls: u64,
+    /// 直近のガチャ結果 (UI 表示用)。
+    pub last_gacha: Option<GachaResultSummary>,
 
     // ── 永続統計 ──
     pub deepest_floor_ever: u32,
@@ -287,8 +397,13 @@ impl AbyssState {
             hero_regen_acc_x100: 0,
             combat_focus: 0,
             current_enemy: placeholder_enemy(),
+            floor_kind: FloorKind::Normal,
             auto_descend: true,
             tab: Tab::Upgrades,
+            keys: 0,
+            pulls_since_epic: 0,
+            total_pulls: 0,
+            last_gacha: None,
             deepest_floor_ever: 1,
             total_kills: 0,
             deaths: 0,

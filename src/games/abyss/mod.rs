@@ -51,8 +51,11 @@ impl AbyssGame {
             TAB_UPGRADES => Some(PlayerAction::SetTab(Tab::Upgrades)),
             TAB_SOULS => Some(PlayerAction::SetTab(Tab::Souls)),
             TAB_STATS => Some(PlayerAction::SetTab(Tab::Stats)),
+            TAB_GACHA => Some(PlayerAction::SetTab(Tab::Gacha)),
             TOGGLE_AUTO_DESCEND => Some(PlayerAction::ToggleAutoDescend),
             RETREAT_TO_SURFACE => Some(PlayerAction::Retreat),
+            GACHA_PULL_1 => Some(PlayerAction::GachaPull(1)),
+            GACHA_PULL_10 => Some(PlayerAction::GachaPull(10)),
             id if (BUY_UPGRADE_BASE..BUY_UPGRADE_BASE + 7).contains(&id) => {
                 let idx = (id - BUY_UPGRADE_BASE) as usize;
                 UpgradeKind::from_index(idx).map(PlayerAction::BuyUpgrade)
@@ -70,6 +73,7 @@ impl AbyssGame {
             '{' => Some(PlayerAction::SetTab(Tab::Upgrades)),
             '|' => Some(PlayerAction::SetTab(Tab::Souls)),
             '}' => Some(PlayerAction::SetTab(Tab::Stats)),
+            '~' => Some(PlayerAction::SetTab(Tab::Gacha)),
             'a' | 'A' => Some(PlayerAction::ToggleAutoDescend),
             'p' | 'P' => Some(PlayerAction::Retreat),
             '1'..='7' if matches!(self.state.tab, Tab::Upgrades) => {
@@ -86,6 +90,8 @@ impl AbyssGame {
                 };
                 SoulPerk::from_index(idx).map(PlayerAction::BuySoulPerk)
             }
+            's' | 'S' if matches!(self.state.tab, Tab::Gacha) => Some(PlayerAction::GachaPull(1)),
+            'x' | 'X' if matches!(self.state.tab, Tab::Gacha) => Some(PlayerAction::GachaPull(10)),
             _ => None,
         }
     }

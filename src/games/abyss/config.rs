@@ -75,12 +75,42 @@ pub struct PacingConfig {
     pub death_souls_mult: u64,
 }
 
+/// ガチャ・鍵ドロップ・フロア種別抽選の設定。
+#[derive(Clone, Debug)]
+pub struct GachaConfig {
+    /// ボス撃破で必ずもらえる基本鍵数。
+    pub keys_per_boss: u64,
+    /// `floor % deep_floor_step == 0` の階層 (例: 10F毎) のボーナス鍵数。
+    pub deep_floor_step: u32,
+    pub deep_floor_bonus_keys: u64,
+
+    /// フロア種別の出現確率 (sum != 1 でも内部で正規化)。
+    /// `[Normal, Treasure, Elite, Bonanza]` の順。
+    pub floor_kind_weights: [u32; 4],
+    /// 何階以下を必ず Normal にするか (序盤の把握しやすさ)。
+    pub floor_kind_normal_below: u32,
+
+    /// ガチャ tier 確率 (千分率)。`[Common, Rare, Epic, Legendary]`。合計 1000。
+    pub gacha_weights_milli: [u32; 4],
+    /// 何回引いて Epic+ が出なければ天井で Epic+ 確定にするか (0 で天井無効)。
+    pub gacha_pity: u32,
+
+    /// Common ヒット時、`現フロアの基礎雑魚 gold * gain_min..gain_max` を獲得。
+    pub common_gold_mult_min: u32,
+    pub common_gold_mult_max: u32,
+    /// Epic ヒット時の魂量 = `floor * epic_souls_mult` (soul_multiplier 適用後)。
+    pub epic_souls_mult: u64,
+    /// Legendary ヒット時の鍵数。
+    pub legendary_keys: u64,
+}
+
 /// 難易度バランスの集約。state に一個保持する。
 #[derive(Clone, Debug)]
 pub struct BalanceConfig {
     pub hero: HeroConfig,
     pub enemy: EnemyConfig,
     pub pacing: PacingConfig,
+    pub gacha: GachaConfig,
 }
 
 impl Default for BalanceConfig {
@@ -134,6 +164,21 @@ impl Default for BalanceConfig {
                 normal_souls_div: 5,
                 boss_souls_mult: 2,
                 death_souls_mult: 3,
+            },
+            gacha: GachaConfig {
+                keys_per_boss: 1,
+                deep_floor_step: 10,
+                deep_floor_bonus_keys: 2,
+                // 50% Normal / 25% Treasure / 20% Elite / 5% Bonanza
+                floor_kind_weights: [50, 25, 20, 5],
+                floor_kind_normal_below: 3,
+                // 60% / 28% / 10% / 2%
+                gacha_weights_milli: [600, 280, 100, 20],
+                gacha_pity: 50,
+                common_gold_mult_min: 5,
+                common_gold_mult_max: 15,
+                epic_souls_mult: 8,
+                legendary_keys: 5,
             },
         }
     }
