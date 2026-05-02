@@ -9,7 +9,9 @@
 
 use super::config::BalanceConfig;
 use super::policy::PlayerAction;
-use super::state::{AbyssState, Enemy, SoulPerk, Tab, UpgradeKind};
+use super::state::{
+    AbyssState, Enemy, FloorKind, GachaResultSummary, GachaTier, SoulPerk, Tab, UpgradeKind,
+};
 
 /// メインの tick 処理。delta_ticks 回ぶん戦闘を進める。
 pub fn tick(state: &mut AbyssState, delta_ticks: u32) {
@@ -32,6 +34,9 @@ pub fn tick(state: &mut AbyssState, delta_ticks: u32) {
     }
     if matches!(state.last_hero_damage, Some((_, 0))) {
         state.last_hero_damage = None;
+    }
+    if let Some(r) = state.last_gacha.as_mut() {
+        r.life_ticks = r.life_ticks.saturating_sub(delta_ticks);
     }
 
     // tick を 1 ステップずつ処理する (敵の交代が連続で起きうるため)。
@@ -100,7 +105,9 @@ fn step_one_tick(state: &mut AbyssState) {
 /// 撃破時の処理: gold/魂を加算し、kill カウンタを進める。
 fn on_enemy_killed(state: &mut AbyssState) {
     let was_boss = state.current_enemy.is_boss;
-    let gold_drop = (state.current_enemy.gold as f64 * state.gold_multiplier()).round() as u64;
+    let kind_gold = state.floor_kind.gold_mult();
+    let gold_drop = ((state.current_enemy.gold as f64) * state.gold_multiplier() * kind_gold)
+        .round() as u64;
     state.gold = state.gold.saturating_add(gold_drop);
     state.run_gold_earned = state.run_gold_earned.saturating_add(gold_drop);
 
@@ -120,9 +127,17 @@ fn on_enemy_killed(state: &mut AbyssState) {
     state.total_kills = state.total_kills.saturating_add(1);
 
     if was_boss {
+        // 鍵ドロップ: 基本 + フロア種別ボーナス + 深層 (10F毎) ボーナス。
+        let g = &state.config.gacha;
+        let mut keys_dropped = g.keys_per_boss + state.floor_kind.bonus_keys_on_boss();
+        if g.deep_floor_step > 0 && state.floor.is_multiple_of(g.deep_floor_step) {
+            keys_dropped = keys_dropped.saturating_add(g.deep_floor_bonus_keys);
+        }
+        state.keys = state.keys.saturating_add(keys_dropped);
+
         state.add_log(format!(
-            "▶ ボス {} 撃破！ +{}g +{}魂",
-            state.current_enemy.name, gold_drop, souls
+            "▶ ボス {} 撃破！ +{}g +{}魂 +{}🔑",
+            state.current_enemy.name, gold_drop, souls, keys_dropped
         ));
         // ボス撃破 → 次階層へ進むか、現フロアに留まるか
         if state.auto_descend {
@@ -148,8 +163,41 @@ fn descend_to_next_floor(state: &mut AbyssState) {
     }
     state.kills_on_floor = 0;
     state.descent_flash = 8;
-    state.add_log(format!("▼ B{}F に到達", state.floor));
+    state.floor_kind = roll_floor_kind(state.floor, &state.config, &mut state.rng_state);
+    let kind_suffix = match state.floor_kind {
+        FloorKind::Normal => String::new(),
+        other => format!(" 〔{} {}〕", other.short_label(), other.name()),
+    };
+    state.add_log(format!("▼ B{}F に到達{}", state.floor, kind_suffix));
     spawn_next_enemy(state);
+}
+
+/// フロア種別を抽選する。`floor_kind_normal_below` 階以下は必ず Normal。
+fn roll_floor_kind(floor: u32, config: &BalanceConfig, rng_seed: &mut u32) -> FloorKind {
+    let g = &config.gacha;
+    if floor < g.floor_kind_normal_below {
+        return FloorKind::Normal;
+    }
+    let weights = g.floor_kind_weights;
+    let total: u32 = weights.iter().sum();
+    if total == 0 {
+        return FloorKind::Normal;
+    }
+    let r = rng_next(rng_seed) % total;
+    let mut acc = 0u32;
+    let kinds = [
+        FloorKind::Normal,
+        FloorKind::Treasure,
+        FloorKind::Elite,
+        FloorKind::Bonanza,
+    ];
+    for (i, &w) in weights.iter().enumerate() {
+        acc += w;
+        if r < acc {
+            return kinds[i];
+        }
+    }
+    FloorKind::Normal
 }
 
 fn on_hero_died(state: &mut AbyssState) {
@@ -167,6 +215,7 @@ fn on_hero_died(state: &mut AbyssState) {
 
     // ラン開始地点に戻る
     state.floor = 1;
+    state.floor_kind = FloorKind::Normal;
     state.kills_on_floor = 0;
     state.run_kills = 0;
     state.run_gold_earned = 0;
@@ -179,7 +228,25 @@ fn on_hero_died(state: &mut AbyssState) {
 /// 次の敵 (雑魚 or ボス) を生成して current_enemy にセット。
 fn spawn_next_enemy(state: &mut AbyssState) {
     let is_boss = state.kills_on_floor >= state.enemies_per_floor();
-    state.current_enemy = make_enemy(state.floor, is_boss, &state.config, &mut state.rng_state);
+    let mut e = make_enemy(state.floor, is_boss, &state.config, &mut state.rng_state);
+    apply_floor_kind_to_enemy(&mut e, state.floor_kind);
+    state.current_enemy = e;
+}
+
+/// フロア種別による敵の数値修正を適用する。
+/// gold は `gold_drop` 計算側で `floor_kind.gold_mult()` を掛けるので、
+/// ここでは hp / atk のみ調整する (二重適用を避ける)。
+fn apply_floor_kind_to_enemy(e: &mut Enemy, kind: FloorKind) {
+    let hp_m = kind.enemy_hp_mult();
+    let atk_m = kind.enemy_atk_mult();
+    if (hp_m - 1.0).abs() > f64::EPSILON {
+        let new_hp = ((e.max_hp as f64) * hp_m).round().max(1.0) as u64;
+        e.max_hp = new_hp;
+        e.hp = new_hp;
+    }
+    if (atk_m - 1.0).abs() > f64::EPSILON {
+        e.atk = ((e.atk as f64) * atk_m).round().max(1.0) as u64;
+    }
 }
 
 /// シンプルな擬似乱数 (xorshift32)。
@@ -346,7 +413,144 @@ pub fn apply_action(state: &mut AbyssState, action: PlayerAction) -> bool {
             set_tab(state, tab);
             true
         }
+        PlayerAction::GachaPull(count) => gacha_pull(state, count),
     }
+}
+
+// ── ガチャ ────────────────────────────────────────────────
+
+/// 鍵を消費してガチャを `count` 回引く。鍵が足りなければ引ける分だけ。
+/// 1 回でも引けたら true。
+pub fn gacha_pull(state: &mut AbyssState, count: u32) -> bool {
+    if count == 0 || state.keys == 0 {
+        return false;
+    }
+    let actual = (count as u64).min(state.keys) as u32;
+    let mut summary = GachaResultSummary {
+        count: actual,
+        by_tier: [0; 4],
+        gained_gold: 0,
+        gained_souls: 0,
+        gained_keys: 0,
+        gained_upgrade_lv: 0,
+        life_ticks: 30,
+    };
+
+    for _ in 0..actual {
+        state.keys -= 1;
+        state.total_pulls = state.total_pulls.saturating_add(1);
+        let tier = roll_gacha_tier(state);
+        match tier {
+            GachaTier::Common => summary.by_tier[0] += 1,
+            GachaTier::Rare => summary.by_tier[1] += 1,
+            GachaTier::Epic => summary.by_tier[2] += 1,
+            GachaTier::Legendary => summary.by_tier[3] += 1,
+        }
+        // pity counter は Epic 以上で reset (Rare までは天井加算継続)。
+        if matches!(tier, GachaTier::Epic | GachaTier::Legendary) {
+            state.pulls_since_epic = 0;
+        } else {
+            state.pulls_since_epic = state.pulls_since_epic.saturating_add(1);
+        }
+        apply_gacha_reward(state, tier, &mut summary);
+    }
+
+    state.add_log(format!(
+        "🎲 ガチャ x{}: C{} R{} E{} L{}",
+        actual, summary.by_tier[0], summary.by_tier[1], summary.by_tier[2], summary.by_tier[3],
+    ));
+    state.last_gacha = Some(summary);
+    true
+}
+
+/// gacha_weights_milli + 天井 (pulls_since_epic) を加味して tier を決定。
+fn roll_gacha_tier(state: &mut AbyssState) -> GachaTier {
+    let g = &state.config.gacha;
+    let pity_active = g.gacha_pity > 0 && state.pulls_since_epic >= g.gacha_pity.saturating_sub(1);
+    if pity_active {
+        // Epic / Legendary を [Epic 比率] : [Legendary 比率] で抽選。
+        let epic_w = g.gacha_weights_milli[2].max(1);
+        let leg_w = g.gacha_weights_milli[3];
+        let total = epic_w + leg_w;
+        let r = rng_next(&mut state.rng_state) % total;
+        return if r < epic_w {
+            GachaTier::Epic
+        } else {
+            GachaTier::Legendary
+        };
+    }
+    let total: u32 = g.gacha_weights_milli.iter().sum::<u32>().max(1);
+    let r = rng_next(&mut state.rng_state) % total;
+    let mut acc = 0u32;
+    let tiers = [
+        GachaTier::Common,
+        GachaTier::Rare,
+        GachaTier::Epic,
+        GachaTier::Legendary,
+    ];
+    for (i, &w) in g.gacha_weights_milli.iter().enumerate() {
+        acc += w;
+        if r < acc {
+            return tiers[i];
+        }
+    }
+    GachaTier::Common
+}
+
+fn apply_gacha_reward(state: &mut AbyssState, tier: GachaTier, summary: &mut GachaResultSummary) {
+    let g = state.config.gacha.clone();
+    match tier {
+        GachaTier::Common => {
+            // 現フロアの基礎雑魚 gold (config から再計算) × ランダム倍率 × gold倍率。
+            let base = base_normal_gold(state.floor, &state.config);
+            let lo = g.common_gold_mult_min.max(1);
+            let hi = g.common_gold_mult_max.max(lo);
+            let mult_range = hi - lo + 1;
+            let r = rng_next(&mut state.rng_state) % mult_range;
+            let mult = lo + r;
+            let gold = ((base as f64) * (mult as f64) * state.gold_multiplier()).round() as u64;
+            let gold = gold.max(1);
+            state.gold = state.gold.saturating_add(gold);
+            state.run_gold_earned = state.run_gold_earned.saturating_add(gold);
+            summary.gained_gold = summary.gained_gold.saturating_add(gold);
+        }
+        GachaTier::Rare => {
+            // ランダムな upgrade を Lv +1 (永続)。Vitality なら現 HP も bump。
+            let idx = (rng_next(&mut state.rng_state) as usize) % UpgradeKind::all().len();
+            let kind = UpgradeKind::from_index(idx).unwrap_or(UpgradeKind::Sword);
+            let max_before = if matches!(kind, UpgradeKind::Vitality) {
+                Some(state.hero_max_hp())
+            } else {
+                None
+            };
+            state.upgrades[kind.index()] = state.upgrades[kind.index()].saturating_add(1);
+            if let Some(before) = max_before {
+                let after = state.hero_max_hp();
+                let delta = after.saturating_sub(before);
+                state.hero_hp = state.hero_hp.saturating_add(delta).min(after);
+            }
+            summary.gained_upgrade_lv = summary.gained_upgrade_lv.saturating_add(1);
+        }
+        GachaTier::Epic => {
+            let souls = ((state.floor as u64).saturating_mul(g.epic_souls_mult)) as f64
+                * state.soul_multiplier();
+            let souls = souls.round() as u64;
+            state.souls = state.souls.saturating_add(souls);
+            summary.gained_souls = summary.gained_souls.saturating_add(souls);
+        }
+        GachaTier::Legendary => {
+            state.keys = state.keys.saturating_add(g.legendary_keys);
+            summary.gained_keys = summary.gained_keys.saturating_add(g.legendary_keys);
+        }
+    }
+}
+
+/// `make_enemy` と同じ式で「指定フロアの基礎雑魚 gold」を再計算する。
+/// ガチャ Common の報酬基準にだけ使う (敵生成と数値が乖離しないよう同式に揃える)。
+fn base_normal_gold(floor: u32, config: &BalanceConfig) -> u64 {
+    let f = floor as f64;
+    let g = config.enemy.gold_base * config.enemy.gold_growth.powf(f - 1.0);
+    g.round().max(1.0) as u64
 }
 
 /// 自分の意思で浅瀬 (B1F) に戻る。死亡扱いにはしない (魂ボーナスなし)。
@@ -357,6 +561,7 @@ pub fn retreat(state: &mut AbyssState) {
     }
     state.add_log(format!("△ 自主撤退: B{}F → B1F", state.floor));
     state.floor = 1;
+    state.floor_kind = FloorKind::Normal;
     state.kills_on_floor = 0;
     state.hero_hp = state.hero_max_hp();
     state.hero_atk_cooldown = state.hero_atk_period();
@@ -578,6 +783,156 @@ mod tests {
         let boss = make_enemy(5, true, &cfg, &mut seed);
         assert!(boss.max_hp > normal.max_hp);
         assert!(boss.gold > normal.gold);
+    }
+
+    // ── ガチャ / フロア種別 ────────────────────────────────
+
+    #[test]
+    fn gacha_pull_requires_keys() {
+        let mut s = AbyssState::new();
+        s.keys = 0;
+        assert!(!gacha_pull(&mut s, 1));
+        assert_eq!(s.total_pulls, 0);
+    }
+
+    #[test]
+    fn gacha_pull_consumes_keys_and_increments_pulls() {
+        let mut s = AbyssState::new();
+        s.keys = 5;
+        let ok = gacha_pull(&mut s, 3);
+        assert!(ok);
+        assert_eq!(s.keys, 2);
+        assert_eq!(s.total_pulls, 3);
+        assert!(s.last_gacha.is_some());
+    }
+
+    #[test]
+    fn gacha_pull_clamped_to_available_keys() {
+        // 鍵 2 個しかないのに 10 連を要求 → 2 連だけ実行される。
+        let mut s = AbyssState::new();
+        s.keys = 2;
+        let ok = gacha_pull(&mut s, 10);
+        assert!(ok);
+        assert_eq!(s.keys, 0);
+        assert_eq!(s.total_pulls, 2);
+    }
+
+    #[test]
+    fn gacha_pity_forces_epic_or_better() {
+        // pity 直前の状態から 1 連引くと、必ず Epic か Legendary が出る。
+        let mut s = AbyssState::new();
+        s.keys = 1;
+        s.pulls_since_epic = s.config.gacha.gacha_pity.saturating_sub(1);
+        gacha_pull(&mut s, 1);
+        let r = s.last_gacha.as_ref().unwrap();
+        // Epic か Legendary が 1 個入っているはず。
+        assert_eq!(r.by_tier[2] + r.by_tier[3], 1);
+        assert_eq!(s.pulls_since_epic, 0);
+    }
+
+    #[test]
+    fn gacha_legendary_grants_keys() {
+        // 高確率で Legendary を出すよう gacha_weights を差し替えて確認。
+        let mut cfg = BalanceConfig::default();
+        cfg.gacha.gacha_weights_milli = [0, 0, 0, 1000];
+        let mut s = AbyssState::with_config(cfg);
+        s.keys = 1;
+        gacha_pull(&mut s, 1);
+        // 1 鍵消費 → Legendary で legendary_keys 鍵が返ってくる。
+        assert_eq!(s.keys, s.config.gacha.legendary_keys);
+    }
+
+    #[test]
+    fn floor_kind_first_floors_normal() {
+        let cfg = BalanceConfig::default();
+        let mut seed = 1;
+        for f in 1..cfg.gacha.floor_kind_normal_below {
+            let kind = roll_floor_kind(f, &cfg, &mut seed);
+            assert_eq!(kind, FloorKind::Normal, "B{}F should be Normal", f);
+        }
+    }
+
+    #[test]
+    fn floor_kind_zero_weights_falls_back_to_normal() {
+        let mut cfg = BalanceConfig::default();
+        cfg.gacha.floor_kind_weights = [0, 0, 0, 0];
+        let mut seed = 1;
+        let kind = roll_floor_kind(50, &cfg, &mut seed);
+        assert_eq!(kind, FloorKind::Normal);
+    }
+
+    #[test]
+    fn elite_floor_drops_extra_keys_on_boss() {
+        // floor_kind = Elite で B5F のボスを撃破した時、鍵が 1+2=3 もらえる。
+        let mut s = AbyssState::new();
+        s.floor = 5;
+        s.floor_kind = FloorKind::Elite;
+        s.kills_on_floor = s.enemies_per_floor();
+        s.upgrades[UpgradeKind::Sword.index()] = 200;
+        s.upgrades[UpgradeKind::Speed.index()] = 20;
+        s.hero_hp = s.hero_max_hp();
+        // tick で boss spawn → 撃破まで進む。
+        let keys_before = s.keys;
+        for _ in 0..400 {
+            tick(&mut s, 1);
+            if s.keys > keys_before {
+                break;
+            }
+        }
+        assert!(
+            s.keys >= keys_before + 3,
+            "Elite boss should drop +3 keys (1 base + 2 elite), got {}",
+            s.keys - keys_before
+        );
+    }
+
+    #[test]
+    fn deep_floor_bonus_keys_at_step() {
+        // B10F (深層) のボス撃破で鍵が 1 (base) + 2 (deep) = 3 もらえる。
+        let mut s = AbyssState::new();
+        s.floor = 10;
+        s.floor_kind = FloorKind::Normal;
+        s.kills_on_floor = s.enemies_per_floor();
+        s.upgrades[UpgradeKind::Sword.index()] = 500;
+        s.upgrades[UpgradeKind::Speed.index()] = 20;
+        s.hero_hp = s.hero_max_hp();
+        let keys_before = s.keys;
+        for _ in 0..1000 {
+            tick(&mut s, 1);
+            if s.keys > keys_before {
+                break;
+            }
+        }
+        assert!(
+            s.keys >= keys_before + 3,
+            "B10F boss should drop +3 keys, got {}",
+            s.keys - keys_before
+        );
+    }
+
+    #[test]
+    fn floor_kind_resets_on_death() {
+        let mut s = AbyssState::new();
+        s.floor = 5;
+        // 先に 1 tick 進めて敵を spawn させてから (placeholder を解消)、override する。
+        tick(&mut s, 1);
+        s.floor_kind = FloorKind::Elite;
+        s.hero_hp = 1;
+        s.current_enemy.atk_cooldown = 1;
+        s.current_enemy.atk = 1000;
+        // 1 tick 進めると敵が攻撃 → hero 死亡 → 浅瀬に戻る。
+        tick(&mut s, 1);
+        assert_eq!(s.floor, 1);
+        assert_eq!(s.floor_kind, FloorKind::Normal);
+    }
+
+    #[test]
+    fn retreat_resets_floor_kind() {
+        let mut s = AbyssState::new();
+        s.floor = 5;
+        s.floor_kind = FloorKind::Treasure;
+        retreat(&mut s);
+        assert_eq!(s.floor_kind, FloorKind::Normal);
     }
 
     #[test]

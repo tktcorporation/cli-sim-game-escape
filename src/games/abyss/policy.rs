@@ -15,4 +15,6 @@ pub enum PlayerAction {
     ToggleAutoDescend,
     Retreat,
     SetTab(Tab),
+    /// ガチャを `count` 回引く (鍵が足りなければ引ける分だけ)。
+    GachaPull(u32),
 }
