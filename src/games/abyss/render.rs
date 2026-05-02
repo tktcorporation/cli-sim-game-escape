@@ -22,6 +22,7 @@ use super::state::{AbyssState, FloorKind, SoulPerk, Tab, UpgradeKind};
 pub struct AbyssLayout {
     pub header: Rect,
     pub combat: Rect,
+    pub hero_panel: Rect,
     pub enemy_panel: Rect,
     pub toggle: Rect,
     pub tab_bar: Rect,
@@ -56,6 +57,7 @@ pub fn compute_layout(area: Rect) -> AbyssLayout {
     AbyssLayout {
         header: chunks[0],
         combat,
+        hero_panel: halves[0],
         enemy_panel: halves[1],
         toggle: chunks[2],
         tab_bar: chunks[3],

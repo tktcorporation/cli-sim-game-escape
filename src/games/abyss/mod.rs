@@ -60,20 +60,37 @@ pub struct AbyssGame {
 struct PrevSnapshot {
     floor: u32,
     enemy_hurt_flash: u32,
+    hero_hurt_flash: u32,
+    enemy_is_boss: bool,
+    /// last_enemy_damage の (amount, is_crit) 部分だけ抜いた指紋。
+    /// life_ticks は毎 tick 減るので含めない (含めると毎フレーム edge が立ってしまう)。
+    last_enemy_dmg: Option<(u64, bool)>,
+    /// gacha の累計引き回数。増えた瞬間に「新規ガチャが回った」と判定する。
+    gacha_total_pulls: u64,
 }
 
 impl AbyssGame {
     pub fn new() -> Self {
         let state = AbyssState::new();
-        let prev = PrevSnapshot {
-            floor: state.floor,
-            enemy_hurt_flash: state.enemy_hurt_flash,
-        };
+        let prev = Self::snapshot(&state);
         Self {
             state,
             effects: RefCell::new(AbyssEffects::new()),
             prev: Cell::new(prev),
             last_render_ms: Cell::new(0.0),
+        }
+    }
+
+    /// 現在 state から PrevSnapshot を作る。new() と detect_transitions の末尾の
+    /// 両方で使う共通ヘルパ。新フィールドを足したらここにも追加するだけで済む。
+    fn snapshot(s: &AbyssState) -> PrevSnapshot {
+        PrevSnapshot {
+            floor: s.floor,
+            enemy_hurt_flash: s.enemy_hurt_flash,
+            hero_hurt_flash: s.hero_hurt_flash,
+            enemy_is_boss: s.current_enemy.is_boss,
+            last_enemy_dmg: s.last_enemy_damage.map(|(a, _, c)| (a, c)),
+            gacha_total_pulls: s.total_pulls,
         }
     }
 
@@ -87,28 +104,55 @@ impl AbyssGame {
         let prev = self.prev.get();
         let mut effects = self.effects.borrow_mut();
         let layout = render::compute_layout(area);
+        let s = &self.state;
 
-        // 階層遷移: floor の増減で別演出
-        if self.state.floor > prev.floor {
-            // ボス撃破などで深く潜った
+        // ── 階層遷移 (floor の増減で別演出) ──
+        if s.floor > prev.floor {
             effects.push_descend(area);
-        } else if self.state.floor < prev.floor {
-            // 撤退または死亡で浅瀬に戻された
+        } else if s.floor < prev.floor {
             effects.push_ascend_or_death(area);
         }
 
-        // 敵被弾: enemy_hurt_flash の rising edge (0 → N)
-        // logic 側で被弾時に enemy_hurt_flash = N にセットされるので、
-        // 「直前 0 で今 > 0」が「今フレームで攻撃が当たった」瞬間。
-        if prev.enemy_hurt_flash == 0 && self.state.enemy_hurt_flash > 0 {
+        // ── 敵被弾 (enemy_hurt_flash の rising edge 0 → N) ──
+        if prev.enemy_hurt_flash == 0 && s.enemy_hurt_flash > 0 {
             effects.push_enemy_hit(layout.enemy_panel);
         }
 
+        // ── 勇者被弾 (hero_hurt_flash の rising edge) ──
+        if prev.hero_hurt_flash == 0 && s.hero_hurt_flash > 0 {
+            effects.push_hero_hit(layout.hero_panel);
+        }
+
+        // ── ボス出現 (current_enemy.is_boss が false → true) ──
+        if !prev.enemy_is_boss && s.current_enemy.is_boss {
+            effects.push_boss_appearance(layout.combat);
+        }
+
+        // ── ボス撃破 (is_boss が true → false で次の敵に切り替わった) ──
+        if prev.enemy_is_boss && !s.current_enemy.is_boss {
+            effects.push_boss_defeated(layout.enemy_panel);
+        }
+
+        // ── クリティカル (新しい damage event で is_crit=true) ──
+        let cur_dmg = s.last_enemy_damage.map(|(a, _, c)| (a, c));
+        if cur_dmg != prev.last_enemy_dmg {
+            if let Some((_, true)) = cur_dmg {
+                effects.push_critical(layout.combat);
+            }
+        }
+
+        // ── ガチャ Legendary (新規ガチャで Legendary が含まれた) ──
+        // by_tier[3] = Legendary 等級の当選数
+        if s.total_pulls > prev.gacha_total_pulls {
+            if let Some(g) = &s.last_gacha {
+                if g.by_tier[3] > 0 {
+                    effects.push_gacha_legendary(layout.body);
+                }
+            }
+        }
+
         // 次の snapshot に更新
-        self.prev.set(PrevSnapshot {
-            floor: self.state.floor,
-            enemy_hurt_flash: self.state.enemy_hurt_flash,
-        });
+        self.prev.set(Self::snapshot(s));
     }
 
     /// 前回 render からの経過時間を計算する。初回は 0。
