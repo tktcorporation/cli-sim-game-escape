@@ -35,6 +35,7 @@ const SETTINGS_RESET_COOKIE: u16 = 10;
 const SETTINGS_RESET_CAREER: u16 = 11;
 const SETTINGS_CONFIRM_YES: u16 = 12;
 const SETTINGS_CONFIRM_NO: u16 = 13;
+const SETTINGS_RESET_ABYSS: u16 = 14;
 
 /// Use `elementFromPoint` to find which grid cell was clicked.
 ///
@@ -286,6 +287,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     InputEvent::Key('2') | InputEvent::Click(_, SETTINGS_RESET_CAREER) => {
                         *confirm_reset = Some(GameChoice::Career);
                     }
+                    InputEvent::Key('3') | InputEvent::Click(_, SETTINGS_RESET_ABYSS) => {
+                        *confirm_reset = Some(GameChoice::Abyss);
+                    }
                     InputEvent::Key('q') | InputEvent::Click(_, BACK_TO_MENU) => {
                         *state = AppState::Menu;
                     }
@@ -313,6 +317,7 @@ fn perform_reset(game: &GameChoice) {
     match game {
         GameChoice::Cookie => games::cookie::save::delete_save(),
         GameChoice::Career => games::career::save::delete_save(),
+        GameChoice::Abyss => games::abyss::save::delete_save(),
         _ => {}
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -701,9 +706,21 @@ fn render_settings_main(
     );
 
     cl.push(Line::from(""));
+
+    // 深淵潜行 (Abyss Idle)
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
+            Span::styled("深淵潜行", Style::default().fg(Color::White)),
+            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
+        ]),
+        SETTINGS_RESET_ABYSS,
+    );
+
+    cl.push(Line::from(""));
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
-        " ※ Tiny Factory / Dungeon Dive / 深淵潜行 は",
+        " ※ Tiny Factory / Dungeon Dive は",
         Style::default().fg(Color::DarkGray),
     )));
     cl.push(Line::from(Span::styled(
@@ -732,6 +749,7 @@ fn render_confirm_dialog(
         GameChoice::Cookie => "Cookie Factory",
         GameChoice::Career => "Career Simulator",
         GameChoice::Cafe => "廃墟カフェ復興記",
+        GameChoice::Abyss => "深淵潜行",
         _ => "Unknown",
     };
 

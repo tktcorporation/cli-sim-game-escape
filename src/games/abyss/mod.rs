@@ -15,6 +15,7 @@ pub mod effects;
 pub mod logic;
 pub mod policy;
 pub mod render;
+pub mod save;
 pub mod state;
 
 #[cfg(test)]
@@ -52,6 +53,8 @@ pub struct AbyssGame {
     prev: Cell<PrevSnapshot>,
     /// 前回 render 時の wall-clock (ms)。effect の elapsed 計算に使う。
     last_render_ms: Cell<f64>,
+    /// オートセーブまでの残り tick 数。
+    save_countdown: u32,
 }
 
 /// effect トリガ判定用の軽量 state スナップショット。Copy なフィールドだけ。
@@ -73,13 +76,21 @@ struct PrevSnapshot {
 
 impl AbyssGame {
     pub fn new() -> Self {
-        let state = AbyssState::new();
+        #[allow(unused_mut)]
+        let mut state = AbyssState::new();
+
+        #[cfg(target_arch = "wasm32")]
+        if save::load_game(&mut state) {
+            state.add_log("セーブデータをロードしました");
+        }
+
         let prev = Self::snapshot(&state);
         Self {
             state,
             effects: RefCell::new(AbyssEffects::new()),
             prev: Cell::new(prev),
             last_render_ms: Cell::new(0.0),
+            save_countdown: save::AUTOSAVE_INTERVAL,
         }
     }
 
@@ -253,6 +264,13 @@ impl Game for AbyssGame {
 
     fn tick(&mut self, delta_ticks: u32) {
         logic::tick(&mut self.state, delta_ticks);
+
+        self.save_countdown = self.save_countdown.saturating_sub(delta_ticks);
+        if self.save_countdown == 0 {
+            #[cfg(target_arch = "wasm32")]
+            save::save_game(&self.state);
+            self.save_countdown = save::AUTOSAVE_INTERVAL;
+        }
     }
 
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
