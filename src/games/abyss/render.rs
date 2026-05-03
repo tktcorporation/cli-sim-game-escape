@@ -407,13 +407,9 @@ fn render_tab_bar(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let active_idx = match state.tab {
-        Tab::Upgrades => 0,
-        Tab::Souls => 1,
-        Tab::Stats => 2,
-        Tab::Gacha => 3,
-        Tab::Settings => 4,
-    };
+    // `Tab::to_save_id` を SSOT として再利用。タブの宣言順 (= save id 順) と
+    // タブバーの並び順を構造的に揃えることで、新タブ追加時に両者がズレない。
+    let active_idx = state.tab.to_save_id() as usize;
     let style_for = |idx: usize, base: Color| -> Style {
         if idx == active_idx {
             Style::default()
