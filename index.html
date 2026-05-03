@@ -6,6 +6,14 @@
     <link data-trunk rel="rust" />
     <title>Idle Games - 放置ゲーム</title>
     <style>
+      /* line-height の SSOT。CSS と JS の両方がここから値を派生させる:
+         - CSS: pre { line-height: var(--line-height) }
+         - JS:  parseFloat(getComputedStyle(:root).getPropertyValue(...))
+         viewport を最大限使うため CSS 既定 (1.2) より詰めてあるが、
+         Fira Code monospace で行間にブリージングを残す範囲。 */
+      :root {
+        --line-height: 1.10;
+      }
       body {
         margin: 0;
         width: 100%;
@@ -26,11 +34,7 @@
         /* Ratzilla sets inline height:15px which clips text when font is
            scaled up.  Let the row height follow the actual font size. */
         height: auto !important;
-        /* line-height は viewport を最大限使うため意図的に詰めている。
-           CSS 既定 (1.2) より小さく、行間に余白を残しつつ縦行数を稼ぐ。
-           この値を変更したら下の JS LINE_HEIGHT 定数も同じに揃えること
-           (rowHeight 計算がここの CSS line-height とミラーしている)。 */
-        line-height: 1.10;
+        line-height: var(--line-height);
         margin: 0;
         padding: 0;
         touch-action: manipulation;
@@ -46,11 +50,15 @@
     // SCALE_W < 1 → bigger text.  0.85 ≈ 18 % larger characters.
     (function() {
       var SCALE_W = 0.85;
-      // CSS の `pre { line-height: ... }` と必ず一致させること。
-      // ここを変えたら CSS 側もミラーする (rowHeight の見積もりが CSS と
-      // ズレると Math.floor の切り捨てで行が無駄になったり、逆に最後の
-      // 行が viewport からはみ出してクリップされる)。
-      var LINE_HEIGHT = 1.10;
+      // CSS の `:root { --line-height: ... }` を SSOT として読む。
+      // CSS 側の値を変えるだけでこの計算式も自動追従する (rowHeight 計算が
+      // 実描画 line-height と同期、Math.floor の切り捨てで行が無駄になったり
+      // 最後の行が viewport からクリップされる事故を防ぐ)。
+      // var() が未対応の環境のため 1.10 をフォールバック。
+      var cssLh = parseFloat(
+        getComputedStyle(document.documentElement).getPropertyValue('--line-height')
+      );
+      var LINE_HEIGHT = isNaN(cssLh) ? 1.10 : cssLh;
 
       // Capture originals before any overrides.
       var origW = window.innerWidth || screen.width || 375;
