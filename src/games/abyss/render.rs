@@ -32,7 +32,9 @@ pub struct AbyssLayout {
 /// area から各パネル Rect を計算する。`render` の中でも、effect 配置時にも同じ式が使える。
 pub fn compute_layout(area: Rect) -> AbyssLayout {
     let narrow = is_narrow_layout(area.width);
-    let combat_height: u16 = if narrow { 8 } else { 9 };
+    // narrow 時は body に縦領域を渡したいので combat を 1 行詰める。
+    // hero panel は narrow で stats 行を省略済 (最大 5 行) なので inner=5 で収まる。
+    let combat_height: u16 = if narrow { 7 } else { 9 };
     // narrow 時はヘッダを 2 行 (B/floor_kind/最深 + 通貨 3 種) に分けるため
     // 内部 2 行 + ALL ボーダー 2 = 4。wide は従来通り 1 行 (= 3)。
     let header_height: u16 = if narrow { 4 } else { 3 };
@@ -465,14 +467,27 @@ fn render_upgrades(
     let narrow = is_narrow_layout(area.width);
     let mut cl = ClickableList::new();
 
-    cl.push(Line::from(vec![
-        Span::styled(" 強化", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::styled(
-            " — gold で永続強化を購入",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]));
-    cl.push(Line::from(""));
+    // narrow ではヘッダ装飾を最小化し、リストに 1 行余分に渡す。
+    // 7 アイテム + ヘッダ 1 + 空行 = 9 行は 40x30 のタブ inner に入りきらないため、
+    // 副題と空行を畳んでギリギリ全アイテム visible を確保する。
+    if narrow {
+        cl.push(Line::from(Span::styled(
+            " 強化",
+            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        cl.push(Line::from(vec![
+            Span::styled(
+                " 強化",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " — gold で永続強化を購入",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+        cl.push(Line::from(""));
+    }
 
     for kind in UpgradeKind::all() {
         let lv = state.upgrades[kind.index()];
@@ -524,25 +539,25 @@ fn render_upgrades(
             BUY_UPGRADE_BASE + kind.index() as u16,
         );
 
-        // 次段階プレビュー + silhouette (curve 持ちのみ、次段階が存在するときだけ)
-        // narrow 時は「その先」を畳み、行数を抑える。詳細は B のモーダルで見せる方針。
-        if let Some(curve) = state.upgrade_curve(*kind) {
-            let lv_u = state.upgrades[kind.index()];
-            let (cur_idx, _) = curve.tier_at(lv_u);
-            let next = curve.tier(cur_idx + 1);
-            let after_next = curve.tier(cur_idx + 2);
-            if let Some((next_lv, _, next_name)) = next {
-                // start_level は「超えると次段階」境界なので、新段階が
-                // 実際に効く最初の Lv は start_level + 1。表示はこちらを使う。
-                let indent = if narrow { "  " } else { "        " };
-                let mut spans = vec![
-                    Span::styled(format!("{}次: ", indent), Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        format!("Lv{} [{}]", next_lv + 1, next_name),
-                        Style::default().fg(Color::Green),
-                    ),
-                ];
-                if !narrow {
+        // 次段階プレビューは情報密度が高い行 (1〜2 visual row) なので、
+        // narrow では完全に畳む。7 アイテム × 最大 2 行 = 14 行を一気に節約し、
+        // 「下が見えなくなる」問題の最大要因を解消する。wide では従来通り表示。
+        if !narrow {
+            if let Some(curve) = state.upgrade_curve(*kind) {
+                let lv_u = state.upgrades[kind.index()];
+                let (cur_idx, _) = curve.tier_at(lv_u);
+                let next = curve.tier(cur_idx + 1);
+                let after_next = curve.tier(cur_idx + 2);
+                if let Some((next_lv, _, next_name)) = next {
+                    // start_level は「超えると次段階」境界なので、新段階が
+                    // 実際に効く最初の Lv は start_level + 1。表示はこちらを使う。
+                    let mut spans = vec![
+                        Span::styled("        次: ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format!("Lv{} [{}]", next_lv + 1, next_name),
+                            Style::default().fg(Color::Green),
+                        ),
+                    ];
                     if let Some((after_lv, _, _)) = after_next {
                         // 次のさらに先は silhouette (?) で見せる
                         spans.push(Span::styled(
@@ -550,15 +565,14 @@ fn render_upgrades(
                             Style::default().fg(Color::DarkGray),
                         ));
                     }
+                    cl.push(Line::from(spans));
+                } else if cur_idx + 1 == curve.len() {
+                    // 最終段階に到達済み
+                    cl.push(Line::from(vec![Span::styled(
+                        "        ▼ 最終段階到達",
+                        Style::default().fg(Color::Magenta),
+                    )]));
                 }
-                cl.push(Line::from(spans));
-            } else if cur_idx + 1 == curve.len() {
-                // 最終段階に到達済み
-                let indent = if narrow { "  " } else { "        " };
-                cl.push(Line::from(vec![Span::styled(
-                    format!("{}▼ 最終段階到達", indent),
-                    Style::default().fg(Color::Magenta),
-                )]));
             }
         }
     }
@@ -1115,6 +1129,40 @@ mod tests {
                 found
             );
         }
+    }
+
+    /// narrow (40 列) で 7 つの強化アイテム全てがクリック可能領域として
+    /// 登録されることを確認 — 縦が足りずに後半が切れて「下が見えない」回帰を防ぐ。
+    ///
+    /// 40x30 はモバイル縦の中でもタイトな部類 (キーボード表示時等)。
+    /// この高さで 7 アイテム全部 visible にできるかが narrow 設計の肝。
+    /// 高さを 47 等の余裕ある値にすると、修正前のレイアウトでも偶然通って
+    /// 回帰検出に失敗するため、わざと厳しめの高さで検証する。
+    #[test]
+    fn narrow_upgrades_all_visible() {
+        let mut state = AbyssState::new();
+        state.tab = Tab::Upgrades;
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
+        terminal
+            .draw(|f| render(&state, f, f.area(), &cs))
+            .unwrap();
+        let cs = cs.borrow();
+        let mut found = [false; 7];
+        for y in 0..30 {
+            for x in 0..40 {
+                if let Some(id) = cs.hit_test(x, y) {
+                    if (BUY_UPGRADE_BASE..BUY_UPGRADE_BASE + 7).contains(&id) {
+                        found[(id - BUY_UPGRADE_BASE) as usize] = true;
+                    }
+                }
+            }
+        }
+        assert!(
+            found.iter().all(|&b| b),
+            "narrow upgrades not all visible at 40x30: {:?}",
+            found
+        );
     }
 
     /// narrow (40 列) ガチャタブで、縦積みになったボタンが両方登録されること。
