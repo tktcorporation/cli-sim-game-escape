@@ -6,6 +6,8 @@
 //! `config::BalanceConfig` を介して注入される。本体ゲームは既定値を、
 //! シミュレータは差し替えた config を渡すことで難易度を変えられる。
 
+use std::cell::Cell;
+
 use super::config::BalanceConfig;
 
 /// 強化の種類。各強化は累積購入数 (level) を持ち、レベルが上がるほどコストも上昇する。
@@ -342,6 +344,16 @@ pub struct AbyssState {
     // ── プレイヤー設定 ──
     pub auto_descend: bool,
     pub tab: Tab,
+    /// 現在のタブ本体の縦スクロール量 (visual rows)。
+    ///
+    /// **UI only**: simulator / logic は本質的には触らない、永続化もしない
+    /// (セッション限定)。タブ切替で 0 にリセット
+    /// (`logic::apply_action::SetTab` で処理)。
+    ///
+    /// `Cell<u16>` なのは、Game::render が `&self` のため、上限 clamp を
+    /// render 直前に行うために interior mutability が必要なため。
+    /// (Game trait シグネチャ変更を避ける目的。logic からは set/get で書ける)
+    pub tab_scroll: Cell<u16>,
 
     // ── ガチャ ──
     /// 蓄積した深淵の鍵 (ガチャ通貨)。永続。
@@ -403,6 +415,7 @@ impl AbyssState {
             floor_kind: FloorKind::Normal,
             auto_descend: true,
             tab: Tab::Upgrades,
+            tab_scroll: Cell::new(0),
             keys: 0,
             pulls_since_epic: 0,
             total_pulls: 0,

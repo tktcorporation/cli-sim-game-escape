@@ -138,6 +138,7 @@ dependencies = [
  "console_error_panic_hook",
  "js-sys",
  "proptest",
+ "ratatui",
  "ratzilla",
  "serde",
  "serde_json",

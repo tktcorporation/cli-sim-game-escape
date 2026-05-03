@@ -147,28 +147,102 @@
       });
     })();
 
-    // Touch handler: convert touch events to synthetic mousedown events.
-    // This lets Ratzilla's on_mouse_event handler (registered in Rust) process
-    // taps through the same ClickState hit-test path as desktop clicks.
+    // Touch handler: tap / swipe を区別して、tap → mousedown、swipe → keydown(j/k)
+    // を発火する state machine。
     //
-    // We dispatch a synthetic mousedown instead of handling touch in WASM because
-    // web-sys TouchEvent/Touch/TouchList causes iOS Safari's WebKit WASM engine
-    // to render a black screen (discovered in commit 0caf982).
+    // - tap: touchstart から touchend までに大きな移動がない → 既存通り
+    //   synthetic mousedown を発火 (ratzilla の on_mouse_event ハンドラで処理)
+    // - swipe: 縦方向に SWIPE_THRESHOLD px 以上動いたら swipe モード突入。
+    //   ROW_HEIGHT_PX ごとに 'j'/'k' KeyboardEvent を dispatch (abyss render
+    //   の SCROLL_UP/SCROLL_DOWN action に相当)。
+    //
+    // 重要:
+    // - mousedown 発火を touchstart→touchend に遅延させたのは、swipe 中に誤って
+    //   強化購入が走るのを防ぐため。
+    // - touchmove は { passive: false } + preventDefault() で iOS の bounce
+    //   スクロールを抑制する (これがないと縦スワイプでページが弾む)。
+    // - WASM 側 (web-sys) で TouchEvent を扱うと iOS Safari が黒画面化する
+    //   バグ (commit 0caf982) を回避するため、touch 処理は全て JS 側で完結。
     (function() {
+      var SWIPE_THRESHOLD = 10;  // px、tap と区別する最小移動量
+      var ROW_HEIGHT_PX = 18;    // 1 'j'/'k' KeyEvent あたりに必要な縦移動量
+
+      var startX = null, startY = null;
+      var lastY = null;
+      var isSwipe = false;
+      var swipeAccum = 0;
+
       document.addEventListener('touchstart', function(e) {
-        if (e.touches.length === 0) return;
-        var touch = e.touches[0];
-        // Prevent the browser from also generating mouse events from this touch.
-        // Without this, Ratzilla's on_mouse_event fires twice per tap: once for
-        // our synthetic mousedown and once for the browser's compatibility event.
+        if (e.touches.length !== 1) {
+          startX = startY = lastY = null;
+          isSwipe = false;
+          swipeAccum = 0;
+          return;
+        }
+        var t = e.touches[0];
+        startX = t.clientX;
+        startY = t.clientY;
+        lastY = t.clientY;
+        isSwipe = false;
+        swipeAccum = 0;
+        // ここでは preventDefault しても OK だが、swipe 後の touchend に
+        // mousedown を遅延させるため、ここではまだ何もしない。
         e.preventDefault();
-        // Dispatch a synthetic mousedown so Ratzilla's on_mouse_event fires
-        document.dispatchEvent(new MouseEvent('mousedown', {
-          clientX: touch.clientX,
-          clientY: touch.clientY,
-          button: 0,
-          bubbles: true
-        }));
+      }, { passive: false });
+
+      document.addEventListener('touchmove', function(e) {
+        if (startY === null || e.touches.length !== 1) return;
+        var t = e.touches[0];
+        var dx = Math.abs(t.clientX - startX);
+        var dy = t.clientY - startY;
+
+        // 一旦 swipe 判定が立てば外れない (誤判定で tap に戻ると mousedown が
+        // 後追い発火して購入誤動作するため)。
+        if (!isSwipe && Math.abs(dy) > SWIPE_THRESHOLD && Math.abs(dy) > dx) {
+          isSwipe = true;
+        }
+        if (isSwipe) {
+          // bounce 抑制
+          e.preventDefault();
+          // 増分 (lastY → 現在 Y) を累積し、ROW_HEIGHT_PX ごとに key dispatch。
+          // 上スワイプ (指上に動かす = clientY 減少) → 下にスクロールしたい = 'j'。
+          // 下スワイプ → 上スクロール = 'k'。
+          var delta = lastY - t.clientY;
+          swipeAccum += delta;
+          while (Math.abs(swipeAccum) >= ROW_HEIGHT_PX) {
+            var key = swipeAccum > 0 ? 'j' : 'k';
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: key, bubbles: true }));
+            swipeAccum -= (swipeAccum > 0 ? ROW_HEIGHT_PX : -ROW_HEIGHT_PX);
+          }
+          lastY = t.clientY;
+        }
+      }, { passive: false });
+
+      document.addEventListener('touchend', function(e) {
+        if (startX === null) return;
+        // tap として確定 (swipe してない) → 既存通り synthetic mousedown を発火。
+        // swipe だった場合は何もしない (key dispatch は touchmove 内で完了)。
+        if (!isSwipe) {
+          document.dispatchEvent(new MouseEvent('mousedown', {
+            clientX: startX,
+            clientY: startY,
+            button: 0,
+            bubbles: true
+          }));
+        }
+        startX = startY = lastY = null;
+        isSwipe = false;
+        swipeAccum = 0;
+      }, { passive: false });
+
+      // マウスホイール: デスクトップでも自然にスクロールできるように。
+      // deltaY > 0 (下回転) → 'j' (下スクロール)、< 0 → 'k' (上スクロール)。
+      document.addEventListener('wheel', function(e) {
+        if (e.deltaY === 0) return;
+        var key = e.deltaY > 0 ? 'j' : 'k';
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: key, bubbles: true }));
+        // ページ全体のスクロールを抑制 (grid は viewport 同サイズなので不要)。
+        e.preventDefault();
       }, { passive: false });
     })();
   </script>

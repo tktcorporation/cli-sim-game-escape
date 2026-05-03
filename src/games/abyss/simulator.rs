@@ -354,6 +354,35 @@ impl Simulator {
 mod sanity_tests {
     use super::*;
 
+    /// `PlayerAction::ScrollUp/ScrollDown` は UI only。simulator policy が
+    /// 絶対に生成しないことを代表的な policy で確認する (将来 policy 著者が
+    /// 誤って加えた回帰を検知)。
+    #[test]
+    fn simulator_policies_never_emit_scroll() {
+        let state = AbyssState::new();
+        let policies: Vec<Box<dyn Policy>> = vec![
+            Box::new(NoActionPolicy),
+            Box::new(GreedyCheapestPolicy::default()),
+            Box::new(WeightedPolicy::balanced()),
+        ];
+        for mut policy in policies {
+            for _ in 0..100 {
+                for action in policy.choose_actions(&state) {
+                    assert!(
+                        !matches!(action, PlayerAction::ScrollUp | PlayerAction::ScrollDown),
+                        "policy emitted UI-only action: {:?}",
+                        action
+                    );
+                }
+            }
+            for action in policy.on_start(&state) {
+                assert!(
+                    !matches!(action, PlayerAction::ScrollUp | PlayerAction::ScrollDown),
+                );
+            }
+        }
+    }
+
     #[test]
     fn no_action_player_stays_shallow() {
         let mut sim = Simulator::new(BalanceConfig::default(), Box::new(NoActionPolicy));

@@ -91,7 +91,7 @@ pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<Re
     match state.tab {
         Tab::Upgrades => render_upgrades(state, f, body_chunks[0], click_state),
         Tab::Souls => render_souls(state, f, body_chunks[0], click_state),
-        Tab::Stats => render_stats(state, f, body_chunks[0]),
+        Tab::Stats => render_stats(state, f, body_chunks[0], click_state),
         Tab::Gacha => render_gacha(state, f, body_chunks[0], click_state),
         Tab::Settings => render_settings(state, f, body_chunks[0], click_state),
     }
@@ -440,6 +440,71 @@ fn render_tab_bar(
     bar.render(f, area, &mut cs);
 }
 
+// ── スクロール共通ヘルパー ─────────────────────────────────
+
+/// `body 内側の inner` を「コンテンツ領域」と「右端 1 列の ▲▼ スクロール列」に分割する。
+/// inner.width が 1 以下なら scroll 列を作らず content_area = inner を返す
+/// (極小幅でも壊れないように)。
+fn split_for_scroll(inner: Rect) -> (Rect, Option<Rect>) {
+    if inner.width <= 1 {
+        return (inner, None);
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+    (chunks[0], Some(chunks[1]))
+}
+
+/// `state.tab_scroll` を `[0, max_scroll]` に clamp して書き戻し、適用後の値を返す。
+/// `max_scroll = content_h - content_area_h` (saturating)。
+/// Cell 経由で Game::render の `&self` シグネチャを変えずに実現する。
+fn clamp_tab_scroll(state: &AbyssState, content_h: u16, content_area_h: u16) -> u16 {
+    let max_scroll = content_h.saturating_sub(content_area_h);
+    let s = state.tab_scroll.get().min(max_scroll);
+    state.tab_scroll.set(s);
+    s
+}
+
+/// 右端のスクロール列に ▲▼ ボタンを描画する。
+/// scroll 列の上半分が ▲ tap area、下半分が ▼ tap area。
+/// ボタン自体は端に 1 セル文字で表示するが、Clickable の tap target は領域全体。
+/// (タッチ操作時のヒット領域を稼ぐため。1 セルだけだとモバイルでは tap 困難)
+fn render_scroll_indicators(
+    f: &mut Frame,
+    area: Rect,
+    scroll: u16,
+    max_scroll: u16,
+    cs: &mut ClickState,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let half = area.height / 2;
+    let style = Style::default()
+        .fg(Color::LightCyan)
+        .add_modifier(Modifier::BOLD);
+
+    // 上半分: ▲ (scroll > 0 のときのみ表示・反応)
+    if half > 0 && scroll > 0 {
+        let up_rect = Rect::new(area.x, area.y, area.width, half);
+        let para = Paragraph::new(Line::from(Span::styled("▲", style)));
+        Clickable::new(para, SCROLL_UP).render(f, up_rect, cs);
+    }
+    // 下半分: ▼ (scroll < max_scroll のときのみ表示・反応)。
+    // 下端に表示するため、上にスペーサ行を入れる。
+    if scroll < max_scroll && area.height > half {
+        let down_h = area.height - half;
+        let down_rect = Rect::new(area.x, area.y + half, area.width, down_h);
+        let mut lines: Vec<Line> = (0..down_h.saturating_sub(1))
+            .map(|_| Line::from(""))
+            .collect();
+        lines.push(Line::from(Span::styled("▼", style)));
+        let para = Paragraph::new(lines);
+        Clickable::new(para, SCROLL_DOWN).render(f, down_rect, cs);
+    }
+}
+
 // ── 強化タブ ───────────────────────────────────────────────
 
 fn render_upgrades(
@@ -561,14 +626,32 @@ fn render_upgrades(
         }
     }
 
+    // ── 描画 + スクロール処理 ──
+    // 1. block を area 全体に描画 → inner を取得
+    // 2. inner を「コンテンツ + ▲▼ 列」に分割
+    // 3. wrap 込みの visual_height を計算し tab_scroll を clamp
+    // 4. ClickableList を content_area に描画 (block は既に出した)
+    // 5. ▲▼ を scroll_col に描画
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let (content_area, scroll_col) = split_for_scroll(inner);
+    let content_h = if narrow {
+        cl.visual_height(content_area.width)
+    } else {
+        cl.lines().len() as u16
+    };
+    let scroll = clamp_tab_scroll(state, content_h, content_area.height);
+    let max_scroll = content_h.saturating_sub(content_area.height);
+
     let mut cs = click_state.borrow_mut();
-    // narrow 時は wrap=true で長い行を折り返す。ClickableList の wrap-aware
-    // ターゲット登録 (clickable_list_wrap_covers_all_rows で保証) により、
-    // 折り返し行全体がクリック可能なまま保たれる。
-    cl.render(f, area, block, &mut cs, narrow, 0);
+    cl.render(f, content_area, Block::default(), &mut cs, narrow, scroll);
+    if let Some(sc) = scroll_col {
+        render_scroll_indicators(f, sc, scroll, max_scroll, &mut cs);
+    }
 }
 
 // ── 魂タブ ─────────────────────────────────────────────────
@@ -623,11 +706,27 @@ fn render_souls(
         );
     }
 
+    // 強化タブと同じパターン (split + clamp + ▲▼)
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Magenta));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let (content_area, scroll_col) = split_for_scroll(inner);
+    let content_h = if narrow {
+        cl.visual_height(content_area.width)
+    } else {
+        cl.lines().len() as u16
+    };
+    let scroll = clamp_tab_scroll(state, content_h, content_area.height);
+    let max_scroll = content_h.saturating_sub(content_area.height);
+
     let mut cs = click_state.borrow_mut();
-    cl.render(f, area, block, &mut cs, narrow, 0);
+    cl.render(f, content_area, Block::default(), &mut cs, narrow, scroll);
+    if let Some(sc) = scroll_col {
+        render_scroll_indicators(f, sc, scroll, max_scroll, &mut cs);
+    }
 }
 
 // ── 設定タブ ───────────────────────────────────────────────
@@ -700,7 +799,12 @@ fn render_settings(
 
 // ── 統計タブ ───────────────────────────────────────────────
 
-fn render_stats(state: &AbyssState, f: &mut Frame, area: Rect) {
+fn render_stats(
+    state: &AbyssState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
         " 統計",
@@ -741,10 +845,29 @@ fn render_stats(state: &AbyssState, f: &mut Frame, area: Rect) {
         format!("×{:.2}", state.gold_multiplier()),
     ));
 
+    // 統計タブは ClickableList ではなく素の Paragraph。同じ scroll パターンを
+    // 適用するため、block を分離してから Paragraph::scroll で offset 描画する。
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan));
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let (content_area, scroll_col) = split_for_scroll(inner);
+    // 統計タブは wrap せず固定幅で表示するので論理行数 = visual 行数。
+    let content_h = lines.len().min(u16::MAX as usize) as u16;
+    let scroll = clamp_tab_scroll(state, content_h, content_area.height);
+    let max_scroll = content_h.saturating_sub(content_area.height);
+
+    f.render_widget(
+        Paragraph::new(lines).scroll((scroll, 0)),
+        content_area,
+    );
+
+    if let Some(sc) = scroll_col {
+        let mut cs = click_state.borrow_mut();
+        render_scroll_indicators(f, sc, scroll, max_scroll, &mut cs);
+    }
 }
 
 fn stat_line(label: &'static str, value: String) -> Line<'static> {
@@ -1223,6 +1346,63 @@ mod tests {
             "narrow upgrades not all visible at 40x30: {:?}",
             found
         );
+    }
+
+    /// タブ切替で `tab_scroll` が 0 にリセットされる。
+    /// (logic::set_tab で `tab_scroll.set(0)` してる挙動の回帰検知)
+    #[test]
+    fn tab_switch_resets_scroll() {
+        use crate::games::abyss::logic;
+        use crate::games::abyss::policy::PlayerAction;
+
+        let mut state = AbyssState::new();
+        state.tab_scroll.set(99);
+        logic::apply_action(&mut state, PlayerAction::SetTab(Tab::Souls));
+        assert_eq!(state.tab_scroll.get(), 0);
+    }
+
+    /// 極小縦サイズ (40x20) で強化タブを開くと初期状態では下が切れるが、
+    /// スクロールすれば最後の Gold (idx=6) のクリックターゲットに到達できる。
+    /// scroll の round-trip (action 適用 → render → 反映) を網羅的に検証する。
+    #[test]
+    fn narrow_upgrades_scroll_to_bottom() {
+        use crate::games::abyss::logic;
+        use crate::games::abyss::policy::PlayerAction;
+
+        let mut state = AbyssState::new();
+        state.tab = Tab::Upgrades;
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+
+        // 初期 frame で render し、tab_scroll を clamp させる
+        // (visual_height ベースで max_scroll が決定する)
+        terminal
+            .draw(|f| render(&state, f, f.area(), &cs))
+            .unwrap();
+
+        // 何度か ScrollDown を流し続けて、その都度 render すれば必ず Gold が
+        // 見える位置に来る (clamp で max_scroll を超えない)。20 回以上で十分
+        // (7 アイテム × 平均 2 visual = 14 行に対し step 3、即ち 5 回程度で底)。
+        let mut found_gold = false;
+        for _ in 0..20 {
+            logic::apply_action(&mut state, PlayerAction::ScrollDown);
+            cs.borrow_mut().clear_targets();
+            terminal
+                .draw(|f| render(&state, f, f.area(), &cs))
+                .unwrap();
+            let cs_ref = cs.borrow();
+            for y in 0..20 {
+                for x in 0..40 {
+                    if cs_ref.hit_test(x, y) == Some(BUY_UPGRADE_BASE + 6) {
+                        found_gold = true;
+                    }
+                }
+            }
+            if found_gold {
+                break;
+            }
+        }
+        assert!(found_gold, "Gold (idx=6) never reachable via ScrollDown at 40x20");
     }
 
     /// 設定タブを開いた時、自動潜行トグルがクリック可能領域として登録されること。

@@ -23,3 +23,7 @@ pub const BUY_SOUL_PERK_BASE: u16 = 200;
 // ── ガチャ ────────────────────────────────────────────────
 pub const GACHA_PULL_1: u16 = 300;
 pub const GACHA_PULL_10: u16 = 301;
+
+// ── タブ本体スクロール (▲▼ オーバーレイ用) ───────────────
+pub const SCROLL_UP: u16 = 400;
+pub const SCROLL_DOWN: u16 = 401;

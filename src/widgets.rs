@@ -180,6 +180,22 @@ impl<'a> ClickableList<'a> {
         self.lines
     }
 
+    /// 指定 `inner_width` で wrap (`Wrap { trim: false }`) した時の visual 行数。
+    ///
+    /// スクロール上限 (`max_scroll = visual_height - area_inner_h`) の事前計算に
+    /// 使う。内部で ratatui の `Paragraph::line_count` に委譲しているため、
+    /// 実際の `render` で使う wrap 実装と完全一致する (drift しない)。
+    ///
+    /// `inner_width == 0` の時はゼロを返す (`line_count` の規約に準拠)。
+    /// wrap=false で render する場合は呼び出し側で `lines().len()` を使うこと。
+    pub fn visual_height(&self, inner_width: u16) -> u16 {
+        if inner_width == 0 {
+            return 0;
+        }
+        let para = Paragraph::new(self.lines.clone()).wrap(Wrap { trim: false });
+        para.line_count(inner_width).min(u16::MAX as usize) as u16
+    }
+
     /// Register click targets for all clickable lines.
     ///
     /// * `area` — the widget area (including borders).
@@ -591,6 +607,21 @@ mod tests {
         // "buy item" is line 2 → row = 0 + 1 + 2 = 3
         assert_eq!(cs.hit_test(10, 3), Some(42));
         assert_eq!(cs.hit_test(10, 2), None); // header 2, not clickable
+    }
+
+    #[test]
+    fn clickable_list_visual_height_with_wrap() {
+        // 20 文字の行を inner_width=10 で wrap させると 2 visual rows。
+        // line_count に委譲しているので ratatui の wrap と完全一致するはず。
+        let mut cl = ClickableList::new();
+        cl.push(Line::from("12345678901234567890")); // 20 cells → 2 rows at width 10
+        cl.push(Line::from("short")); // 5 cells → 1 row at width 10
+        // total = 2 + 1 = 3 visual rows
+        assert_eq!(cl.visual_height(10), 3);
+        // inner_width=20 で全部 1 行ずつ収まる → 1 + 1 = 2
+        assert_eq!(cl.visual_height(20), 2);
+        // ガード: 0 width は 0 を返す (line_count の規約)
+        assert_eq!(cl.visual_height(0), 0);
     }
 
     #[test]
