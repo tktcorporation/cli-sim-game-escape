@@ -505,6 +505,94 @@ fn render_scroll_indicators(
     }
 }
 
+// ── スクロール対応タブの抽象 ──────────────────────────────
+
+/// 「スクロール可能なタブ本体に入る描画コンテンツ」を表す trait。
+///
+/// 各タブ (強化/魂/設定/統計) は同じ「block + content + ▲▼ 列」レイアウトを
+/// 共有しているが、コンテンツの実体だけが `ClickableList` だったり `Paragraph`
+/// だったりする。この trait を介して `render_scrollable_tab` 1 関数で扱う。
+///
+/// **記述と実行の分離**: impl 側はコンテンツの「データ」(行数の見積もりと
+/// 描画手段) を提供するだけで、block 描画やスクロール列の管理は呼び出し側
+/// (`render_scrollable_tab`) が effect として実行する。
+trait ScrollableContent<'a> {
+    /// 指定 `content_width` で描画した時の visual 行数。max_scroll 計算に使う。
+    fn content_height(&self, content_width: u16) -> u16;
+
+    /// `content_area` 内に描画する。`scroll` 分の縦オフセットは impl 側で適用。
+    /// `cs` はクリックターゲット登録が必要な実装 (ClickableList 等) のためだけに渡す。
+    fn render(self, f: &mut Frame, content_area: Rect, scroll: u16, cs: &mut ClickState);
+}
+
+/// `ClickableList` を `wrap` 設定とセットで扱うアダプタ。
+struct WrappingClickableList<'a> {
+    list: ClickableList<'a>,
+    wrap: bool,
+}
+
+impl<'a> ScrollableContent<'a> for WrappingClickableList<'a> {
+    fn content_height(&self, content_width: u16) -> u16 {
+        if self.wrap {
+            self.list.visual_height(content_width)
+        } else {
+            // wrap=false なら論理 1 行 = visual 1 行。
+            self.list.lines().len().min(u16::MAX as usize) as u16
+        }
+    }
+    fn render(self, f: &mut Frame, content_area: Rect, scroll: u16, cs: &mut ClickState) {
+        // block は呼び出し側 (render_scrollable_tab) が既に描いているので、
+        // ここでは Block::default() (無 borders) を渡して content_area に直接描画。
+        self.list
+            .render(f, content_area, Block::default(), cs, self.wrap, scroll);
+    }
+}
+
+impl<'a> ScrollableContent<'a> for Vec<Line<'a>> {
+    fn content_height(&self, _content_width: u16) -> u16 {
+        // 統計タブは wrap しない固定幅前提。論理 = visual。
+        self.len().min(u16::MAX as usize) as u16
+    }
+    fn render(self, f: &mut Frame, content_area: Rect, scroll: u16, _cs: &mut ClickState) {
+        f.render_widget(Paragraph::new(self).scroll((scroll, 0)), content_area);
+    }
+}
+
+/// スクロール対応タブの汎用 render エントリ。
+///
+/// 1. `border_color` の枠を `area` 全体に描く
+/// 2. 内側を「コンテンツ + ▲▼ 列」に分割
+/// 3. `content.content_height` から max_scroll を算出して `state.tab_scroll` を clamp
+/// 4. コンテンツを content_area に描画 (clamp 後の scroll を渡す)
+/// 5. 必要に応じて ▲▼ を描画
+///
+/// 各タブの呼び出し箇所は「コンテンツを組み立てて渡す」だけになる。
+fn render_scrollable_tab<'a, C: ScrollableContent<'a>>(
+    state: &AbyssState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+    border_color: Color,
+    content: C,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color));
+    let (content_area, scroll_col) = split_for_scroll(block.inner(area));
+
+    let content_h = content.content_height(content_area.width);
+    let scroll = clamp_tab_scroll(state, content_h, content_area.height);
+    let max_scroll = content_h.saturating_sub(content_area.height);
+
+    f.render_widget(block, area);
+
+    let mut cs = click_state.borrow_mut();
+    content.render(f, content_area, scroll, &mut cs);
+    if let Some(sc) = scroll_col {
+        render_scroll_indicators(f, sc, scroll, max_scroll, &mut cs);
+    }
+}
+
 // ── 強化タブ ───────────────────────────────────────────────
 
 fn render_upgrades(
@@ -626,32 +714,14 @@ fn render_upgrades(
         }
     }
 
-    // ── 描画 + スクロール処理 ──
-    // 1. block を area 全体に描画 → inner を取得
-    // 2. inner を「コンテンツ + ▲▼ 列」に分割
-    // 3. wrap 込みの visual_height を計算し tab_scroll を clamp
-    // 4. ClickableList を content_area に描画 (block は既に出した)
-    // 5. ▲▼ を scroll_col に描画
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let (content_area, scroll_col) = split_for_scroll(inner);
-    let content_h = if narrow {
-        cl.visual_height(content_area.width)
-    } else {
-        cl.lines().len() as u16
-    };
-    let scroll = clamp_tab_scroll(state, content_h, content_area.height);
-    let max_scroll = content_h.saturating_sub(content_area.height);
-
-    let mut cs = click_state.borrow_mut();
-    cl.render(f, content_area, Block::default(), &mut cs, narrow, scroll);
-    if let Some(sc) = scroll_col {
-        render_scroll_indicators(f, sc, scroll, max_scroll, &mut cs);
-    }
+    render_scrollable_tab(
+        state,
+        f,
+        area,
+        click_state,
+        Color::Green,
+        WrappingClickableList { list: cl, wrap: narrow },
+    );
 }
 
 // ── 魂タブ ─────────────────────────────────────────────────
@@ -706,27 +776,14 @@ fn render_souls(
         );
     }
 
-    // 強化タブと同じパターン (split + clamp + ▲▼)
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Magenta));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let (content_area, scroll_col) = split_for_scroll(inner);
-    let content_h = if narrow {
-        cl.visual_height(content_area.width)
-    } else {
-        cl.lines().len() as u16
-    };
-    let scroll = clamp_tab_scroll(state, content_h, content_area.height);
-    let max_scroll = content_h.saturating_sub(content_area.height);
-
-    let mut cs = click_state.borrow_mut();
-    cl.render(f, content_area, Block::default(), &mut cs, narrow, scroll);
-    if let Some(sc) = scroll_col {
-        render_scroll_indicators(f, sc, scroll, max_scroll, &mut cs);
-    }
+    render_scrollable_tab(
+        state,
+        f,
+        area,
+        click_state,
+        Color::Magenta,
+        WrappingClickableList { list: cl, wrap: narrow },
+    );
 }
 
 // ── 設定タブ ───────────────────────────────────────────────
@@ -790,11 +847,14 @@ fn render_settings(
         )));
     }
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::White));
-    let mut cs = click_state.borrow_mut();
-    cl.render(f, area, block, &mut cs, narrow, 0);
+    render_scrollable_tab(
+        state,
+        f,
+        area,
+        click_state,
+        Color::White,
+        WrappingClickableList { list: cl, wrap: narrow },
+    );
 }
 
 // ── 統計タブ ───────────────────────────────────────────────
@@ -845,29 +905,9 @@ fn render_stats(
         format!("×{:.2}", state.gold_multiplier()),
     ));
 
-    // 統計タブは ClickableList ではなく素の Paragraph。同じ scroll パターンを
-    // 適用するため、block を分離してから Paragraph::scroll で offset 描画する。
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let (content_area, scroll_col) = split_for_scroll(inner);
-    // 統計タブは wrap せず固定幅で表示するので論理行数 = visual 行数。
-    let content_h = lines.len().min(u16::MAX as usize) as u16;
-    let scroll = clamp_tab_scroll(state, content_h, content_area.height);
-    let max_scroll = content_h.saturating_sub(content_area.height);
-
-    f.render_widget(
-        Paragraph::new(lines).scroll((scroll, 0)),
-        content_area,
-    );
-
-    if let Some(sc) = scroll_col {
-        let mut cs = click_state.borrow_mut();
-        render_scroll_indicators(f, sc, scroll, max_scroll, &mut cs);
-    }
+    // ScrollableContent の Vec<Line> impl 経由で render_scrollable_tab に委譲。
+    // 強化/魂/設定タブと完全に同じパターンで描画される。
+    render_scrollable_tab(state, f, area, click_state, Color::Cyan, lines);
 }
 
 fn stat_line(label: &'static str, value: String) -> Line<'static> {
