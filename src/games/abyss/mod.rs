@@ -212,6 +212,7 @@ impl AbyssGame {
             TAB_SOULS => Some(PlayerAction::SetTab(Tab::Souls)),
             TAB_STATS => Some(PlayerAction::SetTab(Tab::Stats)),
             TAB_GACHA => Some(PlayerAction::SetTab(Tab::Gacha)),
+            TAB_SETTINGS => Some(PlayerAction::SetTab(Tab::Settings)),
             TOGGLE_AUTO_DESCEND => Some(PlayerAction::ToggleAutoDescend),
             RETREAT_TO_SURFACE => Some(PlayerAction::Retreat),
             GACHA_PULL_1 => Some(PlayerAction::GachaPull(1)),
@@ -243,6 +244,7 @@ impl AbyssGame {
             '|' => Some(PlayerAction::SetTab(Tab::Souls)),
             '}' => Some(PlayerAction::SetTab(Tab::Stats)),
             '~' => Some(PlayerAction::SetTab(Tab::Gacha)),
+            '\\' => Some(PlayerAction::SetTab(Tab::Settings)),
             'a' | 'A' => Some(PlayerAction::ToggleAutoDescend),
             'p' | 'P' => Some(PlayerAction::Retreat),
             '1'..='7' if matches!(self.state.tab, Tab::Upgrades) => {

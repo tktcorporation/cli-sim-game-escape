@@ -43,7 +43,9 @@ pub fn compute_layout(area: Rect) -> AbyssLayout {
         .constraints([
             Constraint::Length(header_height),
             Constraint::Length(combat_height),
-            Constraint::Length(3),
+            // toggle bar: 浅瀬に戻るボタン 1 行のみ (枠なし)。
+            // 自動潜行トグルは Settings タブに移動した。
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(8),
         ])
@@ -91,6 +93,7 @@ pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<Re
         Tab::Souls => render_souls(state, f, body_chunks[0], click_state),
         Tab::Stats => render_stats(state, f, body_chunks[0]),
         Tab::Gacha => render_gacha(state, f, body_chunks[0], click_state),
+        Tab::Settings => render_settings(state, f, body_chunks[0], click_state),
     }
     render_log(state, f, body_chunks[1]);
 }
@@ -376,48 +379,24 @@ fn make_progress_line(label: &'static str, frac: f32, width: u16, color: Color) 
 // ── トグル行 ───────────────────────────────────────────────
 
 fn render_toggle_bar(
-    state: &AbyssState,
+    _state: &AbyssState,
     f: &mut Frame,
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    if inner.height == 0 {
+    // 自動潜行は Settings タブに移したので、ここは「浅瀬に戻る」1 ボタンのみ。
+    // 枠を外して 1 行に圧縮することで、強化リストに 2 行余分に渡せる。
+    if area.height == 0 {
         return;
     }
-
-    let halves = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-        .split(inner);
-
-    let auto_label = if state.auto_descend {
-        " 自動潜行: ON ▼ "
-    } else {
-        " 自動潜行: OFF ■ "
-    };
-    let auto_color = if state.auto_descend { Color::Green } else { Color::Yellow };
-    let auto_para = Paragraph::new(Line::from(Span::styled(
-        auto_label,
-        Style::default().fg(auto_color).add_modifier(Modifier::BOLD),
-    )));
-
     let retreat_para = Paragraph::new(Line::from(Span::styled(
         " 浅瀬に戻る △",
         Style::default().fg(Color::LightCyan),
     )))
     .alignment(Alignment::Right);
 
-    {
-        let mut cs = click_state.borrow_mut();
-        Clickable::new(auto_para, TOGGLE_AUTO_DESCEND).render(f, halves[0], &mut cs);
-        Clickable::new(retreat_para, RETREAT_TO_SURFACE).render(f, halves[1], &mut cs);
-    }
+    let mut cs = click_state.borrow_mut();
+    Clickable::new(retreat_para, RETREAT_TO_SURFACE).render(f, area, &mut cs);
 }
 
 // ── タブバー ───────────────────────────────────────────────
@@ -433,6 +412,7 @@ fn render_tab_bar(
         Tab::Souls => 1,
         Tab::Stats => 2,
         Tab::Gacha => 3,
+        Tab::Settings => 4,
     };
     let style_for = |idx: usize, base: Color| -> Style {
         if idx == active_idx {
@@ -446,11 +426,15 @@ fn render_tab_bar(
     };
 
     let separator = if is_narrow_layout(area.width) { "|" } else { " │ " };
+    // narrow 40 列で 5 タブ並ぶので、ガチャの 🔑 絵文字を narrow では落として幅を圧縮。
+    let gacha_label = if is_narrow_layout(area.width) { "ガチャ" } else { "ガチャ🔑" };
+    let settings_label = if is_narrow_layout(area.width) { "設定" } else { "⚙設定" };
     let bar = TabBar::new(separator)
         .tab("強化", style_for(0, Color::Green), TAB_UPGRADES)
         .tab("魂", style_for(1, Color::Magenta), TAB_SOULS)
         .tab("統計", style_for(2, Color::Cyan), TAB_STATS)
-        .tab("ガチャ🔑", style_for(3, Color::LightCyan), TAB_GACHA);
+        .tab(gacha_label, style_for(3, Color::LightCyan), TAB_GACHA)
+        .tab(settings_label, style_for(4, Color::White), TAB_SETTINGS);
 
     let mut cs = click_state.borrow_mut();
     bar.render(f, area, &mut cs);
@@ -642,6 +626,74 @@ fn render_souls(
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Magenta));
+    let mut cs = click_state.borrow_mut();
+    cl.render(f, area, block, &mut cs, narrow, 0);
+}
+
+// ── 設定タブ ───────────────────────────────────────────────
+
+/// 設定タブ。「セッションを通して頻繁に切り替えない項目」を集約する場所。
+/// 現状は自動潜行のみ。将来的に難易度・サウンド・倍速プレイ等を入れる想定。
+fn render_settings(
+    state: &AbyssState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let narrow = is_narrow_layout(area.width);
+    let mut cl = ClickableList::new();
+
+    // ヘッダ。narrow では副題を畳む (強化タブと同じポリシー)。
+    if narrow {
+        cl.push(Line::from(Span::styled(
+            " 設定",
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        cl.push(Line::from(vec![
+            Span::styled(
+                " 設定",
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " — プレイ全体に効くオプション",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+        cl.push(Line::from(""));
+    }
+
+    // ── 自動潜行トグル ──
+    // 行タップで TOGGLE_AUTO_DESCEND を発火 (action ID は toggle bar 時代から再利用)。
+    let (state_label, state_color) = if state.auto_descend {
+        ("ON ▼", Color::Green)
+    } else {
+        ("OFF ■", Color::Yellow)
+    };
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(
+                " 自動潜行  ",
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                state_label,
+                Style::default().fg(state_color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" (タップで切替)", Style::default().fg(Color::DarkGray)),
+        ]),
+        TOGGLE_AUTO_DESCEND,
+    );
+    if !narrow {
+        cl.push(Line::from(Span::styled(
+            "   ON: 雑魚を倒したら次フロアへ自動降下 / OFF: 現フロア周回",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::White));
     let mut cs = click_state.borrow_mut();
     cl.render(f, area, block, &mut cs, narrow, 0);
 }
@@ -1068,7 +1120,7 @@ mod tests {
         assert!(found_ten, "GACHA_PULL_10 button not registered");
     }
 
-    /// 4 タブ全てがクリック可能領域として登録されていることを確認。
+    /// 5 タブ全てがクリック可能領域として登録されていることを確認。
     #[test]
     fn all_tabs_registered() {
         let state = AbyssState::new();
@@ -1078,7 +1130,7 @@ mod tests {
             .draw(|f| render(&state, f, f.area(), &cs))
             .unwrap();
         let cs = cs.borrow();
-        let mut found = [false; 4];
+        let mut found = [false; 5];
         for y in 0..30 {
             for x in 0..80 {
                 match cs.hit_test(x, y) {
@@ -1086,6 +1138,7 @@ mod tests {
                     Some(TAB_SOULS) => found[1] = true,
                     Some(TAB_STATS) => found[2] = true,
                     Some(TAB_GACHA) => found[3] = true,
+                    Some(TAB_SETTINGS) => found[4] = true,
                     _ => {}
                 }
             }
@@ -1100,7 +1153,13 @@ mod tests {
     fn narrow_layout_renders_all_tabs() {
         let mut state = AbyssState::new();
         state.keys = 100;
-        let tabs = [Tab::Upgrades, Tab::Souls, Tab::Stats, Tab::Gacha];
+        let tabs = [
+            Tab::Upgrades,
+            Tab::Souls,
+            Tab::Stats,
+            Tab::Gacha,
+            Tab::Settings,
+        ];
         for &tab in &tabs {
             state.tab = tab;
             let cs = Rc::new(RefCell::new(ClickState::new()));
@@ -1110,7 +1169,7 @@ mod tests {
                 .unwrap();
             // narrow でも全タブターゲットが取れる (タブバーの幅切り詰めの回帰検知)
             let cs = cs.borrow();
-            let mut found = [false; 4];
+            let mut found = [false; 5];
             for y in 0..30 {
                 for x in 0..40 {
                     match cs.hit_test(x, y) {
@@ -1118,6 +1177,7 @@ mod tests {
                         Some(TAB_SOULS) => found[1] = true,
                         Some(TAB_STATS) => found[2] = true,
                         Some(TAB_GACHA) => found[3] = true,
+                        Some(TAB_SETTINGS) => found[4] = true,
                         _ => {}
                     }
                 }
@@ -1163,6 +1223,29 @@ mod tests {
             "narrow upgrades not all visible at 40x30: {:?}",
             found
         );
+    }
+
+    /// 設定タブを開いた時、自動潜行トグルがクリック可能領域として登録されること。
+    /// (自動潜行を toggle bar から settings タブに移動した回帰検知用)
+    #[test]
+    fn settings_tab_registers_auto_descend_toggle() {
+        let mut state = AbyssState::new();
+        state.tab = Tab::Settings;
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|f| render(&state, f, f.area(), &cs))
+            .unwrap();
+        let cs = cs.borrow();
+        let mut found = false;
+        for y in 0..30 {
+            for x in 0..80 {
+                if matches!(cs.hit_test(x, y), Some(TOGGLE_AUTO_DESCEND)) {
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "TOGGLE_AUTO_DESCEND not clickable in settings tab");
     }
 
     /// narrow (40 列) ガチャタブで、縦積みになったボタンが両方登録されること。

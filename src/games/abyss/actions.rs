@@ -8,6 +8,7 @@ pub const TAB_UPGRADES: u16 = 10;
 pub const TAB_SOULS: u16 = 11;
 pub const TAB_STATS: u16 = 12;
 pub const TAB_GACHA: u16 = 13;
+pub const TAB_SETTINGS: u16 = 14;
 
 // ── トグル / 操作 ─────────────────────────────────────────
 pub const TOGGLE_AUTO_DESCEND: u16 = 20;

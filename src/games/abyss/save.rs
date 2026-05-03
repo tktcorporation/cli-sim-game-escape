@@ -99,6 +99,7 @@ fn extract_save(state: &AbyssState) -> SaveData {
                 Tab::Souls => 1,
                 Tab::Stats => 2,
                 Tab::Gacha => 3,
+                Tab::Settings => 4,
             },
             keys: state.keys,
             pulls_since_epic: state.pulls_since_epic,
@@ -145,6 +146,7 @@ fn apply_save(state: &mut AbyssState, save: &GameSave) {
         1 => Tab::Souls,
         2 => Tab::Stats,
         3 => Tab::Gacha,
+        4 => Tab::Settings,
         _ => Tab::Upgrades,
     };
 
