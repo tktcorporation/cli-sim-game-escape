@@ -54,10 +54,12 @@ struct GameSave {
     hero_hp: u64,
     combat_focus: u32,
 
-    /// FloorKind の index: 0=Normal, 1=Treasure, 2=Elite, 3=Bonanza
+    /// `FloorKind::all()` 内の index。マッピングは `FloorKind::to_save_id`
+    /// / `from_save_id` に集約 (SSOT)。
     floor_kind: u8,
     auto_descend: bool,
-    /// Tab の index: 0=Upgrades, 1=Souls, 2=Stats, 3=Gacha
+    /// `Tab::all()` 内の index。マッピングは `Tab::to_save_id` /
+    /// `from_save_id` に集約 (SSOT)。
     tab: u8,
 
     keys: u64,
@@ -87,19 +89,9 @@ fn extract_save(state: &AbyssState) -> SaveData {
             run_gold_earned: state.run_gold_earned,
             hero_hp: state.hero_hp,
             combat_focus: state.combat_focus,
-            floor_kind: match state.floor_kind {
-                FloorKind::Normal => 0,
-                FloorKind::Treasure => 1,
-                FloorKind::Elite => 2,
-                FloorKind::Bonanza => 3,
-            },
+            floor_kind: state.floor_kind.to_save_id(),
             auto_descend: state.auto_descend,
-            tab: match state.tab {
-                Tab::Upgrades => 0,
-                Tab::Souls => 1,
-                Tab::Stats => 2,
-                Tab::Gacha => 3,
-            },
+            tab: state.tab.to_save_id(),
             keys: state.keys,
             pulls_since_epic: state.pulls_since_epic,
             total_pulls: state.total_pulls,
@@ -134,19 +126,9 @@ fn apply_save(state: &mut AbyssState, save: &GameSave) {
     state.hero_atk_cooldown = state.hero_atk_period();
     state.hero_regen_acc_x100 = 0;
 
-    state.floor_kind = match save.floor_kind {
-        1 => FloorKind::Treasure,
-        2 => FloorKind::Elite,
-        3 => FloorKind::Bonanza,
-        _ => FloorKind::Normal,
-    };
+    state.floor_kind = FloorKind::from_save_id(save.floor_kind);
     state.auto_descend = save.auto_descend;
-    state.tab = match save.tab {
-        1 => Tab::Souls,
-        2 => Tab::Stats,
-        3 => Tab::Gacha,
-        _ => Tab::Upgrades,
-    };
+    state.tab = Tab::from_save_id(save.tab);
 
     state.keys = save.keys;
     state.pulls_since_epic = save.pulls_since_epic;

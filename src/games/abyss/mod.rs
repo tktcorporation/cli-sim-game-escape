@@ -58,7 +58,7 @@ pub struct AbyssGame {
 }
 
 /// この PlayerAction を適用したらセーブを発火させるか。
-/// SetTab は純粋な UI 状態なので除外し、書き込みノイズを抑える。
+/// SetTab / Scroll は純粋な UI 状態なので除外し、書き込みノイズを抑える。
 fn is_save_worthy(action: PlayerAction) -> bool {
     matches!(
         action,
@@ -212,10 +212,13 @@ impl AbyssGame {
             TAB_SOULS => Some(PlayerAction::SetTab(Tab::Souls)),
             TAB_STATS => Some(PlayerAction::SetTab(Tab::Stats)),
             TAB_GACHA => Some(PlayerAction::SetTab(Tab::Gacha)),
+            TAB_SETTINGS => Some(PlayerAction::SetTab(Tab::Settings)),
             TOGGLE_AUTO_DESCEND => Some(PlayerAction::ToggleAutoDescend),
             RETREAT_TO_SURFACE => Some(PlayerAction::Retreat),
             GACHA_PULL_1 => Some(PlayerAction::GachaPull(1)),
             GACHA_PULL_10 => Some(PlayerAction::GachaPull(10)),
+            SCROLL_UP => Some(PlayerAction::ScrollUp),
+            SCROLL_DOWN => Some(PlayerAction::ScrollDown),
             id if (BUY_UPGRADE_BASE..BUY_UPGRADE_BASE + 7).contains(&id) => {
                 let idx = (id - BUY_UPGRADE_BASE) as usize;
                 UpgradeKind::from_index(idx).map(PlayerAction::BuyUpgrade)
@@ -243,6 +246,7 @@ impl AbyssGame {
             '|' => Some(PlayerAction::SetTab(Tab::Souls)),
             '}' => Some(PlayerAction::SetTab(Tab::Stats)),
             '~' => Some(PlayerAction::SetTab(Tab::Gacha)),
+            '\\' => Some(PlayerAction::SetTab(Tab::Settings)),
             'a' | 'A' => Some(PlayerAction::ToggleAutoDescend),
             'p' | 'P' => Some(PlayerAction::Retreat),
             '1'..='7' if matches!(self.state.tab, Tab::Upgrades) => {
@@ -261,6 +265,11 @@ impl AbyssGame {
             }
             's' | 'S' if matches!(self.state.tab, Tab::Gacha) => Some(PlayerAction::GachaPull(1)),
             'x' | 'X' if matches!(self.state.tab, Tab::Gacha) => Some(PlayerAction::GachaPull(10)),
+            // タブ本体スクロール。タブ非依存で動作 (どのタブでも上下できる)。
+            // main.rs:362-366 で矢印キー → h/j/k/l に既に map されているため
+            // ↑/↓ も自動的に動く。h/l は abyss では未使用なので競合なし。
+            'j' | 'J' => Some(PlayerAction::ScrollDown),
+            'k' | 'K' => Some(PlayerAction::ScrollUp),
             _ => None,
         }
     }

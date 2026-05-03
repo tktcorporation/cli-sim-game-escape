@@ -6,6 +6,8 @@
 //! `config::BalanceConfig` を介して注入される。本体ゲームは既定値を、
 //! シミュレータは差し替えた config を渡すことで難易度を変えられる。
 
+use std::cell::Cell;
+
 use super::config::BalanceConfig;
 
 /// 強化の種類。各強化は累積購入数 (level) を持ち、レベルが上がるほどコストも上昇する。
@@ -202,6 +204,45 @@ pub enum Tab {
     Souls,
     Stats,
     Gacha,
+    /// 設定 (自動潜行 ON/OFF など、頻繁に切り替えない項目)。
+    /// idle 系はメイン画面の縦領域を強化リストに優先したいので、設定系は別タブへ追い出す。
+    Settings,
+}
+
+impl Tab {
+    /// 全タブを宣言順に返す。**SSOT**: save id・タブバー描画順・テスト
+    /// イテレーションは全てこのリストから派生させる。新タブ追加時は
+    /// ここに足すだけで自動的に save 番号が割当たる (末尾追加が安全)。
+    pub const fn all() -> &'static [Tab] {
+        &[
+            Tab::Upgrades,
+            Tab::Souls,
+            Tab::Stats,
+            Tab::Gacha,
+            Tab::Settings,
+        ]
+    }
+
+    /// セーブデータ用のタブ番号 (`all()` 内のインデックス)。
+    /// render.rs ではアクティブタブ index としても再利用 (= タブ宣言順 == 描画順)。
+    pub fn to_save_id(self) -> u8 {
+        Self::all()
+            .iter()
+            .position(|&t| t == self)
+            .expect("Tab variant must appear in Tab::all()") as u8
+    }
+
+    /// セーブデータからタブを復元。未知の id は `Upgrades` にフォールバック
+    /// (旧 save / 将来 enum 縮小による不整合に対する防御)。
+    /// 利用箇所が cfg-gated な save.rs / test だけなので、デフォルトビルドでの
+    /// dead_code を避けるため同じ gate を付与。
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub fn from_save_id(id: u8) -> Self {
+        Self::all()
+            .get(id as usize)
+            .copied()
+            .unwrap_or(Tab::Upgrades)
+    }
 }
 
 /// 現フロアの種別。フロア降下時に抽選され、敵の数値修正と報酬倍率を変える。
@@ -219,6 +260,38 @@ pub enum FloorKind {
 }
 
 impl FloorKind {
+    /// 全フロア種別を宣言順に返す。**SSOT**: save id はこの順で振られる。
+    /// 抽選確率テーブル等とは別概念なので注意 (確率は別途 config 側で持つ)。
+    /// 現状 save 系統からのみ利用するので cfg-gate しているが、将来 UI 等で
+    /// イテレーションしたくなったら gate を外す。
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub const fn all() -> &'static [FloorKind] {
+        &[
+            FloorKind::Normal,
+            FloorKind::Treasure,
+            FloorKind::Elite,
+            FloorKind::Bonanza,
+        ]
+    }
+
+    /// セーブデータ用の番号 (`all()` 内のインデックス)。
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub fn to_save_id(self) -> u8 {
+        Self::all()
+            .iter()
+            .position(|&k| k == self)
+            .expect("FloorKind variant must appear in FloorKind::all()") as u8
+    }
+
+    /// セーブデータから復元。未知の id は `Normal` フォールバック。
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub fn from_save_id(id: u8) -> Self {
+        Self::all()
+            .get(id as usize)
+            .copied()
+            .unwrap_or(FloorKind::Normal)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             FloorKind::Normal => "通常",
@@ -339,6 +412,16 @@ pub struct AbyssState {
     // ── プレイヤー設定 ──
     pub auto_descend: bool,
     pub tab: Tab,
+    /// 現在のタブ本体の縦スクロール量 (visual rows)。
+    ///
+    /// **UI only**: simulator / logic は本質的には触らない、永続化もしない
+    /// (セッション限定)。タブ切替で 0 にリセット
+    /// (`logic::apply_action::SetTab` で処理)。
+    ///
+    /// `Cell<u16>` なのは、Game::render が `&self` のため、上限 clamp を
+    /// render 直前に行うために interior mutability が必要なため。
+    /// (Game trait シグネチャ変更を避ける目的。logic からは set/get で書ける)
+    pub tab_scroll: Cell<u16>,
 
     // ── ガチャ ──
     /// 蓄積した深淵の鍵 (ガチャ通貨)。永続。
@@ -400,6 +483,7 @@ impl AbyssState {
             floor_kind: FloorKind::Normal,
             auto_descend: true,
             tab: Tab::Upgrades,
+            tab_scroll: Cell::new(0),
             keys: 0,
             pulls_since_epic: 0,
             total_pulls: 0,
@@ -578,6 +662,28 @@ fn placeholder_enemy() -> Enemy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Tab::all()` の全要素が to_save_id → from_save_id で元に戻る (双方向同型)。
+    /// 新タブ追加時に save id の重複や抜け穴を検知する SSOT 保護網。
+    #[test]
+    fn tab_save_id_roundtrip() {
+        for &tab in Tab::all() {
+            let id = tab.to_save_id();
+            assert_eq!(Tab::from_save_id(id), tab, "roundtrip mismatch for {:?}", tab);
+        }
+        // 範囲外 id は既定値にフォールバック
+        assert_eq!(Tab::from_save_id(255), Tab::Upgrades);
+    }
+
+    /// 同様に FloorKind も双方向 SSOT。
+    #[test]
+    fn floor_kind_save_id_roundtrip() {
+        for &kind in FloorKind::all() {
+            let id = kind.to_save_id();
+            assert_eq!(FloorKind::from_save_id(id), kind, "roundtrip mismatch for {:?}", kind);
+        }
+        assert_eq!(FloorKind::from_save_id(255), FloorKind::Normal);
+    }
 
     #[test]
     fn initial_state_sane() {

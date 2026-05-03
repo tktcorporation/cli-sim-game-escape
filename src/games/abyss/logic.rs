@@ -414,6 +414,9 @@ pub fn toggle_auto_descend(state: &mut AbyssState) {
 /// タブ切替。
 pub fn set_tab(state: &mut AbyssState, tab: Tab) {
     state.tab = tab;
+    // タブ切替時にスクロール位置を初期化。タブごとに別 scroll を持たない設計
+    // (シンプルさ優先、cookie の prestige_scroll と同じ流儀)。
+    state.tab_scroll.set(0);
 }
 
 /// プレイヤー行動を適用する統一エントリ。本体ゲームの入力ハンドラも、
@@ -436,8 +439,24 @@ pub fn apply_action(state: &mut AbyssState, action: PlayerAction) -> bool {
             true
         }
         PlayerAction::GachaPull(count) => gacha_pull(state, count),
+        PlayerAction::ScrollUp => {
+            // 上限 clamp は render 直前で行うのでここは飽和減算のみ。
+            let v = state.tab_scroll.get().saturating_sub(SCROLL_STEP);
+            state.tab_scroll.set(v);
+            true
+        }
+        PlayerAction::ScrollDown => {
+            // 下限 clamp は render が visual_height から算出して書き戻す。
+            // ここで盲目的に増やしておき、次フレームで補正される。
+            let v = state.tab_scroll.get().saturating_add(SCROLL_STEP);
+            state.tab_scroll.set(v);
+            true
+        }
     }
 }
+
+/// 1 操作あたりのスクロール幅 (visual rows)。Cookie の prestige_scroll と同じ単位。
+const SCROLL_STEP: u16 = 3;
 
 // ── ガチャ ────────────────────────────────────────────────
 

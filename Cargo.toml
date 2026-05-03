@@ -5,6 +5,11 @@ edition = "2021"
 
 [dependencies]
 ratzilla = "0.3"
+# ratzilla 0.3 が transitive で ratatui 0.30 を使う。`unstable-rendered-line-info`
+# feature を有効化するために直接依存を追加。Cargo の feature unification で
+# ratzilla 経由のリンクと同じ ratatui crate に feature が乗る。
+# `Paragraph::line_count` API を ClickableList::visual_height で使う。
+ratatui = { version = "0.30", default-features = false, features = ["unstable-rendered-line-info"] }
 # wasm feature が必須: SimpleRng::default() が std::time::SystemTime::now() を呼ぶが
 # これは wasm32-unknown-unknown で panic する。wasm feature を有効化すると web-time
 # クレートが SystemTime を Performance.now() ベースに差し替えて回避する。

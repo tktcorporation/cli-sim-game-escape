@@ -8,6 +8,7 @@ pub const TAB_UPGRADES: u16 = 10;
 pub const TAB_SOULS: u16 = 11;
 pub const TAB_STATS: u16 = 12;
 pub const TAB_GACHA: u16 = 13;
+pub const TAB_SETTINGS: u16 = 14;
 
 // ── トグル / 操作 ─────────────────────────────────────────
 pub const TOGGLE_AUTO_DESCEND: u16 = 20;
@@ -22,3 +23,7 @@ pub const BUY_SOUL_PERK_BASE: u16 = 200;
 // ── ガチャ ────────────────────────────────────────────────
 pub const GACHA_PULL_1: u16 = 300;
 pub const GACHA_PULL_10: u16 = 301;
+
+// ── タブ本体スクロール (▲▼ オーバーレイ用) ───────────────
+pub const SCROLL_UP: u16 = 400;
+pub const SCROLL_DOWN: u16 = 401;
