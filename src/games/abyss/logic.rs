@@ -10,7 +10,8 @@
 use super::config::BalanceConfig;
 use super::policy::PlayerAction;
 use super::state::{
-    AbyssState, Enemy, FloorKind, GachaResultSummary, GachaTier, SoulPerk, Tab, UpgradeKind,
+    AbyssState, Enemy, EquipmentId, FloorKind, GachaResultSummary, GachaTier, SoulPerk, Tab,
+    UpgradeKind,
 };
 
 /// メインの tick 処理。delta_ticks 回ぶん戦闘を進める。
@@ -301,10 +302,12 @@ pub fn make_enemy(floor: u32, is_boss: bool, config: &BalanceConfig, rng_seed: &
 
     let e = &config.enemy;
     let f = floor as f64;
-    let mut hp = e.hp_base * e.hp_growth.powf(f - 1.0);
-    let mut atk = e.atk_base * e.atk_growth.powf(f - 1.0);
+    // HP / ATK / gold は piecewise schedule に切替 (旧 hp_growth.powf は撤去)。
+    // 装備込みで B100 まで届くよう深層は緩める設計。詳細は config.rs:EnemyGrowthSchedule。
+    let mut hp = e.hp_base * config.enemy_hp_schedule.multiplier(floor);
+    let mut atk = e.atk_base * config.enemy_atk_schedule.multiplier(floor);
     let mut def = e.def_base + (f - 1.0) * e.def_per_floor;
-    let mut gold = e.gold_base * e.gold_growth.powf(f - 1.0);
+    let mut gold = e.gold_base * config.enemy_gold_schedule.multiplier(floor);
 
     if is_boss {
         hp *= e.boss_hp_mult;
@@ -401,6 +404,65 @@ pub fn buy_soul_perk(state: &mut AbyssState, perk: SoulPerk) -> bool {
     true
 }
 
+/// 装備の解放条件を全て満たしているか判定する (gold は別途チェック)。
+/// UI からは「未解放だが解放可能」を表示するために使う。
+pub fn equipment_requirements_met(state: &AbyssState, id: EquipmentId) -> bool {
+    let def = match state.config.equipment.get(id.index()) {
+        Some(d) => d,
+        None => return false,
+    };
+    let req = &def.requirement;
+    if let Some(prereq) = req.prerequisite {
+        if !state.owned_equipment[prereq.index()] {
+            return false;
+        }
+    }
+    for &(kind, min_lv) in &req.upgrade_levels {
+        if state.upgrades[kind.index()] < min_lv {
+            return false;
+        }
+    }
+    true
+}
+
+/// 装備を 1 個解放する。条件未達 / gold 不足 / 既に所持済みなら false。
+pub fn buy_equipment(state: &mut AbyssState, id: EquipmentId) -> bool {
+    if state.owned_equipment[id.index()] {
+        return false;
+    }
+    if !equipment_requirements_met(state, id) {
+        return false;
+    }
+    let def = match state.config.equipment.get(id.index()) {
+        Some(d) => d,
+        None => return false,
+    };
+    let cost = def.requirement.gold_cost;
+    if state.gold < cost {
+        return false;
+    }
+    state.gold -= cost;
+    let name = def.name;
+    let label = def.effect_label;
+    let bonus_hp_pct = def.bonus.hp_pct;
+    let bonus_hp_flat = def.bonus.hp_flat;
+    state.owned_equipment[id.index()] = true;
+
+    // HP の最大値が増えた場合は、現在 HP も同量だけ底上げして「気持ち良く」する。
+    // (Vitality 強化購入と同じ振る舞い。)
+    if bonus_hp_pct > 0.0 || bonus_hp_flat > 0 {
+        let max = state.hero_max_hp();
+        // 現 HP は装備購入で増えた max 分だけ上乗せ (overheal は max でクランプ)。
+        // 簡易に: 装備購入直後は full HP まで上限近くにしたい所だが、
+        //         死にかけ → 装備購入で全回復すると緊張感が壊れるので加算のみ。
+        let delta = (max as f64 * bonus_hp_pct).round() as u64 + bonus_hp_flat;
+        state.hero_hp = state.hero_hp.saturating_add(delta).min(max);
+    }
+
+    state.add_log(format!("✦ 装備解放: {} ({})", name, label));
+    true
+}
+
 /// 自動潜行のON/OFFを切替。
 pub fn toggle_auto_descend(state: &mut AbyssState) {
     state.auto_descend = !state.auto_descend;
@@ -426,6 +488,7 @@ pub fn apply_action(state: &mut AbyssState, action: PlayerAction) -> bool {
     match action {
         PlayerAction::BuyUpgrade(kind) => buy_upgrade(state, kind),
         PlayerAction::BuySoulPerk(perk) => buy_soul_perk(state, perk),
+        PlayerAction::BuyEquipment(id) => buy_equipment(state, id),
         PlayerAction::ToggleAutoDescend => {
             toggle_auto_descend(state);
             true
@@ -589,8 +652,7 @@ fn apply_gacha_reward(state: &mut AbyssState, tier: GachaTier, summary: &mut Gac
 /// `make_enemy` と同じ式で「指定フロアの基礎雑魚 gold」を再計算する。
 /// ガチャ Common の報酬基準にだけ使う (敵生成と数値が乖離しないよう同式に揃える)。
 fn base_normal_gold(floor: u32, config: &BalanceConfig) -> u64 {
-    let f = floor as f64;
-    let g = config.enemy.gold_base * config.enemy.gold_growth.powf(f - 1.0);
+    let g = config.enemy.gold_base * config.enemy_gold_schedule.multiplier(floor);
     g.round().max(1.0) as u64
 }
 

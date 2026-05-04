@@ -182,6 +182,151 @@ impl SoulPerk {
     }
 }
 
+/// 装備の系統。lane 内では前装備が次の前提になる連鎖構造。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EquipmentLane {
+    /// 武器系統 (Sword 強化と連動して伸びる)。
+    Weapon,
+    /// 防具系統 (Armor + Vitality 強化と連動)。
+    Armor,
+    /// 装飾系統 (Speed/Crit/Regen/Gold と複合的に絡む)。
+    Accessory,
+}
+
+impl EquipmentLane {
+    pub fn name(self) -> &'static str {
+        match self {
+            EquipmentLane::Weapon => "武器",
+            EquipmentLane::Armor => "防具",
+            EquipmentLane::Accessory => "装飾",
+        }
+    }
+}
+
+/// 装備の識別子。各 lane に 4 段階で計 12 種。
+///
+/// 数値・解放条件・効果は `BalanceConfig::equipment` 経由でデータドリブンに
+/// 持つ (UpgradeKind が `base_cost`/`growth` を enum 内に持つのと違い、
+/// 装備はバランス調整頻度が高いと予想されるため)。enum 自体は識別と
+/// `index()` / `lane()` / `lane_index()` の構造情報だけを担う。
+///
+/// 並びは `all()` の順。**save id は宣言順固定**: 末尾追加なら旧 save 互換。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EquipmentId {
+    // 武器 lane
+    BronzeSword,
+    SteelSword,
+    MithrilSword,
+    GodSword,
+    // 防具 lane
+    LeatherArmor,
+    SteelArmor,
+    MithrilArmor,
+    GodArmor,
+    // 装飾 lane
+    SwiftBoots,
+    TwinWolfRing,
+    SageRobe,
+    EndingCrown,
+}
+
+/// 装備の総数。`AbyssState::owned_equipment` 配列のサイズに使う。
+pub const EQUIPMENT_COUNT: usize = 12;
+
+impl EquipmentId {
+    /// 全装備を宣言順で返す (save id の SSOT)。
+    pub fn all() -> &'static [EquipmentId] {
+        &[
+            EquipmentId::BronzeSword,
+            EquipmentId::SteelSword,
+            EquipmentId::MithrilSword,
+            EquipmentId::GodSword,
+            EquipmentId::LeatherArmor,
+            EquipmentId::SteelArmor,
+            EquipmentId::MithrilArmor,
+            EquipmentId::GodArmor,
+            EquipmentId::SwiftBoots,
+            EquipmentId::TwinWolfRing,
+            EquipmentId::SageRobe,
+            EquipmentId::EndingCrown,
+        ]
+    }
+
+    pub fn index(self) -> usize {
+        Self::all()
+            .iter()
+            .position(|&e| e == self)
+            .expect("EquipmentId variant must appear in EquipmentId::all()")
+    }
+
+    pub fn from_index(idx: usize) -> Option<EquipmentId> {
+        Self::all().get(idx).copied()
+    }
+
+    pub fn lane(self) -> EquipmentLane {
+        match self {
+            EquipmentId::BronzeSword
+            | EquipmentId::SteelSword
+            | EquipmentId::MithrilSword
+            | EquipmentId::GodSword => EquipmentLane::Weapon,
+            EquipmentId::LeatherArmor
+            | EquipmentId::SteelArmor
+            | EquipmentId::MithrilArmor
+            | EquipmentId::GodArmor => EquipmentLane::Armor,
+            EquipmentId::SwiftBoots
+            | EquipmentId::TwinWolfRing
+            | EquipmentId::SageRobe
+            | EquipmentId::EndingCrown => EquipmentLane::Accessory,
+        }
+    }
+
+    /// lane 内での段階 (0 が最序盤)。同 lane の前段階が `lane_index() - 1`。
+    pub fn lane_index(self) -> usize {
+        match self {
+            EquipmentId::BronzeSword | EquipmentId::LeatherArmor | EquipmentId::SwiftBoots => 0,
+            EquipmentId::SteelSword | EquipmentId::SteelArmor | EquipmentId::TwinWolfRing => 1,
+            EquipmentId::MithrilSword | EquipmentId::MithrilArmor | EquipmentId::SageRobe => 2,
+            EquipmentId::GodSword | EquipmentId::GodArmor | EquipmentId::EndingCrown => 3,
+        }
+    }
+}
+
+/// 装備が hero ステータスに与える効果の集合。
+///
+/// 加算 (`*_flat`) と乗算 % (`*_pct`) を分けて持つ。乗算は同種を合算した上で
+/// 「(base + flat) × (1 + sum_of_pct)」の形で適用する (soul perk と同じ流儀)。
+/// chain 乗算ではなく additive にしている理由は、UI で「合計 +X%」と
+/// 一発提示しやすく、バランス調整も線形で予測しやすいため。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EquipmentBonus {
+    pub atk_pct: f64,
+    pub atk_flat: u64,
+    pub hp_pct: f64,
+    pub hp_flat: u64,
+    pub def_flat: u64,
+    pub crit_bonus: f64,
+    pub speed_pct: f64,
+    pub regen_per_sec: f64,
+    pub gold_pct: f64,
+}
+
+impl EquipmentBonus {
+    /// 2 つの bonus を合成する (additive)。
+    pub fn merge(&self, other: &EquipmentBonus) -> EquipmentBonus {
+        EquipmentBonus {
+            atk_pct: self.atk_pct + other.atk_pct,
+            atk_flat: self.atk_flat.saturating_add(other.atk_flat),
+            hp_pct: self.hp_pct + other.hp_pct,
+            hp_flat: self.hp_flat.saturating_add(other.hp_flat),
+            def_flat: self.def_flat.saturating_add(other.def_flat),
+            crit_bonus: self.crit_bonus + other.crit_bonus,
+            speed_pct: self.speed_pct + other.speed_pct,
+            regen_per_sec: self.regen_per_sec + other.regen_per_sec,
+            gold_pct: self.gold_pct + other.gold_pct,
+        }
+    }
+}
+
 /// 現在対峙している敵。スポーンの度に作り直される。
 #[derive(Clone, Debug)]
 pub struct Enemy {
@@ -209,6 +354,9 @@ pub enum Tab {
     Roadmap,
     Stats,
     Gacha,
+    /// 装備ショップ。lane 連鎖型の解放ツリー。「次は見える / その先は ???」。
+    /// 普段は開かなくて良い (HUD には出さない)。気が向いた時だけ訪問するメニュー。
+    Shop,
     /// 設定 (自動潜行 ON/OFF など、頻繁に切り替えない項目)。
     /// idle 系はメイン画面の縦領域を強化リストに優先したいので、設定系は別タブへ追い出す。
     Settings,
@@ -225,6 +373,9 @@ impl Tab {
             Tab::Stats,
             Tab::Gacha,
             Tab::Settings,
+            // 末尾追加: 既存セーブの Settings (id 4) を維持するため最後に置く。
+            // タブバー描画順 = この順なので、Shop は右端に表示される。
+            Tab::Shop,
         ]
     }
 
@@ -389,6 +540,9 @@ pub struct AbyssState {
     pub upgrades: [u32; 7],
     pub soul_perks: [u32; 4],
     pub souls: u64,
+    /// 解放済み装備フラグ (`EquipmentId::index()` でアクセス)。
+    /// 一度解放したら永続。付け替え無し、効果は累積加算。
+    pub owned_equipment: [bool; EQUIPMENT_COUNT],
 
     // ── ラン (1回の冒険) 単位の状態 ──
     pub gold: u64,
@@ -474,6 +628,7 @@ impl AbyssState {
             upgrades: [0; 7],
             soul_perks: [0; 4],
             souls: 0,
+            owned_equipment: [false; EQUIPMENT_COUNT],
             gold: 0,
             floor: 1,
             max_floor: 1,
@@ -510,7 +665,22 @@ impl AbyssState {
         s
     }
 
-    /// 現在の最大 HP (upgrades + soul perks の合算)。
+    /// 装備の合計効果。所持中の `EquipmentDef::bonus` を additive で合算する。
+    /// 毎フレーム呼ばれうるが装備数は最大 12 なので O(N) で十分。
+    pub fn equipment_bonus(&self) -> EquipmentBonus {
+        let mut total = EquipmentBonus::default();
+        for def in self.config.equipment.iter() {
+            if self.owned_equipment[def.id.index()] {
+                total = total.merge(&def.bonus);
+            }
+        }
+        total
+    }
+
+    /// 現在の最大 HP (upgrades + soul perks + 装備の合算)。
+    ///
+    /// 計算式: `(base + curve_cumul + equipment_flat) × (1 + endurance_pct + equipment_pct)`
+    /// pct は additive で合算してから掛ける (chain 乗算ではない)。
     pub fn hero_max_hp(&self) -> u64 {
         let h = &self.config.hero;
         let lv = self.upgrades[UpgradeKind::Vitality.index()];
@@ -518,9 +688,10 @@ impl AbyssState {
             Some(curve) => curve.cumulative(lv).round() as u64,
             None => lv as u64 * h.hp_per_vitality_lv,
         };
-        let base = h.base_hp + upgrade_hp;
+        let eq = self.equipment_bonus();
+        let base = h.base_hp + upgrade_hp + eq.hp_flat;
         let endurance_lv = self.soul_perks[SoulPerk::Endurance.index()];
-        let mult = 1.0 + endurance_lv as f64 * h.endurance_per_lv;
+        let mult = 1.0 + endurance_lv as f64 * h.endurance_per_lv + eq.hp_pct;
         ((base as f64) * mult).round() as u64
     }
 
@@ -531,9 +702,10 @@ impl AbyssState {
             Some(curve) => curve.cumulative(lv).round() as u64,
             None => lv as u64 * h.atk_per_sword_lv,
         };
-        let base = h.base_atk + upgrade_atk;
+        let eq = self.equipment_bonus();
+        let base = h.base_atk + upgrade_atk + eq.atk_flat;
         let might_lv = self.soul_perks[SoulPerk::Might.index()];
-        let mult = 1.0 + might_lv as f64 * h.might_per_lv;
+        let mult = 1.0 + might_lv as f64 * h.might_per_lv + eq.atk_pct;
         ((base as f64) * mult).round() as u64
     }
 
@@ -568,14 +740,16 @@ impl AbyssState {
             Some(curve) => curve.cumulative(lv).round() as u64,
             None => lv as u64 * h.def_per_armor_lv,
         };
-        h.base_def + upgrade_def
+        let eq = self.equipment_bonus();
+        h.base_def + upgrade_def + eq.def_flat
     }
 
-    /// クリティカル率 (0.0..=`crit_cap`)。
+    /// クリティカル率 (0.0..=`crit_cap`)。装備の crit_bonus も加算。
     pub fn hero_crit_rate(&self) -> f64 {
         let h = &self.config.hero;
         let lv = self.upgrades[UpgradeKind::Crit.index()] as f64;
-        (lv * h.crit_per_lv).min(h.crit_cap)
+        let eq = self.equipment_bonus();
+        (lv * h.crit_per_lv + eq.crit_bonus).min(h.crit_cap)
     }
 
     /// 1 攻撃にかかる tick 数。SPD upgrade と戦闘集中で短縮、`atk_period_min` を下限。
@@ -586,7 +760,8 @@ impl AbyssState {
             Some(curve) => curve.cumulative(lv),
             None => lv as f64 * h.speed_per_lv,
         };
-        let speed_mult = 1.0 + speed_bonus;
+        let eq = self.equipment_bonus();
+        let speed_mult = 1.0 + speed_bonus + eq.speed_pct;
         let focus_factor = self.focus_factor();
         let period = (h.atk_period_base as f64 * focus_factor / speed_mult).round() as u32;
         period.max(h.atk_period_min)
@@ -599,17 +774,22 @@ impl AbyssState {
         (1.0 - focus * h.focus_reduction_per_point).max(0.1)
     }
 
-    /// HP regen (HP/秒)。
+    /// HP regen (HP/秒)。装備の regen_per_sec も加算。
     pub fn hero_regen_per_sec(&self) -> f64 {
+        let eq = self.equipment_bonus();
         self.upgrades[UpgradeKind::Regen.index()] as f64 * self.config.hero.regen_per_lv_per_sec
+            + eq.regen_per_sec
     }
 
-    /// gold 取得倍率 (1.0 + upgrades + soul perks)。
+    /// gold 取得倍率 (1.0 + upgrades + soul perks + equipment)。
     pub fn gold_multiplier(&self) -> f64 {
         let h = &self.config.hero;
         let upgrade_lv = self.upgrades[UpgradeKind::Gold.index()];
         let fortune_lv = self.soul_perks[SoulPerk::Fortune.index()];
-        1.0 + upgrade_lv as f64 * h.gold_per_lv + fortune_lv as f64 * h.fortune_per_lv
+        let eq = self.equipment_bonus();
+        1.0 + upgrade_lv as f64 * h.gold_per_lv
+            + fortune_lv as f64 * h.fortune_per_lv
+            + eq.gold_pct
     }
 
     /// 撃破時の魂取得倍率 (Reaper perk 由来)。

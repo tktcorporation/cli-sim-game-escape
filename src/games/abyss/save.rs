@@ -11,10 +11,10 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
-use super::state::{AbyssState, FloorKind, Tab};
+use super::state::{AbyssState, FloorKind, Tab, EQUIPMENT_COUNT};
 
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 1;
+const SAVE_VERSION: u32 = 2;
 
 #[cfg(target_arch = "wasm32")]
 const MIN_COMPATIBLE_VERSION: u32 = 1;
@@ -71,6 +71,12 @@ struct GameSave {
     deaths: u64,
     total_ticks: u64,
     rng_state: u32,
+
+    /// 解放済み装備フラグ。Vec<bool> でシリアライズ (bool はそのまま JSON に残る)。
+    /// 旧 save (v1) には欠落 → `#[serde(default)]` で空 Vec が入り、apply_save で
+    /// EQUIPMENT_COUNT の空配列にパディングされる。
+    #[serde(default)]
+    owned_equipment: Vec<bool>,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -100,6 +106,7 @@ fn extract_save(state: &AbyssState) -> SaveData {
             deaths: state.deaths,
             total_ticks: state.total_ticks,
             rng_state: state.rng_state,
+            owned_equipment: state.owned_equipment.to_vec(),
         },
     }
 }
@@ -138,6 +145,13 @@ fn apply_save(state: &mut AbyssState, save: &GameSave) {
     state.deaths = save.deaths;
     state.total_ticks = save.total_ticks;
     state.rng_state = save.rng_state;
+
+    // 装備フラグを復元 (旧 save は空 Vec → 全 false で開始)。
+    // EQUIPMENT_COUNT より長い場合は超過分を捨てる (将来装備が縮小しても安全)。
+    for (i, slot) in state.owned_equipment.iter_mut().enumerate() {
+        *slot = save.owned_equipment.get(i).copied().unwrap_or(false);
+    }
+    let _ = EQUIPMENT_COUNT; // doc-anchor: バッファサイズが想定と一致することを確認
 
     // 敵を 0 化して次 tick で再スポーンさせる (Enemy 自体は保存しない方針)。
     state.current_enemy.hp = 0;

@@ -5,13 +5,16 @@
 //! 同じ `logic::apply_action` を通す。これにより本体・sim の動作は構造的に
 //! 一致する (DI のキモ)。
 
-use super::state::{SoulPerk, Tab, UpgradeKind};
+use super::state::{EquipmentId, SoulPerk, Tab, UpgradeKind};
 
 /// プレイヤー (または AI Policy) が起こせる行動。tick とは独立して適用される。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayerAction {
     BuyUpgrade(UpgradeKind),
     BuySoulPerk(SoulPerk),
+    /// 装備を 1 個解放する (gold + 強化 Lv + 前装備の条件を全部満たす場合のみ成功)。
+    /// 解放したら永続装備、付け替え無し。
+    BuyEquipment(EquipmentId),
     ToggleAutoDescend,
     Retreat,
     SetTab(Tab),

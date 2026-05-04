@@ -13,7 +13,10 @@ use crate::input::{is_narrow_layout, ClickState};
 use crate::widgets::{Clickable, ClickableList, TabBar};
 
 use super::actions::*;
-use super::state::{AbyssState, FloorKind, SoulPerk, Tab, UpgradeKind};
+use super::logic;
+use super::state::{
+    AbyssState, EquipmentId, EquipmentLane, FloorKind, SoulPerk, Tab, UpgradeKind,
+};
 
 /// 主要パネルの Rect。effect 配置と通常描画の両方で同じ値を使うため切り出し。
 ///
@@ -94,6 +97,7 @@ pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<Re
         Tab::Stats => render_stats(state, f, body_chunks[0], click_state),
         Tab::Gacha => render_gacha(state, f, body_chunks[0], click_state),
         Tab::Settings => render_settings(state, f, body_chunks[0], click_state),
+        Tab::Shop => render_shop(state, f, body_chunks[0], click_state),
     }
     render_log(state, f, body_chunks[1]);
 }
@@ -421,16 +425,19 @@ fn render_tab_bar(
         }
     };
 
-    let separator = if is_narrow_layout(area.width) { "|" } else { " │ " };
-    // narrow 40 列で 5 タブ並ぶので、ガチャの 🔑 絵文字を narrow では落として幅を圧縮。
-    let gacha_label = if is_narrow_layout(area.width) { "ガチャ" } else { "ガチャ🔑" };
-    let settings_label = if is_narrow_layout(area.width) { "設定" } else { "⚙設定" };
+    let narrow = is_narrow_layout(area.width);
+    let separator = if narrow { "|" } else { " │ " };
+    // narrow 40 列に 6 タブ並ぶ → 絵文字と「設定」のラベルを縮める。
+    let gacha_label = if narrow { "ガチャ" } else { "ガチャ🔑" };
+    let settings_label = if narrow { "設定" } else { "⚙設定" };
+    let shop_label = if narrow { "装備" } else { "🛡装備" };
     let bar = TabBar::new(separator)
         .tab("強化", style_for(0, Color::Green), TAB_UPGRADES)
         .tab("進捗", style_for(1, Color::Cyan), TAB_ROADMAP)
         .tab("統計", style_for(2, Color::Cyan), TAB_STATS)
         .tab(gacha_label, style_for(3, Color::LightCyan), TAB_GACHA)
-        .tab(settings_label, style_for(4, Color::White), TAB_SETTINGS);
+        .tab(settings_label, style_for(4, Color::White), TAB_SETTINGS)
+        .tab(shop_label, style_for(5, Color::Yellow), TAB_SHOP);
 
     let mut cs = click_state.borrow_mut();
     bar.render(f, area, &mut cs);
@@ -941,6 +948,210 @@ fn render_roadmap(
     }
 
     render_scrollable_tab(state, f, area, click_state, Color::Cyan, lines);
+}
+
+// ── 装備ショップタブ ───────────────────────────────────────
+
+/// 装備ショップタブ。lane 連鎖型の解放ツリー。
+///
+/// 表示ルール:
+/// - 解放済みは ✓ + 効果のフル表示
+/// - lane 内の「次に解放可能」(直前装備所持済み or lane 入口) は条件と効果を表示
+/// - その先 (= 次の次) は `???` で隠す。解放を進めると順次明らかになる
+///
+/// クリック: 「次」エントリで全条件 + gold が揃っていればタップで購入。
+/// 条件不足は灰色表示でタップしても無効 (logic 側で弾かれる)。
+fn render_shop(
+    state: &AbyssState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let narrow = is_narrow_layout(area.width);
+    let mut cl = ClickableList::new();
+
+    if narrow {
+        cl.push(Line::from(Span::styled(
+            " 装備",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+    } else {
+        cl.push(Line::from(vec![
+            Span::styled(
+                " 装備",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " — gold + 強化 Lv で永続装備を解放",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+
+    // 各 lane を順に描画。lane の SSOT として全装備を走査して lane ごとに振り分ける。
+    for lane in [
+        EquipmentLane::Weapon,
+        EquipmentLane::Armor,
+        EquipmentLane::Accessory,
+    ] {
+        cl.push(Line::from(""));
+        cl.push(Line::from(Span::styled(
+            format!(" ▣ {}", lane.name()),
+            Style::default()
+                .fg(lane_color(lane))
+                .add_modifier(Modifier::BOLD),
+        )));
+
+        // この lane の装備を lane_index 順に取り出す。
+        let mut lane_items: Vec<EquipmentId> = EquipmentId::all()
+            .iter()
+            .copied()
+            .filter(|id| id.lane() == lane)
+            .collect();
+        lane_items.sort_by_key(|id| id.lane_index());
+
+        // 「次に見える」装備の lane_index を求める:
+        //   = 最後の所持装備の lane_index + 1 (誰も持ってなければ 0)
+        let next_visible_idx = lane_items
+            .iter()
+            .rev()
+            .find(|id| state.owned_equipment[id.index()])
+            .map(|id| id.lane_index() + 1)
+            .unwrap_or(0);
+
+        let mut hid_a_step = false;
+        for &id in &lane_items {
+            let owned = state.owned_equipment[id.index()];
+            let li = id.lane_index();
+
+            if owned {
+                cl.push(equipment_owned_line(state, id, narrow));
+            } else if li == next_visible_idx {
+                cl.push_clickable(
+                    equipment_next_line(state, id, narrow),
+                    BUY_EQUIPMENT_BASE + id.index() as u16,
+                );
+            } else {
+                // 「次の次」以降。1 行だけ ??? を出して以降は省略 (リスト圧縮)。
+                if !hid_a_step {
+                    cl.push(Line::from(vec![
+                        Span::raw("   "),
+                        Span::styled("???", Style::default().fg(Color::DarkGray)),
+                    ]));
+                    hid_a_step = true;
+                }
+            }
+        }
+    }
+
+    render_scrollable_tab(
+        state,
+        f,
+        area,
+        click_state,
+        Color::Yellow,
+        WrappingClickableList { list: cl, wrap: narrow },
+    );
+}
+
+fn lane_color(lane: EquipmentLane) -> Color {
+    match lane {
+        EquipmentLane::Weapon => Color::Red,
+        EquipmentLane::Armor => Color::Blue,
+        EquipmentLane::Accessory => Color::Magenta,
+    }
+}
+
+/// 解放済み装備の 1 行表示。
+fn equipment_owned_line<'a>(state: &AbyssState, id: EquipmentId, _narrow: bool) -> Line<'a> {
+    let def = match state.config.equipment.get(id.index()) {
+        Some(d) => d,
+        None => return Line::from(""),
+    };
+    Line::from(vec![
+        Span::styled(" ✓ ", Style::default().fg(Color::Green)),
+        Span::styled(
+            def.name.to_string(),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            def.effect_label.to_string(),
+            Style::default().fg(Color::Cyan),
+        ),
+    ])
+}
+
+/// 「次に解放可能」装備の 1 行表示。条件達成度で色を変える。
+fn equipment_next_line<'a>(state: &AbyssState, id: EquipmentId, narrow: bool) -> Line<'a> {
+    let def = match state.config.equipment.get(id.index()) {
+        Some(d) => d,
+        None => return Line::from(""),
+    };
+    let req_met = logic::equipment_requirements_met(state, id);
+    let cost = def.requirement.gold_cost;
+    let gold_ok = state.gold >= cost;
+    let buyable = req_met && gold_ok;
+
+    // 状態マーカー: 全条件達成 = ◆、条件未達 = ◇
+    let marker = if buyable { " ◆ " } else { " ◇ " };
+    let marker_color = if buyable { Color::Yellow } else { Color::DarkGray };
+    let label_color = if buyable { Color::White } else { Color::Gray };
+    let cost_color = if gold_ok { Color::Yellow } else { Color::DarkGray };
+
+    let mut spans = vec![
+        Span::styled(marker, Style::default().fg(marker_color)),
+        Span::styled(
+            def.name.to_string(),
+            Style::default()
+                .fg(label_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(def.effect_label.to_string(), Style::default().fg(Color::Cyan)),
+    ];
+
+    // narrow では cost のみ右に置く (条件詳細は次行)
+    spans.push(Span::raw("  "));
+    spans.push(Span::styled(
+        format!("{}g", format_num(cost)),
+        Style::default().fg(cost_color),
+    ));
+    if buyable {
+        spans.push(Span::styled(
+            " [購入]",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+
+    if !narrow && !req_met {
+        // 不足条件を 1 行に詰めて表示 (wide のみ)。
+        let mut missing: Vec<String> = Vec::new();
+        if let Some(prereq) = def.requirement.prerequisite {
+            if !state.owned_equipment[prereq.index()] {
+                if let Some(p_def) = state.config.equipment.get(prereq.index()) {
+                    missing.push(format!("要 {}", p_def.name));
+                }
+            }
+        }
+        for &(kind, min_lv) in &def.requirement.upgrade_levels {
+            let cur = state.upgrades[kind.index()];
+            if cur < min_lv {
+                missing.push(format!("{} Lv {}/{}", kind.name(), cur, min_lv));
+            }
+        }
+        if !missing.is_empty() {
+            spans.push(Span::styled(
+                format!("  ({})", missing.join(", ")),
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+    }
+
+    Line::from(spans)
 }
 
 // ── 設定タブ ───────────────────────────────────────────────

@@ -41,7 +41,7 @@ fn now_ms() -> Option<f64> {
 use actions::*;
 use effects::AbyssEffects;
 use policy::PlayerAction;
-use state::{AbyssState, SoulPerk, Tab, UpgradeKind};
+use state::{AbyssState, EquipmentId, SoulPerk, Tab, UpgradeKind, EQUIPMENT_COUNT};
 
 pub struct AbyssGame {
     pub state: AbyssState,
@@ -64,6 +64,7 @@ fn is_save_worthy(action: PlayerAction) -> bool {
         action,
         PlayerAction::BuyUpgrade(_)
             | PlayerAction::BuySoulPerk(_)
+            | PlayerAction::BuyEquipment(_)
             | PlayerAction::GachaPull(_)
             | PlayerAction::Retreat
             | PlayerAction::ToggleAutoDescend
@@ -85,6 +86,8 @@ struct PrevSnapshot {
     last_enemy_dmg: Option<(u64, bool)>,
     /// gacha の累計引き回数。増えた瞬間に「新規ガチャが回った」と判定する。
     gacha_total_pulls: u64,
+    /// 解放済み装備数 (新装備が増えた瞬間に演出をトリガ)。
+    owned_equipment_count: u32,
 }
 
 impl AbyssGame {
@@ -117,6 +120,7 @@ impl AbyssGame {
             enemy_is_boss: s.current_enemy.is_boss,
             last_enemy_dmg: s.last_enemy_damage.map(|(a, _, c)| (a, c)),
             gacha_total_pulls: s.total_pulls,
+            owned_equipment_count: s.owned_equipment.iter().filter(|b| **b).count() as u32,
         }
     }
 
@@ -180,6 +184,12 @@ impl AbyssGame {
             }
         }
 
+        // ── 装備解放 (所持数が増えた瞬間、タブが Shop なら body 内で演出) ──
+        let cur_owned = s.owned_equipment.iter().filter(|b| **b).count() as u32;
+        if cur_owned > prev.owned_equipment_count {
+            effects.push_equipment_unlock(layout.body);
+        }
+
         // 次の snapshot に更新
         self.prev.set(Self::snapshot(s));
     }
@@ -213,6 +223,7 @@ impl AbyssGame {
             TAB_STATS => Some(PlayerAction::SetTab(Tab::Stats)),
             TAB_GACHA => Some(PlayerAction::SetTab(Tab::Gacha)),
             TAB_SETTINGS => Some(PlayerAction::SetTab(Tab::Settings)),
+            TAB_SHOP => Some(PlayerAction::SetTab(Tab::Shop)),
             TOGGLE_AUTO_DESCEND => Some(PlayerAction::ToggleAutoDescend),
             RETREAT_TO_SURFACE => Some(PlayerAction::Retreat),
             GACHA_PULL_1 => Some(PlayerAction::GachaPull(1)),
@@ -226,6 +237,12 @@ impl AbyssGame {
             id if (BUY_SOUL_PERK_BASE..BUY_SOUL_PERK_BASE + 4).contains(&id) => {
                 let idx = (id - BUY_SOUL_PERK_BASE) as usize;
                 SoulPerk::from_index(idx).map(PlayerAction::BuySoulPerk)
+            }
+            id if (BUY_EQUIPMENT_BASE..BUY_EQUIPMENT_BASE + EQUIPMENT_COUNT as u16)
+                .contains(&id) =>
+            {
+                let idx = (id - BUY_EQUIPMENT_BASE) as usize;
+                EquipmentId::from_index(idx).map(PlayerAction::BuyEquipment)
             }
             _ => None,
         }
@@ -249,6 +266,10 @@ impl AbyssGame {
             '}' => Some(PlayerAction::SetTab(Tab::Stats)),
             '~' => Some(PlayerAction::SetTab(Tab::Gacha)),
             '\\' => Some(PlayerAction::SetTab(Tab::Settings)),
+            // Tab::Shop はクリック/タップ専用 (タブバー右端をタップ)。
+            // 既存のタブ用記号 `{`|`}`~`\` の隣に置ける適切な ASCII が touch regex
+            // (`/\[([0-9A-Za-z\-=!~{}|\\])\]/`) 内に無いため、ホットキー追加は
+            // index.html の regex 拡張と一緒に対応する別 PR に分割。
             'a' | 'A' => Some(PlayerAction::ToggleAutoDescend),
             'p' | 'P' => Some(PlayerAction::Retreat),
             '1'..='7' if matches!(self.state.tab, Tab::Upgrades) => {
