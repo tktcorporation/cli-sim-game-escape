@@ -781,9 +781,13 @@ fn render_roadmap(
     state: &AbyssState,
     f: &mut Frame,
     area: Rect,
-    _click_state: &Rc<RefCell<ClickState>>,
+    click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let inner_width = area.width.saturating_sub(2); // 枠分
+    // `render_scrollable_tab` 経由で他タブと同じ枠組みに揃える。
+    // `tab_scroll` の clamp / ▲▼ オーバーレイが自動で付く。
+    // 内側幅 (= scroll 列差し引き後) は呼び出し側からは見えないので、
+    // バー幅は area から保守的に算出する: 枠 2 + scroll 列 1 + 余白 4 = 7 を引く。
+    let inner_width = area.width.saturating_sub(7);
     let goal = state.goal_floor().max(1);
     let cur = state.floor.min(goal);
     let deepest = state.deepest_floor_ever.min(goal);
@@ -827,7 +831,8 @@ fn render_roadmap(
     ]));
 
     // 進捗バー — `█` = 現到達, `*` = 過去最深 (現在より深い時のみ), `░` = 未到達。
-    let bar_width: u16 = inner_width.saturating_sub(4).clamp(10, 80);
+    // 上限は撤廃。広い viewport ではバーを最大限引き伸ばし、「ゴールまでの距離」感を強調。
+    let bar_width: u16 = inner_width.max(10);
     let filled = ((cur as u64 * bar_width as u64) / goal as u64) as u16;
     // `deepest * bar_width / goal` は deepest == goal の時に bar_width 丁度になり、
     // `for i in 0..bar_width` ループの範囲外になって `*` が消える。最終 cell に
@@ -872,8 +877,8 @@ fn render_roadmap(
         ]));
     }
 
-    // 節目フロアリスト — どこに区切りがあるか、超えたかどうか。
-    // 現状は内容なしの placeholder。Region 名・節目報酬が決まったら埋める。
+    // 節目フロアリスト。各節目までの距離を出すことで「次の目標」を示す。
+    // 区画名・節目報酬は今後の Issue で埋める拡張点 (CLAUDE.md game design 参照)。
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " 節目フロア",
@@ -895,34 +900,46 @@ fn render_roadmap(
         last_milestone = milestone;
         let reached = cur >= milestone;
         let ever_reached = deepest >= milestone;
-        let (mark, color) = if reached {
+        let (mark, mark_color) = if reached {
             ("✓", Color::Green)
         } else if ever_reached {
             ("◇", Color::Magenta)
         } else {
-            (" ", Color::DarkGray)
+            ("·", Color::DarkGray)
         };
         let line_color = if reached || ever_reached {
             Color::White
         } else {
             Color::DarkGray
         };
+        // ステータス文字列: 到達済 / 過去最深で踏破 / 未到達なら残り N フロア。
+        let status = if reached {
+            "(到達済)".to_string()
+        } else if ever_reached {
+            "(過去最深で踏破)".to_string()
+        } else {
+            // off-by-one を入れる: あと N+1 F
+            format!("あと {}F", milestone - cur + 1)
+        };
+        let status_color = if reached {
+            Color::Green
+        } else if ever_reached {
+            Color::Magenta
+        } else {
+            Color::Yellow
+        };
         lines.push(Line::from(vec![
-            Span::styled(format!("  {} ", mark), Style::default().fg(color)),
+            Span::styled(format!("  {} ", mark), Style::default().fg(mark_color)),
             Span::styled(
                 format!("B{}F", milestone),
                 Style::default().fg(line_color),
             ),
-            Span::styled("  — ???", Style::default().fg(Color::DarkGray)),
+            Span::raw("  "),
+            Span::styled(status, Style::default().fg(status_color)),
         ]));
     }
 
-    let widget = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan)),
-    );
-    f.render_widget(widget, area);
+    render_scrollable_tab(state, f, area, click_state, Color::Cyan, lines);
 }
 
 // ── 設定タブ ───────────────────────────────────────────────
@@ -1779,6 +1796,85 @@ mod tests {
         assert!(
             !collapsed.contains("100階のゴール"),
             "goal=50 でサブタイトルに 100階 が残っている (ハードコード): {rendered}"
+        );
+    }
+
+    /// 進捗タブも `render_scrollable_tab` 経由で描画されるため、`tab_scroll`
+    /// が他タブと同じく clamp + 反映される。`render_roadmap` を Paragraph 直
+    /// `render_widget` で書いていた時代は scroll が silently 無視されていた
+    /// (self-review Important #2)。回帰防止: スクロール後の表示が変わる。
+    #[test]
+    fn roadmap_responds_to_tab_scroll() {
+        // 高さ 8 の小さな viewport で、コンテンツが切れる状況を作る。
+        let mut state = AbyssState::new();
+        state.tab = Tab::Roadmap;
+        state.deepest_floor_ever = 50; // 節目フロアが複数行出る状態
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+
+        let render_to_string = |state: &AbyssState| -> String {
+            let mut term = Terminal::new(TestBackend::new(40, 22)).unwrap();
+            term.draw(|f| {
+                render(state, f, f.area(), &cs);
+            })
+            .unwrap();
+            let buf = term.backend().buffer();
+            let mut s = String::new();
+            for y in 0..buf.area().height {
+                for x in 0..buf.area().width {
+                    s.push_str(buf[(x, y)].symbol());
+                }
+                s.push('\n');
+            }
+            s
+        };
+
+        let before = render_to_string(&state);
+        state.tab_scroll.set(5); // SCROLL_STEP 単位より大きい値で確実に動かす
+        let after = render_to_string(&state);
+
+        assert_ne!(
+            before, after,
+            "tab_scroll を変えても進捗タブの描画が変わらない (scrollable_tab に統合されていない)"
+        );
+    }
+
+    /// 節目フロアの placeholder (`???`) を撤廃して production-ready 文言にした。
+    /// (self-review Medium #7) 過去最深で B25F に到達済みなら「(過去最深で踏破)」、
+    /// 未到達ならば「あと NF」が出る。`???` が再混入しないよう保護。
+    #[test]
+    fn roadmap_milestone_status_is_production_ready() {
+        let mut state = AbyssState::new();
+        state.tab = Tab::Roadmap;
+        state.floor = 12; // B25F の手前
+        state.deepest_floor_ever = 12;
+
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 80)).unwrap();
+        terminal
+            .draw(|f| {
+                render(&state, f, f.area(), &cs);
+            })
+            .unwrap();
+
+        let mut rendered = String::new();
+        let buf = terminal.backend().buffer();
+        for y in 0..buf.area().height {
+            for x in 0..buf.area().width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+
+        assert!(
+            !rendered.contains("???"),
+            "進捗タブに placeholder ??? が残っている: {rendered}"
+        );
+        // B25F は未到達 → 「あと 13F」(25 - 12) のような残距離表記が出る。
+        // wide char の二セル展開で空白が混入するので、空白除去後に検査する。
+        let collapsed = rendered.replace(' ', "");
+        assert!(
+            collapsed.contains("13F"),
+            "B25F (cur=12) への残距離 13F が出ていない: {rendered}"
         );
     }
 }
