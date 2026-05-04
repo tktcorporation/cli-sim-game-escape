@@ -3,14 +3,14 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ratzilla::ratatui::layout::Rect;
+use ratzilla::ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::text::{Line, Span};
-use ratzilla::ratatui::widgets::{Block, Borders};
+use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
-use crate::widgets::ClickableList;
+use crate::widgets::Clickable;
 
 use super::super::actions::*;
 use super::super::gacha::{self, card_def};
@@ -23,9 +23,31 @@ pub(super) fn render_card_screen(state: &CafeState, f: &mut Frame, area: Rect, c
 
 pub(super) fn render_gacha_result(f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>, card_ids: &[u32]) {
     let is_narrow = is_narrow_layout(area.width);
-    let mut cl = ClickableList::new();
-    cl.push(Line::from(Span::styled(" ガチャ結果！", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
-    cl.push(Line::from(""));
+
+    // 外枠 (タイトル付き) を先に描画し、内側を「カード一覧」と「固定 OK ボタン」に分割。
+    // 10連 narrow (24 行) でも OK は最終行に必ず残ってクリック可能にする。
+    let borders = if is_narrow { Borders::TOP | Borders::BOTTOM } else { Borders::ALL };
+    let outer = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" ガチャ ");
+    let inner = outer.inner(area);
+    f.render_widget(outer, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),    // カード一覧 (overflow 時はここが切れる)
+            Constraint::Length(1), // OK ボタン (常に最終行に固定)
+        ])
+        .split(inner);
+    let cards_area = chunks[0];
+    let ok_area = chunks[1];
+
+    // カード一覧
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(" ガチャ結果！", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))));
+    lines.push(Line::from(""));
 
     for &id in card_ids {
         if let Some(def) = card_def(id) {
@@ -36,16 +58,16 @@ pub(super) fn render_gacha_result(f: &mut Frame, area: Rect, click_state: &Rc<Re
             };
             if is_narrow {
                 // Narrow: rarity+name と description を 2 行に分ける
-                cl.push(Line::from(vec![
+                lines.push(Line::from(vec![
                     Span::styled(format!(" {} ", def.rarity.label()), Style::default().fg(color).add_modifier(Modifier::BOLD)),
                     Span::styled(def.name, Style::default().fg(color)),
                 ]));
-                cl.push(Line::from(Span::styled(
+                lines.push(Line::from(Span::styled(
                     format!("   {}", def.description),
                     Style::default().fg(Color::DarkGray),
                 )));
             } else {
-                cl.push(Line::from(vec![
+                lines.push(Line::from(vec![
                     Span::styled(format!(" {} ", def.rarity.label()), Style::default().fg(color).add_modifier(Modifier::BOLD)),
                     Span::styled(def.name, Style::default().fg(color)),
                     Span::styled(format!(" — {}", def.description), Style::default().fg(Color::DarkGray)),
@@ -53,15 +75,16 @@ pub(super) fn render_gacha_result(f: &mut Frame, area: Rect, click_state: &Rc<Re
             }
         }
     }
+    f.render_widget(Paragraph::new(lines), cards_area);
 
-    cl.push(Line::from(""));
-    cl.push_clickable(Line::from(Span::styled(" ▶ OK", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))), GACHA_RESULT_OK);
-
-    let borders = if is_narrow { Borders::TOP | Borders::BOTTOM } else { Borders::ALL };
-    let block = Block::default().borders(borders).border_style(Style::default().fg(Color::Yellow)).title(" ガチャ ");
+    // OK ボタンは Clickable で 1 行領域全体をクリック可能にして固定描画する。
+    let ok_para = Paragraph::new(Line::from(Span::styled(
+        " ▶ OK",
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )));
     {
         let mut cs = click_state.borrow_mut();
-        cl.render(f, area, block, &mut cs, false, 0);
+        Clickable::new(ok_para, GACHA_RESULT_OK).render(f, ok_area, &mut cs);
     }
 }
 
@@ -128,6 +151,34 @@ mod tests {
             }
         }
         assert!(found, "GACHA_RESULT_OK button not registered at narrow width");
+    }
+
+    /// narrow 10連 (20+ 行) でも、画面が短くて中身が overflow する条件で
+    /// OK ボタンが必ず最終行に固定描画され、クリック可能であることを確認。
+    /// (Codex review #79: P1 — overflow 時に OK が clip されて触れなくなる回帰防止)
+    #[test]
+    fn gacha_result_ok_button_pinned_when_content_overflows() {
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        // 32x10: 10連 narrow (24 行) は全く入らない overflow ケース
+        let mut terminal = Terminal::new(TestBackend::new(32, 10)).unwrap();
+        // 10連 想定の 10 枚
+        let card_ids: Vec<u32> = vec![20, 21, 22, 23, 24, 10, 11, 12, 13, 14];
+        terminal
+            .draw(|f| render_gacha_result(f, f.area(), &cs, &card_ids))
+            .unwrap();
+        let cs = cs.borrow();
+        let mut found = false;
+        for y in 0..10 {
+            for x in 0..32 {
+                if cs.hit_test(x, y) == Some(GACHA_RESULT_OK) {
+                    found = true;
+                }
+            }
+        }
+        assert!(
+            found,
+            "GACHA_RESULT_OK must remain clickable when card list overflows (10連 on short terminal)"
+        );
     }
 }
 
