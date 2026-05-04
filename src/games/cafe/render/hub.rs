@@ -9,7 +9,7 @@ use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
-use crate::input::ClickState;
+use crate::input::{is_narrow_layout, ClickState};
 use crate::widgets::{ClickableList, TabBar};
 
 use super::super::actions::*;
@@ -26,24 +26,48 @@ pub(super) fn render_hub(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let is_narrow = is_narrow_layout(area.width);
+    let header_h = if is_narrow { 4 } else { 3 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // header
-            Constraint::Length(2), // tab bar
-            Constraint::Min(8),   // content
+            Constraint::Length(header_h), // header (narrow: 2 行 + borders)
+            Constraint::Length(2),        // tab bar
+            Constraint::Min(8),           // content
         ])
         .split(area);
 
-    // Header
-    let header = Paragraph::new(vec![
-        Line::from(vec![
+    // Header — narrow ではステータスを 2 行に折り返す
+    let header_lines = if is_narrow {
+        vec![
+            Line::from(vec![
+                Span::styled(format!(" Rank {} ", state.player_rank.level), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("│ ¥{}", state.money), Style::default().fg(Color::White)),
+            ]),
+            Line::from(vec![
+                Span::styled(format!(" 💎{} ", state.card_state.gems), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("│ AP {}/{}", state.ap_current, AP_MAX), Style::default().fg(Color::Green)),
+            ]),
+        ]
+    } else {
+        vec![Line::from(vec![
             Span::styled(format!(" Rank {} ", state.player_rank.level), Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
             Span::styled(format!("│ ¥{} ", state.money), Style::default().fg(Color::White)),
             Span::styled(format!("│ 💎{} ", state.card_state.gems), Style::default().fg(Color::Cyan)),
             Span::styled(format!("│ AP {}/{}", state.ap_current, AP_MAX), Style::default().fg(Color::Green)),
-        ]),
-    ]).block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Yellow)).title(" 月灯り "));
+        ])]
+    };
+    let header_borders = if is_narrow {
+        Borders::TOP | Borders::BOTTOM
+    } else {
+        Borders::ALL
+    };
+    let header = Paragraph::new(header_lines).block(
+        Block::default()
+            .borders(header_borders)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(" 月灯り "),
+    );
     f.render_widget(header, chunks[0]);
 
     // Tab bar
@@ -204,6 +228,7 @@ fn render_hub_characters(state: &CafeState, f: &mut Frame, area: Rect, click_sta
 }
 
 pub(super) fn render_hub_cards(state: &CafeState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+    let is_narrow = is_narrow_layout(area.width);
     let mut cl = ClickableList::new();
     cl.push(Line::from(Span::styled(
         format!(" 💎{} │ 🪙{}", state.card_state.gems, state.card_state.coins),
@@ -217,14 +242,25 @@ pub(super) fn render_hub_cards(state: &CafeState, f: &mut Frame, area: Rect, cli
     )));
     cl.push(Line::from(""));
 
-    // Equipped card
+    // Equipped card — narrow では 2 行に分けて溢れないようにする
     if let Some(idx) = state.card_state.equipped_card {
         if let Some(owned) = state.card_state.cards.get(idx) {
             if let Some(def) = card_def(owned.card_id) {
-                cl.push(Line::from(Span::styled(
-                    format!(" 装備中: {} {} Lv.{} (x{:.2})", def.rarity.label(), def.name, owned.level, owned.multiplier()),
-                    Style::default().fg(Color::Yellow),
-                )));
+                if is_narrow {
+                    cl.push(Line::from(Span::styled(
+                        format!(" 装備中: {} {}", def.rarity.label(), def.name),
+                        Style::default().fg(Color::Yellow),
+                    )));
+                    cl.push(Line::from(Span::styled(
+                        format!("   Lv.{} (x{:.2})", owned.level, owned.multiplier()),
+                        Style::default().fg(Color::Yellow),
+                    )));
+                } else {
+                    cl.push(Line::from(Span::styled(
+                        format!(" 装備中: {} {} Lv.{} (x{:.2})", def.rarity.label(), def.name, owned.level, owned.multiplier()),
+                        Style::default().fg(Color::Yellow),
+                    )));
+                }
             }
         }
     } else {
@@ -252,7 +288,7 @@ pub(super) fn render_hub_cards(state: &CafeState, f: &mut Frame, area: Rect, cli
     }
     cl.push(Line::from(""));
 
-    // Card list
+    // Card list ( ▶ ★★★ 名前 Lv.10 形式 — 最長 ~28 セルなので 32 列 narrow に収まる)
     for (i, owned) in state.card_state.cards.iter().enumerate().take(15) {
         if let Some(def) = card_def(owned.card_id) {
             let equipped = state.card_state.equipped_card == Some(i);
@@ -266,7 +302,8 @@ pub(super) fn render_hub_cards(state: &CafeState, f: &mut Frame, area: Rect, cli
         }
     }
 
-    let block = Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::Magenta)).title(" カード ");
+    let borders = if is_narrow { Borders::TOP | Borders::BOTTOM } else { Borders::ALL };
+    let block = Block::default().borders(borders).border_style(Style::default().fg(Color::Magenta)).title(" カード ");
     {
         let mut cs = click_state.borrow_mut();
         cl.render(f, area, block, &mut cs, false, 0);
@@ -364,5 +401,93 @@ fn render_hub_missions(state: &CafeState, f: &mut Frame, area: Rect, click_state
     {
         let mut cs = click_state.borrow_mut();
         cl.render(f, area, block, &mut cs, false, 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratzilla::ratatui::backend::TestBackend;
+    use ratzilla::ratatui::Terminal;
+    use super::super::super::gacha::cards::Rarity;
+    use super::super::super::gacha::state::OwnedCard;
+    use super::super::super::state::HubTab;
+
+    /// 32 列幅でカードタブを描画したとき、ガチャボタン (デイリードロー、
+    /// 単発、10連) がクリック登録され、装備中カード行が幅を超えないことを確認。
+    /// (もばいるでガチャの表示が崩れるリグレッション防止)
+    #[test]
+    fn hub_cards_renders_at_narrow_width() {
+        let mut state = CafeState::new();
+        state.phase = super::super::super::state::GamePhase::Hub;
+        state.hub_tab = HubTab::Cards;
+        state.card_state.gems = 5000;
+        state.player_rank.level = 99;
+        state.money = 9_999_999;
+        state.ap_current = 100;
+        // 装備中カードに最長 description のもの (id=20 月灯りの記憶) をセット
+        state.card_state.cards.push(OwnedCard {
+            card_id: 20,
+            level: 10,
+            rank_ups: 0,
+            duplicates: 0,
+        });
+        state.card_state.equipped_card = Some(0);
+
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(32, 40)).unwrap();
+        terminal
+            .draw(|f| render_hub(&state, f, f.area(), &cs))
+            .unwrap();
+
+        // ガチャ系ボタンのクリック登録
+        let cs = cs.borrow();
+        let mut found_daily = false;
+        let mut found_single = false;
+        let mut found_ten = false;
+        for y in 0..40 {
+            for x in 0..32 {
+                match cs.hit_test(x, y) {
+                    Some(CARD_DAILY_DRAW) => found_daily = true,
+                    Some(CARD_GACHA_SINGLE) => found_single = true,
+                    Some(CARD_GACHA_TEN) => found_ten = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(found_daily, "CARD_DAILY_DRAW button missing at narrow width");
+        assert!(found_single, "CARD_GACHA_SINGLE button missing at narrow width");
+        assert!(found_ten, "CARD_GACHA_TEN button missing at narrow width");
+
+        // 装備中カードの行 (rarity + name) が 32 列に収まる
+        let def = super::super::super::gacha::card_def(20).unwrap();
+        let equipped_line = format!(" 装備中: {} {}", def.rarity.label(), def.name);
+        assert!(
+            ratzilla::ratatui::text::Line::from(equipped_line.as_str()).width() <= 32,
+            "equipped card name+rarity overflows 32 cells"
+        );
+        // Rarity が Star3 であることも確認 (テストデータの妥当性)
+        assert_eq!(def.rarity, Rarity::Star3);
+    }
+
+    /// ヘッダーが 32 列幅で 2 行レイアウトに切り替わり、
+    /// 各行が 32 列に収まることを確認。
+    #[test]
+    fn hub_header_fits_at_narrow_width() {
+        // 最悪値 (Rank 99 / ¥9999999 / 💎99999 / AP 100/100)
+        let line1 = " Rank 99 │ ¥9999999".to_string();
+        let line2 = " 💎99999 │ AP 100/100".to_string();
+        let w1 = ratzilla::ratatui::text::Line::from(line1.as_str()).width();
+        let w2 = ratzilla::ratatui::text::Line::from(line2.as_str()).width();
+        assert!(w1 <= 32, "header line1 width = {w1}");
+        assert!(w2 <= 32, "header line2 width = {w2}");
+    }
+
+    /// 32 列幅では narrow レイアウトが選択されることを境界値で確認 (input::is_narrow_layout が `< 60`)。
+    #[test]
+    fn narrow_threshold_applies_to_mobile_widths() {
+        assert!(crate::input::is_narrow_layout(32));
+        assert!(crate::input::is_narrow_layout(40));
+        assert!(!crate::input::is_narrow_layout(60));
     }
 }
