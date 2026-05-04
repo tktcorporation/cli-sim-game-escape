@@ -255,12 +255,17 @@ impl AbyssGame {
                 let idx = (ch as u8 - b'1') as usize;
                 UpgradeKind::from_index(idx).map(PlayerAction::BuyUpgrade)
             }
-            'q' | 'w' | 'e' | 'r' if matches!(self.state.tab, Tab::Upgrades) => {
+            // 魂パーク購入 (旧 Souls タブの `q/w/e/r` を踏襲)。
+            // **大文字** に変えているのは、小文字 `q` が main.rs のグローバル
+            // back-to-menu キー (Esc も `q` にマップ) と衝突するため。
+            // Upgrades が default タブになった #78 以降、小文字 q を魂購入に
+            // 使うとメニュー戻りが効かなくなる UX 退行が発生する (Codex review #78 参照)。
+            'Q' | 'W' | 'E' | 'R' if matches!(self.state.tab, Tab::Upgrades) => {
                 let idx = match ch {
-                    'q' => 0,
-                    'w' => 1,
-                    'e' => 2,
-                    'r' => 3,
+                    'Q' => 0,
+                    'W' => 1,
+                    'E' => 2,
+                    'R' => 3,
                     _ => unreachable!(),
                 };
                 SoulPerk::from_index(idx).map(PlayerAction::BuySoulPerk)
@@ -394,10 +399,33 @@ mod tests {
     fn buy_soul_perk_via_key() {
         let mut g = AbyssGame::new();
         // 魂強化購入は強化タブ統合後 Tab::Upgrades 内から行う。
+        // 小文字 `q` は back-to-menu と衝突するため**大文字** Q/W/E/R を使う。
         g.state.tab = Tab::Upgrades;
         g.state.souls = 100;
-        g.handle_input(&InputEvent::Key('q'));
+        g.handle_input(&InputEvent::Key('Q'));
         assert_eq!(g.state.soul_perks[SoulPerk::Might.index()], 1);
+    }
+
+    /// 小文字 `q` は main.rs の back-to-menu キー (Esc 同等)。Upgrades タブ
+    /// 統合 (#78) の前は 'q' を魂購入に bind していたが、デフォルトタブが
+    /// Upgrades になった現在は q をゲーム側で消費すると最も滞在時間の長い
+    /// 画面でメニュー戻りが効かなくなる。Codex P1 レビューで指摘されたバグ
+    /// の回帰防止: **`q` は handle_input() で消費されない (= false が返る)**。
+    #[test]
+    fn lowercase_q_does_not_consume_input_on_upgrades_tab() {
+        let mut g = AbyssGame::new();
+        g.state.tab = Tab::Upgrades;
+        g.state.souls = 999_999; // 購入余地あっても q を bind してはいけない。
+        let consumed = g.handle_input(&InputEvent::Key('q'));
+        assert!(
+            !consumed,
+            "小文字 'q' を消費するとメニュー戻りが効かなくなる"
+        );
+        assert_eq!(
+            g.state.soul_perks[SoulPerk::Might.index()],
+            0,
+            "小文字 'q' で誤って魂パークが買われてはいけない"
+        );
     }
 
     #[test]
