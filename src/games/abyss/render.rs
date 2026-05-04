@@ -799,7 +799,7 @@ fn render_roadmap(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  — 100階のゴールまで",
+            format!("  — {}階のゴールまで", goal),
             Style::default().fg(Color::DarkGray),
         ),
     ]));
@@ -829,7 +829,11 @@ fn render_roadmap(
     // 進捗バー — `█` = 現到達, `*` = 過去最深 (現在より深い時のみ), `░` = 未到達。
     let bar_width: u16 = inner_width.saturating_sub(4).clamp(10, 80);
     let filled = ((cur as u64 * bar_width as u64) / goal as u64) as u16;
+    // `deepest * bar_width / goal` は deepest == goal の時に bar_width 丁度になり、
+    // `for i in 0..bar_width` ループの範囲外になって `*` が消える。最終 cell に
+    // クランプして、ゴール到達経験者の最深マーカーを必ず描画する。
     let deepest_pos = ((deepest as u64 * bar_width as u64) / goal as u64) as u16;
+    let deepest_pos = deepest_pos.min(bar_width.saturating_sub(1));
 
     let mut bar = String::with_capacity(bar_width as usize + 2);
     bar.push('[');
@@ -877,7 +881,18 @@ fn render_roadmap(
             .fg(Color::Cyan)
             .add_modifier(Modifier::BOLD),
     )));
-    for &milestone in &[10u32, 25, 50, 75, 100] {
+    // 節目は goal_floor の百分率で導出 (10/25/50/75/100%)。
+    // goal=100 なら従来の B10/B25/B50/B75/B100、goal=50 なら B5/B12/B25/B37/B50、
+    // goal=200 なら B20/B50/B100/B150/B200 と自動的に追従する。
+    // 重複除去 (goal が小さい時に同一 floor が複数回出るのを防ぐ) のため、
+    // 直前の milestone と異なる場合のみ表示する。
+    let mut last_milestone: u32 = 0;
+    for pct in [10u32, 25, 50, 75, 100] {
+        let milestone = (((goal as u64 * pct as u64) / 100).max(1) as u32).min(goal);
+        if milestone == last_milestone {
+            continue;
+        }
+        last_milestone = milestone;
         let reached = cur >= milestone;
         let ever_reached = deepest >= milestone;
         let (mark, color) = if reached {
@@ -1640,7 +1655,13 @@ mod tests {
     /// 進捗タブの最深マーカー (`*`) は、過去にゴール (= goal_floor) に
     /// 到達した状態で現在より浅い位置にいる時にも必ず描画される。
     /// 旧実装は `(deepest * bar_width) / goal == bar_width` ちょうどになり
-    /// `for i in 0..bar_width` から外れて `*` が消える境界バグがあった。
+    /// `for i in 0..bar_width` から外れて `*` が消える境階バグがあった。
+    ///
+    /// 注意: ロードマップタブには「(バー上の * 印)」というラベル文字列も
+    /// `deepest > cur` 時に出るので、画面全体で `*` を `any()` で探すと
+    /// production を壊しても false positive で pass してしまう。
+    /// **`*` は最低 2 回出る** (バー本体 + ラベル) ことを assert することで、
+    /// バー側の `*` 消失を確実に検出する。
     #[test]
     fn roadmap_deepest_marker_visible_when_deepest_equals_goal() {
         let mut state = AbyssState::new();
@@ -1656,18 +1677,26 @@ mod tests {
             })
             .unwrap();
         let buf = terminal.backend().buffer();
-        let has_marker = (0..buf.area().width)
+        let star_count = (0..buf.area().width)
             .flat_map(|x| (0..buf.area().height).map(move |y| (x, y)))
-            .any(|(x, y)| buf[(x, y)].symbol() == "*");
+            .filter(|&(x, y)| buf[(x, y)].symbol() == "*")
+            .count();
         assert!(
-            has_marker,
-            "最深 == ゴール時に `*` マーカーが描画されない (off-by-one)"
+            star_count >= 2,
+            "最深 == ゴール時に `*` マーカーがバーに描画されていない (off-by-one)。\
+             count={star_count} (ラベル分の 1 個のみ = false positive)"
         );
     }
 
     /// 進捗タブの節目フロアは `goal_floor` の百分率から導出されるべき。
     /// goal=50 のとき、B100F のような goal を超える行が出ていないこと、
     /// および到達済みの中間 milestone (例: B25F = 50%) が表示されることを確認する。
+    ///
+    /// 注意: 80x30 のような小さい viewport では body 高さが ~10 行に縛られて
+    /// milestone 行がクリップされ、production が `[10,25,50,75,100]` 直書きでも
+    /// テストが pass してしまう viewport 依存の false positive がある。
+    /// **80x80 の十分大きな viewport** で実行することで、production 側の
+    /// バグが本物の B75F/B100F 行を描画してもテストが catch する。
     #[test]
     fn roadmap_milestones_scale_with_goal_floor() {
         use super::super::config::BalanceConfig;
@@ -1679,7 +1708,8 @@ mod tests {
         state.deepest_floor_ever = 30;
 
         let cs = Rc::new(RefCell::new(ClickState::new()));
-        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        // viewport 80x80 で milestone リスト全行が描画されることを保証。
+        let mut terminal = Terminal::new(TestBackend::new(80, 80)).unwrap();
         terminal
             .draw(|f| {
                 render(&state, f, f.area(), &cs);
@@ -1698,14 +1728,57 @@ mod tests {
         // goal=50 では goal を超える B75F / B100F の行は出ない。
         assert!(
             !rendered.contains("B75F"),
-            "goal=50 で B75F 行が出ている: {rendered}"
+            "goal=50 で B75F 行が出ている (milestone がハードコード): {rendered}"
         );
         assert!(
             !rendered.contains("B100F"),
-            "goal=50 で B100F 行が出ている: {rendered}"
+            "goal=50 で B100F 行が出ている (milestone がハードコード): {rendered}"
         );
         // 50% (= B25F) と 100% (= B50F) は表示される。
         assert!(rendered.contains("B25F"), "B25F (50%) が出ていない");
         assert!(rendered.contains("B50F"), "B50F (100% = goal) が出ていない");
+    }
+
+    /// 進捗タブのサブタイトルは `goal_floor` から導出されるべき。
+    /// `"100階のゴールまで"` のハードコードは config 化と矛盾するので、
+    /// goal=50 のとき `50階` と表示されることを assert する。
+    #[test]
+    fn roadmap_subtitle_uses_configured_goal() {
+        use super::super::config::BalanceConfig;
+        let mut config = BalanceConfig::default();
+        config.pacing.goal_floor = 50;
+        let mut state = AbyssState::with_config(config);
+        state.tab = Tab::Roadmap;
+
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                render(&state, f, f.area(), &cs);
+            })
+            .unwrap();
+
+        let mut rendered = String::new();
+        let buf = terminal.backend().buffer();
+        for y in 0..buf.area().height {
+            for x in 0..buf.area().width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+
+        // ratatui の TestBackend は wide char (East Asian) を 2 セルに分割し、
+        // 二セル目に空白を入れるため、`.symbol()` を素朴に concat すると
+        // "50階のゴール" が "5 0 階 の ゴ ー ル" のように展開される。
+        // 空白を除去して論理的な substring 一致を確認する。
+        let collapsed = rendered.replace(' ', "");
+        assert!(
+            collapsed.contains("50階のゴール"),
+            "goal=50 でサブタイトルに 50階 が出ていない: {rendered}"
+        );
+        assert!(
+            !collapsed.contains("100階のゴール"),
+            "goal=50 でサブタイトルに 100階 が残っている (ハードコード): {rendered}"
+        );
     }
 }
