@@ -123,6 +123,15 @@ fn apply_save(state: &mut AbyssState, save: &GameSave) {
     state.run_kills = save.run_kills;
     state.run_gold_earned = save.run_gold_earned;
 
+    // 装備フラグを **hero_max_hp() の依存物なので HP clamp より前に** 復元する。
+    // 装備込みの max HP を計算してから hero_hp を clamp しないと、HP 強化系装備
+    // 込みのセーブが「装備抜き max」で先に切られて読み込まれてしまう
+    // (Codex review #80 P2)。EQUIPMENT_COUNT より長い場合は超過分を捨てる。
+    for (i, slot) in state.owned_equipment.iter_mut().enumerate() {
+        *slot = save.owned_equipment.get(i).copied().unwrap_or(false);
+    }
+    let _ = EQUIPMENT_COUNT; // doc-anchor: バッファサイズが想定と一致することを確認
+
     let max_hp = state.hero_max_hp();
     state.hero_hp = if save.hero_hp == 0 {
         max_hp
@@ -145,13 +154,6 @@ fn apply_save(state: &mut AbyssState, save: &GameSave) {
     state.deaths = save.deaths;
     state.total_ticks = save.total_ticks;
     state.rng_state = save.rng_state;
-
-    // 装備フラグを復元 (旧 save は空 Vec → 全 false で開始)。
-    // EQUIPMENT_COUNT より長い場合は超過分を捨てる (将来装備が縮小しても安全)。
-    for (i, slot) in state.owned_equipment.iter_mut().enumerate() {
-        *slot = save.owned_equipment.get(i).copied().unwrap_or(false);
-    }
-    let _ = EQUIPMENT_COUNT; // doc-anchor: バッファサイズが想定と一致することを確認
 
     // 敵を 0 化して次 tick で再スポーンさせる (Enemy 自体は保存しない方針)。
     state.current_enemy.hp = 0;
@@ -320,6 +322,55 @@ mod tests {
         let mut restored = AbyssState::new();
         apply_save(&mut restored, &loaded.game);
         assert!(restored.hero_hp <= restored.hero_max_hp());
+    }
+
+    /// HP +%装備を所持した状態のセーブで、現 HP が装備込み max HP に基づいて
+    /// 復元されること。Codex review #80 P2 回帰防止: 旧実装では装備フラグ復元
+    /// 前に hero_max_hp() を呼んでいたため、装備込みセーブが「装備抜き max」で
+    /// 切られて読み込まれていた。
+    #[test]
+    fn equipment_restored_before_hp_clamp() {
+        use crate::games::abyss::state::{EquipmentId, UpgradeKind};
+
+        // 元 state で HP +%装備系統を全部解放、HP も装備込み max にしておく。
+        let mut original = AbyssState::new();
+        original.upgrades[UpgradeKind::Armor.index()] = 60;
+        original.upgrades[UpgradeKind::Vitality.index()] = 60;
+        for id in [
+            EquipmentId::LeatherArmor,
+            EquipmentId::SteelArmor,
+            EquipmentId::MithrilArmor,
+            EquipmentId::GodArmor,
+        ] {
+            original.owned_equipment[id.index()] = true;
+        }
+        let full_max = original.hero_max_hp();
+        original.hero_hp = full_max;
+
+        // 装備抜きの max は装備込みより大幅に小さい (装備が効いている前提条件)。
+        let mut bare = AbyssState::new();
+        bare.upgrades = original.upgrades;
+        let bare_max = bare.hero_max_hp();
+        assert!(
+            full_max > bare_max * 2,
+            "test setup: 装備込み max ({}) は装備抜き ({}) の 2 倍以上であるべき",
+            full_max,
+            bare_max
+        );
+
+        // ラウンドトリップ。
+        let save = extract_save(&original);
+        let json = serde_json::to_string(&save).unwrap();
+        let loaded: SaveData = serde_json::from_str(&json).unwrap();
+        let mut restored = AbyssState::new();
+        apply_save(&mut restored, &loaded.game);
+
+        // 装備が復元されてから max が計算されるので、保存時の HP がそのまま戻る。
+        assert_eq!(
+            restored.hero_hp, full_max,
+            "装備込み max ({}) で復元されるべきが、装備抜き max ({}) で切られている疑い",
+            full_max, bare_max
+        );
     }
 
     /// 未知の追加フィールドが含まれていても無視される。

@@ -444,20 +444,17 @@ pub fn buy_equipment(state: &mut AbyssState, id: EquipmentId) -> bool {
     state.gold -= cost;
     let name = def.name;
     let label = def.effect_label;
-    let bonus_hp_pct = def.bonus.hp_pct;
-    let bonus_hp_flat = def.bonus.hp_flat;
-    state.owned_equipment[id.index()] = true;
 
-    // HP の最大値が増えた場合は、現在 HP も同量だけ底上げして「気持ち良く」する。
-    // (Vitality 強化購入と同じ振る舞い。)
-    if bonus_hp_pct > 0.0 || bonus_hp_flat > 0 {
-        let max = state.hero_max_hp();
-        // 現 HP は装備購入で増えた max 分だけ上乗せ (overheal は max でクランプ)。
-        // 簡易に: 装備購入直後は full HP まで上限近くにしたい所だが、
-        //         死にかけ → 装備購入で全回復すると緊張感が壊れるので加算のみ。
-        let delta = (max as f64 * bonus_hp_pct).round() as u64 + bonus_hp_flat;
-        state.hero_hp = state.hero_hp.saturating_add(delta).min(max);
-    }
+    // 「装備購入で max HP が増えた分だけ現 HP も底上げ」の正しい計算。
+    // 旧実装は `new_max * bonus_hp_pct + bonus_hp_flat` を delta としていたが、
+    // 既存装備込みの new_max に対して bonus_hp_pct を適用するので、新装備の
+    // 実際の max HP 増分を大幅に超過し「死にかけでも全回復」してしまう
+    // (Codex review #80 P1)。Vitality 購入と同じ「before/after の差分」方式に統一する。
+    let max_before = state.hero_max_hp();
+    state.owned_equipment[id.index()] = true;
+    let max_after = state.hero_max_hp();
+    let delta = max_after.saturating_sub(max_before);
+    state.hero_hp = state.hero_hp.saturating_add(delta).min(max_after);
 
     state.add_log(format!("✦ 装備解放: {} ({})", name, label));
     true
@@ -849,6 +846,47 @@ mod tests {
         s.hero_hp = 1;
         retreat(&mut s);
         assert_eq!(s.floor, 1);
+        assert!(s.hero_hp > 1);
+    }
+
+    /// 装備購入時の HP bump が「実際の max HP 増分だけ」乗ること。
+    /// Codex review #80 P1 の回帰防止: 旧実装は `new_max * bonus_pct` を
+    /// 加算していて、低 HP からの装備購入で全回復してしまっていた。
+    #[test]
+    fn buy_equipment_hp_bump_uses_actual_max_diff() {
+        use crate::games::abyss::state::EquipmentId;
+
+        // GodArmor は HP +600% の代表例。前提装備を全て埋めて解放可能にする。
+        let mut s = AbyssState::new();
+        s.upgrades[UpgradeKind::Armor.index()] = 60;
+        s.upgrades[UpgradeKind::Vitality.index()] = 60;
+        s.gold = 1_000_000_000;
+        // ミスリル鎧までを連鎖購入で解放 (前装備 prereq を満たすため)。
+        for id in [
+            EquipmentId::LeatherArmor,
+            EquipmentId::SteelArmor,
+            EquipmentId::MithrilArmor,
+        ] {
+            assert!(buy_equipment(&mut s, id), "prereq purchase failed");
+        }
+
+        // 「死にかけ」状態にしてから GodArmor を買う。
+        s.hero_hp = 1;
+        let max_before = s.hero_max_hp();
+        assert!(buy_equipment(&mut s, EquipmentId::GodArmor));
+        let max_after = s.hero_max_hp();
+        let actual_delta = max_after - max_before;
+
+        // 不変条件 1: 現 HP の増加分 ≤ max HP の増加分 (over-heal しない)。
+        assert!(
+            s.hero_hp <= 1 + actual_delta,
+            "hero_hp ({}) must not exceed 1 + actual max diff ({}); over-heal regression",
+            s.hero_hp,
+            1 + actual_delta
+        );
+        // 不変条件 2: 必ず max を超えない。
+        assert!(s.hero_hp <= max_after);
+        // 不変条件 3: HP が増えた装備なので最低でも 1 は増える。
         assert!(s.hero_hp > 1);
     }
 
