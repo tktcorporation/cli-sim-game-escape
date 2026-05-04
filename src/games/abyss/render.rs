@@ -1636,4 +1636,76 @@ mod tests {
         assert!((atk_progress(10, 5) - 0.5).abs() < 1e-6);
         assert!((atk_progress(0, 0) - 1.0).abs() < 1e-6);
     }
+
+    /// 進捗タブの最深マーカー (`*`) は、過去にゴール (= goal_floor) に
+    /// 到達した状態で現在より浅い位置にいる時にも必ず描画される。
+    /// 旧実装は `(deepest * bar_width) / goal == bar_width` ちょうどになり
+    /// `for i in 0..bar_width` から外れて `*` が消える境界バグがあった。
+    #[test]
+    fn roadmap_deepest_marker_visible_when_deepest_equals_goal() {
+        let mut state = AbyssState::new();
+        state.tab = Tab::Roadmap;
+        state.floor = 30;
+        // ゴールちょうど = 100 を過去に踏んでいる状態。
+        state.deepest_floor_ever = state.goal_floor();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                render(&state, f, f.area(), &cs);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let has_marker = (0..buf.area().width)
+            .flat_map(|x| (0..buf.area().height).map(move |y| (x, y)))
+            .any(|(x, y)| buf[(x, y)].symbol() == "*");
+        assert!(
+            has_marker,
+            "最深 == ゴール時に `*` マーカーが描画されない (off-by-one)"
+        );
+    }
+
+    /// 進捗タブの節目フロアは `goal_floor` の百分率から導出されるべき。
+    /// goal=50 のとき、B100F のような goal を超える行が出ていないこと、
+    /// および到達済みの中間 milestone (例: B25F = 50%) が表示されることを確認する。
+    #[test]
+    fn roadmap_milestones_scale_with_goal_floor() {
+        use super::super::config::BalanceConfig;
+        let mut config = BalanceConfig::default();
+        config.pacing.goal_floor = 50;
+        let mut state = AbyssState::with_config(config);
+        state.tab = Tab::Roadmap;
+        state.floor = 30;
+        state.deepest_floor_ever = 30;
+
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                render(&state, f, f.area(), &cs);
+            })
+            .unwrap();
+
+        let mut rendered = String::new();
+        let buf = terminal.backend().buffer();
+        for y in 0..buf.area().height {
+            for x in 0..buf.area().width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+
+        // goal=50 では goal を超える B75F / B100F の行は出ない。
+        assert!(
+            !rendered.contains("B75F"),
+            "goal=50 で B75F 行が出ている: {rendered}"
+        );
+        assert!(
+            !rendered.contains("B100F"),
+            "goal=50 で B100F 行が出ている: {rendered}"
+        );
+        // 50% (= B25F) と 100% (= B50F) は表示される。
+        assert!(rendered.contains("B25F"), "B25F (50%) が出ていない");
+        assert!(rendered.contains("B50F"), "B50F (100% = goal) が出ていない");
+    }
 }
