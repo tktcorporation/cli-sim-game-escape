@@ -200,8 +200,13 @@ pub struct Enemy {
 /// メイン画面のタブ。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
+    /// 強化タブ。gold で買う通常強化と soul で買う魂パークを同居させる
+    /// (どちらも「永続強化への投資」というメンタルモデルが共通なため)。
     Upgrades,
-    Souls,
+    /// 進捗タブ。100F ゴールに対する現在地、最深記録、節目フロアの一覧を表示。
+    /// `Tab::all()` 内で旧 `Souls` の位置 (save id 1) を継承し、
+    /// 既存セーブの Stats/Gacha/Settings の id を維持する。
+    Roadmap,
     Stats,
     Gacha,
     /// 設定 (自動潜行 ON/OFF など、頻繁に切り替えない項目)。
@@ -216,7 +221,7 @@ impl Tab {
     pub const fn all() -> &'static [Tab] {
         &[
             Tab::Upgrades,
-            Tab::Souls,
+            Tab::Roadmap,
             Tab::Stats,
             Tab::Gacha,
             Tab::Settings,
@@ -616,6 +621,11 @@ impl AbyssState {
     /// 1 階層あたりに倒すべき雑魚数。config 経由。
     pub fn enemies_per_floor(&self) -> u32 {
         self.config.pacing.enemies_per_floor
+    }
+
+    /// ダンジョンの到達ゴールフロア。進捗バーの分母。
+    pub fn goal_floor(&self) -> u32 {
+        self.config.pacing.goal_floor
     }
 
     /// 強化 1 段階のコスト。

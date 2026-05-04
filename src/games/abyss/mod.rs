@@ -209,7 +209,7 @@ impl AbyssGame {
     fn click_to_action(&self, action_id: u16) -> Option<PlayerAction> {
         match action_id {
             TAB_UPGRADES => Some(PlayerAction::SetTab(Tab::Upgrades)),
-            TAB_SOULS => Some(PlayerAction::SetTab(Tab::Souls)),
+            TAB_ROADMAP => Some(PlayerAction::SetTab(Tab::Roadmap)),
             TAB_STATS => Some(PlayerAction::SetTab(Tab::Stats)),
             TAB_GACHA => Some(PlayerAction::SetTab(Tab::Gacha)),
             TAB_SETTINGS => Some(PlayerAction::SetTab(Tab::Settings)),
@@ -243,7 +243,9 @@ impl AbyssGame {
     fn key_to_action(&self, ch: char) -> Option<PlayerAction> {
         match ch {
             '{' => Some(PlayerAction::SetTab(Tab::Upgrades)),
-            '|' => Some(PlayerAction::SetTab(Tab::Souls)),
+            // 旧 Souls タブ位置 (`|`) を Roadmap に継承。
+            // 魂パーク購入は強化タブ統合後 `q/w/e/r` で Tab::Upgrades 内から行う。
+            '|' => Some(PlayerAction::SetTab(Tab::Roadmap)),
             '}' => Some(PlayerAction::SetTab(Tab::Stats)),
             '~' => Some(PlayerAction::SetTab(Tab::Gacha)),
             '\\' => Some(PlayerAction::SetTab(Tab::Settings)),
@@ -253,7 +255,7 @@ impl AbyssGame {
                 let idx = (ch as u8 - b'1') as usize;
                 UpgradeKind::from_index(idx).map(PlayerAction::BuyUpgrade)
             }
-            'q' | 'w' | 'e' | 'r' if matches!(self.state.tab, Tab::Souls) => {
+            'q' | 'w' | 'e' | 'r' if matches!(self.state.tab, Tab::Upgrades) => {
                 let idx = match ch {
                     'q' => 0,
                     'w' => 1,
@@ -348,8 +350,8 @@ mod tests {
     #[test]
     fn click_tab_switch() {
         let mut g = AbyssGame::new();
-        g.handle_input(&click(TAB_SOULS));
-        assert_eq!(g.state.tab, Tab::Souls);
+        g.handle_input(&click(TAB_ROADMAP));
+        assert_eq!(g.state.tab, Tab::Roadmap);
         g.handle_input(&click(TAB_STATS));
         assert_eq!(g.state.tab, Tab::Stats);
         g.handle_input(&click(TAB_UPGRADES));
@@ -360,8 +362,8 @@ mod tests {
     fn key_buy_upgrade_only_in_upgrades_tab() {
         let mut g = AbyssGame::new();
         g.state.gold = 1000;
-        // タブ Souls なら反応しない
-        g.state.tab = Tab::Souls;
+        // タブ Roadmap なら反応しない
+        g.state.tab = Tab::Roadmap;
         g.handle_input(&InputEvent::Key('1'));
         assert_eq!(g.state.upgrades[UpgradeKind::Sword.index()], 0);
         // タブ Upgrades なら買える
@@ -374,8 +376,8 @@ mod tests {
     fn click_buy_upgrade_works_regardless_of_tab() {
         let mut g = AbyssGame::new();
         g.state.gold = 1000;
-        // タブが Souls でもクリックなら反応
-        g.state.tab = Tab::Souls;
+        // タブが Roadmap でもクリックなら反応
+        g.state.tab = Tab::Roadmap;
         g.handle_input(&click(BUY_UPGRADE_BASE));
         assert_eq!(g.state.upgrades[UpgradeKind::Sword.index()], 1);
     }
@@ -391,7 +393,8 @@ mod tests {
     #[test]
     fn buy_soul_perk_via_key() {
         let mut g = AbyssGame::new();
-        g.state.tab = Tab::Souls;
+        // 魂強化購入は強化タブ統合後 Tab::Upgrades 内から行う。
+        g.state.tab = Tab::Upgrades;
         g.state.souls = 100;
         g.handle_input(&InputEvent::Key('q'));
         assert_eq!(g.state.soul_perks[SoulPerk::Might.index()], 1);
@@ -442,6 +445,6 @@ mod tests {
         assert!(is_save_worthy(PlayerAction::Retreat));
         assert!(is_save_worthy(PlayerAction::ToggleAutoDescend));
         // SetTab は UI 状態のみ変化させるためセーブを発火しない。
-        assert!(!is_save_worthy(PlayerAction::SetTab(Tab::Souls)));
+        assert!(!is_save_worthy(PlayerAction::SetTab(Tab::Roadmap)));
     }
 }

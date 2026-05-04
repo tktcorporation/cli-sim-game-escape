@@ -90,7 +90,7 @@ pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<Re
 
     match state.tab {
         Tab::Upgrades => render_upgrades(state, f, body_chunks[0], click_state),
-        Tab::Souls => render_souls(state, f, body_chunks[0], click_state),
+        Tab::Roadmap => render_roadmap(state, f, body_chunks[0], click_state),
         Tab::Stats => render_stats(state, f, body_chunks[0], click_state),
         Tab::Gacha => render_gacha(state, f, body_chunks[0], click_state),
         Tab::Settings => render_settings(state, f, body_chunks[0], click_state),
@@ -427,7 +427,7 @@ fn render_tab_bar(
     let settings_label = if is_narrow_layout(area.width) { "設定" } else { "⚙設定" };
     let bar = TabBar::new(separator)
         .tab("強化", style_for(0, Color::Green), TAB_UPGRADES)
-        .tab("魂", style_for(1, Color::Magenta), TAB_SOULS)
+        .tab("進捗", style_for(1, Color::Cyan), TAB_ROADMAP)
         .tab("統計", style_for(2, Color::Cyan), TAB_STATS)
         .tab(gacha_label, style_for(3, Color::LightCyan), TAB_GACHA)
         .tab(settings_label, style_for(4, Color::White), TAB_SETTINGS);
@@ -710,39 +710,25 @@ fn render_upgrades(
         }
     }
 
-    render_scrollable_tab(
-        state,
-        f,
-        area,
-        click_state,
-        Color::Green,
-        WrappingClickableList { list: cl, wrap: narrow },
-    );
-}
-
-// ── 魂タブ ─────────────────────────────────────────────────
-
-fn render_souls(
-    state: &AbyssState,
-    f: &mut Frame,
-    area: Rect,
-    click_state: &Rc<RefCell<ClickState>>,
-) {
-    let narrow = is_narrow_layout(area.width);
-    let mut cl = ClickableList::new();
-
-    cl.push(Line::from(vec![
-        Span::styled(" 魂の強化", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-        Span::styled(
-            " — 死亡しても残る永続バフ",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]));
+    // ── 魂セクション (旧 Souls タブを統合) ──
+    // 「永続強化への投資」というメンタルモデルが gold の強化と共通なため、
+    // 同じタブの末尾にスクロールで連続表示する。
+    cl.push(Line::from(""));
+    let soul_header = if narrow {
+        " 魂の強化".to_string()
+    } else {
+        " 魂の強化  — 死亡しても残る永続バフ".to_string()
+    };
+    cl.push(Line::from(Span::styled(
+        soul_header,
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    )));
     cl.push(Line::from(Span::styled(
         format!(" 所持: ✦{}", format_num(state.souls)),
         Style::default().fg(Color::Magenta),
     )));
-    cl.push(Line::from(""));
 
     for perk in SoulPerk::all().iter() {
         let lv = state.soul_perks[perk.index()];
@@ -777,9 +763,151 @@ fn render_souls(
         f,
         area,
         click_state,
-        Color::Magenta,
+        Color::Green,
         WrappingClickableList { list: cl, wrap: narrow },
     );
+}
+
+// ── 進捗タブ ───────────────────────────────────────────────
+
+/// 100F ゴールに対する現在地・最深・節目を表示する。
+///
+/// 設計メモ:
+/// - 節目フロアは現状ハードコードのリスト (B10/B25/B50/B75/B100)。
+///   将来 Region 名や報酬の連動が決まったら config から注入する形にする。
+/// - クリッカブル要素を持たない純粋情報パネルなので Paragraph を直接使う。
+/// - バーは area_width に応じて伸縮し、narrow (40 セル) でも崩れない。
+fn render_roadmap(
+    state: &AbyssState,
+    f: &mut Frame,
+    area: Rect,
+    _click_state: &Rc<RefCell<ClickState>>,
+) {
+    let inner_width = area.width.saturating_sub(2); // 枠分
+    let goal = state.goal_floor().max(1);
+    let cur = state.floor.min(goal);
+    let deepest = state.deepest_floor_ever.min(goal);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // タイトル + 進捗テキスト
+    lines.push(Line::from(vec![
+        Span::styled(
+            " 進捗",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  — 100階のゴールまで",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // 現在地サマリ
+    let pct = (cur as f64 / goal as f64 * 100.0).round() as u32;
+    lines.push(Line::from(vec![
+        Span::styled("  現在: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("B{}F", cur),
+            Style::default()
+                .fg(floor_color(cur))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  /  "),
+        Span::styled(
+            format!("B{}F", goal),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(
+            format!("  ({}%)", pct),
+            Style::default().fg(Color::Yellow),
+        ),
+    ]));
+
+    // 進捗バー — `█` = 現到達, `*` = 過去最深 (現在より深い時のみ), `░` = 未到達。
+    let bar_width: u16 = inner_width.saturating_sub(4).clamp(10, 80);
+    let filled = ((cur as u64 * bar_width as u64) / goal as u64) as u16;
+    let deepest_pos = ((deepest as u64 * bar_width as u64) / goal as u64) as u16;
+
+    let mut bar = String::with_capacity(bar_width as usize + 2);
+    bar.push('[');
+    for i in 0..bar_width {
+        let ch = if i == deepest_pos && deepest > cur {
+            '*'
+        } else if i < filled {
+            '█'
+        } else {
+            '░'
+        };
+        bar.push(ch);
+    }
+    bar.push(']');
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(bar, Style::default().fg(floor_color(cur))),
+    ]));
+
+    if deepest > cur {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "  最深記録: ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("B{}F", deepest),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  (バー上の * 印)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+
+    // 節目フロアリスト — どこに区切りがあるか、超えたかどうか。
+    // 現状は内容なしの placeholder。Region 名・節目報酬が決まったら埋める。
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " 節目フロア",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    for &milestone in &[10u32, 25, 50, 75, 100] {
+        let reached = cur >= milestone;
+        let ever_reached = deepest >= milestone;
+        let (mark, color) = if reached {
+            ("✓", Color::Green)
+        } else if ever_reached {
+            ("◇", Color::Magenta)
+        } else {
+            (" ", Color::DarkGray)
+        };
+        let line_color = if reached || ever_reached {
+            Color::White
+        } else {
+            Color::DarkGray
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {} ", mark), Style::default().fg(color)),
+            Span::styled(
+                format!("B{}F", milestone),
+                Style::default().fg(line_color),
+            ),
+            Span::styled("  — ???", Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
+    let widget = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Cyan)),
+    );
+    f.render_widget(widget, area);
 }
 
 // ── 設定タブ ───────────────────────────────────────────────
@@ -1294,7 +1422,7 @@ mod tests {
             for x in 0..80 {
                 match cs.hit_test(x, y) {
                     Some(TAB_UPGRADES) => found[0] = true,
-                    Some(TAB_SOULS) => found[1] = true,
+                    Some(TAB_ROADMAP) => found[1] = true,
                     Some(TAB_STATS) => found[2] = true,
                     Some(TAB_GACHA) => found[3] = true,
                     Some(TAB_SETTINGS) => found[4] = true,
@@ -1314,7 +1442,7 @@ mod tests {
         state.keys = 100;
         let tabs = [
             Tab::Upgrades,
-            Tab::Souls,
+            Tab::Roadmap,
             Tab::Stats,
             Tab::Gacha,
             Tab::Settings,
@@ -1333,7 +1461,7 @@ mod tests {
                 for x in 0..40 {
                     match cs.hit_test(x, y) {
                         Some(TAB_UPGRADES) => found[0] = true,
-                        Some(TAB_SOULS) => found[1] = true,
+                        Some(TAB_ROADMAP) => found[1] = true,
                         Some(TAB_STATS) => found[2] = true,
                         Some(TAB_GACHA) => found[3] = true,
                         Some(TAB_SETTINGS) => found[4] = true,
@@ -1393,7 +1521,7 @@ mod tests {
 
         let mut state = AbyssState::new();
         state.tab_scroll.set(99);
-        logic::apply_action(&mut state, PlayerAction::SetTab(Tab::Souls));
+        logic::apply_action(&mut state, PlayerAction::SetTab(Tab::Roadmap));
         assert_eq!(state.tab_scroll.get(), 0);
     }
 
