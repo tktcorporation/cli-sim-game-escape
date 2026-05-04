@@ -913,13 +913,14 @@ fn render_roadmap(
             Color::DarkGray
         };
         // ステータス文字列: 到達済 / 過去最深で踏破 / 未到達なら残り N フロア。
+        // 残距離は `milestone - cur` (1-indexed フロアなので素直な差分)。
+        // 例: cur=12 → B25F まで 13 階上昇 (12→13→...→25 で 13 ステップ)。
         let status = if reached {
             "(到達済)".to_string()
         } else if ever_reached {
             "(過去最深で踏破)".to_string()
         } else {
-            // off-by-one を入れる: あと N+1 F
-            format!("あと {}F", milestone - cur + 1)
+            format!("あと {}F", milestone - cur)
         };
         let status_color = if reached {
             Color::Green
