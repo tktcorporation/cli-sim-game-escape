@@ -5,7 +5,8 @@
 
 // ── タブ ──────────────────────────────────────────────────
 pub const TAB_UPGRADES: u16 = 10;
-pub const TAB_SOULS: u16 = 11;
+/// 進捗タブ。旧 Souls タブの id (11) を継承 (save 互換維持)。
+pub const TAB_ROADMAP: u16 = 11;
 pub const TAB_STATS: u16 = 12;
 pub const TAB_GACHA: u16 = 13;
 pub const TAB_SETTINGS: u16 = 14;

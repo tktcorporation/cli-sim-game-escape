@@ -236,6 +236,10 @@ pub struct PacingConfig {
     pub boss_souls_mult: u64,
     /// 死亡時、`floor * death_souls_mult` が基礎魂量。
     pub death_souls_mult: u64,
+    /// ダンジョンの到達ゴールフロア。進捗タブの分母として使う。
+    /// 将来「短編 (50F)」「長編 (200F)」など難度差し替えで切り替えるため
+    /// BalanceConfig 経由で注入する。
+    pub goal_floor: u32,
 }
 
 /// ガチャ・鍵ドロップ・フロア種別抽選の設定。
@@ -331,6 +335,7 @@ impl Default for BalanceConfig {
                 normal_souls_div: 5,
                 boss_souls_mult: 2,
                 death_souls_mult: 3,
+                goal_floor: 100,
             },
             gacha: GachaConfig {
                 keys_per_boss: 1,
@@ -403,6 +408,7 @@ mod tests {
         assert_eq!(c.enemy.boss_atk_period, 14);
         assert_eq!(c.pacing.enemies_per_floor, 8);
         assert_eq!(c.pacing.normal_souls_div, 5);
+        assert_eq!(c.pacing.goal_floor, 100);
     }
 
     #[test]

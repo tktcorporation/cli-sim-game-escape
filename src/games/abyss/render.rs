@@ -90,7 +90,7 @@ pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<Re
 
     match state.tab {
         Tab::Upgrades => render_upgrades(state, f, body_chunks[0], click_state),
-        Tab::Souls => render_souls(state, f, body_chunks[0], click_state),
+        Tab::Roadmap => render_roadmap(state, f, body_chunks[0], click_state),
         Tab::Stats => render_stats(state, f, body_chunks[0], click_state),
         Tab::Gacha => render_gacha(state, f, body_chunks[0], click_state),
         Tab::Settings => render_settings(state, f, body_chunks[0], click_state),
@@ -427,7 +427,7 @@ fn render_tab_bar(
     let settings_label = if is_narrow_layout(area.width) { "設定" } else { "⚙設定" };
     let bar = TabBar::new(separator)
         .tab("強化", style_for(0, Color::Green), TAB_UPGRADES)
-        .tab("魂", style_for(1, Color::Magenta), TAB_SOULS)
+        .tab("進捗", style_for(1, Color::Cyan), TAB_ROADMAP)
         .tab("統計", style_for(2, Color::Cyan), TAB_STATS)
         .tab(gacha_label, style_for(3, Color::LightCyan), TAB_GACHA)
         .tab(settings_label, style_for(4, Color::White), TAB_SETTINGS);
@@ -710,39 +710,25 @@ fn render_upgrades(
         }
     }
 
-    render_scrollable_tab(
-        state,
-        f,
-        area,
-        click_state,
-        Color::Green,
-        WrappingClickableList { list: cl, wrap: narrow },
-    );
-}
-
-// ── 魂タブ ─────────────────────────────────────────────────
-
-fn render_souls(
-    state: &AbyssState,
-    f: &mut Frame,
-    area: Rect,
-    click_state: &Rc<RefCell<ClickState>>,
-) {
-    let narrow = is_narrow_layout(area.width);
-    let mut cl = ClickableList::new();
-
-    cl.push(Line::from(vec![
-        Span::styled(" 魂の強化", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
-        Span::styled(
-            " — 死亡しても残る永続バフ",
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]));
+    // ── 魂セクション (旧 Souls タブを統合) ──
+    // 「永続強化への投資」というメンタルモデルが gold の強化と共通なため、
+    // 同じタブの末尾にスクロールで連続表示する。
+    cl.push(Line::from(""));
+    let soul_header = if narrow {
+        " 魂の強化".to_string()
+    } else {
+        " 魂の強化  — 死亡しても残る永続バフ".to_string()
+    };
+    cl.push(Line::from(Span::styled(
+        soul_header,
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    )));
     cl.push(Line::from(Span::styled(
         format!(" 所持: ✦{}", format_num(state.souls)),
         Style::default().fg(Color::Magenta),
     )));
-    cl.push(Line::from(""));
 
     for perk in SoulPerk::all().iter() {
         let lv = state.soul_perks[perk.index()];
@@ -777,9 +763,184 @@ fn render_souls(
         f,
         area,
         click_state,
-        Color::Magenta,
+        Color::Green,
         WrappingClickableList { list: cl, wrap: narrow },
     );
+}
+
+// ── 進捗タブ ───────────────────────────────────────────────
+
+/// 100F ゴールに対する現在地・最深・節目を表示する。
+///
+/// 設計メモ:
+/// - 節目フロアは現状ハードコードのリスト (B10/B25/B50/B75/B100)。
+///   将来 Region 名や報酬の連動が決まったら config から注入する形にする。
+/// - クリッカブル要素を持たない純粋情報パネルなので Paragraph を直接使う。
+/// - バーは area_width に応じて伸縮し、narrow (40 セル) でも崩れない。
+fn render_roadmap(
+    state: &AbyssState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    // `render_scrollable_tab` 経由で他タブと同じ枠組みに揃える。
+    // `tab_scroll` の clamp / ▲▼ オーバーレイが自動で付く。
+    // 内側幅 (= scroll 列差し引き後) は呼び出し側からは見えないので、
+    // バー幅は area から保守的に算出する: 枠 2 + scroll 列 1 + 余白 4 = 7 を引く。
+    let inner_width = area.width.saturating_sub(7);
+    let goal = state.goal_floor().max(1);
+    let cur = state.floor.min(goal);
+    let deepest = state.deepest_floor_ever.min(goal);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // タイトル + 進捗テキスト
+    lines.push(Line::from(vec![
+        Span::styled(
+            " 進捗",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!("  — {}階のゴールまで", goal),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    lines.push(Line::from(""));
+
+    // 現在地サマリ
+    let pct = (cur as f64 / goal as f64 * 100.0).round() as u32;
+    lines.push(Line::from(vec![
+        Span::styled("  現在: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("B{}F", cur),
+            Style::default()
+                .fg(floor_color(cur))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  /  "),
+        Span::styled(
+            format!("B{}F", goal),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled(
+            format!("  ({}%)", pct),
+            Style::default().fg(Color::Yellow),
+        ),
+    ]));
+
+    // 進捗バー — `█` = 現到達, `*` = 過去最深 (現在より深い時のみ), `░` = 未到達。
+    // 上限は撤廃。広い viewport ではバーを最大限引き伸ばし、「ゴールまでの距離」感を強調。
+    let bar_width: u16 = inner_width.max(10);
+    let filled = ((cur as u64 * bar_width as u64) / goal as u64) as u16;
+    // `deepest * bar_width / goal` は deepest == goal の時に bar_width 丁度になり、
+    // `for i in 0..bar_width` ループの範囲外になって `*` が消える。最終 cell に
+    // クランプして、ゴール到達経験者の最深マーカーを必ず描画する。
+    let deepest_pos = ((deepest as u64 * bar_width as u64) / goal as u64) as u16;
+    let deepest_pos = deepest_pos.min(bar_width.saturating_sub(1));
+
+    let mut bar = String::with_capacity(bar_width as usize + 2);
+    bar.push('[');
+    for i in 0..bar_width {
+        let ch = if i == deepest_pos && deepest > cur {
+            '*'
+        } else if i < filled {
+            '█'
+        } else {
+            '░'
+        };
+        bar.push(ch);
+    }
+    bar.push(']');
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(bar, Style::default().fg(floor_color(cur))),
+    ]));
+
+    if deepest > cur {
+        lines.push(Line::from(vec![
+            Span::styled(
+                "  最深記録: ",
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                format!("B{}F", deepest),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  (バー上の * 印)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+
+    // 節目フロアリスト。各節目までの距離を出すことで「次の目標」を示す。
+    // 区画名・節目報酬は今後の Issue で埋める拡張点 (CLAUDE.md game design 参照)。
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " 節目フロア",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    // 節目は goal_floor の百分率で導出 (10/25/50/75/100%)。
+    // goal=100 なら従来の B10/B25/B50/B75/B100、goal=50 なら B5/B12/B25/B37/B50、
+    // goal=200 なら B20/B50/B100/B150/B200 と自動的に追従する。
+    // 重複除去 (goal が小さい時に同一 floor が複数回出るのを防ぐ) のため、
+    // 直前の milestone と異なる場合のみ表示する。
+    let mut last_milestone: u32 = 0;
+    for pct in [10u32, 25, 50, 75, 100] {
+        let milestone = (((goal as u64 * pct as u64) / 100).max(1) as u32).min(goal);
+        if milestone == last_milestone {
+            continue;
+        }
+        last_milestone = milestone;
+        let reached = cur >= milestone;
+        let ever_reached = deepest >= milestone;
+        let (mark, mark_color) = if reached {
+            ("✓", Color::Green)
+        } else if ever_reached {
+            ("◇", Color::Magenta)
+        } else {
+            ("·", Color::DarkGray)
+        };
+        let line_color = if reached || ever_reached {
+            Color::White
+        } else {
+            Color::DarkGray
+        };
+        // ステータス文字列: 到達済 / 過去最深で踏破 / 未到達なら残り N フロア。
+        // 残距離は `milestone - cur` (1-indexed フロアなので素直な差分)。
+        // 例: cur=12 → B25F まで 13 階上昇 (12→13→...→25 で 13 ステップ)。
+        let status = if reached {
+            "(到達済)".to_string()
+        } else if ever_reached {
+            "(過去最深で踏破)".to_string()
+        } else {
+            format!("あと {}F", milestone - cur)
+        };
+        let status_color = if reached {
+            Color::Green
+        } else if ever_reached {
+            Color::Magenta
+        } else {
+            Color::Yellow
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("  {} ", mark), Style::default().fg(mark_color)),
+            Span::styled(
+                format!("B{}F", milestone),
+                Style::default().fg(line_color),
+            ),
+            Span::raw("  "),
+            Span::styled(status, Style::default().fg(status_color)),
+        ]));
+    }
+
+    render_scrollable_tab(state, f, area, click_state, Color::Cyan, lines);
 }
 
 // ── 設定タブ ───────────────────────────────────────────────
@@ -1294,7 +1455,7 @@ mod tests {
             for x in 0..80 {
                 match cs.hit_test(x, y) {
                     Some(TAB_UPGRADES) => found[0] = true,
-                    Some(TAB_SOULS) => found[1] = true,
+                    Some(TAB_ROADMAP) => found[1] = true,
                     Some(TAB_STATS) => found[2] = true,
                     Some(TAB_GACHA) => found[3] = true,
                     Some(TAB_SETTINGS) => found[4] = true,
@@ -1314,7 +1475,7 @@ mod tests {
         state.keys = 100;
         let tabs = [
             Tab::Upgrades,
-            Tab::Souls,
+            Tab::Roadmap,
             Tab::Stats,
             Tab::Gacha,
             Tab::Settings,
@@ -1333,7 +1494,7 @@ mod tests {
                 for x in 0..40 {
                     match cs.hit_test(x, y) {
                         Some(TAB_UPGRADES) => found[0] = true,
-                        Some(TAB_SOULS) => found[1] = true,
+                        Some(TAB_ROADMAP) => found[1] = true,
                         Some(TAB_STATS) => found[2] = true,
                         Some(TAB_GACHA) => found[3] = true,
                         Some(TAB_SETTINGS) => found[4] = true,
@@ -1393,7 +1554,7 @@ mod tests {
 
         let mut state = AbyssState::new();
         state.tab_scroll.set(99);
-        logic::apply_action(&mut state, PlayerAction::SetTab(Tab::Souls));
+        logic::apply_action(&mut state, PlayerAction::SetTab(Tab::Roadmap));
         assert_eq!(state.tab_scroll.get(), 0);
     }
 
@@ -1507,5 +1668,214 @@ mod tests {
         assert!((atk_progress(10, 0) - 1.0).abs() < 1e-6);
         assert!((atk_progress(10, 5) - 0.5).abs() < 1e-6);
         assert!((atk_progress(0, 0) - 1.0).abs() < 1e-6);
+    }
+
+    /// 進捗タブの最深マーカー (`*`) は、過去にゴール (= goal_floor) に
+    /// 到達した状態で現在より浅い位置にいる時にも必ず描画される。
+    /// 旧実装は `(deepest * bar_width) / goal == bar_width` ちょうどになり
+    /// `for i in 0..bar_width` から外れて `*` が消える境階バグがあった。
+    ///
+    /// 注意: ロードマップタブには「(バー上の * 印)」というラベル文字列も
+    /// `deepest > cur` 時に出るので、画面全体で `*` を `any()` で探すと
+    /// production を壊しても false positive で pass してしまう。
+    /// **`*` は最低 2 回出る** (バー本体 + ラベル) ことを assert することで、
+    /// バー側の `*` 消失を確実に検出する。
+    #[test]
+    fn roadmap_deepest_marker_visible_when_deepest_equals_goal() {
+        let mut state = AbyssState::new();
+        state.tab = Tab::Roadmap;
+        state.floor = 30;
+        // ゴールちょうど = 100 を過去に踏んでいる状態。
+        state.deepest_floor_ever = state.goal_floor();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                render(&state, f, f.area(), &cs);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let star_count = (0..buf.area().width)
+            .flat_map(|x| (0..buf.area().height).map(move |y| (x, y)))
+            .filter(|&(x, y)| buf[(x, y)].symbol() == "*")
+            .count();
+        assert!(
+            star_count >= 2,
+            "最深 == ゴール時に `*` マーカーがバーに描画されていない (off-by-one)。\
+             count={star_count} (ラベル分の 1 個のみ = false positive)"
+        );
+    }
+
+    /// 進捗タブの節目フロアは `goal_floor` の百分率から導出されるべき。
+    /// goal=50 のとき、B100F のような goal を超える行が出ていないこと、
+    /// および到達済みの中間 milestone (例: B25F = 50%) が表示されることを確認する。
+    ///
+    /// 注意: 80x30 のような小さい viewport では body 高さが ~10 行に縛られて
+    /// milestone 行がクリップされ、production が `[10,25,50,75,100]` 直書きでも
+    /// テストが pass してしまう viewport 依存の false positive がある。
+    /// **80x80 の十分大きな viewport** で実行することで、production 側の
+    /// バグが本物の B75F/B100F 行を描画してもテストが catch する。
+    #[test]
+    fn roadmap_milestones_scale_with_goal_floor() {
+        use super::super::config::BalanceConfig;
+        let mut config = BalanceConfig::default();
+        config.pacing.goal_floor = 50;
+        let mut state = AbyssState::with_config(config);
+        state.tab = Tab::Roadmap;
+        state.floor = 30;
+        state.deepest_floor_ever = 30;
+
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        // viewport 80x80 で milestone リスト全行が描画されることを保証。
+        let mut terminal = Terminal::new(TestBackend::new(80, 80)).unwrap();
+        terminal
+            .draw(|f| {
+                render(&state, f, f.area(), &cs);
+            })
+            .unwrap();
+
+        let mut rendered = String::new();
+        let buf = terminal.backend().buffer();
+        for y in 0..buf.area().height {
+            for x in 0..buf.area().width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+
+        // goal=50 では goal を超える B75F / B100F の行は出ない。
+        assert!(
+            !rendered.contains("B75F"),
+            "goal=50 で B75F 行が出ている (milestone がハードコード): {rendered}"
+        );
+        assert!(
+            !rendered.contains("B100F"),
+            "goal=50 で B100F 行が出ている (milestone がハードコード): {rendered}"
+        );
+        // 50% (= B25F) と 100% (= B50F) は表示される。
+        assert!(rendered.contains("B25F"), "B25F (50%) が出ていない");
+        assert!(rendered.contains("B50F"), "B50F (100% = goal) が出ていない");
+    }
+
+    /// 進捗タブのサブタイトルは `goal_floor` から導出されるべき。
+    /// `"100階のゴールまで"` のハードコードは config 化と矛盾するので、
+    /// goal=50 のとき `50階` と表示されることを assert する。
+    #[test]
+    fn roadmap_subtitle_uses_configured_goal() {
+        use super::super::config::BalanceConfig;
+        let mut config = BalanceConfig::default();
+        config.pacing.goal_floor = 50;
+        let mut state = AbyssState::with_config(config);
+        state.tab = Tab::Roadmap;
+
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                render(&state, f, f.area(), &cs);
+            })
+            .unwrap();
+
+        let mut rendered = String::new();
+        let buf = terminal.backend().buffer();
+        for y in 0..buf.area().height {
+            for x in 0..buf.area().width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+
+        // ratatui の TestBackend は wide char (East Asian) を 2 セルに分割し、
+        // 二セル目に空白を入れるため、`.symbol()` を素朴に concat すると
+        // "50階のゴール" が "5 0 階 の ゴ ー ル" のように展開される。
+        // 空白を除去して論理的な substring 一致を確認する。
+        let collapsed = rendered.replace(' ', "");
+        assert!(
+            collapsed.contains("50階のゴール"),
+            "goal=50 でサブタイトルに 50階 が出ていない: {rendered}"
+        );
+        assert!(
+            !collapsed.contains("100階のゴール"),
+            "goal=50 でサブタイトルに 100階 が残っている (ハードコード): {rendered}"
+        );
+    }
+
+    /// 進捗タブも `render_scrollable_tab` 経由で描画されるため、`tab_scroll`
+    /// が他タブと同じく clamp + 反映される。`render_roadmap` を Paragraph 直
+    /// `render_widget` で書いていた時代は scroll が silently 無視されていた
+    /// (self-review Important #2)。回帰防止: スクロール後の表示が変わる。
+    #[test]
+    fn roadmap_responds_to_tab_scroll() {
+        // 高さ 8 の小さな viewport で、コンテンツが切れる状況を作る。
+        let mut state = AbyssState::new();
+        state.tab = Tab::Roadmap;
+        state.deepest_floor_ever = 50; // 節目フロアが複数行出る状態
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+
+        let render_to_string = |state: &AbyssState| -> String {
+            let mut term = Terminal::new(TestBackend::new(40, 22)).unwrap();
+            term.draw(|f| {
+                render(state, f, f.area(), &cs);
+            })
+            .unwrap();
+            let buf = term.backend().buffer();
+            let mut s = String::new();
+            for y in 0..buf.area().height {
+                for x in 0..buf.area().width {
+                    s.push_str(buf[(x, y)].symbol());
+                }
+                s.push('\n');
+            }
+            s
+        };
+
+        let before = render_to_string(&state);
+        state.tab_scroll.set(5); // SCROLL_STEP 単位より大きい値で確実に動かす
+        let after = render_to_string(&state);
+
+        assert_ne!(
+            before, after,
+            "tab_scroll を変えても進捗タブの描画が変わらない (scrollable_tab に統合されていない)"
+        );
+    }
+
+    /// 節目フロアの placeholder (`???`) を撤廃して production-ready 文言にした。
+    /// (self-review Medium #7) 過去最深で B25F に到達済みなら「(過去最深で踏破)」、
+    /// 未到達ならば「あと NF」が出る。`???` が再混入しないよう保護。
+    #[test]
+    fn roadmap_milestone_status_is_production_ready() {
+        let mut state = AbyssState::new();
+        state.tab = Tab::Roadmap;
+        state.floor = 12; // B25F の手前
+        state.deepest_floor_ever = 12;
+
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 80)).unwrap();
+        terminal
+            .draw(|f| {
+                render(&state, f, f.area(), &cs);
+            })
+            .unwrap();
+
+        let mut rendered = String::new();
+        let buf = terminal.backend().buffer();
+        for y in 0..buf.area().height {
+            for x in 0..buf.area().width {
+                rendered.push_str(buf[(x, y)].symbol());
+            }
+            rendered.push('\n');
+        }
+
+        assert!(
+            !rendered.contains("???"),
+            "進捗タブに placeholder ??? が残っている: {rendered}"
+        );
+        // B25F は未到達 → 「あと 13F」(25 - 12) のような残距離表記が出る。
+        // wide char の二セル展開で空白が混入するので、空白除去後に検査する。
+        let collapsed = rendered.replace(' ', "");
+        assert!(
+            collapsed.contains("13F"),
+            "B25F (cur=12) への残距離 13F が出ていない: {rendered}"
+        );
     }
 }
