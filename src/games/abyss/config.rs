@@ -174,9 +174,9 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
         EquipmentDef {
             id: EquipmentId::GodSword,
             name: "神剣エクスカリバー",
-            effect_label: "ATK +400% / +100 (Lv毎 +15%/+50)",
+            effect_label: "ATK +400% / +100 (Lv毎 +11%/+35)",
             base_bonus: EquipmentBonus { atk_pct: 4.00, atk_flat: 100, ..Default::default() },
-            per_level_bonus: EquipmentBonus { atk_pct: 0.15, atk_flat: 50, ..Default::default() },
+            per_level_bonus: EquipmentBonus { atk_pct: 0.11, atk_flat: 35, ..Default::default() },
             gold_cost: 5_000_000,
             prerequisite: Some(EquipmentId::MithrilSword),
             enh_cost_base: 800_000,
@@ -249,7 +249,7 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
         EquipmentDef {
             id: EquipmentId::GodArmor,
             name: "神鎧アイギス",
-            effect_label: "HP +600% / +800 / DEF +100 (Lv毎 +15%/+200/+20)",
+            effect_label: "HP +600% / +800 / DEF +100 (Lv毎 +11%/+150/+15)",
             base_bonus: EquipmentBonus {
                 hp_pct: 6.00,
                 hp_flat: 800,
@@ -257,9 +257,9 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
                 ..Default::default()
             },
             per_level_bonus: EquipmentBonus {
-                hp_pct: 0.15,
-                hp_flat: 200,
-                def_flat: 20,
+                hp_pct: 0.11,
+                hp_flat: 150,
+                def_flat: 15,
                 ..Default::default()
             },
             gold_cost: 6_000_000,
@@ -330,7 +330,7 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
         EquipmentDef {
             id: EquipmentId::EndingCrown,
             name: "終焉の冠",
-            effect_label: "ATK+150% / HP+150% / 全方位 (Lv毎 +5%系)",
+            effect_label: "ATK+150% / HP+150% / 全方位 (Lv毎 +2.5%系)",
             base_bonus: EquipmentBonus {
                 atk_pct: 1.50,
                 hp_pct: 1.50,
@@ -341,12 +341,12 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
                 ..Default::default()
             },
             per_level_bonus: EquipmentBonus {
-                atk_pct: 0.05,
-                hp_pct: 0.05,
-                speed_pct: 0.01,
-                crit_bonus: 0.005,
-                regen_per_sec: 0.20,
-                gold_pct: 0.01,
+                atk_pct: 0.035,
+                hp_pct: 0.035,
+                speed_pct: 0.007,
+                crit_bonus: 0.0035,
+                regen_per_sec: 0.15,
+                gold_pct: 0.007,
                 ..Default::default()
             },
             gold_cost: 8_000_000,
@@ -490,16 +490,16 @@ impl Default for BalanceConfig {
             enemy_hp_schedule: EnemyGrowthSchedule::new(vec![
                 (1, 1.32),
                 (10, 1.20),
-                (25, 1.10),
-                (50, 1.04),
-                (75, 1.015),
+                (25, 1.13),
+                (50, 1.06),
+                (75, 1.020),
             ]),
             enemy_atk_schedule: EnemyGrowthSchedule::new(vec![
                 (1, 1.22),
                 (10, 1.15),
                 (25, 1.08),
-                (50, 1.03),
-                (75, 1.01),
+                (50, 1.04),
+                (75, 1.015),
             ]),
             enemy_gold_schedule: EnemyGrowthSchedule::new(vec![
                 (1, 1.40),
