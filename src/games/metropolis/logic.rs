@@ -46,6 +46,7 @@ fn advance_construction(city: &mut City) {
         }
     }
     for (x, y, kind) in completions {
+        city.completion_flash_until[y][x] = city.tick + COMPLETION_FLASH_TICKS;
         city.push_event(format!("✓ {} ({},{}) 完成", building_name(kind), x, y));
     }
 }
@@ -115,6 +116,22 @@ fn accrue_income(city: &mut City) {
     let income = compute_income_per_sec(city);
     city.cash += income;
     city.cash_earned_total += income;
+    if income > 0 {
+        city.last_payout_amount = income;
+        city.last_payout_tick = city.tick;
+    }
+    let mut flash_targets: Vec<(usize, usize)> = Vec::new();
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            if matches!(city.tile(x, y), Tile::Built(Building::Shop)) && shop_is_active(city, x, y)
+            {
+                flash_targets.push((x, y));
+            }
+        }
+    }
+    for (x, y) in flash_targets {
+        city.payout_flash_until[y][x] = city.tick + PAYOUT_FLASH_TICKS;
+    }
 }
 
 /// Compute total cash/sec.  Pure function over the grid — easy to unit-test.
@@ -152,7 +169,7 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
 /// A shop earns money if it has a road neighbor *and* a house within
 /// Manhattan distance 3.  This makes Tier-1's random scattering punishable
 /// without being unwinnable.
-fn shop_is_active(city: &City, sx: usize, sy: usize) -> bool {
+pub(super) fn shop_is_active(city: &City, sx: usize, sy: usize) -> bool {
     if !has_neighbor_kind(city, sx, sy, Building::Road) {
         return false;
     }

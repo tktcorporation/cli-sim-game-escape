@@ -139,9 +139,24 @@ pub struct City {
     /// Most-recent AI activity for the on-screen "thought log".
     /// Newest first; older entries trimmed to `MAX_EVENTS`.
     pub events: Vec<String>,
+
+    /// セルが完成フラッシュを保つ最終 tick (`tick < value` の間光る)。
+    pub completion_flash_until: Vec<Vec<u64>>,
+    /// アクティブ店舗が給料フラッシュを保つ最終 tick。
+    pub payout_flash_until: Vec<Vec<u64>>,
+    /// 直近の収入額 (status の "+$X" フラッシュ用)。
+    pub last_payout_amount: i64,
+    /// 直近の収入が発生した tick。
+    pub last_payout_tick: u64,
 }
 
 pub const MAX_EVENTS: usize = 8;
+
+/// 完成タイルが光り続けるtick数 (1.5秒)。
+pub const COMPLETION_FLASH_TICKS: u64 = 15;
+
+/// 店舗が給料発生時に光るtick数 (0.6秒)。
+pub const PAYOUT_FLASH_TICKS: u64 = 6;
 
 impl City {
     pub fn new() -> Self {
@@ -150,8 +165,12 @@ impl City {
 
     pub fn with_seed(seed: u64) -> Self {
         let mut grid = Vec::with_capacity(GRID_H);
+        let mut completion_flash_until = Vec::with_capacity(GRID_H);
+        let mut payout_flash_until = Vec::with_capacity(GRID_H);
         for _ in 0..GRID_H {
             grid.push(vec![Tile::Empty; GRID_W]);
+            completion_flash_until.push(vec![0u64; GRID_W]);
+            payout_flash_until.push(vec![0u64; GRID_W]);
         }
         Self {
             grid,
@@ -166,6 +185,10 @@ impl City {
             cash_earned_total: 0,
             cash_spent_total: 0,
             events: Vec::new(),
+            completion_flash_until,
+            payout_flash_until,
+            last_payout_amount: 0,
+            last_payout_tick: 0,
         }
     }
 
