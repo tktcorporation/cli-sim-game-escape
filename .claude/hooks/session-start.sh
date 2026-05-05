@@ -42,17 +42,29 @@ echo "▶ Ensuring wasm32-unknown-unknown target..."
 rustup target add wasm32-unknown-unknown
 
 # ── trunk (build.sh と揃える) ─────────────────────────────
+# CLAUDE_CODE_REMOTE は常に Linux 想定だが、コンテナの CPU が x86_64 か
+# arm64 (aarch64) かはホスト次第なので `uname -m` で判別する。
+# 未対応 arch では cargo install に fallback (時間はかかるが確実に入る)。
 TRUNK_VERSION="${TRUNK_VERSION:-0.21.14}"
 TRUNK_BIN="$CARGO_BIN_DIR/trunk"
 
+case "$(uname -m)" in
+  x86_64)        TRUNK_TARGET="x86_64-unknown-linux-gnu" ;;
+  aarch64|arm64) TRUNK_TARGET="aarch64-unknown-linux-gnu" ;;
+  *)             TRUNK_TARGET="" ;;
+esac
+
 if [ -x "$TRUNK_BIN" ] && "$TRUNK_BIN" --version 2>/dev/null | grep -q "$TRUNK_VERSION"; then
   echo "✓ Trunk $TRUNK_VERSION already installed"
-else
-  echo "▶ Installing Trunk $TRUNK_VERSION..."
-  TRUNK_URL="https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz"
+elif [ -n "$TRUNK_TARGET" ]; then
+  echo "▶ Installing Trunk $TRUNK_VERSION ($TRUNK_TARGET)..."
+  TRUNK_URL="https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-${TRUNK_TARGET}.tar.gz"
   curl -sSfL "$TRUNK_URL" | tar xzf - -C "$CARGO_BIN_DIR"
   chmod +x "$TRUNK_BIN"
   "$TRUNK_BIN" --version
+else
+  echo "▶ Unsupported arch $(uname -m) — falling back to 'cargo install trunk' (slow)"
+  cargo install --locked --version "$TRUNK_VERSION" trunk
 fi
 
 echo "✓ session-start hook complete"
