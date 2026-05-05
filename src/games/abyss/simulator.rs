@@ -18,7 +18,7 @@
 use super::config::BalanceConfig;
 use super::logic;
 use super::policy::PlayerAction;
-use super::state::{AbyssState, EquipmentId, EquipmentLane, SoulPerk};
+use super::state::{AbyssState, EquipmentId, EquipmentLane, SoulPerk, EQUIPMENT_COUNT};
 
 // ───────────────────────────────────────────────────────────────
 // Policy: 自動プレイヤーの抽象。
@@ -238,6 +238,11 @@ pub struct SimMetrics {
 
     pub death_floors: Vec<u32>,
     pub first_reached: Vec<(u32, u64)>,
+
+    /// 各装備の **初購入 tick** (`EquipmentId::index()` 順)。`None` = 未購入。
+    /// 「装備購入が play time に分散しているか」を可視化するための pacing 指標。
+    /// late game に bunching していたら balance 調整のサインになる。
+    pub equipment_purchase_ticks: [Option<u64>; EQUIPMENT_COUNT],
 }
 
 impl SimMetrics {
@@ -267,17 +272,72 @@ impl SimMetrics {
         ));
 
         if !self.first_reached.is_empty() {
+            // 「ゴール=B100」を中心に節目フロアの到達時刻を出す。B25/B50/B75/B100 で
+            // 4 等分の sweep が見えるかが pacing チェックの主軸。
             s.push_str("到達時刻 (フロア → 分):\n");
-            let milestones = [2u32, 5, 10, 15, 20, 30, 50];
+            let milestones = [2u32, 5, 10, 25, 50, 75, 100];
             for &m in &milestones {
                 if let Some((_, t)) = self.first_reached.iter().find(|(f, _)| *f == m) {
                     s.push_str(&format!(
-                        "  B{:>3}F: {:>6.1} 分 ({} ticks)\n",
+                        "  B{:>3}F: {:>6.1} 分 ({:>4.1} h, {} ticks)\n",
                         m,
                         *t as f64 / 600.0,
+                        *t as f64 / 36000.0,
                         t
                     ));
+                } else {
+                    s.push_str(&format!("  B{:>3}F: 未到達\n", m));
                 }
+            }
+        }
+
+        // 装備購入タイムライン: 全 12 装備の初購入時刻を一覧表示する。
+        // 「lane バランス進行」の検証に使う ─ Weapon 列だけが進んで Accessory が
+        // 後回しになっていたら policy か balance のバイアスが疑える。
+        let any_purchased = self
+            .equipment_purchase_ticks
+            .iter()
+            .any(|t| t.is_some());
+        if any_purchased {
+            s.push_str("装備購入時刻 (lane × tier × 分):\n");
+            for &id in EquipmentId::all() {
+                let label = format!(
+                    "{} {} (tier {})",
+                    lane_short(id.lane()),
+                    equipment_name_short(id),
+                    id.lane_index()
+                );
+                match self.equipment_purchase_ticks[id.index()] {
+                    Some(t) => s.push_str(&format!(
+                        "  {:<24}: {:>7.1} 分 ({:>4.1} h)\n",
+                        label,
+                        t as f64 / 600.0,
+                        t as f64 / 36000.0
+                    )),
+                    None => s.push_str(&format!("  {:<24}: 未購入\n", label)),
+                }
+            }
+
+            // 購入間隔の統計 — どこかに大きな gap があれば「退屈な空白」のサイン。
+            let purchased_ticks: Vec<u64> = self
+                .equipment_purchase_ticks
+                .iter()
+                .filter_map(|t| *t)
+                .collect();
+            if purchased_ticks.len() >= 2 {
+                let mut sorted = purchased_ticks.clone();
+                sorted.sort();
+                let gaps: Vec<u64> = sorted.windows(2).map(|w| w[1] - w[0]).collect();
+                let max_gap = *gaps.iter().max().unwrap_or(&0);
+                let mean_gap = gaps.iter().sum::<u64>() as f64 / gaps.len() as f64;
+                let span = sorted.last().unwrap() - sorted.first().unwrap();
+                s.push_str(&format!(
+                    "購入間隔: 最大 {:.1} 分, 平均 {:.1} 分, 全期間 {:.1} 分 ({:.1} h)\n",
+                    max_gap as f64 / 600.0,
+                    mean_gap / 600.0,
+                    span as f64 / 600.0,
+                    span as f64 / 36000.0
+                ));
             }
         }
 
@@ -297,6 +357,35 @@ impl SimMetrics {
         }
 
         s
+    }
+}
+
+/// レポート整形用の lane 短縮ラベル。
+fn lane_short(lane: EquipmentLane) -> &'static str {
+    match lane {
+        EquipmentLane::Weapon => "[武]",
+        EquipmentLane::Armor => "[防]",
+        EquipmentLane::Accessory => "[飾]",
+    }
+}
+
+/// レポート整形用の装備名 (config に依らず enum 直接マッピング)。
+/// `BalanceConfig::default()` の `equipment[i].name` と一致するよう手書きする
+/// (sim report が config のクローンを抱える必要をなくすため)。
+fn equipment_name_short(id: EquipmentId) -> &'static str {
+    match id {
+        EquipmentId::BronzeSword => "銅の剣",
+        EquipmentId::SteelSword => "鋼鉄の剣",
+        EquipmentId::MithrilSword => "ミスリルの剣",
+        EquipmentId::GodSword => "神剣",
+        EquipmentId::LeatherArmor => "革鎧",
+        EquipmentId::SteelArmor => "鋼鉄の鎧",
+        EquipmentId::MithrilArmor => "ミスリルの鎧",
+        EquipmentId::GodArmor => "神鎧",
+        EquipmentId::SwiftBoots => "速攻のブーツ",
+        EquipmentId::TwinWolfRing => "双狼の指輪",
+        EquipmentId::SageRobe => "賢者のローブ",
+        EquipmentId::EndingCrown => "終焉の冠",
     }
 }
 
@@ -371,6 +460,18 @@ impl Simulator {
             self.metrics
                 .hp_samples
                 .push((cur_tick, self.state.hero_hp as f64 / max));
+        }
+
+        // 装備購入の検知 — 既に owned で metrics 側未記録なら今 tick が初購入。
+        // 装備は再購入不可なので、一度立ち上がったフラグはずっと true で、
+        // metrics 側の `Option` の None→Some 遷移は最大 1 回のみ。
+        for &id in EquipmentId::all() {
+            let i = id.index();
+            if self.state.owned_equipment[i]
+                && self.metrics.equipment_purchase_ticks[i].is_none()
+            {
+                self.metrics.equipment_purchase_ticks[i] = Some(cur_tick);
+            }
         }
     }
 
