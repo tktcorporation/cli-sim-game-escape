@@ -12,6 +12,8 @@ pub const TAB_GACHA: u16 = 13;
 pub const TAB_SETTINGS: u16 = 14;
 /// 装備ショップサブタブ。
 pub const TAB_SHOP: u16 = 15;
+/// 魂サブタブ (旧強化タブ末尾の魂セクションを独立分離)。
+pub const TAB_SOULS: u16 = 16;
 
 // ── トップグループ (メインメニュー 4 つ) ────────────────────
 // グループをクリックするとそのグループの default_tab() に切替。

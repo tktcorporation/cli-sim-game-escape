@@ -345,27 +345,34 @@ pub struct Enemy {
 /// メイン画面のタブ。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
-    /// 強化タブ。gold で買う通常強化と soul で買う魂パークを同居させる
-    /// (どちらも「永続強化への投資」というメンタルモデルが共通なため)。
+    /// 強化サブタブ。gold で買う通常強化のみ (魂は `Tab::Souls` に分離)。
+    /// 装備が「段階的な達成感」を担うようになったため、本タブは線形な数値投資に
+    /// 専念する: 段階バッジ・次段階プレビューは廃止し、Lv + コスト + per-Lv 効果のみ表示。
     Upgrades,
-    /// 進捗タブ。100F ゴールに対する現在地、最深記録、節目フロアの一覧を表示。
+    /// 進捗サブタブ。100F ゴールに対する現在地、最深記録、節目フロアの一覧を表示。
     /// `Tab::all()` 内で旧 `Souls` の位置 (save id 1) を継承し、
     /// 既存セーブの Stats/Gacha/Settings の id を維持する。
     Roadmap,
     Stats,
     Gacha,
-    /// 装備ショップ。lane 連鎖型の解放ツリー。「次は見える / その先は ???」。
-    /// 普段は開かなくて良い (HUD には出さない)。気が向いた時だけ訪問するメニュー。
-    Shop,
     /// 設定 (自動潜行 ON/OFF など、頻繁に切り替えない項目)。
     /// idle 系はメイン画面の縦領域を強化リストに優先したいので、設定系は別タブへ追い出す。
     Settings,
+    /// 装備ショップサブタブ。lane 連鎖型の解放ツリー。「次は見える / その先は ???」。
+    /// 普段は開かなくて良い (HUD には出さない)。気が向いた時だけ訪問するメニュー。
+    Shop,
+    /// 魂サブタブ。死亡で蓄積される魂による永続バフ (旧 `Tab::Upgrades` 内の魂セクションを分離)。
+    /// 操作頻度が `Tab::Upgrades` と異なる (魂はラン死亡後に集中) ため、サブタブ独立で UX 整理。
+    Souls,
 }
 
 impl Tab {
-    /// 全タブを宣言順に返す。**SSOT**: save id・タブバー描画順・テスト
-    /// イテレーションは全てこのリストから派生させる。新タブ追加時は
-    /// ここに足すだけで自動的に save 番号が割当たる (末尾追加が安全)。
+    /// 全タブを宣言順に返す。**SSOT**: save id・テストイテレーションの基準。
+    /// グループ階層化後は UI のタブバー描画順は `TabGroup::all()` に移ったため、
+    /// このリストは save id 専用 SSOT になっている (= save / test だけが利用)。
+    /// `to_save_id` / `from_save_id` と同じく cfg gate でデフォルト build の
+    /// dead_code を避ける。
+    #[cfg(any(target_arch = "wasm32", test))]
     pub const fn all() -> &'static [Tab] {
         &[
             Tab::Upgrades,
@@ -373,14 +380,17 @@ impl Tab {
             Tab::Stats,
             Tab::Gacha,
             Tab::Settings,
-            // 末尾追加: 既存セーブの Settings (id 4) を維持するため最後に置く。
-            // タブバー描画順 = この順なので、Shop は右端に表示される。
+            // 末尾追加: 既存セーブの save id (Upgrades=0..Settings=4) を維持するため
+            // 新タブは末尾に置く。UI 上の表示順は `TabGroup` が制御する。
             Tab::Shop,
+            Tab::Souls,
         ]
     }
 
     /// セーブデータ用のタブ番号 (`all()` 内のインデックス)。
-    /// render.rs ではアクティブタブ index としても再利用 (= タブ宣言順 == 描画順)。
+    /// 利用箇所が cfg-gated な save.rs / test だけなので、デフォルトビルドでの
+    /// dead_code を避けるため同じ gate を付与。
+    #[cfg(any(target_arch = "wasm32", test))]
     pub fn to_save_id(self) -> u8 {
         Self::all()
             .iter()
@@ -388,10 +398,7 @@ impl Tab {
             .expect("Tab variant must appear in Tab::all()") as u8
     }
 
-    /// セーブデータからタブを復元。未知の id は `Upgrades` にフォールバック
-    /// (旧 save / 将来 enum 縮小による不整合に対する防御)。
-    /// 利用箇所が cfg-gated な save.rs / test だけなので、デフォルトビルドでの
-    /// dead_code を避けるため同じ gate を付与。
+    /// セーブデータからタブを復元。未知の id は `Upgrades` にフォールバック。
     #[cfg(any(target_arch = "wasm32", test))]
     pub fn from_save_id(id: u8) -> Self {
         Self::all()
@@ -425,6 +432,9 @@ pub enum TabGroup {
 
 impl TabGroup {
     /// 全グループを宣言順 (= タブバー描画順) で返す。
+    /// 利用は SSOT 整合性 test だけなので、デフォルトビルドの dead_code を
+    /// 避けるため `Tab::all` と同じ cfg-gate を当てる。
+    #[cfg(any(target_arch = "wasm32", test))]
     pub const fn all() -> &'static [TabGroup] {
         &[
             TabGroup::Growth,
@@ -437,7 +447,10 @@ impl TabGroup {
     /// このグループに属する `Tab` をサブタブの並び順で返す。
     pub fn tabs(self) -> &'static [Tab] {
         match self {
-            TabGroup::Growth => &[Tab::Upgrades, Tab::Shop],
+            // 育成は 3 サブタブ: 強化 (gold) / 装備 (gold + 強化Lv連鎖) / 魂 (souls)
+            // 強化と装備は毎分操作する系、魂はラン死亡後に集中する系で頻度差があるため
+            // 同じグループ内のサブタブとして並列に並べる。
+            TabGroup::Growth => &[Tab::Upgrades, Tab::Shop, Tab::Souls],
             TabGroup::Info => &[Tab::Roadmap, Tab::Stats],
             TabGroup::Gacha => &[Tab::Gacha],
             TabGroup::Settings => &[Tab::Settings],
@@ -463,7 +476,7 @@ impl TabGroup {
     /// `tabs()` の構成と必ず一致するように `match` で網羅する。
     pub fn from_tab(tab: Tab) -> TabGroup {
         match tab {
-            Tab::Upgrades | Tab::Shop => TabGroup::Growth,
+            Tab::Upgrades | Tab::Shop | Tab::Souls => TabGroup::Growth,
             Tab::Roadmap | Tab::Stats => TabGroup::Info,
             Tab::Gacha => TabGroup::Gacha,
             Tab::Settings => TabGroup::Settings,
@@ -784,7 +797,10 @@ impl AbyssState {
         ((base as f64) * mult).round() as u64
     }
 
-    /// 指定強化の段階カーブ参照を返す (curve 未定義なら None)。
+    /// 指定強化のカーブ参照を返す (curve 未定義なら None)。
+    /// 内部の hero stat 計算 (`hero_atk` / `hero_max_hp` 等) で `cumulative()` を使うために保持。
+    /// UI からは段階表示を撤去した (装備が段階の役目を担うため) ので、UI で
+    /// このメソッドを呼ぶ箇所は無い。
     pub fn upgrade_curve(&self, kind: UpgradeKind) -> Option<&super::config::TierCurve> {
         let h = &self.config.hero;
         match kind {
@@ -795,17 +811,6 @@ impl AbyssState {
             // Crit/Regen/Gold は段階制未対応 (cap や倍率の都合で別設計が必要)
             _ => None,
         }
-    }
-
-    /// 強化の現在段階名と次段階情報を返す。UI 表示用。curve 未定義なら None。
-    pub fn upgrade_tier(
-        &self,
-        kind: UpgradeKind,
-    ) -> Option<(&'static str, Option<(u32, &'static str)>)> {
-        let curve = self.upgrade_curve(kind)?;
-        let lv = self.upgrades[kind.index()];
-        let (_, name) = curve.tier_at(lv);
-        Some((name, curve.next_tier(lv)))
     }
 
     pub fn hero_def(&self) -> u64 {

@@ -15,7 +15,7 @@ use crate::widgets::{Clickable, ClickableList, TabBar};
 use super::actions::*;
 use super::logic;
 use super::state::{
-    AbyssState, EquipmentId, EquipmentLane, FloorKind, SoulPerk, Tab, UpgradeKind,
+    AbyssState, EquipmentId, EquipmentLane, FloorKind, SoulPerk, Tab, TabGroup, UpgradeKind,
 };
 
 /// 主要パネルの Rect。effect 配置と通常描画の両方で同じ値を使うため切り出し。
@@ -84,22 +84,41 @@ pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<Re
     render_toggle_bar(state, f, l.toggle, click_state);
     render_tab_bar(state, f, l.tab_bar, click_state);
 
-    // タブコンテンツ + ログを縦分割
+    // body 構成: (任意でサブタブバー 1 行) + タブコンテンツ + ログ。
+    // 育成・情報グループはサブタブが複数あるので 1 行のサブタブバーを差し込む。
+    // 単独タブ (ガチャ・設定) はサブタブバー無しでコンテンツに直行。
+    let group = TabGroup::from_tab(state.tab);
     let log_h: u16 = if narrow { 4 } else { 5 };
+    let constraints: Vec<Constraint> = if group.has_subtabs() {
+        vec![
+            Constraint::Length(1),
+            Constraint::Min(5),
+            Constraint::Length(log_h),
+        ]
+    } else {
+        vec![Constraint::Min(5), Constraint::Length(log_h)]
+    };
     let body_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(log_h)])
+        .constraints(constraints)
         .split(l.body);
+    let (content_idx, log_idx) = if group.has_subtabs() {
+        render_subtab_bar(state, f, body_chunks[0], click_state);
+        (1, 2)
+    } else {
+        (0, 1)
+    };
 
     match state.tab {
-        Tab::Upgrades => render_upgrades(state, f, body_chunks[0], click_state),
-        Tab::Roadmap => render_roadmap(state, f, body_chunks[0], click_state),
-        Tab::Stats => render_stats(state, f, body_chunks[0], click_state),
-        Tab::Gacha => render_gacha(state, f, body_chunks[0], click_state),
-        Tab::Settings => render_settings(state, f, body_chunks[0], click_state),
-        Tab::Shop => render_shop(state, f, body_chunks[0], click_state),
+        Tab::Upgrades => render_upgrades(state, f, body_chunks[content_idx], click_state),
+        Tab::Roadmap => render_roadmap(state, f, body_chunks[content_idx], click_state),
+        Tab::Stats => render_stats(state, f, body_chunks[content_idx], click_state),
+        Tab::Gacha => render_gacha(state, f, body_chunks[content_idx], click_state),
+        Tab::Settings => render_settings(state, f, body_chunks[content_idx], click_state),
+        Tab::Shop => render_shop(state, f, body_chunks[content_idx], click_state),
+        Tab::Souls => render_souls(state, f, body_chunks[content_idx], click_state),
     }
-    render_log(state, f, body_chunks[1]);
+    render_log(state, f, body_chunks[log_idx]);
 }
 
 // ── ヘッダ ─────────────────────────────────────────────────
@@ -405,17 +424,21 @@ fn render_toggle_bar(
 
 // ── タブバー ───────────────────────────────────────────────
 
+/// メインメニュー (4 つのトップグループ) を描画する。
+///
+/// 6 タブ → 4 グループへの階層化: `TabGroup::all()` を SSOT として描画順を取り、
+/// アクティブグループ (= 現在タブの所属グループ) を強調表示する。
+/// 同グループ内のサブタブ間で切り替えても、メインメニュー上はずっと同じ
+/// グループがアクティブのまま (= 認知負荷最小)。
 fn render_tab_bar(
     state: &AbyssState,
     f: &mut Frame,
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    // `Tab::to_save_id` を SSOT として再利用。タブの宣言順 (= save id 順) と
-    // タブバーの並び順を構造的に揃えることで、新タブ追加時に両者がズレない。
-    let active_idx = state.tab.to_save_id() as usize;
-    let style_for = |idx: usize, base: Color| -> Style {
-        if idx == active_idx {
+    let active_group = TabGroup::from_tab(state.tab);
+    let style_for = |group: TabGroup, base: Color| -> Style {
+        if group == active_group {
             Style::default()
                 .fg(Color::Black)
                 .bg(base)
@@ -427,20 +450,84 @@ fn render_tab_bar(
 
     let narrow = is_narrow_layout(area.width);
     let separator = if narrow { "|" } else { " │ " };
-    // narrow 40 列に 6 タブ並ぶ → 絵文字と「設定」のラベルを縮める。
-    let gacha_label = if narrow { "ガチャ" } else { "ガチャ🔑" };
-    let settings_label = if narrow { "設定" } else { "⚙設定" };
-    let shop_label = if narrow { "装備" } else { "🛡装備" };
+    // narrow 40 列でも 4 グループはゆとりを持って収まるので、wide では絵文字付き、
+    // narrow ではグループ名そのまま (`TabGroup::name()`) で軽量化。
+    let growth_label: &str = if narrow { TabGroup::Growth.name() } else { "🛡育成" };
+    let info_label: &str = if narrow { TabGroup::Info.name() } else { "📊情報" };
+    let gacha_label: &str = if narrow { TabGroup::Gacha.name() } else { "ガチャ🔑" };
+    let settings_label: &str = if narrow { TabGroup::Settings.name() } else { "⚙設定" };
     let bar = TabBar::new(separator)
-        .tab("強化", style_for(0, Color::Green), TAB_UPGRADES)
-        .tab("進捗", style_for(1, Color::Cyan), TAB_ROADMAP)
-        .tab("統計", style_for(2, Color::Cyan), TAB_STATS)
-        .tab(gacha_label, style_for(3, Color::LightCyan), TAB_GACHA)
-        .tab(settings_label, style_for(4, Color::White), TAB_SETTINGS)
-        .tab(shop_label, style_for(5, Color::Yellow), TAB_SHOP);
+        .tab(growth_label, style_for(TabGroup::Growth, Color::Green), TAB_GROUP_GROWTH)
+        .tab(info_label, style_for(TabGroup::Info, Color::Cyan), TAB_GROUP_INFO)
+        .tab(gacha_label, style_for(TabGroup::Gacha, Color::LightCyan), TAB_GROUP_GACHA)
+        .tab(settings_label, style_for(TabGroup::Settings, Color::White), TAB_GROUP_SETTINGS);
 
     let mut cs = click_state.borrow_mut();
     bar.render(f, area, &mut cs);
+}
+
+/// サブタブバーを描画する (グループにサブタブが複数ある時のみ呼ぶ)。
+/// 占有領域は 1 行。育成グループ `[強化][装備][魂]`、情報グループ `[進捗][統計]`。
+fn render_subtab_bar(
+    state: &AbyssState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let group = TabGroup::from_tab(state.tab);
+    let active_tab = state.tab;
+    let mut bar = TabBar::new(" · ");
+    for &tab in group.tabs() {
+        let label = subtab_label(tab);
+        let click_id = subtab_click_id(tab);
+        let base = subtab_color(tab);
+        let style = if tab == active_tab {
+            Style::default()
+                .fg(Color::Black)
+                .bg(base)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(base)
+        };
+        bar = bar.tab(label, style, click_id);
+    }
+    let mut cs = click_state.borrow_mut();
+    bar.render(f, area, &mut cs);
+}
+
+fn subtab_label(tab: Tab) -> &'static str {
+    match tab {
+        Tab::Upgrades => "強化",
+        Tab::Shop => "装備",
+        Tab::Souls => "魂",
+        Tab::Roadmap => "進捗",
+        Tab::Stats => "統計",
+        Tab::Gacha => "ガチャ",
+        Tab::Settings => "設定",
+    }
+}
+
+fn subtab_click_id(tab: Tab) -> u16 {
+    match tab {
+        Tab::Upgrades => TAB_UPGRADES,
+        Tab::Shop => TAB_SHOP,
+        Tab::Souls => TAB_SOULS,
+        Tab::Roadmap => TAB_ROADMAP,
+        Tab::Stats => TAB_STATS,
+        Tab::Gacha => TAB_GACHA,
+        Tab::Settings => TAB_SETTINGS,
+    }
+}
+
+fn subtab_color(tab: Tab) -> Color {
+    match tab {
+        Tab::Upgrades => Color::Green,
+        Tab::Shop => Color::Yellow,
+        Tab::Souls => Color::Magenta,
+        Tab::Roadmap | Tab::Stats => Color::Cyan,
+        Tab::Gacha => Color::LightCyan,
+        Tab::Settings => Color::White,
+    }
 }
 
 // ── スクロール共通ヘルパー ─────────────────────────────────
@@ -596,8 +683,14 @@ fn render_scrollable_tab<'a, C: ScrollableContent<'a>>(
     }
 }
 
-// ── 強化タブ ───────────────────────────────────────────────
+// ── 強化サブタブ ───────────────────────────────────────────
 
+/// 強化サブタブ。線形に近い「Lv + 効果 + コスト」の純粋な投資画面。
+///
+/// 装備の追加で「段階的な達成感」が装備ツリーに移ったため、本タブは段階バッジ
+/// (`[剣士]`) や次段階プレビュー (`次: Lv11 [剣豪]`) を一切出さない。
+/// per-Lv の数値も `cumulative(lv+1) - cumulative(lv)` で計算するため、内部 TierCurve
+/// の境界をまたぐ Lv では数値が変化する (これは正しい挙動)。
 fn render_upgrades(
     state: &AbyssState,
     f: &mut Frame,
@@ -606,28 +699,6 @@ fn render_upgrades(
 ) {
     let narrow = is_narrow_layout(area.width);
     let mut cl = ClickableList::new();
-
-    // narrow ではヘッダ装飾を最小化し、リストに 1 行余分に渡す。
-    // 7 アイテム + ヘッダ 1 + 空行 = 9 行は 40x30 のタブ inner に入りきらないため、
-    // 副題と空行を畳んでギリギリ全アイテム visible を確保する。
-    if narrow {
-        cl.push(Line::from(Span::styled(
-            " 強化",
-            Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-        )));
-    } else {
-        cl.push(Line::from(vec![
-            Span::styled(
-                " 強化",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " — gold で永続強化を購入",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-        cl.push(Line::from(""));
-    }
 
     for kind in UpgradeKind::all() {
         let lv = state.upgrades[kind.index()];
@@ -643,12 +714,9 @@ fn render_upgrades(
 
         let label_color = if affordable { Color::White } else { Color::DarkGray };
         let label = format!(" {} ", kind.name());
-        // 次に 1 Lv 上げた時の実増分。curve 持ち強化は段階によって変わるので
-        // `cumulative(lv+1) - cumulative(lv)` で次購入の実効値を出す。
-        // 非 curve (Crit/Regen/Gold) は固定文字列にフォールバック。
+        // 次に 1 Lv 上げた時の実増分。curve 持ちは境界跨ぎで数値が変わる。
         let effect = match state.upgrade_curve(*kind) {
             Some(curve) => {
-                let lv = state.upgrades[kind.index()];
                 let delta = curve.cumulative(lv + 1) - curve.cumulative(lv);
                 match kind {
                     UpgradeKind::Sword => format!("ATK+{}", delta.round() as u64),
@@ -662,79 +730,47 @@ fn render_upgrades(
         };
         let lv_str = format!(" Lv.{}", lv);
 
-        // 段階バッジ (curve 持ちのみ)
-        let tier_badge = state
-            .upgrade_tier(*kind)
-            .map(|(name, _)| format!("[{}] ", name))
-            .unwrap_or_default();
-
         cl.push_clickable(
             Line::from(vec![
                 Span::styled(label, Style::default().fg(label_color).add_modifier(Modifier::BOLD)),
-                Span::styled(tier_badge, Style::default().fg(Color::Yellow)),
                 Span::styled(format!("{:<10}", effect), Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{:>10}", cost_str), cost_style),
                 Span::styled(lv_str, Style::default().fg(Color::Magenta)),
             ]),
             BUY_UPGRADE_BASE + kind.index() as u16,
         );
-
-        // 次段階プレビューは情報密度が高い行 (1〜2 visual row) なので、
-        // narrow では完全に畳む。7 アイテム × 最大 2 行 = 14 行を一気に節約し、
-        // 「下が見えなくなる」問題の最大要因を解消する。wide では従来通り表示。
-        if !narrow {
-            if let Some(curve) = state.upgrade_curve(*kind) {
-                let lv_u = state.upgrades[kind.index()];
-                let (cur_idx, _) = curve.tier_at(lv_u);
-                let next = curve.tier(cur_idx + 1);
-                let after_next = curve.tier(cur_idx + 2);
-                if let Some((next_lv, _, next_name)) = next {
-                    // start_level は「超えると次段階」境界なので、新段階が
-                    // 実際に効く最初の Lv は start_level + 1。表示はこちらを使う。
-                    let mut spans = vec![
-                        Span::styled("        次: ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            format!("Lv{} [{}]", next_lv + 1, next_name),
-                            Style::default().fg(Color::Green),
-                        ),
-                    ];
-                    if let Some((after_lv, _, _)) = after_next {
-                        // 次のさらに先は silhouette (?) で見せる
-                        spans.push(Span::styled(
-                            format!("    その先: Lv{} [???]", after_lv + 1),
-                            Style::default().fg(Color::DarkGray),
-                        ));
-                    }
-                    cl.push(Line::from(spans));
-                } else if cur_idx + 1 == curve.len() {
-                    // 最終段階に到達済み
-                    cl.push(Line::from(vec![Span::styled(
-                        "        ▼ 最終段階到達",
-                        Style::default().fg(Color::Magenta),
-                    )]));
-                }
-            }
-        }
     }
 
-    // ── 魂セクション (旧 Souls タブを統合) ──
-    // 「永続強化への投資」というメンタルモデルが gold の強化と共通なため、
-    // 同じタブの末尾にスクロールで連続表示する。
-    cl.push(Line::from(""));
-    let soul_header = if narrow {
-        " 魂の強化".to_string()
-    } else {
-        " 魂の強化  — 死亡しても残る永続バフ".to_string()
-    };
+    let _ = narrow; // 簡素化により narrow/wide で分岐するほどの内容差は無くなった
+    render_scrollable_tab(
+        state,
+        f,
+        area,
+        click_state,
+        Color::Green,
+        WrappingClickableList { list: cl, wrap: narrow },
+    );
+}
+
+// ── 魂サブタブ ─────────────────────────────────────────────
+
+/// 魂サブタブ。死亡で蓄積される魂を消費して買う永続バフ 4 種。
+/// 旧 `render_upgrades` 末尾の魂セクションを独立タブとして分離した
+/// (操作頻度が「ラン死亡後に集中」と強化と異なるため)。
+fn render_souls(
+    state: &AbyssState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let narrow = is_narrow_layout(area.width);
+    let mut cl = ClickableList::new();
+
     cl.push(Line::from(Span::styled(
-        soul_header,
+        format!(" 所持: ✦{}", format_num(state.souls)),
         Style::default()
             .fg(Color::Magenta)
             .add_modifier(Modifier::BOLD),
-    )));
-    cl.push(Line::from(Span::styled(
-        format!(" 所持: ✦{}", format_num(state.souls)),
-        Style::default().fg(Color::Magenta),
     )));
 
     for perk in SoulPerk::all().iter() {
@@ -770,7 +806,7 @@ fn render_upgrades(
         f,
         area,
         click_state,
-        Color::Green,
+        Color::Magenta,
         WrappingClickableList { list: cl, wrap: narrow },
     );
 }
@@ -1651,9 +1687,10 @@ mod tests {
         assert!(found_ten, "GACHA_PULL_10 button not registered");
     }
 
-    /// 5 タブ全てがクリック可能領域として登録されていることを確認。
+    /// メインメニューの 4 グループがクリック可能領域として登録されていることを確認。
+    /// 階層化前は 5 タブをトップに並べていたが、現在は 4 グループに集約されている。
     #[test]
-    fn all_tabs_registered() {
+    fn all_top_groups_registered() {
         let state = AbyssState::new();
         let cs = Rc::new(RefCell::new(ClickState::new()));
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
@@ -1661,27 +1698,56 @@ mod tests {
             .draw(|f| render(&state, f, f.area(), &cs))
             .unwrap();
         let cs = cs.borrow();
-        let mut found = [false; 5];
+        let mut found = [false; 4];
         for y in 0..30 {
             for x in 0..80 {
                 match cs.hit_test(x, y) {
-                    Some(TAB_UPGRADES) => found[0] = true,
-                    Some(TAB_ROADMAP) => found[1] = true,
-                    Some(TAB_STATS) => found[2] = true,
-                    Some(TAB_GACHA) => found[3] = true,
-                    Some(TAB_SETTINGS) => found[4] = true,
+                    Some(TAB_GROUP_GROWTH) => found[0] = true,
+                    Some(TAB_GROUP_INFO) => found[1] = true,
+                    Some(TAB_GROUP_GACHA) => found[2] = true,
+                    Some(TAB_GROUP_SETTINGS) => found[3] = true,
                     _ => {}
                 }
             }
         }
-        assert!(found.iter().all(|&b| b), "missing tab targets: {:?}", found);
+        assert!(found.iter().all(|&b| b), "missing top-group targets: {:?}", found);
     }
 
-    /// narrow (40 列) でも全タブを描画してパニックしないこと、
-    /// かつタブ・主要ボタンが登録されることをスモーク確認。
-    /// レイアウト変更で行数が膨らんで Constraint が負になる回帰を防ぐ。
+    /// 育成グループ (multi-subtab) を開いた時、サブタブバーに 3 サブタブ
+    /// (強化/装備/魂) のクリックターゲットが登録されること。
     #[test]
-    fn narrow_layout_renders_all_tabs() {
+    fn growth_group_renders_three_subtabs() {
+        let state = AbyssState::new();
+        // 既定で Tab::Upgrades = 育成グループ。
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal
+            .draw(|f| render(&state, f, f.area(), &cs))
+            .unwrap();
+        let cs = cs.borrow();
+        let mut found = [false; 3];
+        for y in 0..30 {
+            for x in 0..80 {
+                match cs.hit_test(x, y) {
+                    Some(TAB_UPGRADES) => found[0] = true,
+                    Some(TAB_SHOP) => found[1] = true,
+                    Some(TAB_SOULS) => found[2] = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            found.iter().all(|&b| b),
+            "missing growth subtab targets: {:?}",
+            found
+        );
+    }
+
+    /// narrow (40 列) で全 7 タブをアクティブにして描画してもパニックせず、
+    /// **メインメニュー 4 グループ全て**がクリック可能領域として登録されること。
+    /// レイアウト変更で行数が膨らんで Constraint が負になる回帰も同時に防ぐ。
+    #[test]
+    fn narrow_layout_renders_all_top_groups() {
         let mut state = AbyssState::new();
         state.keys = 100;
         let tabs = [
@@ -1690,6 +1756,8 @@ mod tests {
             Tab::Stats,
             Tab::Gacha,
             Tab::Settings,
+            Tab::Shop,
+            Tab::Souls,
         ];
         for &tab in &tabs {
             state.tab = tab;
@@ -1698,24 +1766,22 @@ mod tests {
             terminal
                 .draw(|f| render(&state, f, f.area(), &cs))
                 .unwrap();
-            // narrow でも全タブターゲットが取れる (タブバーの幅切り詰めの回帰検知)
             let cs = cs.borrow();
-            let mut found = [false; 5];
+            let mut found = [false; 4];
             for y in 0..30 {
                 for x in 0..40 {
                     match cs.hit_test(x, y) {
-                        Some(TAB_UPGRADES) => found[0] = true,
-                        Some(TAB_ROADMAP) => found[1] = true,
-                        Some(TAB_STATS) => found[2] = true,
-                        Some(TAB_GACHA) => found[3] = true,
-                        Some(TAB_SETTINGS) => found[4] = true,
+                        Some(TAB_GROUP_GROWTH) => found[0] = true,
+                        Some(TAB_GROUP_INFO) => found[1] = true,
+                        Some(TAB_GROUP_GACHA) => found[2] = true,
+                        Some(TAB_GROUP_SETTINGS) => found[3] = true,
                         _ => {}
                     }
                 }
             }
             assert!(
                 found.iter().all(|&b| b),
-                "narrow tab {:?}: missing targets {:?}",
+                "narrow tab {:?}: missing top-group targets {:?}",
                 tab,
                 found
             );
