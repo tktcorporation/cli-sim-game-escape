@@ -229,6 +229,11 @@ pub struct CafeState {
     /// `Cell` because `Game::render` takes `&self` and the renderer needs to
     /// clamp the value against the freshly-computed content height.
     pub cards_scroll: Cell<u16>,
+    /// Vertical scroll offset for the GachaResult screen. Auto-tracks the
+    /// latest revealed card during the reveal anim; user-controllable
+    /// afterwards via ▲▼ / `j` `k` so all 10 pulled cards are reachable on
+    /// short mobile viewports.
+    pub gacha_result_scroll: Cell<u16>,
 }
 
 impl CafeState {
@@ -280,6 +285,7 @@ impl CafeState {
             hub_tab: HubTab::Home,
             gacha_anim_frame: 0,
             cards_scroll: Cell::new(0),
+            gacha_result_scroll: Cell::new(0),
         }
     }
 

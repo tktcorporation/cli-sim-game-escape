@@ -328,16 +328,26 @@ pub(super) fn render_hub_cards(state: &CafeState, f: &mut Frame, area: Rect, cli
     cl.push(Line::from(""));
 
     // Card list ( ▶ ★★★ 名前 Lv.10 形式 — 最長 ~28 セルなので 32 列 narrow に収まる)
-    for (i, owned) in state.card_state.cards.iter().enumerate().take(15) {
+    //
+    // 「直近結果」をプレイヤーが見つけられる必要があるため、所持枚数が
+    // CARDS_VISIBLE を超えても**末尾から CARDS_VISIBLE 枚**を表示する。
+    // 古いカードは ID 範囲を圧迫させないため非表示 (action ID は
+    // CARD_EQUIP_BASE..+CARDS_VISIBLE に固定し、display 位置 → cards index
+    // の解決は click handler 側で `total - CARDS_VISIBLE + offset` で行う)。
+    let cards = &state.card_state.cards;
+    let total = cards.len();
+    let start = total.saturating_sub(CARDS_VISIBLE);
+    for (offset, owned) in cards[start..].iter().enumerate() {
+        let actual_idx = start + offset;
         if let Some(def) = card_def(owned.card_id) {
-            let equipped = state.card_state.equipped_card == Some(i);
+            let equipped = state.card_state.equipped_card == Some(actual_idx);
             let marker = if equipped { "▶" } else { " " };
             cl.push_clickable(Line::from(vec![
                 Span::styled(format!(" {marker} "), Style::default().fg(Color::Yellow)),
                 Span::styled(format!("{} ", def.rarity.label()), Style::default().fg(Color::Magenta)),
                 Span::styled(def.name, Style::default().fg(Color::White)),
                 Span::styled(format!(" Lv.{}", owned.level), Style::default().fg(Color::Cyan)),
-            ]), CARD_EQUIP_BASE + i as u16);
+            ]), CARD_EQUIP_BASE + offset as u16);
         }
     }
 
@@ -706,6 +716,62 @@ mod tests {
                 let id = cs.hit_test(x, y);
                 assert_ne!(id, Some(CARD_SCROLL_UP), "scroll col leaked at 32×40");
                 assert_ne!(id, Some(CARD_SCROLL_DOWN), "scroll col leaked at 32×40");
+            }
+        }
+    }
+
+    /// 所持カードが CARDS_VISIBLE (15) 枚を超えた時、表示は **最新 15 枚** に
+    /// 限定される。古いカード (オフセット 0) はリストから消え、最新 (オフセット
+    /// total-1) は登録される。「ガチャを引いた直後の新カードが見えない」回帰防止。
+    #[test]
+    fn hub_cards_shows_latest_window_when_over_visible_cap() {
+        let mut state = CafeState::new();
+        state.phase = super::super::super::state::GamePhase::Hub;
+        state.hub_tab = HubTab::Cards;
+        state.card_state.gems = 5000;
+        // 20 枚 push (CARDS_VISIBLE=15 を超過)
+        for id in 1..=20 {
+            state.card_state.cards.push(OwnedCard {
+                card_id: id,
+                level: 1,
+                rank_ups: 0,
+                duplicates: 0,
+            });
+        }
+
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(32, 60)).unwrap();
+        terminal
+            .draw(|f| render_hub(&state, f, f.area(), &cs))
+            .unwrap();
+
+        let cs = cs.borrow();
+        // 表示行は 15 個 — display offset 0..14 の action ID が登録される。
+        // CARD_EQUIP_BASE+0 = 最古の表示カード (= cards[5])
+        // CARD_EQUIP_BASE+14 = 最新カード (= cards[19])
+        let mut found = std::collections::HashSet::new();
+        for y in 0..60 {
+            for x in 0..32 {
+                if let Some(id) = cs.hit_test(x, y) {
+                    if (CARD_EQUIP_BASE..CARD_EQUIP_BASE + 15).contains(&id) {
+                        found.insert(id - CARD_EQUIP_BASE);
+                    }
+                }
+            }
+        }
+        assert!(
+            found.contains(&14),
+            "newest card (display offset 14) must be displayed/clickable"
+        );
+        // CARDS_VISIBLE+ は出ない (offset 15 以降の ID は登録されない)
+        for y in 0..60 {
+            for x in 0..32 {
+                if let Some(id) = cs.hit_test(x, y) {
+                    assert!(
+                        id < CARD_EQUIP_BASE + 15 || id >= CARD_BACK,
+                        "no card row with display offset >= CARDS_VISIBLE expected (got id={id})"
+                    );
+                }
             }
         }
     }
