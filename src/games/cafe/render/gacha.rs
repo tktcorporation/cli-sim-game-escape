@@ -115,19 +115,28 @@ pub(super) fn render_gacha_result(
     };
 
     // Scroll selection:
-    // - During the reveal anim: auto-track so the latest revealed line stays
-    //   in view (otherwise on a short screen the player only ever sees the
-    //   first few cards while later, possibly rarer drops are hidden).
-    // - After completion: respect the player's manual scroll, clamped each
-    //   frame in case the content shrunk on resize.
+    // - Anticipation phase (revealed == 0): pin scroll=0 so the header
+    //   ("✦ 召喚中 ✦") and skip-hint stay visible. Earlier auto-track logic
+    //   computed a positive scroll here, which on tiny mobile heights pushed
+    //   the header off-screen and the player saw a blank screen.
+    // - Reveal phase (revealed >= 1): keep the **latest** card pinned at the
+    //   bottom of the viewport so newly-revealed cards are never hidden by
+    //   overflow on a short screen.
+    // - Complete: respect the player's manual scroll, clamped each frame in
+    //   case content size shrunk on resize.
     let max_scroll = total_lines.saturating_sub(cards_area.height);
     let scroll = if complete {
         state.gacha_result_scroll.get().min(max_scroll)
+    } else if revealed == 0 {
+        0
     } else {
-        // header(1) + blank(1) + revealed cards = how far down the latest
-        // visible line sits. Subtract viewport height to land on the bottom.
-        let revealed_through = (2 + revealed) as u16;
-        revealed_through.saturating_sub(cards_area.height).min(max_scroll)
+        // Lines: 0=header, 1=blank, 2=card1, ..., 1+N=cardN.
+        // Show last_card_line at the bottom row (height-1) → scroll = last_card_line - (height-1).
+        let last_card_line = 1u16 + revealed as u16;
+        let view_h = cards_area.height.max(1);
+        last_card_line
+            .saturating_sub(view_h - 1)
+            .min(max_scroll)
     };
     state.gacha_result_scroll.set(scroll);
 
@@ -398,6 +407,29 @@ mod tests {
             "▼ scroll must register when 10連 result overflows on 32×10"
         );
         assert!(!found_up, "▲ must NOT register when scroll==0 (top of list)");
+    }
+
+    /// 旧 auto-scroll は revealed=0 (anticipation) で `scroll = 2 - height`
+    /// を計算し、tiny 画面で header を画面外に押し出して「何も見えない」
+    /// 症状を引き起こしていた。anticipation 中は scroll=0 固定で header
+    /// (✦ 召喚中 ✦) が必ず可視であることを検証する回帰テスト。
+    #[test]
+    fn gacha_result_pins_header_during_anticipation_on_tiny_screen() {
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        // 32x6 — anticipation の 5 行 (header + empty + 3 行) すら入らない極小
+        let mut terminal = Terminal::new(TestBackend::new(32, 6)).unwrap();
+        let card_ids: Vec<u32> = vec![20, 21, 22, 23, 24, 10, 11, 12, 13, 14];
+        let mut state = CafeState::new();
+        state.gacha_anim_frame = 0; // = anticipation phase
+        terminal
+            .draw(|f| render_gacha_result(&state, f, f.area(), &cs, &card_ids))
+            .unwrap();
+        // anticipation 中は scroll=0 が強制されること
+        assert_eq!(
+            state.gacha_result_scroll.get(),
+            0,
+            "scroll must stay 0 during anticipation so header stays visible"
+        );
     }
 
     /// アニメーション中は ▲▼ ボタンを出さない (auto-scroll とユーザー操作の

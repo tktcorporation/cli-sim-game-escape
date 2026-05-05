@@ -10,14 +10,18 @@
 //! - [`ClickableList`] — Vertical list with per-row click targets.
 //! - [`ClickableGrid`] — 2D grid with per-cell click targets.
 //! - [`Clickable`] — Wrap any [`Widget`] with a single full-area click target.
+//! - [`ScrollableTab`] — `ClickableList` + bordered block + auto ▲▼ tap column,
+//!   with the scroll position auto-clamped against per-frame content height.
 //!
 //! These builders are the **only** sanctioned way to register click targets.
 //! Direct calls to `ClickState::add_click_target` / `add_row_target` are
 //! banned by clippy (see `clippy.toml`).
 #![allow(clippy::disallowed_methods)]
 
-use ratzilla::ratatui::layout::Rect;
-use ratzilla::ratatui::style::{Color, Style};
+use std::cell::Cell;
+
+use ratzilla::ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::{Block, Paragraph, Widget, Wrap};
 use ratzilla::ratatui::Frame;
@@ -473,6 +477,198 @@ impl<W: Widget> Clickable<W> {
     pub fn render(self, f: &mut Frame, area: Rect, cs: &mut ClickState) {
         cs.add_click_target(area, self.action_id);
         f.render_widget(self.widget, area);
+    }
+}
+
+// ── ScrollableTab ─────────────────────────────────────────────
+
+/// A bordered tab body that wraps a [`ClickableList`] and adds a right-edge
+/// ▲▼ tap column for vertical scrolling on small screens.
+///
+/// # Why this primitive exists
+///
+/// Both Abyss (強化/魂/設定) and Café (カード) have tabs whose content can
+/// exceed the viewport on mobile. Each one used to inline the same "border
+/// block + content area + scroll column + scroll-position clamp" boilerplate.
+/// This primitive consolidates the pattern so the two stay in lock-step:
+///
+/// - `block` is rendered onto `area` (caller controls borders/title/color).
+/// - The block's inner area is split horizontally into content + a 1-col
+///   scroll column (the scroll column is omitted only if `inner.width <= 1`).
+/// - The list is rendered into the content area, scrolled by the value
+///   currently held in `scroll_state`. The value is **clamped against the
+///   freshly-computed content height** and written back, so resizing the
+///   window or shrinking the list never leaves the view stuck past the end.
+/// - ▲ / ▼ tap targets are drawn into the scroll column. Each tap target
+///   spans HALF the column height (not just the single ▲/▼ glyph) so it's
+///   reachable with a fingertip.
+///
+/// # Example
+/// ```ignore
+/// ScrollableTab::new(cl, &state.cards_scroll, CARD_SCROLL_UP, CARD_SCROLL_DOWN)
+///     .block(Block::default().borders(Borders::ALL).title(" カード "))
+///     .arrow_color(Color::LightMagenta)
+///     .render(f, area, &mut cs);
+/// ```
+pub struct ScrollableTab<'a> {
+    list: ClickableList<'a>,
+    block: Block<'a>,
+    wrap: bool,
+    scroll_state: &'a Cell<u16>,
+    scroll_up_id: u16,
+    scroll_down_id: u16,
+    arrow_color: Color,
+}
+
+impl<'a> ScrollableTab<'a> {
+    /// Create a new scrollable tab.
+    ///
+    /// `scroll_state` is borrowed (interior mutability via `Cell<u16>`) so
+    /// `Game::render(&self, ...)` can update the clamped scroll position
+    /// without needing `&mut Self`.
+    pub fn new(
+        list: ClickableList<'a>,
+        scroll_state: &'a Cell<u16>,
+        scroll_up_id: u16,
+        scroll_down_id: u16,
+    ) -> Self {
+        Self {
+            list,
+            block: Block::default(),
+            wrap: false,
+            scroll_state,
+            scroll_up_id,
+            scroll_down_id,
+            arrow_color: Color::LightCyan,
+        }
+    }
+
+    pub fn block(mut self, b: Block<'a>) -> Self {
+        self.block = b;
+        self
+    }
+
+    /// Enable line wrapping. When false (default) one logical line maps to
+    /// one visual row; with wrap, long lines may consume multiple rows and
+    /// the scroll/clamp math accounts for wrap-expanded heights.
+    /// Currently kept ready for the abyss migration that uses `wrap=narrow`.
+    #[allow(dead_code)]
+    pub fn wrap(mut self, w: bool) -> Self {
+        self.wrap = w;
+        self
+    }
+
+    pub fn arrow_color(mut self, c: Color) -> Self {
+        self.arrow_color = c;
+        self
+    }
+
+    /// Render the block, the list (scrolled), and the ▲▼ tap column.
+    /// Click targets for the list rows are added inside `ClickableList::render`;
+    /// the scroll arrows are added on top via `Clickable`.
+    pub fn render(self, f: &mut Frame, area: Rect, cs: &mut ClickState) {
+        let ScrollableTab {
+            list,
+            block,
+            wrap,
+            scroll_state,
+            scroll_up_id,
+            scroll_down_id,
+            arrow_color,
+        } = self;
+
+        let inner = block.inner(area);
+
+        // Always reserve the scroll column when there is room — keeps the
+        // content width identical whether the list overflows or not, so the
+        // user's spatial expectations don't shift between renders.
+        let (content_area, scroll_col) = split_for_scroll(inner);
+
+        let content_h = if wrap {
+            list.visual_height(content_area.width)
+        } else {
+            list.lines().len().min(u16::MAX as usize) as u16
+        };
+        let max_scroll = content_h.saturating_sub(content_area.height);
+        let scroll = scroll_state.get().min(max_scroll);
+        scroll_state.set(scroll);
+
+        f.render_widget(block, area);
+        list.render(f, content_area, Block::default(), cs, wrap, scroll);
+        if let Some(sc) = scroll_col {
+            render_scroll_indicators(
+                f,
+                sc,
+                ScrollIndicatorState { scroll, max_scroll },
+                cs,
+                ScrollIndicatorIds {
+                    up: scroll_up_id,
+                    down: scroll_down_id,
+                    color: arrow_color,
+                },
+            );
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+struct ScrollIndicatorState {
+    scroll: u16,
+    max_scroll: u16,
+}
+
+#[derive(Copy, Clone)]
+struct ScrollIndicatorIds {
+    up: u16,
+    down: u16,
+    color: Color,
+}
+
+/// Split a rect into "content (rest)" + "1-col scroll bar (right edge)".
+/// Returns `(content, None)` if the input is too narrow (≤ 1 col) — that
+/// preserves the entire row for content rather than rendering a useless
+/// scroll bar that eats the only column.
+fn split_for_scroll(inner: Rect) -> (Rect, Option<Rect>) {
+    if inner.width <= 1 {
+        return (inner, None);
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+    (chunks[0], Some(chunks[1]))
+}
+
+/// Draw ▲ on the upper half and ▼ on the lower half of `area`. Each glyph
+/// is drawn at the visual edge but the **tap target spans the full half** —
+/// 1-cell-wide tap targets are unreachable on touch devices.
+fn render_scroll_indicators(
+    f: &mut Frame,
+    area: Rect,
+    state: ScrollIndicatorState,
+    cs: &mut ClickState,
+    ids: ScrollIndicatorIds,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let half = area.height / 2;
+    let style = Style::default().fg(ids.color).add_modifier(Modifier::BOLD);
+
+    if half > 0 && state.scroll > 0 {
+        let up_rect = Rect::new(area.x, area.y, area.width, half);
+        let para = Paragraph::new(Line::from(Span::styled("▲", style)));
+        Clickable::new(para, ids.up).render(f, up_rect, cs);
+    }
+    if state.scroll < state.max_scroll && area.height > half {
+        let down_h = area.height - half;
+        let down_rect = Rect::new(area.x, area.y + half, area.width, down_h);
+        let mut lines: Vec<Line> = (0..down_h.saturating_sub(1))
+            .map(|_| Line::from(""))
+            .collect();
+        lines.push(Line::from(Span::styled("▼", style)));
+        let para = Paragraph::new(lines);
+        Clickable::new(para, ids.down).render(f, down_rect, cs);
     }
 }
 

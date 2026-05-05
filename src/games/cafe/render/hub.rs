@@ -10,7 +10,7 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
-use crate::widgets::{Clickable, ClickableList, TabBar};
+use crate::widgets::{ClickableList, ScrollableTab, TabBar};
 
 use super::super::actions::*;
 use super::super::characters::CharacterId;
@@ -313,18 +313,11 @@ pub(super) fn render_hub_cards(state: &CafeState, f: &mut Frame, area: Rect, cli
     } else {
         cl.push(Line::from(Span::styled(" ✓ デイリードロー済み", Style::default().fg(Color::DarkGray))));
     }
-    if state.card_state.gems >= GACHA_SINGLE_COST {
-        cl.push_clickable(Line::from(Span::styled(
-            format!(" ▶ ガチャ単発 (💎{})", GACHA_SINGLE_COST),
-            Style::default().fg(Color::Cyan),
-        )), CARD_GACHA_SINGLE);
-    }
-    if state.card_state.gems >= GACHA_TEN_COST {
-        cl.push_clickable(Line::from(Span::styled(
-            format!(" ▶ ガチャ10連 (💎{})", GACHA_TEN_COST),
-            Style::default().fg(Color::Cyan),
-        )), CARD_GACHA_TEN);
-    }
+    // 単発/10連 はガチャの「主要操作」なので、💎 不足でも **常に表示**して
+    // 存在を見せる。手前の click handler が在庫チェックするので、グレー
+    // 行をタップしても safe (`try_gacha_*` が `gems >= cost` を再検証)。
+    push_gacha_button(&mut cl, " ▶ ガチャ単発", GACHA_SINGLE_COST, state.card_state.gems, CARD_GACHA_SINGLE);
+    push_gacha_button(&mut cl, " ▶ ガチャ10連", GACHA_TEN_COST, state.card_state.gems, CARD_GACHA_TEN);
     cl.push(Line::from(""));
 
     // Card list ( ▶ ★★★ 名前 Lv.10 形式 — 最長 ~28 セルなので 32 列 narrow に収まる)
@@ -351,75 +344,44 @@ pub(super) fn render_hub_cards(state: &CafeState, f: &mut Frame, area: Rect, cli
         }
     }
 
+    // 強化タブ (abyss) と同じ ScrollableTab primitive を使用。block + content
+    // + ▲▼ tap 列 + スクロール clamp が 1 つの widget 呼び出しに集約される。
     let borders = if is_narrow { Borders::TOP | Borders::BOTTOM } else { Borders::ALL };
-    let block = Block::default().borders(borders).border_style(Style::default().fg(Color::Magenta)).title(" カード ");
-
-    // Inner area determines whether we need a scroll column. We split the
-    // *inner* (post-border) area horizontally, then re-render the block
-    // ourselves so block + content + scroll col stay co-located on the same
-    // `<pre>` grid (no overlay div, per CLAUDE.md).
-    let inner = block.inner(area);
-    let total_lines = cl.len() as u16;
-    let needs_scroll = total_lines > inner.height;
-
-    let (content_area, scroll_col) = if needs_scroll && inner.width >= 2 {
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Min(0), Constraint::Length(1)])
-            .split(inner);
-        (cols[0], Some(cols[1]))
-    } else {
-        (inner, None)
-    };
-
-    // Clamp scroll against the freshly-computed max so resizing the window
-    // never leaves the view stuck past the end of the list.
-    let max_scroll = total_lines.saturating_sub(content_area.height);
-    let scroll = state.cards_scroll.get().min(max_scroll);
-    state.cards_scroll.set(scroll);
-
-    f.render_widget(block, area);
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(" カード ");
     {
         let mut cs = click_state.borrow_mut();
-        cl.render(f, content_area, Block::default(), &mut cs, false, scroll);
-        if let Some(sc) = scroll_col {
-            render_cards_scroll_indicators(f, sc, scroll, max_scroll, &mut cs);
-        }
+        ScrollableTab::new(cl, &state.cards_scroll, CARD_SCROLL_UP, CARD_SCROLL_DOWN)
+            .block(block)
+            .arrow_color(Color::LightMagenta)
+            .render(f, area, &mut cs);
     }
 }
 
-/// Right-edge ▲▼ tap column for the Cards tab. Mirrors the abyss pattern:
-/// each half of the column is a full-area `Clickable`, so even on touch the
-/// button is reachable without pixel-perfect aim.
-fn render_cards_scroll_indicators(
-    f: &mut Frame,
-    area: Rect,
-    scroll: u16,
-    max_scroll: u16,
-    cs: &mut ClickState,
+/// 💎 が足りているなら clickable で cyan、足りなければ非 clickable で
+/// DarkGray + `(💎不足)` 注記を出す。「ボタンが消えた」と user が混乱する
+/// のを避けるため、affordable 状態に関わらず必ず 1 行を消費する。
+fn push_gacha_button<'a>(
+    cl: &mut ClickableList<'a>,
+    label: &'a str,
+    cost: u32,
+    gems: u32,
+    action_id: u16,
 ) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let half = area.height / 2;
-    let style = Style::default()
-        .fg(Color::LightMagenta)
-        .add_modifier(Modifier::BOLD);
-
-    if half > 0 && scroll > 0 {
-        let up_rect = Rect::new(area.x, area.y, area.width, half);
-        let para = Paragraph::new(Line::from(Span::styled("▲", style)));
-        Clickable::new(para, CARD_SCROLL_UP).render(f, up_rect, cs);
-    }
-    if scroll < max_scroll && area.height > half {
-        let down_h = area.height - half;
-        let down_rect = Rect::new(area.x, area.y + half, area.width, down_h);
-        let mut lines: Vec<Line> = (0..down_h.saturating_sub(1))
-            .map(|_| Line::from(""))
-            .collect();
-        lines.push(Line::from(Span::styled("▼", style)));
-        let para = Paragraph::new(lines);
-        Clickable::new(para, CARD_SCROLL_DOWN).render(f, down_rect, cs);
+    let affordable = gems >= cost;
+    let line_text = format!("{label} (💎{cost})");
+    if affordable {
+        cl.push_clickable(
+            Line::from(Span::styled(line_text, Style::default().fg(Color::Cyan))),
+            action_id,
+        );
+    } else {
+        cl.push(Line::from(vec![
+            Span::styled(line_text, Style::default().fg(Color::DarkGray)),
+            Span::styled(" (💎不足)", Style::default().fg(Color::DarkGray)),
+        ]));
     }
 }
 
