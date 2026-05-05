@@ -5,8 +5,10 @@
 //! - `SAVE_VERSION`: 現在のセーブ形式バージョン。フィールド追加時にインクリメントする。
 //! - `MIN_COMPATIBLE_VERSION`: 互換性を維持できる最小バージョン。
 //!
-//! v3 で「装備中心の進行軸」へ刷新したため、旧 save (v1/v2) は破棄。
-//! `MIN_COMPATIBLE_VERSION = 3` にして旧データは load_game で弾かれる。
+//! v3 で「装備中心の進行軸」へ刷新、v4 で `EquipmentId` を 12→18 段階に拡張
+//! (中間 tier 1/4 を 3 lane × 2 = 6 個追加)。enum の宣言順を変えたため、
+//! v3 以前の save の `equipment_levels` index は新 enum と一致しない。
+//! `MIN_COMPATIBLE_VERSION = 4` にして旧データは load_game で弾かれる。
 
 #[cfg(any(target_arch = "wasm32", test))]
 use serde::{Deserialize, Serialize};
@@ -15,10 +17,10 @@ use serde::{Deserialize, Serialize};
 use super::state::{AbyssState, EquipmentId, FloorKind, Tab, EQUIPMENT_COUNT, LANE_COUNT};
 
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 3;
+const SAVE_VERSION: u32 = 4;
 
 #[cfg(target_arch = "wasm32")]
-const MIN_COMPATIBLE_VERSION: u32 = 3;
+const MIN_COMPATIBLE_VERSION: u32 = 4;
 
 #[cfg(target_arch = "wasm32")]
 const STORAGE_KEY: &str = "abyss_idle_save";

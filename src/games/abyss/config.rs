@@ -123,21 +123,25 @@ pub struct EquipmentDef {
     pub enh_cost_growth: f64,
 }
 
-/// 既定の装備テーブル (12 個 / 3 lane × 4 段階)。
+/// 既定の装備テーブル (18 個 / 3 lane × 6 段階)。
 ///
 /// バランス設計:
 /// - 武器 lane: ATK 系 (base + per-Lv で flat と % 両方が伸びる)
 /// - 防具 lane: HP 系 + DEF flat
 /// - 装飾 lane: Speed/Crit/Regen/Gold の混合 + 終焉の冠で全方位ブースト
 ///
-/// 「強化 Lv を伸ばすのが進行軸」なので、各装備とも per_level_bonus が
-/// 旧 UpgradeKind の per-Lv に相当する役目を持つ。
+/// 6 段階に拡張した目的: 装備購入の milestone を 40h 全体に分散させること。
+/// 旧 4 段階だと最終装備が 3.5h で揃ってしまい、残り 36h は強化のみの
+/// 単調なフェーズになっていた。中間 (Iron/Chainmail/Bracelet) と
+/// 上位 (Dragon/Phoenix) を挿入し、cost 比 ×20-30 で延ばす。
+///
+/// 並びは `EquipmentId::all()` と一致させる必要がある (config 経由で index アクセス)。
 fn default_equipment_table() -> Vec<EquipmentDef> {
     use super::state::{EquipmentBonus, EquipmentId};
 
     vec![
         // ── 武器 lane ──
-        // 銅: 序盤、強化で線形に伸びる足場。
+        // tier 0: 銅 — 序盤の足場、tier 1 までの繋ぎ。
         EquipmentDef {
             id: EquipmentId::BronzeSword,
             name: "銅の剣",
@@ -149,6 +153,19 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
             enh_cost_base: 15,
             enh_cost_growth: 1.16,
         },
+        // tier 1: 鉄 — 銅の上位、序盤後半の milestone。
+        EquipmentDef {
+            id: EquipmentId::IronSword,
+            name: "鉄の剣",
+            effect_label: "ATK +10% / +3 (Lv毎 +1.5%/+2)",
+            base_bonus: EquipmentBonus { atk_pct: 0.10, atk_flat: 3, ..Default::default() },
+            per_level_bonus: EquipmentBonus { atk_pct: 0.015, atk_flat: 2, ..Default::default() },
+            gold_cost: 1_000,
+            prerequisite: Some(EquipmentId::BronzeSword),
+            enh_cost_base: 150,
+            enh_cost_growth: 1.17,
+        },
+        // tier 2: 鋼鉄 — 中盤の主力、~30 分前後で到達。
         EquipmentDef {
             id: EquipmentId::SteelSword,
             name: "鋼鉄の剣",
@@ -156,10 +173,11 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
             base_bonus: EquipmentBonus { atk_pct: 0.20, atk_flat: 5, ..Default::default() },
             per_level_bonus: EquipmentBonus { atk_pct: 0.02, atk_flat: 3, ..Default::default() },
             gold_cost: 5_000,
-            prerequisite: Some(EquipmentId::BronzeSword),
+            prerequisite: Some(EquipmentId::IronSword),
             enh_cost_base: 600,
             enh_cost_growth: 1.18,
         },
+        // tier 3: ミスリル — 中盤後半、~1-2 時間で到達。
         EquipmentDef {
             id: EquipmentId::MithrilSword,
             name: "ミスリルの剣",
@@ -171,18 +189,33 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
             enh_cost_base: 25_000,
             enh_cost_growth: 1.18,
         },
+        // tier 4: 竜骨剣 — 後期前半の主力。Mithril (ATK +60%) → God (ATK +400%) の中間で、
+        // tier 5 入手まで B50-75 を抜けるための火力を担う。
+        EquipmentDef {
+            id: EquipmentId::DragonboneSword,
+            name: "竜骨剣",
+            effect_label: "ATK +220% / +80 (Lv毎 +10%/+25)",
+            base_bonus: EquipmentBonus { atk_pct: 2.20, atk_flat: 80, ..Default::default() },
+            per_level_bonus: EquipmentBonus { atk_pct: 0.10, atk_flat: 25, ..Default::default() },
+            gold_cost: 5_000_000,
+            prerequisite: Some(EquipmentId::MithrilSword),
+            enh_cost_base: 800_000,
+            enh_cost_growth: 1.19,
+        },
+        // tier 5: 神剣 — 終端、~30 時間付近の milestone。
         EquipmentDef {
             id: EquipmentId::GodSword,
             name: "神剣エクスカリバー",
             effect_label: "ATK +400% / +100 (Lv毎 +11%/+35)",
             base_bonus: EquipmentBonus { atk_pct: 4.00, atk_flat: 100, ..Default::default() },
             per_level_bonus: EquipmentBonus { atk_pct: 0.11, atk_flat: 35, ..Default::default() },
-            gold_cost: 5_000_000,
-            prerequisite: Some(EquipmentId::MithrilSword),
-            enh_cost_base: 800_000,
+            gold_cost: 180_000_000,
+            prerequisite: Some(EquipmentId::DragonboneSword),
+            enh_cost_base: 22_000_000,
             enh_cost_growth: 1.20,
         },
         // ── 防具 lane ──
+        // tier 0: 革鎧。
         EquipmentDef {
             id: EquipmentId::LeatherArmor,
             name: "革鎧",
@@ -204,6 +237,29 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
             enh_cost_base: 20,
             enh_cost_growth: 1.16,
         },
+        // tier 1: 鎖帷子 — 革と鋼鉄の中間。
+        EquipmentDef {
+            id: EquipmentId::Chainmail,
+            name: "鎖帷子",
+            effect_label: "HP +10% / +12 / DEF +2 (Lv毎 +1.5%/+8/+2)",
+            base_bonus: EquipmentBonus {
+                hp_pct: 0.10,
+                hp_flat: 12,
+                def_flat: 2,
+                ..Default::default()
+            },
+            per_level_bonus: EquipmentBonus {
+                hp_pct: 0.015,
+                hp_flat: 8,
+                def_flat: 2,
+                ..Default::default()
+            },
+            gold_cost: 1_500,
+            prerequisite: Some(EquipmentId::LeatherArmor),
+            enh_cost_base: 200,
+            enh_cost_growth: 1.17,
+        },
+        // tier 2: 鋼鉄の鎧。
         EquipmentDef {
             id: EquipmentId::SteelArmor,
             name: "鋼鉄の鎧",
@@ -221,10 +277,11 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
                 ..Default::default()
             },
             gold_cost: 7_500,
-            prerequisite: Some(EquipmentId::LeatherArmor),
+            prerequisite: Some(EquipmentId::Chainmail),
             enh_cost_base: 900,
             enh_cost_growth: 1.18,
         },
+        // tier 3: ミスリルの鎧。
         EquipmentDef {
             id: EquipmentId::MithrilArmor,
             name: "ミスリルの鎧",
@@ -246,6 +303,29 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
             enh_cost_base: 30_000,
             enh_cost_growth: 1.18,
         },
+        // tier 4: 竜鱗鎧 — 後期前半の盾、Mithril (HP +60%) → God (HP +600%) の中間。
+        EquipmentDef {
+            id: EquipmentId::DragonscaleArmor,
+            name: "竜鱗鎧",
+            effect_label: "HP +300% / +600 / DEF +70 (Lv毎 +10%/+150/+12)",
+            base_bonus: EquipmentBonus {
+                hp_pct: 3.00,
+                hp_flat: 600,
+                def_flat: 70,
+                ..Default::default()
+            },
+            per_level_bonus: EquipmentBonus {
+                hp_pct: 0.10,
+                hp_flat: 150,
+                def_flat: 12,
+                ..Default::default()
+            },
+            gold_cost: 6_000_000,
+            prerequisite: Some(EquipmentId::MithrilArmor),
+            enh_cost_base: 900_000,
+            enh_cost_growth: 1.19,
+        },
+        // tier 5: 神鎧アイギス。
         EquipmentDef {
             id: EquipmentId::GodArmor,
             name: "神鎧アイギス",
@@ -262,12 +342,13 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
                 def_flat: 15,
                 ..Default::default()
             },
-            gold_cost: 6_000_000,
-            prerequisite: Some(EquipmentId::MithrilArmor),
-            enh_cost_base: 900_000,
+            gold_cost: 220_000_000,
+            prerequisite: Some(EquipmentId::DragonscaleArmor),
+            enh_cost_base: 27_000_000,
             enh_cost_growth: 1.20,
         },
         // ── 装飾 lane ──
+        // tier 0: 速攻のブーツ。
         EquipmentDef {
             id: EquipmentId::SwiftBoots,
             name: "速攻のブーツ",
@@ -287,6 +368,29 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
             enh_cost_base: 25,
             enh_cost_growth: 1.16,
         },
+        // tier 1: 戦士の腕輪 — 序盤後半に小さく全方位を補強。
+        EquipmentDef {
+            id: EquipmentId::WarriorBracelet,
+            name: "戦士の腕輪",
+            effect_label: "ATK+5% / HP+5% / 速度+5% (Lv毎 +1%/+1%/+0.5%)",
+            base_bonus: EquipmentBonus {
+                atk_pct: 0.05,
+                hp_pct: 0.05,
+                speed_pct: 0.05,
+                ..Default::default()
+            },
+            per_level_bonus: EquipmentBonus {
+                atk_pct: 0.01,
+                hp_pct: 0.01,
+                speed_pct: 0.005,
+                ..Default::default()
+            },
+            gold_cost: 2_000,
+            prerequisite: Some(EquipmentId::SwiftBoots),
+            enh_cost_base: 250,
+            enh_cost_growth: 1.17,
+        },
+        // tier 2: 双狼の指輪。
         EquipmentDef {
             id: EquipmentId::TwinWolfRing,
             name: "双狼の指輪",
@@ -302,10 +406,11 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
                 ..Default::default()
             },
             gold_cost: 8_000,
-            prerequisite: Some(EquipmentId::SwiftBoots),
+            prerequisite: Some(EquipmentId::WarriorBracelet),
             enh_cost_base: 1_000,
             enh_cost_growth: 1.18,
         },
+        // tier 3: 賢者のローブ。
         EquipmentDef {
             id: EquipmentId::SageRobe,
             name: "賢者のローブ",
@@ -327,6 +432,29 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
             enh_cost_base: 40_000,
             enh_cost_growth: 1.18,
         },
+        // tier 4: 不死鳥の翼 — 後期の生存・攻撃補強。
+        EquipmentDef {
+            id: EquipmentId::PhoenixWings,
+            name: "不死鳥の翼",
+            effect_label: "回復+5/s / ATK+50% / CRIT+12% (Lv毎 +0.25/s/+1.5%/+0.6%)",
+            base_bonus: EquipmentBonus {
+                regen_per_sec: 5.0,
+                atk_pct: 0.50,
+                crit_bonus: 0.12,
+                ..Default::default()
+            },
+            per_level_bonus: EquipmentBonus {
+                regen_per_sec: 0.25,
+                atk_pct: 0.015,
+                crit_bonus: 0.006,
+                ..Default::default()
+            },
+            gold_cost: 8_000_000,
+            prerequisite: Some(EquipmentId::SageRobe),
+            enh_cost_base: 1_200_000,
+            enh_cost_growth: 1.19,
+        },
+        // tier 5: 終焉の冠 — 装飾の頂点、全方位ブースト。
         EquipmentDef {
             id: EquipmentId::EndingCrown,
             name: "終焉の冠",
@@ -349,9 +477,9 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
                 gold_pct: 0.007,
                 ..Default::default()
             },
-            gold_cost: 8_000_000,
-            prerequisite: Some(EquipmentId::SageRobe),
-            enh_cost_base: 1_200_000,
+            gold_cost: 280_000_000,
+            prerequisite: Some(EquipmentId::PhoenixWings),
+            enh_cost_base: 34_000_000,
             enh_cost_growth: 1.20,
         },
     ]
@@ -490,16 +618,16 @@ impl Default for BalanceConfig {
             enemy_hp_schedule: EnemyGrowthSchedule::new(vec![
                 (1, 1.32),
                 (10, 1.20),
-                (25, 1.13),
-                (50, 1.06),
-                (75, 1.020),
+                (25, 1.10),
+                (50, 1.05),
+                (75, 1.018),
             ]),
             enemy_atk_schedule: EnemyGrowthSchedule::new(vec![
                 (1, 1.22),
                 (10, 1.15),
                 (25, 1.08),
-                (50, 1.04),
-                (75, 1.015),
+                (50, 1.035),
+                (75, 1.013),
             ]),
             enemy_gold_schedule: EnemyGrowthSchedule::new(vec![
                 (1, 1.40),
@@ -588,7 +716,7 @@ mod tests {
         assert_eq!(c.pacing.goal_floor, 100);
         assert!((c.enemy_hp_schedule.multiplier(2) - 1.32).abs() < 1e-9);
         assert!((c.enemy_atk_schedule.multiplier(2) - 1.22).abs() < 1e-9);
-        assert_eq!(c.equipment.len(), 12);
+        assert_eq!(c.equipment.len(), 18);
     }
 
     #[test]

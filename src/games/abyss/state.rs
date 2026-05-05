@@ -137,49 +137,62 @@ impl EquipmentLane {
     }
 }
 
-/// 装備の識別子。各 lane に 4 段階で計 12 種。
+/// 装備の識別子。各 lane に 6 段階で計 18 種。
 ///
 /// 数値・解放条件・効果は `BalanceConfig::equipment` 経由でデータドリブンに
 /// 持つ。enum 自体は識別と `index()` / `lane()` / `lane_index()` の構造情報だけを担う。
 ///
-/// 並びは `all()` の順。**save id は宣言順固定**: 末尾追加なら旧 save 互換。
+/// 並びは `all()` の順 (lane ごとに lane_index 昇順)。`index()` は save key として
+/// 使うので、新装備の挿入や順序変更は SAVE_VERSION の bump を伴う。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EquipmentId {
-    // 武器 lane
+    // 武器 lane (6 段階)
     BronzeSword,
+    IronSword,
     SteelSword,
     MithrilSword,
+    DragonboneSword,
     GodSword,
-    // 防具 lane
+    // 防具 lane (6 段階)
     LeatherArmor,
+    Chainmail,
     SteelArmor,
     MithrilArmor,
+    DragonscaleArmor,
     GodArmor,
-    // 装飾 lane
+    // 装飾 lane (6 段階)
     SwiftBoots,
+    WarriorBracelet,
     TwinWolfRing,
     SageRobe,
+    PhoenixWings,
     EndingCrown,
 }
 
 /// 装備の総数。`AbyssState::owned_equipment` 配列のサイズに使う。
-pub const EQUIPMENT_COUNT: usize = 12;
+pub const EQUIPMENT_COUNT: usize = 18;
 
 impl EquipmentId {
     /// 全装備を宣言順で返す (save id の SSOT)。
     pub fn all() -> &'static [EquipmentId] {
         &[
             EquipmentId::BronzeSword,
+            EquipmentId::IronSword,
             EquipmentId::SteelSword,
             EquipmentId::MithrilSword,
+            EquipmentId::DragonboneSword,
             EquipmentId::GodSword,
             EquipmentId::LeatherArmor,
+            EquipmentId::Chainmail,
             EquipmentId::SteelArmor,
             EquipmentId::MithrilArmor,
+            EquipmentId::DragonscaleArmor,
             EquipmentId::GodArmor,
             EquipmentId::SwiftBoots,
+            EquipmentId::WarriorBracelet,
             EquipmentId::TwinWolfRing,
             EquipmentId::SageRobe,
+            EquipmentId::PhoenixWings,
             EquipmentId::EndingCrown,
         ]
     }
@@ -198,27 +211,37 @@ impl EquipmentId {
     pub fn lane(self) -> EquipmentLane {
         match self {
             EquipmentId::BronzeSword
+            | EquipmentId::IronSword
             | EquipmentId::SteelSword
             | EquipmentId::MithrilSword
+            | EquipmentId::DragonboneSword
             | EquipmentId::GodSword => EquipmentLane::Weapon,
             EquipmentId::LeatherArmor
+            | EquipmentId::Chainmail
             | EquipmentId::SteelArmor
             | EquipmentId::MithrilArmor
+            | EquipmentId::DragonscaleArmor
             | EquipmentId::GodArmor => EquipmentLane::Armor,
             EquipmentId::SwiftBoots
+            | EquipmentId::WarriorBracelet
             | EquipmentId::TwinWolfRing
             | EquipmentId::SageRobe
+            | EquipmentId::PhoenixWings
             | EquipmentId::EndingCrown => EquipmentLane::Accessory,
         }
     }
 
-    /// lane 内での段階 (0 が最序盤)。同 lane の前段階が `lane_index() - 1`。
+    /// lane 内での段階 (0 が最序盤、5 が最上位)。同 lane の前段階が `lane_index() - 1`。
     pub fn lane_index(self) -> usize {
         match self {
             EquipmentId::BronzeSword | EquipmentId::LeatherArmor | EquipmentId::SwiftBoots => 0,
-            EquipmentId::SteelSword | EquipmentId::SteelArmor | EquipmentId::TwinWolfRing => 1,
-            EquipmentId::MithrilSword | EquipmentId::MithrilArmor | EquipmentId::SageRobe => 2,
-            EquipmentId::GodSword | EquipmentId::GodArmor | EquipmentId::EndingCrown => 3,
+            EquipmentId::IronSword | EquipmentId::Chainmail | EquipmentId::WarriorBracelet => 1,
+            EquipmentId::SteelSword | EquipmentId::SteelArmor | EquipmentId::TwinWolfRing => 2,
+            EquipmentId::MithrilSword | EquipmentId::MithrilArmor | EquipmentId::SageRobe => 3,
+            EquipmentId::DragonboneSword
+            | EquipmentId::DragonscaleArmor
+            | EquipmentId::PhoenixWings => 4,
+            EquipmentId::GodSword | EquipmentId::GodArmor | EquipmentId::EndingCrown => 5,
         }
     }
 }

@@ -420,7 +420,9 @@ pub fn enhance_equipment(state: &mut AbyssState, id: EquipmentId) -> bool {
     state.gold -= cost;
 
     // 強化対象が装着中なら hero_max_hp が変動するので、装備購入と同じ
-    // before/after 差分で hero_hp を底上げする。装着していない場合は変動なし。
+    // 「max 増減両方向で hero_hp を追従させる」分岐で hero_hp を更新する。
+    // 装着していない場合はステに反映されないので変動なし。
+    // `buy_equipment` / `equip_item` と同じ if/else 構造で統一 (Codex review #87 P2)。
     let is_equipped = state.equipped[id.lane().index()] == Some(id);
     let max_before = if is_equipped {
         Some(state.hero_max_hp())
@@ -430,8 +432,12 @@ pub fn enhance_equipment(state: &mut AbyssState, id: EquipmentId) -> bool {
     state.equipment_levels[id.index()] = state.equipment_levels[id.index()].saturating_add(1);
     if let Some(before) = max_before {
         let after = state.hero_max_hp();
-        let delta = after.saturating_sub(before);
-        state.hero_hp = state.hero_hp.saturating_add(delta).min(after);
+        if after > before {
+            let delta = after - before;
+            state.hero_hp = state.hero_hp.saturating_add(delta).min(after);
+        } else {
+            state.hero_hp = state.hero_hp.min(after);
+        }
     }
 
     let name = state
@@ -627,13 +633,19 @@ fn apply_gacha_reward(state: &mut AbyssState, tier: GachaTier, summary: &mut Gac
             } else {
                 let idx = (rng_next(&mut state.rng_state) as usize) % equipped.len();
                 let target = equipped[idx];
-                // hero stats 変動を伴うので、装着中なら hp の bump も忘れずに。
+                // 装着中装備の Lv 上げで hero_max_hp が変動するので、
+                // `enhance_equipment` と同じ「max 増減両方向で hero_hp を追従させる」
+                // if/else パターンで HP を更新する (Codex review #87 P2 統一)。
                 let max_before = state.hero_max_hp();
                 state.equipment_levels[target.index()] =
                     state.equipment_levels[target.index()].saturating_add(1);
                 let max_after = state.hero_max_hp();
-                let delta = max_after.saturating_sub(max_before);
-                state.hero_hp = state.hero_hp.saturating_add(delta).min(max_after);
+                if max_after > max_before {
+                    let delta = max_after - max_before;
+                    state.hero_hp = state.hero_hp.saturating_add(delta).min(max_after);
+                } else {
+                    state.hero_hp = state.hero_hp.min(max_after);
+                }
                 summary.gained_enh_lv = summary.gained_enh_lv.saturating_add(1);
             }
         }
@@ -707,13 +719,16 @@ mod tests {
     }
 
     /// 上位装備を買うと旧装備は所持したままで、装着スロットだけが新しいものに置換される。
+    /// 6 段階構造のため Bronze → Iron → Steel と prereq チェーンを順に解放する。
     #[test]
     fn buying_higher_tier_replaces_equipped_slot() {
         let mut s = AbyssState::new();
         s.gold = 1_000_000_000;
         buy_equipment(&mut s, EquipmentId::BronzeSword);
+        buy_equipment(&mut s, EquipmentId::IronSword);
         buy_equipment(&mut s, EquipmentId::SteelSword);
         assert!(s.owned_equipment[EquipmentId::BronzeSword.index()]);
+        assert!(s.owned_equipment[EquipmentId::IronSword.index()]);
         assert!(s.owned_equipment[EquipmentId::SteelSword.index()]);
         assert_eq!(
             s.equipped[EquipmentLane::Weapon.index()],
@@ -727,6 +742,7 @@ mod tests {
         let mut s = AbyssState::new();
         s.gold = 1_000_000_000;
         buy_equipment(&mut s, EquipmentId::BronzeSword);
+        buy_equipment(&mut s, EquipmentId::IronSword);
         buy_equipment(&mut s, EquipmentId::SteelSword); // 自動で SteelSword 装着
         assert!(equip_item(&mut s, EquipmentId::BronzeSword));
         assert_eq!(
@@ -794,11 +810,12 @@ mod tests {
     fn buy_equipment_clamps_hp_when_new_gear_lowers_max() {
         use crate::games::abyss::state::EquipmentBonus;
 
-        // 上位 (SteelArmor) を意図的に空 bonus にして、LeatherArmor 装着時より max が下がる状況を作る。
+        // 上位 (Chainmail = LeatherArmor の次段階) を意図的に空 bonus にして、
+        // LeatherArmor 装着時より max が下がる状況を作る。
         let mut cfg = BalanceConfig::default();
-        let steel_idx = EquipmentId::SteelArmor.index();
-        cfg.equipment[steel_idx].base_bonus = EquipmentBonus::default();
-        cfg.equipment[steel_idx].per_level_bonus = EquipmentBonus::default();
+        let chain_idx = EquipmentId::Chainmail.index();
+        cfg.equipment[chain_idx].base_bonus = EquipmentBonus::default();
+        cfg.equipment[chain_idx].per_level_bonus = EquipmentBonus::default();
 
         let mut s = AbyssState::with_config(cfg);
         s.gold = 1_000_000_000;
@@ -808,23 +825,23 @@ mod tests {
         let max_with_leather = s.hero_max_hp();
         s.hero_hp = max_with_leather; // 満タン
 
-        // SteelArmor を買うと auto-equip で Armor lane が置換され、空 bonus なので max が下がる。
-        assert!(buy_equipment(&mut s, EquipmentId::SteelArmor));
-        let max_with_steel = s.hero_max_hp();
+        // Chainmail を買うと auto-equip で Armor lane が置換され、空 bonus なので max が下がる。
+        assert!(buy_equipment(&mut s, EquipmentId::Chainmail));
+        let max_with_chainmail = s.hero_max_hp();
 
         // テスト前提: max が実際に下がる装備変更が起きていること。
         assert!(
-            max_with_steel < max_with_leather,
-            "test setup: SteelArmor (空 bonus) は LeatherArmor より max が低いはず ({} >= {})",
-            max_with_steel,
+            max_with_chainmail < max_with_leather,
+            "test setup: Chainmail (空 bonus) は LeatherArmor より max が低いはず ({} >= {})",
+            max_with_chainmail,
             max_with_leather
         );
         // 不変条件: max が下がっても hero_hp は新 max を超えない。
         assert!(
-            s.hero_hp <= max_with_steel,
+            s.hero_hp <= max_with_chainmail,
             "hero_hp ({}) は新 max ({}) を超えてはならない",
             s.hero_hp,
-            max_with_steel
+            max_with_chainmail
         );
     }
 

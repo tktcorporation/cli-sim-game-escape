@@ -1724,14 +1724,15 @@ mod tests {
     }
 
     /// 所持済み (未装着) の装備に EQUIP_ITEM_BASE クリックターゲットが登録されること。
-    /// 銅剣を買って装着 → 鋼鉄の剣を買って自動装着 (新装備) → 銅剣は所持中だが未装着 → [装着] ボタン化。
+    /// 銅剣を買って装着 → 鉄の剣を買って自動装着 (新装備) → 銅剣は所持中だが未装着 → [装着] ボタン化。
+    /// 6 段階構造の prereq チェーン (Bronze → Iron) に合わせる。
     #[test]
     fn shop_tab_registers_equip_target_for_owned_unequipped() {
         let mut state = AbyssState::new();
         state.gold = 1_000_000_000;
         super::super::logic::buy_equipment(&mut state, EquipmentId::BronzeSword);
-        super::super::logic::buy_equipment(&mut state, EquipmentId::SteelSword);
-        // ここで装着中は SteelSword、所持中で未装着は BronzeSword。
+        super::super::logic::buy_equipment(&mut state, EquipmentId::IronSword);
+        // ここで装着中は IronSword、所持中で未装着は BronzeSword。
         state.tab = Tab::Shop;
 
         let cs = Rc::new(RefCell::new(ClickState::new()));

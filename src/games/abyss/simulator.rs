@@ -375,16 +375,22 @@ fn lane_short(lane: EquipmentLane) -> &'static str {
 fn equipment_name_short(id: EquipmentId) -> &'static str {
     match id {
         EquipmentId::BronzeSword => "銅の剣",
+        EquipmentId::IronSword => "鉄の剣",
         EquipmentId::SteelSword => "鋼鉄の剣",
         EquipmentId::MithrilSword => "ミスリルの剣",
+        EquipmentId::DragonboneSword => "竜骨剣",
         EquipmentId::GodSword => "神剣",
         EquipmentId::LeatherArmor => "革鎧",
+        EquipmentId::Chainmail => "鎖帷子",
         EquipmentId::SteelArmor => "鋼鉄の鎧",
         EquipmentId::MithrilArmor => "ミスリルの鎧",
+        EquipmentId::DragonscaleArmor => "竜鱗鎧",
         EquipmentId::GodArmor => "神鎧",
         EquipmentId::SwiftBoots => "速攻のブーツ",
+        EquipmentId::WarriorBracelet => "戦士の腕輪",
         EquipmentId::TwinWolfRing => "双狼の指輪",
         EquipmentId::SageRobe => "賢者のローブ",
+        EquipmentId::PhoenixWings => "不死鳥の翼",
         EquipmentId::EndingCrown => "終焉の冠",
     }
 }
