@@ -5,6 +5,7 @@ pub mod cafe;
 pub mod career;
 pub mod cookie;
 pub mod factory;
+pub mod godfield;
 pub mod rpg;
 
 use std::cell::RefCell;
@@ -40,6 +41,7 @@ pub enum GameChoice {
     Rpg,
     Cafe,
     Abyss,
+    Godfield,
 }
 
 /// Top-level application state.
@@ -66,5 +68,6 @@ pub fn create_game(choice: &GameChoice) -> Box<dyn Game> {
         GameChoice::Rpg => Box::new(rpg::RpgGame::new()),
         GameChoice::Cafe => Box::new(cafe::CafeGame::new()),
         GameChoice::Abyss => Box::new(abyss::AbyssGame::new()),
+        GameChoice::Godfield => Box::new(godfield::GodFieldGame::new()),
     }
 }

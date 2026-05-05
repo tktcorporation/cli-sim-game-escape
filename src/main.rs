@@ -27,7 +27,8 @@ pub const MENU_SELECT_CAREER: u16 = 3;
 pub const MENU_SELECT_RPG: u16 = 4;
 pub const MENU_SELECT_CAFE: u16 = 5;
 pub const MENU_SELECT_ABYSS: u16 = 6;
-pub const MENU_SELECT_SETTINGS: u16 = 7;
+pub const MENU_SELECT_GODFIELD: u16 = 7;
+pub const MENU_SELECT_SETTINGS: u16 = 8;
 pub const BACK_TO_MENU: u16 = 65535;
 
 // ── Settings action IDs ─────────────────────────────────────────
@@ -247,6 +248,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 InputEvent::Key('6') | InputEvent::Click(_, MENU_SELECT_ABYSS) => {
                     Some(GameChoice::Abyss)
                 }
+                InputEvent::Key('7') | InputEvent::Click(_, MENU_SELECT_GODFIELD) => {
+                    Some(GameChoice::Godfield)
+                }
                 _ => None,
             };
             if let Some(choice) = choice {
@@ -254,7 +258,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 *state = AppState::Playing { game };
             } else if matches!(
                 event,
-                InputEvent::Key('7') | InputEvent::Click(_, MENU_SELECT_SETTINGS)
+                InputEvent::Key('8') | InputEvent::Click(_, MENU_SELECT_SETTINGS)
             ) {
                 *state = AppState::Settings {
                     confirm_reset: None,
@@ -566,6 +570,21 @@ fn render_menu(
         "    自動戦闘で深層を目指す放置型ローグダンジョン",
         Style::default().fg(Color::DarkGray),
     )), MENU_SELECT_ABYSS);
+
+    cl.push(Line::from(""));
+    cl.push_clickable(Line::from(vec![
+        Span::styled(
+            " ▶ ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("神の戦場 (God Field)", Style::default().fg(Color::White)),
+    ]), MENU_SELECT_GODFIELD);
+    cl.push_clickable(Line::from(Span::styled(
+        "    4人で戦うターン制カードバトルロイヤル",
+        Style::default().fg(Color::DarkGray),
+    )), MENU_SELECT_GODFIELD);
 
     cl.push(Line::from(""));
     cl.push_clickable(Line::from(vec![
