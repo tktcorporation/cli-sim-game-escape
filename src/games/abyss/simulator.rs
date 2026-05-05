@@ -140,8 +140,21 @@ impl Policy for LaneWeightedPolicy {
 
 /// 解放可能な装備のうち最も lane_index が浅いものを購入するアクションを返す。
 /// 解放不能 / gold 不足なら None。
+///
+/// 実装の不変条件: **lane_index が小さいものを優先**して走査する。
+/// `EquipmentId::all()` の宣言順は「武器全段階 → 防具全段階 → 装飾全段階」なので、
+/// 素朴に for ループすると武器に偏った購入順 (例: 銅剣を買った直後に LeatherArmor
+/// より先に SteelSword を買ってしまう) になり、policy が doc の主張する
+/// 「lane バランス進行」を表現できなくなる (Codex review #87 P2)。
+/// `sort_by_key(|id| id.lane_index())` で並び替えてから走査することで、
+/// 同 lane_index 内では `EquipmentId::all()` の順 (Weapon→Armor→Accessory) を
+/// 保ちつつ、より浅い段階の装備を全 lane で先に拾えるようにする
+/// (sort_by_key は stable sort なのでこの tie-break は自動で効く)。
 fn next_buy_equipment(state: &AbyssState) -> Option<PlayerAction> {
-    for &id in EquipmentId::all() {
+    let mut by_lane_idx: Vec<EquipmentId> = EquipmentId::all().to_vec();
+    by_lane_idx.sort_by_key(|id| id.lane_index());
+
+    for id in by_lane_idx {
         if state.owned_equipment[id.index()] {
             continue;
         }
@@ -423,6 +436,35 @@ mod sanity_tests {
             "no-action policy should stay shallow, got B{}",
             sim.metrics().deepest_floor
         );
+    }
+
+    /// `next_buy_equipment` が **lane_index 主キーで浅いものから** 選ぶこと。
+    /// Codex review #87 P2 回帰防止: 旧実装は `EquipmentId::all()` の宣言順
+    /// (武器全段階 → 防具全段階 → 装飾全段階) でループしていたため、銅剣所持後に
+    /// `LeatherArmor` (lane_index 0) より `SteelSword` (lane_index 1) を先に
+    /// 選んでしまい、policy が「lane バランス進行」を表現できていなかった。
+    #[test]
+    fn next_buy_prefers_lower_lane_index_across_lanes() {
+        let mut s = AbyssState::new();
+        // 銅剣所持済み + 大量の gold あり。
+        // 候補: SteelSword (lane_idx 1, 5000g) / LeatherArmor (lane_idx 0, 150g)
+        //       / SwiftBoots (lane_idx 0, 200g)。lane_idx 0 を優先すべき。
+        s.owned_equipment[EquipmentId::BronzeSword.index()] = true;
+        s.gold = 1_000_000;
+
+        let action = next_buy_equipment(&s).expect("買える装備があるはず");
+        match action {
+            PlayerAction::BuyEquipment(id) => {
+                assert_eq!(
+                    id.lane_index(),
+                    0,
+                    "lane_index 0 (LeatherArmor または SwiftBoots) を選ぶべきだが {:?} (lane_index {}) が返った",
+                    id,
+                    id.lane_index()
+                );
+            }
+            other => panic!("BuyEquipment 以外が返ってきた: {:?}", other),
+        }
     }
 
     #[test]
