@@ -537,6 +537,17 @@ fn built_2wide_glyph(b: Building) -> &'static str {
 
 // ── Status panel ────────────────────────────────────────────
 
+/// CASH 行の収入ハイライトを点灯すべきか?
+///
+/// 起動直後は `last_payout_tick == 0` のため `tick - 0 < PAYOUT_FLASH_TICKS`
+/// が真になり、収入が一度も発生していないのに LightYellow に光ってしまう。
+/// `last_payout_amount > 0` を gate にすることで「実際の支払いが発生した直後」
+/// のみハイライトする。
+fn is_payout_flash_active(state: &City) -> bool {
+    state.last_payout_amount > 0
+        && state.tick.saturating_sub(state.last_payout_tick) < PAYOUT_FLASH_TICKS
+}
+
 fn render_status(state: &City, f: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -549,7 +560,7 @@ fn render_status(state: &City, f: &mut Frame, area: Rect) {
     let income = logic::compute_income_per_sec(state);
     let pop = state.population();
     let active = state.active_constructions();
-    let payout_recent = state.tick.saturating_sub(state.last_payout_tick) < PAYOUT_FLASH_TICKS;
+    let payout_recent = is_payout_flash_active(state);
 
     let income_color = if payout_recent {
         Color::LightYellow
@@ -874,6 +885,33 @@ mod tests {
             grid_w,
             area_w
         );
+    }
+
+    /// 起動直後 (last_payout_amount == 0) は payout flash が点灯してはならない。
+    /// Codex P2 (#94 r3190426465): tick - 0 < FLASH_TICKS で偽陽性になる回帰防止。
+    #[test]
+    fn payout_flash_does_not_trigger_on_fresh_city() {
+        let city = City::new();
+        assert!(
+            !is_payout_flash_active(&city),
+            "fresh city should not show payout flash"
+        );
+        // 数 tick 進めても、収入が無ければ点灯しない。
+        let mut city = City::new();
+        city.tick = 3;
+        assert!(!is_payout_flash_active(&city));
+    }
+
+    /// 実際に支払いが発生した直後は点灯し、`PAYOUT_FLASH_TICKS` 経過で消える。
+    #[test]
+    fn payout_flash_lights_after_real_payout() {
+        let mut city = City::new();
+        city.last_payout_amount = 5;
+        city.last_payout_tick = 10;
+        city.tick = 11;
+        assert!(is_payout_flash_active(&city));
+        city.tick = 10 + PAYOUT_FLASH_TICKS;
+        assert!(!is_payout_flash_active(&city));
     }
 
     /// 完成タイルは flash_until が tick より大きい間、特殊スタイルでレンダリングされる。
