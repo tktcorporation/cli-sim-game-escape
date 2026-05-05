@@ -1,16 +1,10 @@
 //! Semantic action IDs for Dungeon Dive click targets.
 
 // ── Scene choices (1-based index) ──────────────────────────────
-/// Choice base: +index (0-based). So choice [1] = CHOICE_BASE+0, etc.
 pub const CHOICE_BASE: u16 = 10;
 
-// ── Battle sub-menus ───────────────────────────────────────────
-/// Skill select base: + index into available skills.
+// ── Skill (overlay during dungeon) ─────────────────────────────
 pub const SKILL_BASE: u16 = 30;
-/// Item select base (in battle): + index into consumable items.
-pub const BATTLE_ITEM_BASE: u16 = 40;
-/// Back from sub-menu in battle.
-pub const BATTLE_BACK: u16 = 50;
 
 // ── Overlay: Inventory ─────────────────────────────────────────
 pub const INV_USE_BASE: u16 = 60;
@@ -21,23 +15,23 @@ pub const SHOP_BUY_BASE: u16 = 80;
 // ── Overlay open ──────────────────────────────────────────────
 pub const OPEN_INVENTORY: u16 = 101;
 pub const OPEN_STATUS: u16 = 102;
+pub const OPEN_SKILL_MENU: u16 = 103;
 
 // ── Overlay close ──────────────────────────────────────────────
 pub const CLOSE_OVERLAY: u16 = 100;
 
-// ── Dungeon movement (legacy IDs, no longer used) ─────────────
-// Movement is now handled via D-pad and map tap only.
-
 // ── Event choices ─────────────────────────────────────────────
 pub const EVENT_CHOICE_BASE: u16 = 120;
 
-// ── Map tap zones (3×3 grid, base + row*3 + col) ─────────────
-/// Base action ID for tapping on the 2D dungeon map.
-/// Grid layout: (1,0)=N, (0,1)=W, (2,1)=E, (1,2)=S.
+// ── Map tap zones (3×3 grid) ─────────────────────────────────
 pub const MAP_TAP_BASE: u16 = 140;
 
-// ── D-pad controller (3×3 grid, base + row*3 + col) ─────────
-/// Base action ID for the on-screen D-pad.
-/// Grid layout: (1,0)=N, (0,1)=W, (2,1)=E, (1,2)=S.
-/// Unlike map tap, D-pad uses try_move (1 cell, no auto-walk).
+// ── D-pad controller (3×3 grid) ─────────────────────────────
 pub const DPAD_BASE: u16 = 150;
+
+// ── Quest board ──────────────────────────────────────────────
+pub const QUEST_ACCEPT_BASE: u16 = 170;
+pub const QUEST_ABANDON: u16 = 175;
+
+// ── Pray ─────────────────────────────────────────────────────
+pub const PRAY_CONFIRM: u16 = 180;

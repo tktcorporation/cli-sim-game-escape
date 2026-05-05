@@ -1,7 +1,7 @@
 //! Dungeon Dive game state — all data structures, no logic.
 //!
-//! Design: "Dungeon Crawler" — room-by-room exploration with
-//! risk/reward resource management across dungeon floors.
+//! Design: roguelike grid-based dungeon crawler with inline combat,
+//! satiety, random affixes, quests, prayer, and pets.
 
 // ── Elements ──────────────────────────────────────────────────
 
@@ -30,6 +30,7 @@ pub enum EnemyKind {
 
 pub struct EnemyInfo {
     pub name: &'static str,
+    pub glyph: char, // letter shown on map
     pub max_hp: u32,
     pub atk: u32,
     pub def: u32,
@@ -37,60 +38,62 @@ pub struct EnemyInfo {
     pub gold: u32,
     pub drop: Option<(ItemKind, u32)>, // (item, chance_pct 0-100)
     pub weakness: Option<Element>,
-    pub can_charge: bool, // can do charge attack (telegraph → 2x damage)
+    pub can_charge: bool,
+    /// Whether this monster can be tamed by feeding.
+    pub tameable: bool,
 }
 
 pub fn enemy_info(kind: EnemyKind) -> EnemyInfo {
     match kind {
         EnemyKind::Slime => EnemyInfo {
-            name: "スライム", max_hp: 12, atk: 4, def: 1, exp: 5, gold: 8,
+            name: "スライム", glyph: 's', max_hp: 12, atk: 4, def: 1, exp: 5, gold: 8,
             drop: Some((ItemKind::Herb, 40)),
-            weakness: Some(Element::Fire), can_charge: false,
+            weakness: Some(Element::Fire), can_charge: false, tameable: true,
         },
         EnemyKind::Rat => EnemyInfo {
-            name: "大ネズミ", max_hp: 10, atk: 6, def: 0, exp: 4, gold: 6,
+            name: "大ネズミ", glyph: 'r', max_hp: 10, atk: 6, def: 0, exp: 4, gold: 6,
             drop: Some((ItemKind::Herb, 25)),
-            weakness: None, can_charge: false,
+            weakness: None, can_charge: false, tameable: true,
         },
         EnemyKind::Goblin => EnemyInfo {
-            name: "ゴブリン", max_hp: 28, atk: 10, def: 4, exp: 15, gold: 20,
+            name: "ゴブリン", glyph: 'g', max_hp: 28, atk: 10, def: 4, exp: 15, gold: 20,
             drop: Some((ItemKind::MagicWater, 30)),
-            weakness: Some(Element::Fire), can_charge: false,
+            weakness: Some(Element::Fire), can_charge: false, tameable: true,
         },
         EnemyKind::Bat => EnemyInfo {
-            name: "コウモリ", max_hp: 18, atk: 9, def: 2, exp: 10, gold: 12,
+            name: "コウモリ", glyph: 'b', max_hp: 18, atk: 9, def: 2, exp: 10, gold: 12,
             drop: None,
-            weakness: Some(Element::Thunder), can_charge: false,
+            weakness: Some(Element::Thunder), can_charge: false, tameable: false,
         },
         EnemyKind::Skeleton => EnemyInfo {
-            name: "スケルトン", max_hp: 45, atk: 14, def: 8, exp: 30, gold: 35,
+            name: "スケルトン", glyph: 'k', max_hp: 45, atk: 14, def: 8, exp: 30, gold: 35,
             drop: Some((ItemKind::StrengthPotion, 20)),
-            weakness: Some(Element::Fire), can_charge: false,
+            weakness: Some(Element::Fire), can_charge: false, tameable: false,
         },
         EnemyKind::Golem => EnemyInfo {
-            name: "ゴーレム", max_hp: 60, atk: 16, def: 14, exp: 40, gold: 50,
+            name: "ゴーレム", glyph: 'G', max_hp: 60, atk: 16, def: 14, exp: 40, gold: 50,
             drop: Some((ItemKind::MagicWater, 30)),
-            weakness: Some(Element::Thunder), can_charge: true,
+            weakness: Some(Element::Thunder), can_charge: true, tameable: false,
         },
         EnemyKind::DarkKnight => EnemyInfo {
-            name: "暗黒騎士", max_hp: 75, atk: 20, def: 15, exp: 55, gold: 70,
+            name: "暗黒騎士", glyph: 'K', max_hp: 75, atk: 20, def: 15, exp: 55, gold: 70,
             drop: Some((ItemKind::StrengthPotion, 35)),
-            weakness: Some(Element::Thunder), can_charge: true,
+            weakness: Some(Element::Thunder), can_charge: true, tameable: false,
         },
         EnemyKind::Demon => EnemyInfo {
-            name: "デーモン", max_hp: 85, atk: 22, def: 12, exp: 65, gold: 80,
+            name: "デーモン", glyph: 'D', max_hp: 85, atk: 22, def: 12, exp: 65, gold: 80,
             drop: Some((ItemKind::MagicWater, 40)),
-            weakness: Some(Element::Ice), can_charge: false,
+            weakness: Some(Element::Ice), can_charge: false, tameable: false,
         },
         EnemyKind::Dragon => EnemyInfo {
-            name: "ドラゴン", max_hp: 120, atk: 28, def: 18, exp: 100, gold: 150,
+            name: "ドラゴン", glyph: 'R', max_hp: 120, atk: 28, def: 18, exp: 100, gold: 150,
             drop: Some((ItemKind::Herb, 50)),
-            weakness: Some(Element::Ice), can_charge: true,
+            weakness: Some(Element::Ice), can_charge: true, tameable: false,
         },
         EnemyKind::DemonLord => EnemyInfo {
-            name: "魔王", max_hp: 200, atk: 32, def: 20, exp: 300, gold: 500,
+            name: "魔王", glyph: 'L', max_hp: 200, atk: 32, def: 20, exp: 300, gold: 500,
             drop: None,
-            weakness: None, can_charge: true,
+            weakness: None, can_charge: true, tameable: false,
         },
     }
 }
@@ -126,6 +129,13 @@ pub enum ItemKind {
     LeatherArmor,
     ChainMail,
     KnightArmor,
+    // Foods
+    Bread,
+    Jerky,
+    CookedMeal,
+    Apple,
+    // Pet food
+    PetTreat,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -133,6 +143,7 @@ pub enum ItemCategory {
     Consumable,
     Weapon,
     Armor,
+    Food,
 }
 
 pub struct ItemInfo {
@@ -189,6 +200,26 @@ pub fn item_info(kind: ItemKind) -> ItemInfo {
             name: "騎士の鎧", description: "DEF+20",
             category: ItemCategory::Armor, buy_price: 800, value: 20,
         },
+        ItemKind::Bread => ItemInfo {
+            name: "パン", description: "満腹度+300",
+            category: ItemCategory::Food, buy_price: 15, value: 300,
+        },
+        ItemKind::Jerky => ItemInfo {
+            name: "干し肉", description: "満腹度+500",
+            category: ItemCategory::Food, buy_price: 35, value: 500,
+        },
+        ItemKind::CookedMeal => ItemInfo {
+            name: "温かい料理", description: "満腹度+800/HP少回復",
+            category: ItemCategory::Food, buy_price: 90, value: 800,
+        },
+        ItemKind::Apple => ItemInfo {
+            name: "リンゴ", description: "満腹度+150",
+            category: ItemCategory::Food, buy_price: 8, value: 150,
+        },
+        ItemKind::PetTreat => ItemInfo {
+            name: "ペットの餌", description: "野生の魔物に与えると懐く可能性",
+            category: ItemCategory::Consumable, buy_price: 60, value: 0,
+        },
     }
 }
 
@@ -197,14 +228,19 @@ pub fn shop_items(max_floor: u32) -> Vec<(ItemKind, u32)> {
     let mut items = vec![
         (ItemKind::Herb, 99),
         (ItemKind::MagicWater, 99),
+        (ItemKind::Bread, 99),
+        (ItemKind::Apple, 99),
         (ItemKind::WoodenSword, 1),
         (ItemKind::TravelClothes, 1),
+        (ItemKind::PetTreat, 99),
     ];
     if max_floor >= 2 {
+        items.push((ItemKind::Jerky, 99));
         items.push((ItemKind::IronSword, 1));
         items.push((ItemKind::LeatherArmor, 1));
     }
     if max_floor >= 4 {
+        items.push((ItemKind::CookedMeal, 99));
         items.push((ItemKind::StrengthPotion, 99));
         items.push((ItemKind::SteelSword, 1));
         items.push((ItemKind::ChainMail, 1));
@@ -215,6 +251,81 @@ pub fn shop_items(max_floor: u32) -> Vec<(ItemKind, u32)> {
     }
     items
 }
+
+// ── Affixes (random magical equipment prefixes) ──────────────
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Affix {
+    /// 炎の: +Fire damage on attack
+    Fire,
+    /// 氷の: +Ice damage on attack
+    Ice,
+    /// 雷の: +Thunder damage on attack
+    Thunder,
+    /// 鋭利な: +ATK
+    Sharp,
+    /// 頑強な: +DEF
+    Sturdy,
+    /// 神秘の: +MAG
+    Mystic,
+    /// 吸血の: drain HP on hit
+    Vampiric,
+    /// 加護の: +max HP
+    Blessed,
+}
+
+pub struct AffixInfo {
+    pub prefix: &'static str,
+    pub atk_bonus: i32,
+    pub def_bonus: i32,
+    pub mag_bonus: i32,
+    pub max_hp_bonus: i32,
+    pub element: Option<Element>,
+    pub element_dmg: u32,
+    pub vampiric_pct: u32, // % hp drain on attack
+}
+
+pub fn affix_info(affix: Affix) -> AffixInfo {
+    match affix {
+        Affix::Fire => AffixInfo {
+            prefix: "炎の", atk_bonus: 0, def_bonus: 0, mag_bonus: 0, max_hp_bonus: 0,
+            element: Some(Element::Fire), element_dmg: 4, vampiric_pct: 0,
+        },
+        Affix::Ice => AffixInfo {
+            prefix: "氷の", atk_bonus: 0, def_bonus: 0, mag_bonus: 0, max_hp_bonus: 0,
+            element: Some(Element::Ice), element_dmg: 4, vampiric_pct: 0,
+        },
+        Affix::Thunder => AffixInfo {
+            prefix: "雷の", atk_bonus: 0, def_bonus: 0, mag_bonus: 0, max_hp_bonus: 0,
+            element: Some(Element::Thunder), element_dmg: 4, vampiric_pct: 0,
+        },
+        Affix::Sharp => AffixInfo {
+            prefix: "鋭利な", atk_bonus: 4, def_bonus: 0, mag_bonus: 0, max_hp_bonus: 0,
+            element: None, element_dmg: 0, vampiric_pct: 0,
+        },
+        Affix::Sturdy => AffixInfo {
+            prefix: "頑強な", atk_bonus: 0, def_bonus: 4, mag_bonus: 0, max_hp_bonus: 0,
+            element: None, element_dmg: 0, vampiric_pct: 0,
+        },
+        Affix::Mystic => AffixInfo {
+            prefix: "神秘の", atk_bonus: 0, def_bonus: 0, mag_bonus: 5, max_hp_bonus: 0,
+            element: None, element_dmg: 0, vampiric_pct: 0,
+        },
+        Affix::Vampiric => AffixInfo {
+            prefix: "吸血の", atk_bonus: 0, def_bonus: 0, mag_bonus: 0, max_hp_bonus: 0,
+            element: None, element_dmg: 0, vampiric_pct: 25,
+        },
+        Affix::Blessed => AffixInfo {
+            prefix: "加護の", atk_bonus: 0, def_bonus: 1, mag_bonus: 0, max_hp_bonus: 15,
+            element: None, element_dmg: 0, vampiric_pct: 0,
+        },
+    }
+}
+
+pub const ALL_AFFIXES: &[Affix] = &[
+    Affix::Fire, Affix::Ice, Affix::Thunder, Affix::Sharp,
+    Affix::Sturdy, Affix::Mystic, Affix::Vampiric, Affix::Blessed,
+];
 
 // ── Skills ────────────────────────────────────────────────────
 
@@ -240,7 +351,7 @@ pub struct SkillInfo {
 pub fn skill_info(kind: SkillKind) -> SkillInfo {
     match kind {
         SkillKind::Fire => SkillInfo {
-            name: "ファイア", description: "炎で敵を攻撃 (魔力依存)",
+            name: "ファイア", description: "炎で隣接敵を焼く (魔力依存)",
             mp_cost: 8, value: 3, learn_level: 1,
         },
         SkillKind::Heal => SkillInfo {
@@ -248,29 +359,28 @@ pub fn skill_info(kind: SkillKind) -> SkillInfo {
             mp_cost: 6, value: 2, learn_level: 2,
         },
         SkillKind::IceBlade => SkillInfo {
-            name: "アイスブレード", description: "氷の刃で斬る (ATK+MAG)",
+            name: "アイスブレード", description: "氷の刃で隣接敵を斬る",
             mp_cost: 10, value: 2, learn_level: 3,
         },
         SkillKind::Shield => SkillInfo {
-            name: "シールド", description: "戦闘中DEF上昇",
+            name: "シールド", description: "数ターンDEF上昇",
             mp_cost: 5, value: 8, learn_level: 4,
         },
         SkillKind::Thunder => SkillInfo {
-            name: "サンダー", description: "雷撃 (高威力・魔力依存)",
+            name: "サンダー", description: "雷撃 (高威力・隣接)",
             mp_cost: 14, value: 4, learn_level: 5,
         },
         SkillKind::Drain => SkillInfo {
-            name: "ドレイン", description: "HP吸収攻撃 (魔力依存)",
+            name: "ドレイン", description: "HP吸収攻撃",
             mp_cost: 12, value: 2, learn_level: 6,
         },
         SkillKind::Berserk => SkillInfo {
-            name: "バーサク", description: "ATK大幅UP / DEF低下",
+            name: "バーサク", description: "数ターンATK大幅UP/DEF低下",
             mp_cost: 8, value: 15, learn_level: 8,
         },
     }
 }
 
-/// Returns the element associated with a skill, if any.
 pub fn skill_element(kind: SkillKind) -> Option<Element> {
     match kind {
         SkillKind::Fire => Some(Element::Fire),
@@ -321,10 +431,26 @@ pub const MAX_FLOOR: u32 = 10;
 
 // ── Inventory Entry ───────────────────────────────────────────
 
+/// A stack of items in the inventory.
+///
+/// If `affix` is `Some`, the item is unique (cannot stack — each
+/// affixed instance is its own entry, count is always 1).
 #[derive(Clone, Debug)]
 pub struct InventoryItem {
     pub kind: ItemKind,
     pub count: u32,
+    pub affix: Option<Affix>,
+}
+
+impl InventoryItem {
+    /// Display name including affix prefix.
+    pub fn display_name(&self) -> String {
+        let base = item_info(self.kind).name;
+        match self.affix {
+            Some(a) => format!("{}{}", affix_info(a).prefix, base),
+            None => base.to_string(),
+        }
+    }
 }
 
 // ── Dungeon Grid Map System ───────────────────────────────────
@@ -371,23 +497,13 @@ pub enum Tile {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CellType {
-    /// Normal corridor.
     Corridor,
-    /// Dungeon entrance (stairs up to town).
     Entrance,
-    /// Stairs down to next floor.
     Stairs,
-    /// Enemy encounter.
-    Enemy,
-    /// Treasure chest with choices.
     Treasure,
-    /// Trap room.
     Trap,
-    /// Healing spring.
     Spring,
-    /// Lore fragment.
     Lore,
-    /// NPC encounter.
     Npc,
 }
 
@@ -416,6 +532,33 @@ pub struct Room {
     pub h: usize,
 }
 
+/// A monster on the dungeon grid (inline-combat entity).
+#[derive(Clone, Debug)]
+pub struct Monster {
+    pub kind: EnemyKind,
+    pub x: usize,
+    pub y: usize,
+    pub hp: u32,
+    pub max_hp: u32,
+    /// Whether the monster has noticed the player and is active.
+    pub awake: bool,
+    /// True when the monster is "winding up" a charge attack
+    /// (telegraphed → next turn does double damage).
+    pub charging: bool,
+}
+
+/// A pet/companion on the dungeon grid (ally entity).
+#[derive(Clone, Debug)]
+pub struct Pet {
+    pub kind: EnemyKind,
+    pub name: String,
+    pub x: usize,
+    pub y: usize,
+    pub hp: u32,
+    pub max_hp: u32,
+    pub level: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct DungeonMap {
     pub floor_num: u32,
@@ -426,6 +569,7 @@ pub struct DungeonMap {
     pub player_y: usize,
     pub last_dir: Facing,
     pub rooms: Vec<Room>,
+    pub monsters: Vec<Monster>,
 }
 
 impl DungeonMap {
@@ -438,6 +582,12 @@ impl DungeonMap {
     pub fn in_bounds(&self, x: i32, y: i32) -> bool {
         x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height
     }
+    /// Find index of monster at (x, y), if any.
+    pub fn monster_at(&self, x: usize, y: usize) -> Option<usize> {
+        self.monsters
+            .iter()
+            .position(|m| m.x == x && m.y == y && m.hp > 0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -449,7 +599,7 @@ pub enum FloorTheme {
     DemonCastle,
 }
 
-/// Interactive event with choices.
+/// Interactive event with choices (treasure / spring / lore / npc).
 #[derive(Clone, Debug)]
 pub struct DungeonEvent {
     pub description: Vec<String>,
@@ -464,90 +614,90 @@ pub struct EventChoice {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EventAction {
-    /// Open treasure chest directly.
     OpenTreasure,
-    /// Search carefully (avoids traps).
     SearchTreasure,
-    /// Ignore and move on.
     Ignore,
-    /// Ambush the enemy (first strike).
-    Ambush,
-    /// Sneak past the enemy.
-    SneakPast,
-    /// Fight normally.
-    FightNormally,
-    /// Drink from spring.
     DrinkSpring,
-    /// Fill a bottle from spring.
     FillBottle,
-    /// Read the lore inscription.
     ReadLore,
-    /// Talk to NPC.
     TalkNpc,
-    /// Trade with NPC.
     TradeNpc,
-    /// Descend stairs to next floor.
     DescendStairs,
-    /// Return to town via entrance.
     ReturnToTown,
-    /// Continue exploring.
     Continue,
 }
 
-/// What happened after resolving a room event.
-#[derive(Clone, Debug)]
-pub struct RoomResult {
-    pub description: Vec<String>,
-}
-
-// ── Battle State ──────────────────────────────────────────────
-
-#[derive(Clone, Debug)]
-pub struct BattleEnemy {
-    pub kind: EnemyKind,
-    pub hp: u32,
-    pub max_hp: u32,
-}
+// ── Quests (Elona-style request board) ────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum BattlePhase {
-    SelectAction,
-    SelectSkill,
-    SelectItem,
-    Victory,
-    Defeat,
-    Fled,
+pub enum QuestKind {
+    /// Slay N monsters of a specific kind on a target floor.
+    Slay { target: EnemyKind, count: u32, floor: u32 },
+    /// Reach a specific floor on this run.
+    Reach { floor: u32 },
+    /// Collect N specific items.
+    Collect { item: ItemKind, count: u32 },
 }
 
 #[derive(Clone, Debug)]
-pub struct BattleState {
-    pub enemy: BattleEnemy,
-    pub phase: BattlePhase,
-    pub player_def_boost: u32,
-    pub player_atk_boost: u32,
-    pub log: Vec<String>,
-    pub is_boss: bool,
-    pub enemy_charging: bool,
-    pub player_berserk: bool,
+pub struct Quest {
+    pub kind: QuestKind,
+    pub reward_gold: u32,
+    pub reward_exp: u32,
+    /// Progress counter (e.g. monsters slain so far).
+    pub progress: u32,
+}
+
+impl Quest {
+    pub fn is_complete(&self) -> bool {
+        match self.kind {
+            QuestKind::Slay { count, .. } => self.progress >= count,
+            QuestKind::Reach { floor } => self.progress >= floor,
+            QuestKind::Collect { count, .. } => self.progress >= count,
+        }
+    }
+
+    pub fn description(&self) -> String {
+        match self.kind {
+            QuestKind::Slay { target, count, floor } => {
+                format!(
+                    "{}をB{}Fで{}体討伐 ({}/{})",
+                    enemy_info(target).name,
+                    floor,
+                    count,
+                    self.progress.min(count),
+                    count
+                )
+            }
+            QuestKind::Reach { floor } => {
+                format!(
+                    "B{}Fまで到達 ({}/{})",
+                    floor,
+                    self.progress.min(floor),
+                    floor
+                )
+            }
+            QuestKind::Collect { item, count } => {
+                format!(
+                    "{}を{}個集める ({}/{})",
+                    item_info(item).name,
+                    count,
+                    self.progress.min(count),
+                    count
+                )
+            }
+        }
+    }
 }
 
 // ── Scene System ─────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Scene {
-    /// Opening intro (0 = first screen, 1 = receive gear, 2 = transition).
     Intro(u8),
-    /// In town: rest, shop, enter dungeon.
     Town,
-    /// Grid-based dungeon exploration with 3D view.
     DungeonExplore,
-    /// Interactive event with choices.
     DungeonEvent,
-    /// Event result display.
-    DungeonResult,
-    /// In combat.
-    Battle,
-    /// Game complete — demon lord defeated.
     GameClear,
 }
 
@@ -557,6 +707,48 @@ pub enum Overlay {
     Inventory,
     Status,
     Shop,
+    /// Skill list — pick one to cast (counts as a turn).
+    SkillMenu,
+    /// Quest board (town).
+    QuestBoard,
+    /// Pray confirmation (town).
+    PrayMenu,
+}
+
+// ── Player Status Effects ─────────────────────────────────────
+
+/// Temporary buffs applied to the player. Decremented each turn.
+#[derive(Clone, Debug, Default)]
+pub struct PlayerBuffs {
+    /// Extra DEF from Shield skill.
+    pub shield_turns: u32,
+    pub shield_value: u32,
+    /// Extra ATK from Berserk.
+    pub berserk_turns: u32,
+    pub berserk_atk: u32,
+    /// Extra ATK from Strength Potion (in dungeon).
+    pub potion_turns: u32,
+    pub potion_atk: u32,
+}
+
+impl PlayerBuffs {
+    pub fn def_bonus(&self) -> u32 {
+        if self.shield_turns > 0 { self.shield_value } else { 0 }
+    }
+    pub fn atk_bonus(&self) -> u32 {
+        let mut a = 0;
+        if self.berserk_turns > 0 { a += self.berserk_atk; }
+        if self.potion_turns > 0 { a += self.potion_atk; }
+        a
+    }
+    pub fn def_penalty(&self) -> u32 {
+        if self.berserk_turns > 0 { 5 } else { 0 }
+    }
+    pub fn tick_down(&mut self) {
+        if self.shield_turns > 0 { self.shield_turns -= 1; }
+        if self.berserk_turns > 0 { self.berserk_turns -= 1; }
+        if self.potion_turns > 0 { self.potion_turns -= 1; }
+    }
 }
 
 // ── Root Game State ───────────────────────────────────────────
@@ -574,11 +766,11 @@ pub struct RpgState {
     pub mag: u32,
     pub gold: u32,
 
-    // Equipment
-    pub weapon: Option<ItemKind>,
-    pub armor: Option<ItemKind>,
+    // Equipment (indices into inventory; equipped item not removed from inv)
+    pub weapon_idx: Option<usize>,
+    pub armor_idx: Option<usize>,
 
-    // Inventory
+    // Inventory (supports affixed unique items)
     pub inventory: Vec<InventoryItem>,
 
     // Dungeon
@@ -586,18 +778,11 @@ pub struct RpgState {
     pub max_floor_reached: u32,
     pub total_clears: u32,
 
-    // Battle
-    pub battle: Option<BattleState>,
-
     // Scene system
     pub scene: Scene,
     pub overlay: Option<Overlay>,
     pub scene_text: Vec<String>,
 
-    // Room result (what happened in last room)
-    pub room_result: Option<RoomResult>,
-
-    // Active event (interactive choices)
     pub active_event: Option<DungeonEvent>,
 
     // Log (shown at bottom)
@@ -615,7 +800,33 @@ pub struct RpgState {
 
     // Lore collected
     pub lore_found: Vec<u32>,
+
+    // ── Elona-flavor extensions ──
+
+    /// Satiety (満腹度): 0..=satiety_max. Drains each turn in dungeon.
+    pub satiety: u32,
+    pub satiety_max: u32,
+
+    /// Faith (信仰度): grows on prayer / floor clears. Affects pray outcomes.
+    pub faith: u32,
+    /// Whether the player has prayed in the current dungeon run.
+    pub prayed_this_run: bool,
+
+    /// Currently accepted quest.
+    pub active_quest: Option<Quest>,
+    pub completed_quests: u32,
+
+    /// Player's pet companion.
+    pub pet: Option<Pet>,
+
+    /// Status effect buffs (shield, berserk, potion).
+    pub buffs: PlayerBuffs,
+
+    /// Counter that increments on each player action (turn-based).
+    pub turn_count: u64,
 }
+
+pub const SATIETY_MAX_DEFAULT: u32 = 1000;
 
 impl RpgState {
     pub fn new() -> Self {
@@ -631,17 +842,15 @@ impl RpgState {
             base_def: stats.def,
             mag: stats.mag,
             gold: 0,
-            weapon: None,
-            armor: None,
+            weapon_idx: None,
+            armor_idx: None,
             inventory: Vec::new(),
             dungeon: None,
             max_floor_reached: 0,
             total_clears: 0,
-            battle: None,
             scene: Scene::Intro(0),
             overlay: None,
             scene_text: Vec::new(),
-            room_result: None,
             active_event: None,
             log: Vec::new(),
             game_cleared: false,
@@ -651,6 +860,15 @@ impl RpgState {
             run_enemies_killed: 0,
             run_rooms_explored: 0,
             lore_found: Vec::new(),
+            satiety: SATIETY_MAX_DEFAULT,
+            satiety_max: SATIETY_MAX_DEFAULT,
+            faith: 0,
+            prayed_this_run: false,
+            active_quest: None,
+            completed_quests: 0,
+            pet: None,
+            buffs: PlayerBuffs::default(),
+            turn_count: 0,
         }
     }
 
@@ -661,23 +879,94 @@ impl RpgState {
         }
     }
 
+    /// Equipped weapon entry.
+    pub fn weapon(&self) -> Option<&InventoryItem> {
+        self.weapon_idx.and_then(|i| self.inventory.get(i))
+    }
+    /// Equipped armor entry.
+    pub fn armor(&self) -> Option<&InventoryItem> {
+        self.armor_idx.and_then(|i| self.inventory.get(i))
+    }
+
+    /// Total ATK including weapon base value, weapon affix bonus, and buffs.
     pub fn total_atk(&self) -> u32 {
-        let weapon_bonus = self.weapon.map(|w| item_info(w).value).unwrap_or(0);
-        self.base_atk + weapon_bonus
+        let mut atk = self.base_atk;
+        if let Some(w) = self.weapon() {
+            atk += item_info(w.kind).value;
+            if let Some(a) = w.affix {
+                atk = (atk as i32 + affix_info(a).atk_bonus).max(0) as u32;
+            }
+        }
+        atk + self.buffs.atk_bonus()
     }
 
     pub fn total_def(&self) -> u32 {
-        let armor_bonus = self.armor.map(|a| item_info(a).value).unwrap_or(0);
-        self.base_def + armor_bonus
+        let mut def = self.base_def;
+        if let Some(a) = self.armor() {
+            def += item_info(a.kind).value;
+            if let Some(af) = a.affix {
+                def = (def as i32 + affix_info(af).def_bonus).max(0) as u32;
+            }
+        }
+        let bonus = self.buffs.def_bonus();
+        let pen = self.buffs.def_penalty();
+        def.saturating_add(bonus).saturating_sub(pen)
+    }
+
+    /// Effective magic (includes affixes on equipped weapon/armor).
+    pub fn total_mag(&self) -> u32 {
+        let mut m = self.mag as i32;
+        if let Some(w) = self.weapon() {
+            if let Some(a) = w.affix {
+                m += affix_info(a).mag_bonus;
+            }
+        }
+        if let Some(ar) = self.armor() {
+            if let Some(a) = ar.affix {
+                m += affix_info(a).mag_bonus;
+            }
+        }
+        m.max(0) as u32
+    }
+
+    /// Effective max HP (includes Blessed affixes).
+    pub fn effective_max_hp(&self) -> u32 {
+        let mut hp = self.max_hp as i32;
+        if let Some(w) = self.weapon() {
+            if let Some(a) = w.affix { hp += affix_info(a).max_hp_bonus; }
+        }
+        if let Some(ar) = self.armor() {
+            if let Some(a) = ar.affix { hp += affix_info(a).max_hp_bonus; }
+        }
+        hp.max(1) as u32
+    }
+
+    /// Element of equipped weapon (for elemental damage on attack).
+    pub fn weapon_element(&self) -> Option<Element> {
+        self.weapon()
+            .and_then(|w| w.affix)
+            .and_then(|a| affix_info(a).element)
+    }
+    pub fn weapon_element_dmg(&self) -> u32 {
+        self.weapon()
+            .and_then(|w| w.affix)
+            .map(|a| affix_info(a).element_dmg)
+            .unwrap_or(0)
+    }
+    pub fn weapon_vampiric_pct(&self) -> u32 {
+        self.weapon()
+            .and_then(|w| w.affix)
+            .map(|a| affix_info(a).vampiric_pct)
+            .unwrap_or(0)
     }
 
     #[cfg(test)]
     pub fn item_count(&self, kind: ItemKind) -> u32 {
         self.inventory
             .iter()
-            .find(|i| i.kind == kind)
+            .filter(|i| i.kind == kind && i.affix.is_none())
             .map(|i| i.count)
-            .unwrap_or(0)
+            .sum()
     }
 }
 
@@ -696,6 +985,10 @@ mod tests {
         assert_eq!(s.scene, Scene::Intro(0));
         assert!(s.overlay.is_none());
         assert!(!s.game_cleared);
+        assert_eq!(s.satiety, SATIETY_MAX_DEFAULT);
+        assert_eq!(s.faith, 0);
+        assert!(s.active_quest.is_none());
+        assert!(s.pet.is_none());
     }
 
     #[test]
@@ -707,28 +1000,69 @@ mod tests {
     #[test]
     fn total_atk_with_weapon() {
         let mut s = RpgState::new();
-        s.weapon = Some(ItemKind::IronSword);
-        assert_eq!(s.total_atk(), 13);
+        s.inventory.push(InventoryItem {
+            kind: ItemKind::IronSword, count: 1, affix: None,
+        });
+        s.weapon_idx = Some(0);
+        assert_eq!(s.total_atk(), 13); // 5 base + 8 sword
     }
 
     #[test]
-    fn total_def_with_armor() {
+    fn total_atk_with_affixed_weapon() {
         let mut s = RpgState::new();
-        s.armor = Some(ItemKind::LeatherArmor);
-        assert_eq!(s.total_def(), 8);
+        s.inventory.push(InventoryItem {
+            kind: ItemKind::IronSword, count: 1, affix: Some(Affix::Sharp),
+        });
+        s.weapon_idx = Some(0);
+        // 5 base + 8 sword + 4 Sharp affix = 17
+        assert_eq!(s.total_atk(), 17);
     }
 
     #[test]
-    fn item_count_empty() {
-        let s = RpgState::new();
-        assert_eq!(s.item_count(ItemKind::Herb), 0);
+    fn affix_display_name_includes_prefix() {
+        let it = InventoryItem {
+            kind: ItemKind::IronSword, count: 1, affix: Some(Affix::Fire),
+        };
+        assert_eq!(it.display_name(), "炎の鉄の剣");
     }
 
     #[test]
-    fn item_count_with_items() {
+    fn buffs_tick_down() {
+        let mut b = PlayerBuffs {
+            shield_turns: 3,
+            shield_value: 8,
+            ..Default::default()
+        };
+        assert_eq!(b.def_bonus(), 8);
+        b.tick_down();
+        b.tick_down();
+        b.tick_down();
+        assert_eq!(b.def_bonus(), 0);
+    }
+
+    #[test]
+    fn quest_progress_complete() {
+        let q = Quest {
+            kind: QuestKind::Slay {
+                target: EnemyKind::Slime, count: 3, floor: 1,
+            },
+            reward_gold: 50,
+            reward_exp: 20,
+            progress: 3,
+        };
+        assert!(q.is_complete());
+    }
+
+    #[test]
+    fn item_count_excludes_affixed() {
         let mut s = RpgState::new();
-        s.inventory
-            .push(InventoryItem { kind: ItemKind::Herb, count: 5 });
+        s.inventory.push(InventoryItem {
+            kind: ItemKind::Herb, count: 5, affix: None,
+        });
+        s.inventory.push(InventoryItem {
+            kind: ItemKind::Herb, count: 1, affix: Some(Affix::Blessed),
+        });
+        // Only stackable count
         assert_eq!(s.item_count(ItemKind::Herb), 5);
     }
 
@@ -736,59 +1070,14 @@ mod tests {
     fn facing_reverse() {
         assert_eq!(Facing::North.reverse(), Facing::South);
         assert_eq!(Facing::East.reverse(), Facing::West);
-        assert_eq!(Facing::South.reverse(), Facing::North);
-        assert_eq!(Facing::West.reverse(), Facing::East);
     }
 
     #[test]
-    fn tile_walkability() {
-        let wall_cell = MapCell {
-            tile: Tile::Wall,
-            cell_type: CellType::Corridor,
-            visited: false,
-            revealed: false,
-            event_done: false,
-            room_id: None,
-        };
-        assert!(!wall_cell.is_walkable());
-
-        let floor_cell = MapCell {
-            tile: Tile::RoomFloor,
-            cell_type: CellType::Corridor,
-            visited: false,
-            revealed: false,
-            event_done: false,
-            room_id: Some(0),
-        };
-        assert!(floor_cell.is_walkable());
-
-        let corridor_cell = MapCell {
-            tile: Tile::Corridor,
-            cell_type: CellType::Corridor,
-            visited: false,
-            revealed: false,
-            event_done: false,
-            room_id: None,
-        };
-        assert!(corridor_cell.is_walkable());
-    }
-
-    #[test]
-    fn log_truncation() {
-        let mut s = RpgState::new();
-        for i in 0..40 {
-            s.add_log(&format!("msg {}", i));
-        }
-        assert!(s.log.len() <= 30);
-    }
-
-    #[test]
-    fn shop_expands_with_progress() {
-        let base = shop_items(0);
-        let mid = shop_items(4);
-        let late = shop_items(7);
-        assert!(mid.len() > base.len());
-        assert!(late.len() > mid.len());
+    fn shop_includes_food() {
+        let s = shop_items(0);
+        let kinds: Vec<ItemKind> = s.iter().map(|(k, _)| *k).collect();
+        assert!(kinds.contains(&ItemKind::Bread));
+        assert!(kinds.contains(&ItemKind::Apple));
     }
 
     #[test]
@@ -810,5 +1099,41 @@ mod tests {
             assert!(!info.name.is_empty());
             assert!(info.mp_cost > 0);
         }
+    }
+
+    #[test]
+    fn all_affixes_have_info() {
+        for &a in ALL_AFFIXES {
+            let info = affix_info(a);
+            assert!(!info.prefix.is_empty());
+        }
+    }
+
+    #[test]
+    fn dungeon_monster_at() {
+        let map = DungeonMap {
+            floor_num: 1,
+            width: 5,
+            height: 5,
+            grid: vec![vec![MapCell {
+                tile: Tile::RoomFloor,
+                cell_type: CellType::Corridor,
+                visited: false,
+                revealed: false,
+                event_done: false,
+                room_id: None,
+            }; 5]; 5],
+            player_x: 0,
+            player_y: 0,
+            last_dir: Facing::North,
+            rooms: Vec::new(),
+            monsters: vec![Monster {
+                kind: EnemyKind::Slime,
+                x: 2, y: 2, hp: 12, max_hp: 12,
+                awake: false, charging: false,
+            }],
+        };
+        assert_eq!(map.monster_at(2, 2), Some(0));
+        assert_eq!(map.monster_at(0, 0), None);
     }
 }

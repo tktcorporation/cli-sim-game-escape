@@ -1,13 +1,12 @@
-//! Interactive dungeon events — choices that shape the exploration experience.
-//!
-//! Each cell type can trigger an event with multiple choices.
-//! Events create the "exploration feel" that was missing from the linear system.
+//! Interactive dungeon events — choices for treasure / spring / lore /
+//! npc / trap / stairs / entrance cells. Enemy encounters are handled
+//! inline (monster entities on the grid).
 
 use super::state::{
     CellType, DungeonEvent, EventAction, EventChoice, FloorTheme, ItemKind,
 };
 
-// ── RNG (same LCG) ──────────────────────────────────────────
+// ── RNG ─────────────────────────────────────────────────────
 
 fn next_rng(seed: u64) -> u64 {
     seed.wrapping_mul(6364136223846793005)
@@ -19,9 +18,8 @@ fn rng_range(seed: &mut u64, max: u32) -> u32 {
     ((*seed >> 33) % max as u64) as u32
 }
 
-// ── Event Generation ──────────────────────────────────────────
+// ── Event Generation ────────────────────────────────────────
 
-/// Generate an interactive event based on cell type and floor theme.
 pub fn generate_event(
     cell_type: CellType,
     floor: u32,
@@ -30,7 +28,6 @@ pub fn generate_event(
 ) -> Option<DungeonEvent> {
     match cell_type {
         CellType::Treasure => Some(treasure_event(floor, theme, rng_seed)),
-        CellType::Enemy => Some(enemy_event(floor, theme, rng_seed)),
         CellType::Trap => Some(trap_event(floor, theme, rng_seed)),
         CellType::Spring => Some(spring_event(theme)),
         CellType::Lore => Some(lore_event(floor, rng_seed)),
@@ -53,73 +50,19 @@ fn treasure_event(floor: u32, theme: FloorTheme, rng_seed: &mut u64) -> DungeonE
         FloorTheme::DemonCastle => "禍々しい紋章が刻まれた箱がある。",
     };
 
-    let search_hint = if floor >= 4 {
-        "調べる (罠を確認)"
-    } else {
-        "慎重に調べる"
-    };
+    let search_hint = if floor >= 4 { "調べる (罠を確認)" } else { "慎重に調べる" };
 
     DungeonEvent {
         description: vec![desc.into()],
         choices: vec![
-            EventChoice {
-                label: "開ける".into(),
-                action: EventAction::OpenTreasure,
-            },
-            EventChoice {
-                label: search_hint.into(),
-                action: EventAction::SearchTreasure,
-            },
-            EventChoice {
-                label: "無視する".into(),
-                action: EventAction::Ignore,
-            },
-        ],
-    }
-}
-
-fn enemy_event(floor: u32, theme: FloorTheme, rng_seed: &mut u64) -> DungeonEvent {
-    let desc = match theme {
-        FloorTheme::MossyRuins => {
-            let texts = [
-                "物陰に何かが蠢いている…！",
-                "暗がりから敵意を感じる。",
-            ];
-            texts[rng_range(rng_seed, texts.len() as u32) as usize]
-        }
-        FloorTheme::Underground => "水面に映る影…何かいる。",
-        FloorTheme::AncientTemple => "神殿の守護者が立ちはだかる。",
-        FloorTheme::VolcanicDepths => "灼熱の中に蠢く影。",
-        FloorTheme::DemonCastle => "闇の中から殺気が迸る。",
-    };
-
-    let sneak_label = if floor >= 3 {
-        "忍び足で通り抜ける"
-    } else {
-        "そっと通り過ぎる"
-    };
-
-    DungeonEvent {
-        description: vec![desc.into(), "敵はまだこちらに気づいていない。".into()],
-        choices: vec![
-            EventChoice {
-                label: "奇襲する".into(),
-                action: EventAction::Ambush,
-            },
-            EventChoice {
-                label: sneak_label.into(),
-                action: EventAction::SneakPast,
-            },
-            EventChoice {
-                label: "正面から戦う".into(),
-                action: EventAction::FightNormally,
-            },
+            EventChoice { label: "開ける".into(), action: EventAction::OpenTreasure },
+            EventChoice { label: search_hint.into(), action: EventAction::SearchTreasure },
+            EventChoice { label: "無視する".into(), action: EventAction::Ignore },
         ],
     }
 }
 
 fn trap_event(floor: u32, theme: FloorTheme, rng_seed: &mut u64) -> DungeonEvent {
-    // Traps are disguised — the description hints but doesn't reveal
     let desc = match theme {
         FloorTheme::MossyRuins => {
             let texts = [
@@ -134,23 +77,14 @@ fn trap_event(floor: u32, theme: FloorTheme, rng_seed: &mut u64) -> DungeonEvent
         FloorTheme::DemonCastle => "魔法陣のような痕跡が床に残る。",
     };
 
-    let _ = floor; // may use later for trap difficulty hints
+    let _ = floor;
 
     DungeonEvent {
         description: vec![desc.into(), "嫌な予感がする…".into()],
         choices: vec![
-            EventChoice {
-                label: "慎重に進む".into(),
-                action: EventAction::SearchTreasure, // reuse: search = careful
-            },
-            EventChoice {
-                label: "そのまま通り抜ける".into(),
-                action: EventAction::OpenTreasure, // reuse: open = direct
-            },
-            EventChoice {
-                label: "引き返す".into(),
-                action: EventAction::Ignore,
-            },
+            EventChoice { label: "慎重に進む".into(), action: EventAction::SearchTreasure },
+            EventChoice { label: "そのまま通り抜ける".into(), action: EventAction::OpenTreasure },
+            EventChoice { label: "引き返す".into(), action: EventAction::Ignore },
         ],
     }
 }
@@ -167,18 +101,9 @@ fn spring_event(theme: FloorTheme) -> DungeonEvent {
     DungeonEvent {
         description: vec![desc.into()],
         choices: vec![
-            EventChoice {
-                label: "水を飲む (HP/MP回復)".into(),
-                action: EventAction::DrinkSpring,
-            },
-            EventChoice {
-                label: "瓶に汲む (薬草入手)".into(),
-                action: EventAction::FillBottle,
-            },
-            EventChoice {
-                label: "先に進む".into(),
-                action: EventAction::Ignore,
-            },
+            EventChoice { label: "水を飲む (HP/MP回復)".into(), action: EventAction::DrinkSpring },
+            EventChoice { label: "瓶に汲む (薬草入手)".into(), action: EventAction::FillBottle },
+            EventChoice { label: "先に進む".into(), action: EventAction::Ignore },
         ],
     }
 }
@@ -199,14 +124,8 @@ fn lore_event(floor: u32, rng_seed: &mut u64) -> DungeonEvent {
     DungeonEvent {
         description: vec![desc.into()],
         choices: vec![
-            EventChoice {
-                label: "読む".into(),
-                action: EventAction::ReadLore,
-            },
-            EventChoice {
-                label: "先に進む".into(),
-                action: EventAction::Ignore,
-            },
+            EventChoice { label: "読む".into(), action: EventAction::ReadLore },
+            EventChoice { label: "先に進む".into(), action: EventAction::Ignore },
         ],
     }
 }
@@ -214,40 +133,18 @@ fn lore_event(floor: u32, rng_seed: &mut u64) -> DungeonEvent {
 fn npc_event(floor: u32, rng_seed: &mut u64) -> DungeonEvent {
     let npc_type = rng_range(rng_seed, 3);
     let (desc, talk_label, trade_label) = match npc_type {
-        0 => (
-            "傷ついた冒険者がうずくまっている。",
-            "話しかける",
-            "薬草を分ける",
-        ),
-        1 => (
-            "謎の商人が松明の下で休んでいる。",
-            "話を聞く",
-            "取引する",
-        ),
-        _ => (
-            "放浪の魔術師がこちらを見ている。",
-            "話しかける",
-            "助けを求める",
-        ),
+        0 => ("傷ついた冒険者がうずくまっている。", "話しかける", "薬草を分ける"),
+        1 => ("謎の商人が松明の下で休んでいる。", "話を聞く", "取引する"),
+        _ => ("放浪の魔術師がこちらを見ている。", "話しかける", "助けを求める"),
     };
-
-    let _ = floor; // may use for NPC inventory scaling
+    let _ = floor;
 
     DungeonEvent {
         description: vec![desc.into()],
         choices: vec![
-            EventChoice {
-                label: talk_label.into(),
-                action: EventAction::TalkNpc,
-            },
-            EventChoice {
-                label: trade_label.into(),
-                action: EventAction::TradeNpc,
-            },
-            EventChoice {
-                label: "立ち去る".into(),
-                action: EventAction::Ignore,
-            },
+            EventChoice { label: talk_label.into(), action: EventAction::TalkNpc },
+            EventChoice { label: trade_label.into(), action: EventAction::TradeNpc },
+            EventChoice { label: "立ち去る".into(), action: EventAction::Ignore },
         ],
     }
 }
@@ -260,25 +157,16 @@ fn stairs_event(floor: u32) -> DungeonEvent {
     };
 
     let descend_label = if floor >= 10 {
-        "扉を開ける (ボス戦)"
+        "扉を開ける (ボスフロアへ)".to_string()
     } else {
-        &format!("B{}Fへ降りる", floor + 1)
+        format!("B{}Fへ降りる", floor + 1)
     };
 
     DungeonEvent {
-        description: vec![
-            desc.into(),
-            format!("現在: B{}F", floor),
-        ],
+        description: vec![desc.into(), format!("現在: B{}F", floor)],
         choices: vec![
-            EventChoice {
-                label: descend_label.to_string(),
-                action: EventAction::DescendStairs,
-            },
-            EventChoice {
-                label: "探索を続ける".into(),
-                action: EventAction::Continue,
-            },
+            EventChoice { label: descend_label, action: EventAction::DescendStairs },
+            EventChoice { label: "探索を続ける".into(), action: EventAction::Continue },
         ],
     }
 }
@@ -287,29 +175,20 @@ fn entrance_event() -> DungeonEvent {
     DungeonEvent {
         description: vec!["入口の階段がある。町へ戻れる。".into()],
         choices: vec![
-            EventChoice {
-                label: "町に帰還する".into(),
-                action: EventAction::ReturnToTown,
-            },
-            EventChoice {
-                label: "探索を続ける".into(),
-                action: EventAction::Continue,
-            },
+            EventChoice { label: "町に帰還する".into(), action: EventAction::ReturnToTown },
+            EventChoice { label: "探索を続ける".into(), action: EventAction::Continue },
         ],
     }
 }
 
-// ── Event Resolution ──────────────────────────────────────────
+// ── Event Resolution ────────────────────────────────────────
 
-/// Result of resolving an event choice.
 pub struct EventOutcome {
     pub description: Vec<String>,
     pub gold: i32,
     pub hp_change: i32,
     pub mp_change: i32,
     pub item: Option<(ItemKind, u32)>,
-    pub start_battle: bool,
-    pub first_strike: bool,
     pub descend: bool,
     pub return_to_town: bool,
     pub lore_id: Option<u32>,
@@ -323,8 +202,6 @@ impl EventOutcome {
             hp_change: 0,
             mp_change: 0,
             item: None,
-            start_battle: false,
-            first_strike: false,
             descend: false,
             return_to_town: false,
             lore_id: None,
@@ -332,7 +209,6 @@ impl EventOutcome {
     }
 }
 
-/// Resolve an event choice and produce an outcome.
 pub fn resolve_event(
     action: &EventAction,
     cell_type: CellType,
@@ -341,14 +217,15 @@ pub fn resolve_event(
     rng_seed: &mut u64,
 ) -> EventOutcome {
     match (action, cell_type) {
-        // Treasure: Open directly
         (EventAction::OpenTreasure, CellType::Treasure) => {
-            let trap_chance = 15 + floor * 2; // 17% at F1, 35% at F10
+            let trap_chance = 15 + floor * 2;
             if rng_range(rng_seed, 100) < trap_chance {
-                // Trapped!
                 let damage = 5 + floor * 3;
                 EventOutcome {
-                    description: vec!["罠だ！ 宝箱に仕掛けがあった！".into(), format!("{}ダメージを受けた！", damage)],
+                    description: vec![
+                        "罠だ！ 宝箱に仕掛けがあった！".into(),
+                        format!("{}ダメージを受けた！", damage),
+                    ],
                     hp_change: -(damage as i32),
                     ..EventOutcome::empty()
                 }
@@ -356,16 +233,12 @@ pub fn resolve_event(
                 treasure_reward(floor, rng_seed)
             }
         }
-        // Treasure: Search carefully
         (EventAction::SearchTreasure, CellType::Treasure) => {
-            // Searching avoids traps but takes time (could attract enemies later)
             let mut outcome = treasure_reward(floor, rng_seed);
             outcome.description.insert(0, "慎重に調べた…罠はなかった。".into());
-            // Slightly less gold as "cost" of being careful
             outcome.gold = (outcome.gold as f32 * 0.8) as i32;
             outcome
         }
-        // Trap: Rush through
         (EventAction::OpenTreasure, CellType::Trap) => {
             let damage = 8 + floor * 3 + rng_range(rng_seed, floor * 2);
             EventOutcome {
@@ -374,77 +247,39 @@ pub fn resolve_event(
                 ..EventOutcome::empty()
             }
         }
-        // Trap: Move carefully
         (EventAction::SearchTreasure, CellType::Trap) => {
-            let avoid_chance = 40 + player_level * 5; // 45% at lv1, 90% at lv10
+            let avoid_chance = 40 + player_level * 5;
             if rng_range(rng_seed, 100) < avoid_chance {
                 EventOutcome {
                     description: vec!["罠を見破った！ 慎重に回避した。".into()],
                     ..EventOutcome::empty()
                 }
             } else {
-                let damage = (5 + floor * 2) / 2; // half damage
+                let damage = (5 + floor * 2) / 2;
                 EventOutcome {
-                    description: vec!["罠を発見したが避けきれなかった！".into(), format!("{}ダメージ (軽減)", damage)],
+                    description: vec![
+                        "罠を発見したが避けきれなかった！".into(),
+                        format!("{}ダメージ (軽減)", damage),
+                    ],
                     hp_change: -(damage as i32),
                     ..EventOutcome::empty()
                 }
             }
         }
-        // Enemy: Ambush
-        (EventAction::Ambush, CellType::Enemy) => {
-            EventOutcome {
-                description: vec!["不意を突いた！ 先制攻撃！".into()],
-                start_battle: true,
-                first_strike: true,
-                ..EventOutcome::empty()
-            }
-        }
-        // Enemy: Sneak past
-        (EventAction::SneakPast, CellType::Enemy) => {
-            let sneak_chance = 30 + player_level * 5; // 35% at lv1, 80% at lv10
-            if rng_range(rng_seed, 100) < sneak_chance {
-                EventOutcome {
-                    description: vec!["気づかれずに通り抜けた！".into()],
-                    ..EventOutcome::empty()
-                }
-            } else {
-                EventOutcome {
-                    description: vec!["見つかった！ 不意打ちされた！".into()],
-                    start_battle: true,
-                    first_strike: false,
-                    hp_change: -(floor as i32 * 2), // surprise damage
-                    ..EventOutcome::empty()
-                }
-            }
-        }
-        // Enemy: Fight normally
-        (EventAction::FightNormally, CellType::Enemy) => {
-            EventOutcome {
-                description: vec!["正面から立ち向かった！".into()],
-                start_battle: true,
-                first_strike: false,
-                ..EventOutcome::empty()
-            }
-        }
-        // Spring: Drink
-        (EventAction::DrinkSpring, CellType::Spring) => {
-            EventOutcome {
-                description: vec!["澄んだ水で体を癒した。".into(), "HP/MPが25%回復した。".into()],
-                hp_change: 9999, // special: means 25% heal (handled by caller)
-                mp_change: 9999,
-                ..EventOutcome::empty()
-            }
-        }
-        // Spring: Fill bottle
-        (EventAction::FillBottle, CellType::Spring) => {
-            EventOutcome {
-                description: vec!["泉の水を瓶に汲んだ。".into(), "薬草を1つ入手した。".into()],
-                item: Some((ItemKind::Herb, 1)),
-                ..EventOutcome::empty()
-            }
-        }
-        // Lore: Read
+        (EventAction::DrinkSpring, CellType::Spring) => EventOutcome {
+            description: vec![
+                "澄んだ水で体を癒した。".into(),
+                "HP/MPが25%回復した。".into(),
+            ],
+            hp_change: 9999,
+            mp_change: 9999,
+            ..EventOutcome::empty()
+        },
+        (EventAction::FillBottle, CellType::Spring) => EventOutcome {
+            description: vec!["泉の水を瓶に汲んだ。".into(), "薬草を1つ入手した。".into()],
+            item: Some((ItemKind::Herb, 1)),
+            ..EventOutcome::empty()
+        },
         (EventAction::ReadLore, CellType::Lore) => {
             let lore_id = floor * 10 + rng_range(rng_seed, 5);
             let text = lore_text(lore_id);
@@ -454,7 +289,6 @@ pub fn resolve_event(
                 ..EventOutcome::empty()
             }
         }
-        // NPC: Talk
         (EventAction::TalkNpc, CellType::Npc) => {
             let hint = npc_hint(floor, rng_seed);
             EventOutcome {
@@ -462,43 +296,28 @@ pub fn resolve_event(
                 ..EventOutcome::empty()
             }
         }
-        // NPC: Trade
         (EventAction::TradeNpc, CellType::Npc) => {
-            let item = if floor >= 5 {
-                ItemKind::MagicWater
-            } else {
-                ItemKind::Herb
-            };
+            let item = if floor >= 5 { ItemKind::MagicWater } else { ItemKind::Herb };
             EventOutcome {
                 description: vec!["お礼にアイテムを受け取った。".into()],
                 item: Some((item, 1)),
                 ..EventOutcome::empty()
             }
         }
-        // Stairs: Descend
-        (EventAction::DescendStairs, CellType::Stairs) => {
-            EventOutcome {
-                description: vec![format!("B{}Fへ降りる…", floor + 1)],
-                descend: true,
-                ..EventOutcome::empty()
-            }
-        }
-        // Entrance: Return to town
-        (EventAction::ReturnToTown, CellType::Entrance) => {
-            EventOutcome {
-                description: vec!["町へ帰還する。".into()],
-                return_to_town: true,
-                ..EventOutcome::empty()
-            }
-        }
-        // Ignore / Continue
-        (EventAction::Ignore | EventAction::Continue, _) => {
-            EventOutcome {
-                description: vec!["先に進むことにした。".into()],
-                ..EventOutcome::empty()
-            }
-        }
-        // Default
+        (EventAction::DescendStairs, CellType::Stairs) => EventOutcome {
+            description: vec![format!("B{}Fへ降りる…", floor + 1)],
+            descend: true,
+            ..EventOutcome::empty()
+        },
+        (EventAction::ReturnToTown, CellType::Entrance) => EventOutcome {
+            description: vec!["町へ帰還する。".into()],
+            return_to_town: true,
+            ..EventOutcome::empty()
+        },
+        (EventAction::Ignore | EventAction::Continue, _) => EventOutcome {
+            description: vec!["先に進むことにした。".into()],
+            ..EventOutcome::empty()
+        },
         _ => EventOutcome {
             description: vec!["何も起こらなかった。".into()],
             ..EventOutcome::empty()
@@ -518,16 +337,15 @@ fn treasure_reward(floor: u32, rng_seed: &mut u64) -> EventOutcome {
     } else if roll < 80 {
         let count = 1 + rng_range(rng_seed, 2);
         EventOutcome {
-            description: vec!["宝箱を開けた！".into(), format!("薬草x{}を手に入れた！", count)],
+            description: vec![
+                "宝箱を開けた！".into(),
+                format!("薬草x{}を手に入れた！", count),
+            ],
             item: Some((ItemKind::Herb, count)),
             ..EventOutcome::empty()
         }
     } else {
-        let item = if floor >= 6 {
-            ItemKind::StrengthPotion
-        } else {
-            ItemKind::MagicWater
-        };
+        let item = if floor >= 6 { ItemKind::StrengthPotion } else { ItemKind::MagicWater };
         let name = match item {
             ItemKind::MagicWater => "魔法の水",
             ItemKind::StrengthPotion => "力の薬",
@@ -564,9 +382,9 @@ fn lore_text(lore_id: u32) -> &'static str {
 fn npc_hint(floor: u32, rng_seed: &mut u64) -> String {
     let hints = match floor {
         1..=3 => vec![
-            "「この先は行き止まりが多い。地図を頭に入れておけ」",
+            "「ペットの餌を持っていけば、敵を仲間にできる」",
             "「宝箱には罠があることもある。慎重にな」",
-            "「敵に気づかれる前に奇襲するのが一番だ」",
+            "「満腹度が0になると体力が削れる。食料を忘れるな」",
         ],
         4..=6 => vec![
             "「ゴーレムが力を溜めたらシールドを使え」",
@@ -587,7 +405,7 @@ fn npc_hint(floor: u32, rng_seed: &mut u64) -> String {
     hints[idx].to_string()
 }
 
-// ── Tests ──────────────────────────────────────────────────────
+// ── Tests ─────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
@@ -603,15 +421,6 @@ mod tests {
     }
 
     #[test]
-    fn enemy_event_has_choices() {
-        let mut seed = 42u64;
-        let event = generate_event(CellType::Enemy, 1, FloorTheme::MossyRuins, &mut seed);
-        assert!(event.is_some());
-        let event = event.unwrap();
-        assert!(event.choices.len() >= 3);
-    }
-
-    #[test]
     fn corridor_has_no_event() {
         let mut seed = 42u64;
         let event = generate_event(CellType::Corridor, 1, FloorTheme::MossyRuins, &mut seed);
@@ -624,27 +433,10 @@ mod tests {
         let outcome = resolve_event(
             &EventAction::OpenTreasure,
             CellType::Treasure,
-            1,
-            1,
+            1, 1,
             &mut seed,
         );
         assert!(!outcome.description.is_empty());
-        // Either got treasure or got trapped
-        assert!(outcome.gold > 0 || outcome.hp_change < 0 || outcome.item.is_some());
-    }
-
-    #[test]
-    fn resolve_enemy_ambush_starts_battle() {
-        let mut seed = 42u64;
-        let outcome = resolve_event(
-            &EventAction::Ambush,
-            CellType::Enemy,
-            1,
-            1,
-            &mut seed,
-        );
-        assert!(outcome.start_battle);
-        assert!(outcome.first_strike);
     }
 
     #[test]
@@ -653,23 +445,16 @@ mod tests {
         let outcome = resolve_event(
             &EventAction::DrinkSpring,
             CellType::Spring,
-            1,
-            1,
+            1, 1,
             &mut seed,
         );
-        assert_eq!(outcome.hp_change, 9999); // sentinel for 25% heal
+        assert_eq!(outcome.hp_change, 9999);
     }
 
     #[test]
     fn resolve_stairs_descends() {
         let mut seed = 42u64;
-        let outcome = resolve_event(
-            &EventAction::DescendStairs,
-            CellType::Stairs,
-            3,
-            5,
-            &mut seed,
-        );
+        let outcome = resolve_event(&EventAction::DescendStairs, CellType::Stairs, 3, 5, &mut seed);
         assert!(outcome.descend);
     }
 }
