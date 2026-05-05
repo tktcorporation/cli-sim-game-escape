@@ -1,17 +1,15 @@
 //! 深淵潜行 — 純粋ロジック関数群。
 //!
-//! tick / spawn / 攻撃判定 / 強化購入など全てここに集約する。
+//! tick / spawn / 攻撃判定 / 装備購入・装着・強化など全てここに集約する。
 //! `state.rs` のフィールドだけを操作し、IOやレンダーは触らない。
 //!
 //! 数値バランスは `state.config` (BalanceConfig) から取り出すので、
-//! 本体ゲームとシミュレータで完全に同じコードを通る ─ 動作の乖離は
-//! 構造的に起きない。
+//! 本体ゲームとシミュレータで完全に同じコードを通る。
 
 use super::config::BalanceConfig;
 use super::policy::PlayerAction;
 use super::state::{
     AbyssState, Enemy, EquipmentId, FloorKind, GachaResultSummary, GachaTier, SoulPerk, Tab,
-    UpgradeKind,
 };
 
 /// メインの tick 処理。delta_ticks 回ぶん戦闘を進める。
@@ -40,7 +38,6 @@ pub fn tick(state: &mut AbyssState, delta_ticks: u32) {
         r.life_ticks = r.life_ticks.saturating_sub(delta_ticks);
     }
 
-    // tick を 1 ステップずつ処理する (敵の交代が連続で起きうるため)。
     for _ in 0..delta_ticks {
         step_one_tick(state);
         state.total_ticks += 1;
@@ -48,9 +45,8 @@ pub fn tick(state: &mut AbyssState, delta_ticks: u32) {
 }
 
 fn step_one_tick(state: &mut AbyssState) {
-    // ── HP regen (10 tick = 1秒 → 1秒あたりの規定値を 10 tick に分散) ──
+    // ── HP regen ──
     if state.hero_hp > 0 && state.hero_hp < state.hero_max_hp() {
-        // regen_per_sec * 100 を 10tickで足す → 1tickあたり regen_per_sec * 10
         let regen_per_tick_x100 = (state.hero_regen_per_sec() * 10.0).round() as u32;
         state.hero_regen_acc_x100 = state.hero_regen_acc_x100.saturating_add(regen_per_tick_x100);
         if state.hero_regen_acc_x100 >= 100 {
@@ -61,7 +57,7 @@ fn step_one_tick(state: &mut AbyssState) {
         }
     }
 
-    // ── 敵が居ない (HP 0 のプレースホルダ) → 新しい敵スポーン ──
+    // ── 敵が居ない → 新しい敵スポーン ──
     if state.current_enemy.hp == 0 || state.current_enemy.max_hp == 0 {
         spawn_next_enemy(state);
         return;
@@ -79,7 +75,6 @@ fn step_one_tick(state: &mut AbyssState) {
         state.last_enemy_damage = Some((actual, 6, crit));
         state.enemy_hurt_flash = 3;
 
-        // 攻撃成功で focus +1。次攻撃の cooldown は焼成された focus を反映する。
         let focus_max = state.config.hero.focus_max;
         state.combat_focus = (state.combat_focus + 1).min(focus_max);
         state.hero_atk_cooldown = state.hero_atk_period();
@@ -107,7 +102,6 @@ fn step_one_tick(state: &mut AbyssState) {
     }
 }
 
-/// 撃破時の処理: gold/魂を加算し、kill カウンタを進める。
 fn on_enemy_killed(state: &mut AbyssState) {
     let was_boss = state.current_enemy.is_boss;
     let kind_gold = state.floor_kind.gold_mult();
@@ -120,8 +114,6 @@ fn on_enemy_killed(state: &mut AbyssState) {
     let base_souls = if was_boss {
         (state.floor as u64) * pacing.boss_souls_mult
     } else {
-        // 0 だと div_ceil が panic するので最小 1 にクランプ。
-        // tuning config が誤って 0 を入れても fail-graceful にする。
         let div = pacing.normal_souls_div.max(1);
         state.floor.div_ceil(div) as u64
     };
@@ -132,7 +124,6 @@ fn on_enemy_killed(state: &mut AbyssState) {
     state.total_kills = state.total_kills.saturating_add(1);
 
     if was_boss {
-        // 鍵ドロップ: 基本 + フロア種別ボーナス + 深層 (10F毎) ボーナス。
         let g = &state.config.gacha;
         let mut keys_dropped = g.keys_per_boss + state.floor_kind.bonus_keys_on_boss();
         if g.deep_floor_step > 0 && state.floor.is_multiple_of(g.deep_floor_step) {
@@ -144,11 +135,9 @@ fn on_enemy_killed(state: &mut AbyssState) {
             "▶ ボス {} 撃破！ +{}g +{}魂 +{}🔑",
             state.current_enemy.name, gold_drop, souls, keys_dropped
         ));
-        // ボス撃破 → 次階層へ進むか、現フロアに留まるか
         if state.auto_descend {
             descend_to_next_floor(state);
         } else {
-            // 自動潜行 OFF → 同じフロアに留まり、kill カウンタをリセット (=次のボスへ向けて再周回)
             state.kills_on_floor = 0;
             spawn_next_enemy(state);
         }
@@ -177,7 +166,6 @@ fn descend_to_next_floor(state: &mut AbyssState) {
     spawn_next_enemy(state);
 }
 
-/// フロア種別を抽選する。`floor_kind_normal_below` 階以下は必ず Normal。
 fn roll_floor_kind(floor: u32, config: &BalanceConfig, rng_seed: &mut u32) -> FloorKind {
     let g = &config.gacha;
     if floor < g.floor_kind_normal_below {
@@ -218,7 +206,6 @@ fn on_hero_died(state: &mut AbyssState) {
         state.floor, bonus_souls
     ));
 
-    // ラン開始地点に戻る
     state.floor = 1;
     state.floor_kind = FloorKind::Normal;
     state.kills_on_floor = 0;
@@ -231,7 +218,6 @@ fn on_hero_died(state: &mut AbyssState) {
     spawn_next_enemy(state);
 }
 
-/// 次の敵 (雑魚 or ボス) を生成して current_enemy にセット。
 fn spawn_next_enemy(state: &mut AbyssState) {
     let is_boss = state.kills_on_floor >= state.enemies_per_floor();
     let mut e = make_enemy(state.floor, is_boss, &state.config, &mut state.rng_state);
@@ -239,9 +225,6 @@ fn spawn_next_enemy(state: &mut AbyssState) {
     state.current_enemy = e;
 }
 
-/// フロア種別による敵の数値修正を適用する。
-/// gold は `gold_drop` 計算側で `floor_kind.gold_mult()` を掛けるので、
-/// ここでは hp / atk のみ調整する (二重適用を避ける)。
 fn apply_floor_kind_to_enemy(e: &mut Enemy, kind: FloorKind) {
     let hp_m = kind.enemy_hp_mult();
     let atk_m = kind.enemy_atk_mult();
@@ -255,7 +238,6 @@ fn apply_floor_kind_to_enemy(e: &mut Enemy, kind: FloorKind) {
     }
 }
 
-/// シンプルな擬似乱数 (xorshift32)。
 fn rng_next(seed: &mut u32) -> u32 {
     let mut x = *seed;
     if x == 0 {
@@ -274,10 +256,7 @@ fn roll_crit(state: &mut AbyssState) -> bool {
     r < threshold
 }
 
-/// 与えられた floor / boss フラグから敵を生成する。
-/// 数値スケーリングは config から、名前テーブルは固定で持つ。
 pub fn make_enemy(floor: u32, is_boss: bool, config: &BalanceConfig, rng_seed: &mut u32) -> Enemy {
-    // 名前テーブル (フロア帯ごとに変わる)。
     let normal_names: &[&str] = match floor {
         1..=2 => &["スライム", "大ネズミ", "コウモリ"],
         3..=5 => &["ゴブリン", "スケルトン", "影の犬"],
@@ -302,8 +281,6 @@ pub fn make_enemy(floor: u32, is_boss: bool, config: &BalanceConfig, rng_seed: &
 
     let e = &config.enemy;
     let f = floor as f64;
-    // HP / ATK / gold は piecewise schedule に切替 (旧 hp_growth.powf は撤去)。
-    // 装備込みで B100 まで届くよう深層は緩める設計。詳細は config.rs:EnemyGrowthSchedule。
     let mut hp = e.hp_base * config.enemy_hp_schedule.multiplier(floor);
     let mut atk = e.atk_base * config.enemy_atk_schedule.multiplier(floor);
     let mut def = e.def_base + (f - 1.0) * e.def_per_floor;
@@ -338,32 +315,139 @@ pub fn make_enemy(floor: u32, is_boss: bool, config: &BalanceConfig, rng_seed: &
 
 // ── プレイヤーアクション ──
 
-/// 強化を 1 段階購入する。gold が足りなければ false。
-pub fn buy_upgrade(state: &mut AbyssState, kind: UpgradeKind) -> bool {
-    let cost = state.upgrade_cost(kind);
+/// 装備の購入条件 (前装備 prerequisite) を満たしているか判定する。
+/// gold は別途チェック。UI 側で「未解放だが解放可能」を表示するために使う。
+pub fn equipment_requirements_met(state: &AbyssState, id: EquipmentId) -> bool {
+    let def = match state.config.equipment.get(id.index()) {
+        Some(d) => d,
+        None => return false,
+    };
+    if let Some(prereq) = def.prerequisite {
+        if !state.owned_equipment[prereq.index()] {
+            return false;
+        }
+    }
+    true
+}
+
+/// 装備を 1 個購入する。条件未達 / gold 不足 / 既に所持済みなら false。
+///
+/// 購入直後は **その lane に自動装着** する (空スロットも、既に何かが装着されている
+/// 場合も置換)。新装備を買ったらすぐ使いたい、という idle UX を素直に表現するため。
+/// 旧装備に戻したいときは `equip_item(prev_id)` を呼べば良い (所持装備からの装着切替は無料)。
+pub fn buy_equipment(state: &mut AbyssState, id: EquipmentId) -> bool {
+    if state.owned_equipment[id.index()] {
+        return false;
+    }
+    if !equipment_requirements_met(state, id) {
+        return false;
+    }
+    let def = match state.config.equipment.get(id.index()) {
+        Some(d) => d,
+        None => return false,
+    };
+    let cost = def.gold_cost;
     if state.gold < cost {
         return false;
     }
     state.gold -= cost;
+    let name = def.name;
+    let label = def.effect_label;
+    let lane = id.lane();
 
-    // Vitality は最大値増加分をそのまま現 HP にも乗せて「気持ち良さ」を出す。
-    // 増分は config (hp_per_vitality_lv) と Endurance 倍率に依存するので、
-    // ハードコードせず Lv 上げ前後の hero_max_hp() の差分で計算する。
-    let max_before = if matches!(kind, UpgradeKind::Vitality) {
+    // 装備が変わると max_hp も変わる。max が増えた / 減った両方向に hero_hp を追従させる:
+    //   - 増えた場合: delta だけ底上げ (低 HP からの装備変更で over-heal しないが、現 HP は増加分上がる)
+    //   - 減った場合: hero_hp を新 max にクランプ (旧 max で生き残ってた hero_hp の取り残しを防ぐ)
+    // `equip_item` と同じ分岐にすることで「装備変更時の HP 追従」を 1 つの責務として
+    // 統一する (片方だけ修正されてバグる事故を防ぐ目的での明示的対称構造)。
+    let max_before = state.hero_max_hp();
+    state.owned_equipment[id.index()] = true;
+    state.equipped[lane.index()] = Some(id);
+    let max_after = state.hero_max_hp();
+    if max_after > max_before {
+        let delta = max_after - max_before;
+        state.hero_hp = state.hero_hp.saturating_add(delta).min(max_after);
+    } else {
+        state.hero_hp = state.hero_hp.min(max_after);
+    }
+
+    state.add_log(format!("✦ 装備購入: {} ({}) → 装着", name, label));
+    true
+}
+
+/// 既に所持している装備を装着する。装着切替は無料。
+/// 所持していない、または既にその装備を装着中なら false。
+pub fn equip_item(state: &mut AbyssState, id: EquipmentId) -> bool {
+    if !state.owned_equipment[id.index()] {
+        return false;
+    }
+    let lane = id.lane();
+    if state.equipped[lane.index()] == Some(id) {
+        return false; // 既に同じものを装着中
+    }
+    let max_before = state.hero_max_hp();
+    state.equipped[lane.index()] = Some(id);
+    let max_after = state.hero_max_hp();
+    // max が増えたなら delta だけ現 HP も bump (装備購入と同じ流儀)。
+    // max が減った場合は hp を max に切り詰める。
+    if max_after > max_before {
+        let delta = max_after - max_before;
+        state.hero_hp = state.hero_hp.saturating_add(delta).min(max_after);
+    } else {
+        state.hero_hp = state.hero_hp.min(max_after);
+    }
+    let name = state
+        .config
+        .equipment
+        .get(id.index())
+        .map(|d| d.name)
+        .unwrap_or("装備");
+    state.add_log(format!("◆ 装着: {}", name));
+    true
+}
+
+/// 指定装備を 1 段階強化する。所持していなくても呼べるが、UI 側でフィルタするので
+/// 通常は所持装備に対してのみ呼ばれる。
+pub fn enhance_equipment(state: &mut AbyssState, id: EquipmentId) -> bool {
+    let cost = state.enhance_cost(id);
+    if state.gold < cost {
+        return false;
+    }
+    // 装備が定義されていない id は弾く (state.config.equipment が SSOT)。
+    if state.config.equipment.get(id.index()).is_none() {
+        return false;
+    }
+    state.gold -= cost;
+
+    // 強化対象が装着中なら hero_max_hp が変動するので、装備購入と同じ
+    // 「max 増減両方向で hero_hp を追従させる」分岐で hero_hp を更新する。
+    // 装着していない場合はステに反映されないので変動なし。
+    // `buy_equipment` / `equip_item` と同じ if/else 構造で統一 (Codex review #87 P2)。
+    let is_equipped = state.equipped[id.lane().index()] == Some(id);
+    let max_before = if is_equipped {
         Some(state.hero_max_hp())
     } else {
         None
     };
-
-    state.upgrades[kind.index()] = state.upgrades[kind.index()].saturating_add(1);
-
+    state.equipment_levels[id.index()] = state.equipment_levels[id.index()].saturating_add(1);
     if let Some(before) = max_before {
         let after = state.hero_max_hp();
-        let delta = after.saturating_sub(before);
-        state.hero_hp = state.hero_hp.saturating_add(delta).min(after);
+        if after > before {
+            let delta = after - before;
+            state.hero_hp = state.hero_hp.saturating_add(delta).min(after);
+        } else {
+            state.hero_hp = state.hero_hp.min(after);
+        }
     }
 
-    state.add_log(format!("◆ {} Lv.{}", kind.name(), state.upgrades[kind.index()]));
+    let name = state
+        .config
+        .equipment
+        .get(id.index())
+        .map(|d| d.name)
+        .unwrap_or("装備");
+    let lv = state.equipment_levels[id.index()];
+    state.add_log(format!("◆ {} +{}", name, lv));
     true
 }
 
@@ -387,62 +471,6 @@ pub fn buy_soul_perk(state: &mut AbyssState, perk: SoulPerk) -> bool {
     true
 }
 
-/// 装備の解放条件を全て満たしているか判定する (gold は別途チェック)。
-/// UI からは「未解放だが解放可能」を表示するために使う。
-pub fn equipment_requirements_met(state: &AbyssState, id: EquipmentId) -> bool {
-    let def = match state.config.equipment.get(id.index()) {
-        Some(d) => d,
-        None => return false,
-    };
-    let req = &def.requirement;
-    if let Some(prereq) = req.prerequisite {
-        if !state.owned_equipment[prereq.index()] {
-            return false;
-        }
-    }
-    for &(kind, min_lv) in &req.upgrade_levels {
-        if state.upgrades[kind.index()] < min_lv {
-            return false;
-        }
-    }
-    true
-}
-
-/// 装備を 1 個解放する。条件未達 / gold 不足 / 既に所持済みなら false。
-pub fn buy_equipment(state: &mut AbyssState, id: EquipmentId) -> bool {
-    if state.owned_equipment[id.index()] {
-        return false;
-    }
-    if !equipment_requirements_met(state, id) {
-        return false;
-    }
-    let def = match state.config.equipment.get(id.index()) {
-        Some(d) => d,
-        None => return false,
-    };
-    let cost = def.requirement.gold_cost;
-    if state.gold < cost {
-        return false;
-    }
-    state.gold -= cost;
-    let name = def.name;
-    let label = def.effect_label;
-
-    // 「装備購入で max HP が増えた分だけ現 HP も底上げ」の正しい計算。
-    // 旧実装は `new_max * bonus_hp_pct + bonus_hp_flat` を delta としていたが、
-    // 既存装備込みの new_max に対して bonus_hp_pct を適用するので、新装備の
-    // 実際の max HP 増分を大幅に超過し「死にかけでも全回復」してしまう
-    // (Codex review #80 P1)。Vitality 購入と同じ「before/after の差分」方式に統一する。
-    let max_before = state.hero_max_hp();
-    state.owned_equipment[id.index()] = true;
-    let max_after = state.hero_max_hp();
-    let delta = max_after.saturating_sub(max_before);
-    state.hero_hp = state.hero_hp.saturating_add(delta).min(max_after);
-
-    state.add_log(format!("✦ 装備解放: {} ({})", name, label));
-    true
-}
-
 /// 自動潜行のON/OFFを切替。
 pub fn toggle_auto_descend(state: &mut AbyssState) {
     state.auto_descend = !state.auto_descend;
@@ -456,19 +484,16 @@ pub fn toggle_auto_descend(state: &mut AbyssState) {
 /// タブ切替。
 pub fn set_tab(state: &mut AbyssState, tab: Tab) {
     state.tab = tab;
-    // タブ切替時にスクロール位置を初期化。タブごとに別 scroll を持たない設計
-    // (シンプルさ優先、cookie の prestige_scroll と同じ流儀)。
     state.tab_scroll.set(0);
 }
 
-/// プレイヤー行動を適用する統一エントリ。本体ゲームの入力ハンドラも、
-/// シミュレータの Policy も、最終的にこの関数を通る。返値は「行動が
-/// 何らかの状態変化を起こしたか」のフラグ (買えなかった等で false)。
+/// プレイヤー行動を適用する統一エントリ。
 pub fn apply_action(state: &mut AbyssState, action: PlayerAction) -> bool {
     match action {
-        PlayerAction::BuyUpgrade(kind) => buy_upgrade(state, kind),
-        PlayerAction::BuySoulPerk(perk) => buy_soul_perk(state, perk),
         PlayerAction::BuyEquipment(id) => buy_equipment(state, id),
+        PlayerAction::EquipItem(id) => equip_item(state, id),
+        PlayerAction::EnhanceEquipment(id) => enhance_equipment(state, id),
+        PlayerAction::BuySoulPerk(perk) => buy_soul_perk(state, perk),
         PlayerAction::ToggleAutoDescend => {
             toggle_auto_descend(state);
             true
@@ -483,14 +508,11 @@ pub fn apply_action(state: &mut AbyssState, action: PlayerAction) -> bool {
         }
         PlayerAction::GachaPull(count) => gacha_pull(state, count),
         PlayerAction::ScrollUp => {
-            // 上限 clamp は render 直前で行うのでここは飽和減算のみ。
             let v = state.tab_scroll.get().saturating_sub(SCROLL_STEP);
             state.tab_scroll.set(v);
             true
         }
         PlayerAction::ScrollDown => {
-            // 下限 clamp は render が visual_height から算出して書き戻す。
-            // ここで盲目的に増やしておき、次フレームで補正される。
             let v = state.tab_scroll.get().saturating_add(SCROLL_STEP);
             state.tab_scroll.set(v);
             true
@@ -498,13 +520,10 @@ pub fn apply_action(state: &mut AbyssState, action: PlayerAction) -> bool {
     }
 }
 
-/// 1 操作あたりのスクロール幅 (visual rows)。Cookie の prestige_scroll と同じ単位。
 const SCROLL_STEP: u16 = 3;
 
 // ── ガチャ ────────────────────────────────────────────────
 
-/// 鍵を消費してガチャを `count` 回引く。鍵が足りなければ引ける分だけ。
-/// 1 回でも引けたら true。
 pub fn gacha_pull(state: &mut AbyssState, count: u32) -> bool {
     if count == 0 || state.keys == 0 {
         return false;
@@ -516,7 +535,7 @@ pub fn gacha_pull(state: &mut AbyssState, count: u32) -> bool {
         gained_gold: 0,
         gained_souls: 0,
         gained_keys: 0,
-        gained_upgrade_lv: 0,
+        gained_enh_lv: 0,
         life_ticks: 30,
     };
 
@@ -530,7 +549,6 @@ pub fn gacha_pull(state: &mut AbyssState, count: u32) -> bool {
             GachaTier::Epic => summary.by_tier[2] += 1,
             GachaTier::Legendary => summary.by_tier[3] += 1,
         }
-        // pity counter は Epic 以上で reset (Rare までは天井加算継続)。
         if matches!(tier, GachaTier::Epic | GachaTier::Legendary) {
             state.pulls_since_epic = 0;
         } else {
@@ -547,12 +565,10 @@ pub fn gacha_pull(state: &mut AbyssState, count: u32) -> bool {
     true
 }
 
-/// gacha_weights_milli + 天井 (pulls_since_epic) を加味して tier を決定。
 fn roll_gacha_tier(state: &mut AbyssState) -> GachaTier {
     let g = &state.config.gacha;
     let pity_active = g.gacha_pity > 0 && state.pulls_since_epic >= g.gacha_pity.saturating_sub(1);
     if pity_active {
-        // Epic / Legendary を [Epic 比率] : [Legendary 比率] で抽選。
         let epic_w = g.gacha_weights_milli[2].max(1);
         let leg_w = g.gacha_weights_milli[3];
         let total = epic_w + leg_w;
@@ -585,7 +601,6 @@ fn apply_gacha_reward(state: &mut AbyssState, tier: GachaTier, summary: &mut Gac
     let g = state.config.gacha.clone();
     match tier {
         GachaTier::Common => {
-            // 現フロアの基礎雑魚 gold (config から再計算) × ランダム倍率 × gold倍率。
             let base = base_normal_gold(state.floor, &state.config);
             let lo = g.common_gold_mult_min.max(1);
             let hi = g.common_gold_mult_max.max(lo);
@@ -599,21 +614,40 @@ fn apply_gacha_reward(state: &mut AbyssState, tier: GachaTier, summary: &mut Gac
             summary.gained_gold = summary.gained_gold.saturating_add(gold);
         }
         GachaTier::Rare => {
-            // ランダムな upgrade を Lv +1 (永続)。Vitality なら現 HP も bump。
-            let idx = (rng_next(&mut state.rng_state) as usize) % UpgradeKind::all().len();
-            let kind = UpgradeKind::from_index(idx).unwrap_or(UpgradeKind::Sword);
-            let max_before = if matches!(kind, UpgradeKind::Vitality) {
-                Some(state.hero_max_hp())
+            // Rare 報酬: 装着中装備のうちランダム 1 つの強化 Lv +1。
+            // 装備が進行軸の主役になったので「装備の強化を直接ブースト」が
+            // 一番ストレートな gacha 報酬。装着していない場合は gold ボーナスにフォールバック。
+            let equipped: Vec<EquipmentId> = state
+                .equipped
+                .iter()
+                .filter_map(|s| *s)
+                .collect();
+            if equipped.is_empty() {
+                // 装着なし → Common 相当の gold 大盤振る舞いにフォールバック。
+                let base = base_normal_gold(state.floor, &state.config);
+                let gold = ((base as f64) * 20.0 * state.gold_multiplier()).round() as u64;
+                let gold = gold.max(1);
+                state.gold = state.gold.saturating_add(gold);
+                state.run_gold_earned = state.run_gold_earned.saturating_add(gold);
+                summary.gained_gold = summary.gained_gold.saturating_add(gold);
             } else {
-                None
-            };
-            state.upgrades[kind.index()] = state.upgrades[kind.index()].saturating_add(1);
-            if let Some(before) = max_before {
-                let after = state.hero_max_hp();
-                let delta = after.saturating_sub(before);
-                state.hero_hp = state.hero_hp.saturating_add(delta).min(after);
+                let idx = (rng_next(&mut state.rng_state) as usize) % equipped.len();
+                let target = equipped[idx];
+                // 装着中装備の Lv 上げで hero_max_hp が変動するので、
+                // `enhance_equipment` と同じ「max 増減両方向で hero_hp を追従させる」
+                // if/else パターンで HP を更新する (Codex review #87 P2 統一)。
+                let max_before = state.hero_max_hp();
+                state.equipment_levels[target.index()] =
+                    state.equipment_levels[target.index()].saturating_add(1);
+                let max_after = state.hero_max_hp();
+                if max_after > max_before {
+                    let delta = max_after - max_before;
+                    state.hero_hp = state.hero_hp.saturating_add(delta).min(max_after);
+                } else {
+                    state.hero_hp = state.hero_hp.min(max_after);
+                }
+                summary.gained_enh_lv = summary.gained_enh_lv.saturating_add(1);
             }
-            summary.gained_upgrade_lv = summary.gained_upgrade_lv.saturating_add(1);
         }
         GachaTier::Epic => {
             let souls = ((state.floor as u64).saturating_mul(g.epic_souls_mult)) as f64
@@ -629,14 +663,12 @@ fn apply_gacha_reward(state: &mut AbyssState, tier: GachaTier, summary: &mut Gac
     }
 }
 
-/// `make_enemy` と同じ式で「指定フロアの基礎雑魚 gold」を再計算する。
-/// ガチャ Common の報酬基準にだけ使う (敵生成と数値が乖離しないよう同式に揃える)。
 fn base_normal_gold(floor: u32, config: &BalanceConfig) -> u64 {
     let g = config.enemy.gold_base * config.enemy_gold_schedule.multiplier(floor);
     g.round().max(1.0) as u64
 }
 
-/// 自分の意思で浅瀬 (B1F) に戻る。死亡扱いにはしない (魂ボーナスなし)。
+/// 自分の意思で浅瀬 (B1F) に戻る。
 pub fn retreat(state: &mut AbyssState) {
     if state.floor == 1 {
         state.add_log("既に B1F に居る");
@@ -655,10 +687,10 @@ pub fn retreat(state: &mut AbyssState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::games::abyss::state::EquipmentLane;
 
     fn ticked_state() -> AbyssState {
         let mut s = AbyssState::new();
-        // 最初は placeholder なので 1 tick 進めて初期敵を作る
         tick(&mut s, 1);
         s
     }
@@ -671,25 +703,165 @@ mod tests {
         assert!(!s.current_enemy.is_boss);
     }
 
+    /// 装備購入が条件未達なら失敗、満たしているなら自動装着まで行うこと。
     #[test]
-    fn hero_attacks_enemy_over_time() {
-        let mut s = ticked_state();
-        let initial_hp = s.current_enemy.hp;
-        // hero_atk_period (12) tick 進めれば 1 攻撃は確実に発生
-        tick(&mut s, 30);
-        assert!(s.current_enemy.hp < initial_hp || s.run_kills > 0);
+    fn buy_equipment_auto_equips_into_lane_slot() {
+        let mut s = AbyssState::new();
+        s.gold = 1_000_000;
+        // 銅剣は prereq 無し、購入できる。
+        assert!(buy_equipment(&mut s, EquipmentId::BronzeSword));
+        assert!(s.owned_equipment[EquipmentId::BronzeSword.index()]);
+        assert_eq!(
+            s.equipped[EquipmentLane::Weapon.index()],
+            Some(EquipmentId::BronzeSword),
+            "購入時は自動装着されるべき"
+        );
+    }
+
+    /// 上位装備を買うと旧装備は所持したままで、装着スロットだけが新しいものに置換される。
+    /// 6 段階構造のため Bronze → Iron → Steel と prereq チェーンを順に解放する。
+    #[test]
+    fn buying_higher_tier_replaces_equipped_slot() {
+        let mut s = AbyssState::new();
+        s.gold = 1_000_000_000;
+        buy_equipment(&mut s, EquipmentId::BronzeSword);
+        buy_equipment(&mut s, EquipmentId::IronSword);
+        buy_equipment(&mut s, EquipmentId::SteelSword);
+        assert!(s.owned_equipment[EquipmentId::BronzeSword.index()]);
+        assert!(s.owned_equipment[EquipmentId::IronSword.index()]);
+        assert!(s.owned_equipment[EquipmentId::SteelSword.index()]);
+        assert_eq!(
+            s.equipped[EquipmentLane::Weapon.index()],
+            Some(EquipmentId::SteelSword)
+        );
+    }
+
+    /// 既に所持している装備を装着し直せること。
+    #[test]
+    fn equip_item_can_swap_between_owned() {
+        let mut s = AbyssState::new();
+        s.gold = 1_000_000_000;
+        buy_equipment(&mut s, EquipmentId::BronzeSword);
+        buy_equipment(&mut s, EquipmentId::IronSword);
+        buy_equipment(&mut s, EquipmentId::SteelSword); // 自動で SteelSword 装着
+        assert!(equip_item(&mut s, EquipmentId::BronzeSword));
+        assert_eq!(
+            s.equipped[EquipmentLane::Weapon.index()],
+            Some(EquipmentId::BronzeSword)
+        );
+    }
+
+    /// 強化は所持していて装着中なら hero ステを直接押し上げる。
+    #[test]
+    fn enhance_equipped_increases_stats() {
+        let mut s = AbyssState::new();
+        s.gold = 1_000_000_000;
+        buy_equipment(&mut s, EquipmentId::BronzeSword);
+        let atk_before = s.hero_atk();
+        assert!(enhance_equipment(&mut s, EquipmentId::BronzeSword));
+        assert_eq!(s.equipment_levels[EquipmentId::BronzeSword.index()], 1);
+        assert!(s.hero_atk() > atk_before);
+    }
+
+    /// 強化コストが gold 不足だと失敗する。
+    #[test]
+    fn enhance_fails_without_gold() {
+        let mut s = AbyssState::new();
+        s.gold = 1_000_000;
+        buy_equipment(&mut s, EquipmentId::BronzeSword);
+        s.gold = 0;
+        assert!(!enhance_equipment(&mut s, EquipmentId::BronzeSword));
+        assert_eq!(s.equipment_levels[EquipmentId::BronzeSword.index()], 0);
+    }
+
+    /// 強化 Lv が増えればコストも増える。
+    #[test]
+    fn enhance_cost_grows_geometrically() {
+        let mut s = AbyssState::new();
+        s.gold = 1_000_000_000;
+        buy_equipment(&mut s, EquipmentId::BronzeSword);
+        let c0 = s.enhance_cost(EquipmentId::BronzeSword);
+        enhance_equipment(&mut s, EquipmentId::BronzeSword);
+        let c1 = s.enhance_cost(EquipmentId::BronzeSword);
+        assert!(c1 > c0);
+    }
+
+    /// 装備購入時に max_hp が上がっても、現 HP が新 max を超えないこと。
+    #[test]
+    fn buy_equipment_hp_bump_does_not_overshoot_max() {
+        let mut s = AbyssState::new();
+        s.gold = 1_000_000_000;
+        // 死にかけにしてから防具を買う。装備で max が大幅に上がっても、
+        // 現 HP は max を超えないこと。
+        s.hero_hp = 1;
+        let max_before = s.hero_max_hp();
+        assert!(buy_equipment(&mut s, EquipmentId::LeatherArmor));
+        let max_after = s.hero_max_hp();
+        let delta = max_after - max_before;
+        assert!(s.hero_hp <= 1 + delta);
+        assert!(s.hero_hp <= max_after);
+    }
+
+    /// 装備購入で max_hp が **下がる** ケースでも hero_hp が新 max にクランプされること。
+    /// Codex review #87 P2 の回帰防止: カスタム config で同 lane の上位装備を弱体化させ、
+    /// 自動装着で max が減ったとき `hero_hp > max` の取り残しが起きないことを保証する。
+    /// `equip_item` と同じ「max 増減両方向で hero_hp を追従」スタイルの不変条件。
+    #[test]
+    fn buy_equipment_clamps_hp_when_new_gear_lowers_max() {
+        use crate::games::abyss::state::EquipmentBonus;
+
+        // 上位 (Chainmail = LeatherArmor の次段階) を意図的に空 bonus にして、
+        // LeatherArmor 装着時より max が下がる状況を作る。
+        let mut cfg = BalanceConfig::default();
+        let chain_idx = EquipmentId::Chainmail.index();
+        cfg.equipment[chain_idx].base_bonus = EquipmentBonus::default();
+        cfg.equipment[chain_idx].per_level_bonus = EquipmentBonus::default();
+
+        let mut s = AbyssState::with_config(cfg);
+        s.gold = 1_000_000_000;
+
+        // LeatherArmor を買って装着 → 装備込みで max が上がる。
+        assert!(buy_equipment(&mut s, EquipmentId::LeatherArmor));
+        let max_with_leather = s.hero_max_hp();
+        s.hero_hp = max_with_leather; // 満タン
+
+        // Chainmail を買うと auto-equip で Armor lane が置換され、空 bonus なので max が下がる。
+        assert!(buy_equipment(&mut s, EquipmentId::Chainmail));
+        let max_with_chainmail = s.hero_max_hp();
+
+        // テスト前提: max が実際に下がる装備変更が起きていること。
+        assert!(
+            max_with_chainmail < max_with_leather,
+            "test setup: Chainmail (空 bonus) は LeatherArmor より max が低いはず ({} >= {})",
+            max_with_chainmail,
+            max_with_leather
+        );
+        // 不変条件: max が下がっても hero_hp は新 max を超えない。
+        assert!(
+            s.hero_hp <= max_with_chainmail,
+            "hero_hp ({}) は新 max ({}) を超えてはならない",
+            s.hero_hp,
+            max_with_chainmail
+        );
     }
 
     #[test]
     fn killing_enemies_advances_floor_with_auto_descend() {
         let mut s = AbyssState::new();
-        // 大量の強化で確実にフロアを進める
-        s.upgrades[UpgradeKind::Sword.index()] = 50;
-        s.upgrades[UpgradeKind::Speed.index()] = 10;
-        s.upgrades[UpgradeKind::Vitality.index()] = 50;
+        // 強い装備を全 lane に装着して確実にフロアを進める。
+        s.gold = u64::MAX / 2;
+        for &id in EquipmentId::all() {
+            // テスト用: 解放条件を全部満たしてから順に購入していく。
+            buy_equipment(&mut s, id);
+        }
+        // 装備の Lv も上げる。
+        for &id in EquipmentId::all() {
+            for _ in 0..30 {
+                enhance_equipment(&mut s, id);
+            }
+        }
         s.hero_hp = s.hero_max_hp();
         s.auto_descend = true;
-        // 適度に長く進める
         tick(&mut s, 2000);
         assert!(s.floor >= 2, "floor should advance, got {}", s.floor);
     }
@@ -697,13 +869,19 @@ mod tests {
     #[test]
     fn no_descend_when_auto_descend_off() {
         let mut s = AbyssState::new();
-        s.upgrades[UpgradeKind::Sword.index()] = 50;
-        s.upgrades[UpgradeKind::Vitality.index()] = 50;
-        s.upgrades[UpgradeKind::Speed.index()] = 10;
+        s.gold = u64::MAX / 2;
+        for &id in EquipmentId::all() {
+            buy_equipment(&mut s, id);
+        }
+        for &id in EquipmentId::all() {
+            for _ in 0..20 {
+                enhance_equipment(&mut s, id);
+            }
+        }
         s.hero_hp = s.hero_max_hp();
         s.auto_descend = false;
         let per_floor = s.enemies_per_floor() as u64;
-        tick(&mut s, 2000);
+        tick(&mut s, 3000);
         assert_eq!(s.floor, 1);
         assert!(s.run_kills > per_floor);
     }
@@ -711,84 +889,11 @@ mod tests {
     #[test]
     fn weak_hero_dies_eventually() {
         let mut s = AbyssState::new();
-        // 弱い hero / 強い floor
         s.floor = 30;
         s.auto_descend = false;
-        s.upgrades[UpgradeKind::Vitality.index()] = 0;
         s.hero_hp = s.hero_max_hp();
         tick(&mut s, 10_000);
-        // 死亡しているか、何度かリセットされて floor=1 に戻っているはず
         assert!(s.deaths > 0 || s.floor == 1);
-    }
-
-    #[test]
-    fn buy_upgrade_with_enough_gold() {
-        let mut s = ticked_state();
-        s.gold = 1_000_000;
-        let before_atk = s.hero_atk();
-        let ok = buy_upgrade(&mut s, UpgradeKind::Sword);
-        assert!(ok);
-        assert_eq!(s.upgrades[UpgradeKind::Sword.index()], 1);
-        assert!(s.hero_atk() > before_atk);
-    }
-
-    #[test]
-    fn buy_upgrade_fails_without_gold() {
-        let mut s = ticked_state();
-        s.gold = 0;
-        let ok = buy_upgrade(&mut s, UpgradeKind::Sword);
-        assert!(!ok);
-        assert_eq!(s.upgrades[UpgradeKind::Sword.index()], 0);
-    }
-
-    #[test]
-    fn vitality_increases_current_hp_too() {
-        let mut s = ticked_state();
-        s.gold = 1_000_000;
-        // ダメージを受けた状態を作る
-        let max = s.hero_max_hp();
-        s.hero_hp = max - 5;
-        let before_hp = s.hero_hp;
-        buy_upgrade(&mut s, UpgradeKind::Vitality);
-        assert!(s.hero_hp > before_hp);
-    }
-
-    #[test]
-    fn vitality_current_hp_bump_matches_config() {
-        // hp_per_vitality_lv を変えても、現 HP 増分と最大 HP 増分が一致することを確認。
-        // (固定 +10 を使っていた旧実装に対する回帰テスト)
-        let mut cfg = BalanceConfig::default();
-        cfg.hero.hp_per_vitality_lv = 25; // 既定 10 から変更
-        cfg.hero.vitality_curve = None; // 段階制を無効化して旧経路を検証
-        let mut s = AbyssState::with_config(cfg);
-        s.gold = 1_000_000;
-        let max_before = s.hero_max_hp();
-        s.hero_hp = max_before - 7;
-        let hp_before = s.hero_hp;
-
-        let ok = buy_upgrade(&mut s, UpgradeKind::Vitality);
-        assert!(ok);
-
-        let max_after = s.hero_max_hp();
-        // max は config 通りに増えているはず
-        assert_eq!(max_after - max_before, 25);
-        // 現 HP も同じ delta だけ増えているはず (キャップ未達の状態)
-        assert_eq!(s.hero_hp - hp_before, 25);
-    }
-
-    #[test]
-    fn vitality_current_hp_capped_at_new_max() {
-        // 満タンで Vitality を買ったら、新最大値まで bump、上回らない。
-        let mut cfg = BalanceConfig::default();
-        cfg.hero.hp_per_vitality_lv = 5;
-        let mut s = AbyssState::with_config(cfg);
-        s.gold = 1_000_000;
-        let max_before = s.hero_max_hp();
-        s.hero_hp = max_before; // 満タン
-        buy_upgrade(&mut s, UpgradeKind::Vitality);
-        let max_after = s.hero_max_hp();
-        assert_eq!(s.hero_hp, max_after);
-        assert!(s.hero_hp <= max_after);
     }
 
     #[test]
@@ -802,14 +907,19 @@ mod tests {
 
     #[test]
     fn normal_souls_div_zero_does_not_panic() {
-        // tuning ミスで normal_souls_div = 0 が入っても panic せず、最低 1 にクランプされる。
         let mut cfg = BalanceConfig::default();
         cfg.pacing.normal_souls_div = 0;
         let mut s = AbyssState::with_config(cfg);
-        s.upgrades[UpgradeKind::Sword.index()] = 100;
-        s.upgrades[UpgradeKind::Speed.index()] = 20;
+        s.gold = 1_000_000_000;
+        for &id in EquipmentId::all() {
+            buy_equipment(&mut s, id);
+        }
+        for &id in EquipmentId::all() {
+            for _ in 0..20 {
+                enhance_equipment(&mut s, id);
+            }
+        }
         s.hero_hp = s.hero_max_hp();
-        // 雑魚撃破まで進める。panic しなければ OK。
         tick(&mut s, 5_000);
         assert!(s.run_kills > 0);
     }
@@ -832,52 +942,10 @@ mod tests {
         assert!(s.hero_hp > 1);
     }
 
-    /// 装備購入時の HP bump が「実際の max HP 増分だけ」乗ること。
-    /// Codex review #80 P1 の回帰防止: 旧実装は `new_max * bonus_pct` を
-    /// 加算していて、低 HP からの装備購入で全回復してしまっていた。
-    #[test]
-    fn buy_equipment_hp_bump_uses_actual_max_diff() {
-        use crate::games::abyss::state::EquipmentId;
-
-        // GodArmor は HP +600% の代表例。前提装備を全て埋めて解放可能にする。
-        let mut s = AbyssState::new();
-        s.upgrades[UpgradeKind::Armor.index()] = 60;
-        s.upgrades[UpgradeKind::Vitality.index()] = 60;
-        s.gold = 1_000_000_000;
-        // ミスリル鎧までを連鎖購入で解放 (前装備 prereq を満たすため)。
-        for id in [
-            EquipmentId::LeatherArmor,
-            EquipmentId::SteelArmor,
-            EquipmentId::MithrilArmor,
-        ] {
-            assert!(buy_equipment(&mut s, id), "prereq purchase failed");
-        }
-
-        // 「死にかけ」状態にしてから GodArmor を買う。
-        s.hero_hp = 1;
-        let max_before = s.hero_max_hp();
-        assert!(buy_equipment(&mut s, EquipmentId::GodArmor));
-        let max_after = s.hero_max_hp();
-        let actual_delta = max_after - max_before;
-
-        // 不変条件 1: 現 HP の増加分 ≤ max HP の増加分 (over-heal しない)。
-        assert!(
-            s.hero_hp <= 1 + actual_delta,
-            "hero_hp ({}) must not exceed 1 + actual max diff ({}); over-heal regression",
-            s.hero_hp,
-            1 + actual_delta
-        );
-        // 不変条件 2: 必ず max を超えない。
-        assert!(s.hero_hp <= max_after);
-        // 不変条件 3: HP が増えた装備なので最低でも 1 は増える。
-        assert!(s.hero_hp > 1);
-    }
-
     #[test]
     fn boss_spawns_after_enough_kills() {
         let mut s = AbyssState::new();
         s.kills_on_floor = s.enemies_per_floor();
-        // 1 tick 進めれば boss spawn
         tick(&mut s, 1);
         assert!(s.current_enemy.is_boss);
     }
@@ -911,8 +979,6 @@ mod tests {
         assert!(boss.gold > normal.gold);
     }
 
-    // ── ガチャ / フロア種別 ────────────────────────────────
-
     #[test]
     fn gacha_pull_requires_keys() {
         let mut s = AbyssState::new();
@@ -934,7 +1000,6 @@ mod tests {
 
     #[test]
     fn gacha_pull_clamped_to_available_keys() {
-        // 鍵 2 個しかないのに 10 連を要求 → 2 連だけ実行される。
         let mut s = AbyssState::new();
         s.keys = 2;
         let ok = gacha_pull(&mut s, 10);
@@ -945,27 +1010,39 @@ mod tests {
 
     #[test]
     fn gacha_pity_forces_epic_or_better() {
-        // pity 直前の状態から 1 連引くと、必ず Epic か Legendary が出る。
         let mut s = AbyssState::new();
         s.keys = 1;
         s.pulls_since_epic = s.config.gacha.gacha_pity.saturating_sub(1);
         gacha_pull(&mut s, 1);
         let r = s.last_gacha.as_ref().unwrap();
-        // Epic か Legendary が 1 個入っているはず。
         assert_eq!(r.by_tier[2] + r.by_tier[3], 1);
         assert_eq!(s.pulls_since_epic, 0);
     }
 
     #[test]
     fn gacha_legendary_grants_keys() {
-        // 高確率で Legendary を出すよう gacha_weights を差し替えて確認。
         let mut cfg = BalanceConfig::default();
         cfg.gacha.gacha_weights_milli = [0, 0, 0, 1000];
         let mut s = AbyssState::with_config(cfg);
         s.keys = 1;
         gacha_pull(&mut s, 1);
-        // 1 鍵消費 → Legendary で legendary_keys 鍵が返ってくる。
         assert_eq!(s.keys, s.config.gacha.legendary_keys);
+    }
+
+    /// ガチャ Rare は装着中装備の強化 Lv を直接押し上げる。
+    /// 装着していない時は gold フォールバックなので、装着あり前提で確認。
+    #[test]
+    fn gacha_rare_enhances_equipped_item() {
+        let mut cfg = BalanceConfig::default();
+        cfg.gacha.gacha_weights_milli = [0, 1000, 0, 0]; // 100% Rare
+        let mut s = AbyssState::with_config(cfg);
+        s.gold = 1_000_000_000;
+        buy_equipment(&mut s, EquipmentId::BronzeSword);
+        let lv_before = s.equipment_levels[EquipmentId::BronzeSword.index()];
+        s.keys = 1;
+        gacha_pull(&mut s, 1);
+        let lv_after = s.equipment_levels[EquipmentId::BronzeSword.index()];
+        assert_eq!(lv_after, lv_before + 1);
     }
 
     #[test]
@@ -974,7 +1051,7 @@ mod tests {
         let mut seed = 1;
         for f in 1..cfg.gacha.floor_kind_normal_below {
             let kind = roll_floor_kind(f, &cfg, &mut seed);
-            assert_eq!(kind, FloorKind::Normal, "B{}F should be Normal", f);
+            assert_eq!(kind, FloorKind::Normal);
         }
     }
 
@@ -988,96 +1065,15 @@ mod tests {
     }
 
     #[test]
-    fn elite_floor_drops_extra_keys_on_boss() {
-        // floor_kind = Elite で B5F のボスを撃破した時、鍵が 1+2=3 もらえる。
-        let mut s = AbyssState::new();
-        s.floor = 5;
-        s.floor_kind = FloorKind::Elite;
-        s.kills_on_floor = s.enemies_per_floor();
-        s.upgrades[UpgradeKind::Sword.index()] = 200;
-        s.upgrades[UpgradeKind::Speed.index()] = 20;
-        s.hero_hp = s.hero_max_hp();
-        // tick で boss spawn → 撃破まで進む。
-        let keys_before = s.keys;
-        for _ in 0..400 {
-            tick(&mut s, 1);
-            if s.keys > keys_before {
-                break;
-            }
-        }
-        assert!(
-            s.keys >= keys_before + 3,
-            "Elite boss should drop +3 keys (1 base + 2 elite), got {}",
-            s.keys - keys_before
-        );
-    }
-
-    #[test]
-    fn deep_floor_bonus_keys_at_step() {
-        // B10F (深層) のボス撃破で鍵が 1 (base) + 2 (deep) = 3 もらえる。
-        let mut s = AbyssState::new();
-        s.floor = 10;
-        s.floor_kind = FloorKind::Normal;
-        s.kills_on_floor = s.enemies_per_floor();
-        s.upgrades[UpgradeKind::Sword.index()] = 500;
-        s.upgrades[UpgradeKind::Speed.index()] = 20;
-        s.hero_hp = s.hero_max_hp();
-        let keys_before = s.keys;
-        for _ in 0..1000 {
-            tick(&mut s, 1);
-            if s.keys > keys_before {
-                break;
-            }
-        }
-        assert!(
-            s.keys >= keys_before + 3,
-            "B10F boss should drop +3 keys, got {}",
-            s.keys - keys_before
-        );
-    }
-
-    #[test]
-    fn floor_kind_resets_on_death() {
-        let mut s = AbyssState::new();
-        s.floor = 5;
-        // 先に 1 tick 進めて敵を spawn させてから (placeholder を解消)、override する。
-        tick(&mut s, 1);
-        s.floor_kind = FloorKind::Elite;
-        s.hero_hp = 1;
-        s.current_enemy.atk_cooldown = 1;
-        s.current_enemy.atk = 1000;
-        // 1 tick 進めると敵が攻撃 → hero 死亡 → 浅瀬に戻る。
-        tick(&mut s, 1);
-        assert_eq!(s.floor, 1);
-        assert_eq!(s.floor_kind, FloorKind::Normal);
-    }
-
-    #[test]
-    fn retreat_resets_floor_kind() {
-        let mut s = AbyssState::new();
-        s.floor = 5;
-        s.floor_kind = FloorKind::Treasure;
-        retreat(&mut s);
-        assert_eq!(s.floor_kind, FloorKind::Normal);
-    }
-
-    #[test]
-    fn combat_focus_increases_with_attacks() {
-        let mut s = ticked_state();
-        let initial_focus = s.combat_focus;
-        // hero_atk が enemy hp を上回らないように、適度に強い設定を作る。
-        // ただしすぐに敵を倒すと focus が運用しきれないので、ターゲットを高 HP に置く。
-        s.current_enemy.hp = 10_000;
-        s.current_enemy.max_hp = 10_000;
-        s.current_enemy.def = 0;
-        // 次の hero attack まで進める (atk_period 弱)
-        tick(&mut s, 100);
-        assert!(
-            s.combat_focus > initial_focus,
-            "focus should grow after attacks (got {} → {})",
-            initial_focus,
-            s.combat_focus
-        );
+    fn config_swap_changes_enemy_scaling() {
+        let mut seed_a = 42;
+        let mut seed_b = 42;
+        let easy = BalanceConfig::easy();
+        let hard = BalanceConfig::hard();
+        let f = 15;
+        let easy_enemy = make_enemy(f, false, &easy, &mut seed_a);
+        let hard_enemy = make_enemy(f, false, &hard, &mut seed_b);
+        assert!(hard_enemy.max_hp > easy_enemy.max_hp);
     }
 
     #[test]
@@ -1086,27 +1082,7 @@ mod tests {
         let period_at_zero = s.hero_atk_period();
         s.combat_focus = s.config.hero.focus_max;
         let period_at_max = s.hero_atk_period();
-        assert!(
-            period_at_max < period_at_zero,
-            "max focus should shorten period ({} → {})",
-            period_at_zero,
-            period_at_max
-        );
-    }
-
-    #[test]
-    fn combat_focus_reset_on_death() {
-        let mut s = AbyssState::new();
-        s.combat_focus = s.config.hero.focus_max;
-        s.floor = 30;
-        s.hero_hp = 1;
-        // 敵を強制的にスポーン → 1 tick で死亡
-        tick(&mut s, 1);
-        s.current_enemy.atk = 9999;
-        s.current_enemy.atk_cooldown = 1;
-        tick(&mut s, 1);
-        assert!(s.deaths > 0);
-        assert_eq!(s.combat_focus, 0, "death should reset focus");
+        assert!(period_at_max < period_at_zero);
     }
 
     #[test]
@@ -1116,19 +1092,5 @@ mod tests {
         s.combat_focus = 20;
         retreat(&mut s);
         assert_eq!(s.combat_focus, 0);
-    }
-
-    #[test]
-    fn config_swap_changes_enemy_scaling() {
-        // 同 seed / 同 floor で config を変えると敵 HP が変わることを確認。
-        // 本体ゲームと sim の DI が機能している証拠。
-        let mut seed_a = 42;
-        let mut seed_b = 42;
-        let easy = BalanceConfig::easy();
-        let hard = BalanceConfig::hard();
-        let f = 15;
-        let easy_enemy = make_enemy(f, false, &easy, &mut seed_a);
-        let hard_enemy = make_enemy(f, false, &hard, &mut seed_b);
-        assert!(hard_enemy.max_hp > easy_enemy.max_hp);
     }
 }

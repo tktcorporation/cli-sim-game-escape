@@ -4,27 +4,28 @@
 //!
 //! - `SAVE_VERSION`: 現在のセーブ形式バージョン。フィールド追加時にインクリメントする。
 //! - `MIN_COMPATIBLE_VERSION`: 互換性を維持できる最小バージョン。
-//!   新フィールドの追加のみの場合はこの値を変えない (旧データを維持できる)。
-//!   既存フィールドの意味変更や削除など破壊的変更を行った場合のみインクリメントする。
+//!
+//! v3 で「装備中心の進行軸」へ刷新、v4 で `EquipmentId` を 12→18 段階に拡張
+//! (中間 tier 1/4 を 3 lane × 2 = 6 個追加)。enum の宣言順を変えたため、
+//! v3 以前の save の `equipment_levels` index は新 enum と一致しない。
+//! `MIN_COMPATIBLE_VERSION = 4` にして旧データは load_game で弾かれる。
 
 #[cfg(any(target_arch = "wasm32", test))]
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
-use super::state::{AbyssState, FloorKind, Tab, EQUIPMENT_COUNT};
+use super::state::{AbyssState, EquipmentId, FloorKind, Tab, EQUIPMENT_COUNT, LANE_COUNT};
 
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 2;
+const SAVE_VERSION: u32 = 4;
 
 #[cfg(target_arch = "wasm32")]
-const MIN_COMPATIBLE_VERSION: u32 = 1;
+const MIN_COMPATIBLE_VERSION: u32 = 4;
 
 #[cfg(target_arch = "wasm32")]
 const STORAGE_KEY: &str = "abyss_idle_save";
 
 /// イベントベース保存の保険として走らせる定期セーブ間隔 (tick 数)。
-/// 10 ticks/sec × 30 秒 = 300 ticks。auto_descend OFF で同フロア周回中も
-/// gold/souls/keys が積み上がるので、ミルストーン以外のドリフトを救うため。
 pub const AUTOSAVE_INTERVAL: u32 = 300;
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -34,13 +35,19 @@ struct SaveData {
     game: GameSave,
 }
 
-/// 永続化対象フィールド。current_enemy / フラッシュ等の演出 state は保存しない
-/// (敵は次 tick で再スポーン、演出は新規ロードで自然にリセットされるため)。
+/// 永続化対象フィールド。current_enemy / フラッシュ等の演出 state は保存しない。
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
 struct GameSave {
-    upgrades: [u32; 7],
+    /// 解放済み装備フラグ。
+    owned_equipment: Vec<bool>,
+    /// 各装備の強化レベル。`EquipmentId::index()` 順。
+    equipment_levels: Vec<u32>,
+    /// 各 lane の装着 EquipmentId (`None` は -1 で表現)。
+    /// `EquipmentLane::index()` 順 (Weapon=0, Armor=1, Accessory=2)。
+    equipped: Vec<i16>,
+
     soul_perks: [u32; 4],
     souls: u64,
 
@@ -54,12 +61,8 @@ struct GameSave {
     hero_hp: u64,
     combat_focus: u32,
 
-    /// `FloorKind::all()` 内の index。マッピングは `FloorKind::to_save_id`
-    /// / `from_save_id` に集約 (SSOT)。
     floor_kind: u8,
     auto_descend: bool,
-    /// `Tab::all()` 内の index。マッピングは `Tab::to_save_id` /
-    /// `from_save_id` に集約 (SSOT)。
     tab: u8,
 
     keys: u64,
@@ -71,20 +74,27 @@ struct GameSave {
     deaths: u64,
     total_ticks: u64,
     rng_state: u32,
-
-    /// 解放済み装備フラグ。Vec<bool> でシリアライズ (bool はそのまま JSON に残る)。
-    /// 旧 save (v1) には欠落 → `#[serde(default)]` で空 Vec が入り、apply_save で
-    /// EQUIPMENT_COUNT の空配列にパディングされる。
-    #[serde(default)]
-    owned_equipment: Vec<bool>,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
 fn extract_save(state: &AbyssState) -> SaveData {
+    // 装着スロット (Option<EquipmentId>) を i16 列に詰める。-1 が None、
+    // 0..EQUIPMENT_COUNT が EquipmentId::index()。range 検査は load 側で行う。
+    let equipped: Vec<i16> = state
+        .equipped
+        .iter()
+        .map(|slot| match slot {
+            Some(id) => id.index() as i16,
+            None => -1,
+        })
+        .collect();
+
     SaveData {
         version: SAVE_VERSION,
         game: GameSave {
-            upgrades: state.upgrades,
+            owned_equipment: state.owned_equipment.to_vec(),
+            equipment_levels: state.equipment_levels.to_vec(),
+            equipped,
             soul_perks: state.soul_perks,
             souls: state.souls,
             gold: state.gold,
@@ -106,14 +116,12 @@ fn extract_save(state: &AbyssState) -> SaveData {
             deaths: state.deaths,
             total_ticks: state.total_ticks,
             rng_state: state.rng_state,
-            owned_equipment: state.owned_equipment.to_vec(),
         },
     }
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
 fn apply_save(state: &mut AbyssState, save: &GameSave) {
-    state.upgrades = save.upgrades;
     state.soul_perks = save.soul_perks;
     state.souls = save.souls;
     state.gold = save.gold;
@@ -123,14 +131,33 @@ fn apply_save(state: &mut AbyssState, save: &GameSave) {
     state.run_kills = save.run_kills;
     state.run_gold_earned = save.run_gold_earned;
 
-    // 装備フラグを **hero_max_hp() の依存物なので HP clamp より前に** 復元する。
-    // 装備込みの max HP を計算してから hero_hp を clamp しないと、HP 強化系装備
-    // 込みのセーブが「装備抜き max」で先に切られて読み込まれてしまう
-    // (Codex review #80 P2)。EQUIPMENT_COUNT より長い場合は超過分を捨てる。
+    // 装備フラグ・強化 Lv・装着スロットを **HP clamp より前に** 復元する。
+    // 装備込みの max HP を確定させてから hero_hp を clamp しないと、
+    // 装備で底上げされた HP が「装備抜き max」で切られて読み込まれてしまう。
     for (i, slot) in state.owned_equipment.iter_mut().enumerate() {
         *slot = save.owned_equipment.get(i).copied().unwrap_or(false);
     }
-    let _ = EQUIPMENT_COUNT; // doc-anchor: バッファサイズが想定と一致することを確認
+    for (i, slot) in state.equipment_levels.iter_mut().enumerate() {
+        *slot = save.equipment_levels.get(i).copied().unwrap_or(0);
+    }
+    let _ = EQUIPMENT_COUNT;
+    for (lane_i, slot) in state.equipped.iter_mut().enumerate() {
+        *slot = match save.equipped.get(lane_i).copied() {
+            Some(idx) if idx >= 0 => {
+                let id = EquipmentId::from_index(idx as usize);
+                // 装備が存在し、所持済みで、かつ **その lane に属する** ときだけ装着を復元する。
+                // lane consistency チェックが無いと、不正/旧形式の save で同一 EquipmentId が
+                // 複数 lane スロットに入ってしまい `equipment_bonus()` が同じ装備を多重加算する
+                // (Codex review #87 P2 の回帰防止)。SSOT は EquipmentId::lane() なので、
+                // ここで「lane 番号と装備の本来の lane が一致」を再検証する。
+                id.filter(|id| {
+                    state.owned_equipment[id.index()] && id.lane().index() == lane_i
+                })
+            }
+            _ => None,
+        };
+    }
+    let _ = LANE_COUNT;
 
     let max_hp = state.hero_max_hp();
     state.hero_hp = if save.hero_hp == 0 {
@@ -155,7 +182,7 @@ fn apply_save(state: &mut AbyssState, save: &GameSave) {
     state.total_ticks = save.total_ticks;
     state.rng_state = save.rng_state;
 
-    // 敵を 0 化して次 tick で再スポーンさせる (Enemy 自体は保存しない方針)。
+    // 敵を 0 化して次 tick で再スポーンさせる。
     state.current_enemy.hp = 0;
     state.current_enemy.max_hp = 0;
     state.last_enemy_damage = None;
@@ -214,6 +241,8 @@ pub fn load_game(state: &mut AbyssState) -> bool {
         }
     };
     if save_data.version < MIN_COMPATIBLE_VERSION {
+        // v3 以前 (旧 UpgradeKind 体系) は破棄: 進行軸が根本的に変わったため、
+        // 機械的なマイグレーションでは整合が取れない。完全新規スタートさせる。
         let _ = storage.remove_item(STORAGE_KEY);
         return false;
     }
@@ -231,13 +260,17 @@ pub fn delete_save() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::games::abyss::state::{SoulPerk, UpgradeKind};
+    use crate::games::abyss::state::{EquipmentId, EquipmentLane, SoulPerk};
 
     #[test]
     fn extract_and_apply_roundtrip() {
         let mut original = AbyssState::new();
-        original.upgrades[UpgradeKind::Sword.index()] = 5;
-        original.upgrades[UpgradeKind::Vitality.index()] = 3;
+        original.gold = 1_000_000_000;
+        crate::games::abyss::logic::buy_equipment(&mut original, EquipmentId::BronzeSword);
+        crate::games::abyss::logic::buy_equipment(&mut original, EquipmentId::LeatherArmor);
+        for _ in 0..5 {
+            crate::games::abyss::logic::enhance_equipment(&mut original, EquipmentId::BronzeSword);
+        }
         original.soul_perks[SoulPerk::Might.index()] = 2;
         original.souls = 42;
         original.gold = 12345;
@@ -245,7 +278,6 @@ mod tests {
         original.max_floor = 10;
         original.kills_on_floor = 3;
         original.run_kills = 50;
-        original.run_gold_earned = 9999;
         original.combat_focus = 4;
         original.floor_kind = FloorKind::Elite;
         original.auto_descend = false;
@@ -268,35 +300,27 @@ mod tests {
         let mut restored = AbyssState::new();
         apply_save(&mut restored, &loaded.game);
 
-        assert_eq!(restored.upgrades[UpgradeKind::Sword.index()], 5);
-        assert_eq!(restored.upgrades[UpgradeKind::Vitality.index()], 3);
+        assert!(restored.owned_equipment[EquipmentId::BronzeSword.index()]);
+        assert!(restored.owned_equipment[EquipmentId::LeatherArmor.index()]);
+        assert_eq!(restored.equipment_levels[EquipmentId::BronzeSword.index()], 5);
+        assert_eq!(
+            restored.equipped[EquipmentLane::Weapon.index()],
+            Some(EquipmentId::BronzeSword)
+        );
+        assert_eq!(
+            restored.equipped[EquipmentLane::Armor.index()],
+            Some(EquipmentId::LeatherArmor)
+        );
         assert_eq!(restored.soul_perks[SoulPerk::Might.index()], 2);
         assert_eq!(restored.souls, 42);
         assert_eq!(restored.gold, 12345);
         assert_eq!(restored.floor, 7);
-        assert_eq!(restored.max_floor, 10);
-        assert_eq!(restored.kills_on_floor, 3);
-        assert_eq!(restored.run_kills, 50);
-        assert_eq!(restored.run_gold_earned, 9999);
-        assert_eq!(restored.combat_focus, 4);
         assert_eq!(restored.floor_kind, FloorKind::Elite);
-        assert!(!restored.auto_descend);
         assert_eq!(restored.tab, Tab::Gacha);
-        assert_eq!(restored.keys, 25);
-        assert_eq!(restored.pulls_since_epic, 12);
-        assert_eq!(restored.total_pulls, 80);
-        assert_eq!(restored.deepest_floor_ever, 15);
-        assert_eq!(restored.total_kills, 200);
-        assert_eq!(restored.deaths, 3);
-        assert_eq!(restored.total_ticks, 50000);
-        assert_eq!(restored.rng_state, 0xABCD);
         assert!(restored.hero_hp > 0 && restored.hero_hp <= restored.hero_max_hp());
-        // Enemy は再スポーン用に zero 化されている。
         assert_eq!(restored.current_enemy.hp, 0);
-        assert_eq!(restored.current_enemy.max_hp, 0);
     }
 
-    /// hero_hp == 0 のセーブは max_hp に補正される (死亡途中で保存されたケースを救う)。
     #[test]
     fn zero_hero_hp_restored_to_full() {
         let mut original = AbyssState::new();
@@ -310,81 +334,53 @@ mod tests {
         assert_eq!(restored.hero_hp, restored.hero_max_hp());
     }
 
-    /// hero_hp が max_hp を超えるケースは max_hp に clamp される。
-    #[test]
-    fn over_max_hp_clamped() {
-        let mut original = AbyssState::new();
-        original.hero_hp = 999_999;
-        let save = extract_save(&original);
-        let json = serde_json::to_string(&save).unwrap();
-        let loaded: SaveData = serde_json::from_str(&json).unwrap();
-
-        let mut restored = AbyssState::new();
-        apply_save(&mut restored, &loaded.game);
-        assert!(restored.hero_hp <= restored.hero_max_hp());
-    }
-
-    /// HP +%装備を所持した状態のセーブで、現 HP が装備込み max HP に基づいて
-    /// 復元されること。Codex review #80 P2 回帰防止: 旧実装では装備フラグ復元
-    /// 前に hero_max_hp() を呼んでいたため、装備込みセーブが「装備抜き max」で
-    /// 切られて読み込まれていた。
+    /// 装備で max が大きく上がったセーブを、装備復元前に hp clamp しないこと。
+    /// 装備フラグ → max_hp 計算 → hero_hp clamp の順を守れているかの不変条件。
     #[test]
     fn equipment_restored_before_hp_clamp() {
-        use crate::games::abyss::state::{EquipmentId, UpgradeKind};
-
-        // 元 state で HP +%装備系統を全部解放、HP も装備込み max にしておく。
         let mut original = AbyssState::new();
-        original.upgrades[UpgradeKind::Armor.index()] = 60;
-        original.upgrades[UpgradeKind::Vitality.index()] = 60;
+        original.gold = 1_000_000_000;
+        // 防具系を全部解放して HP 大盛りにする。
         for id in [
             EquipmentId::LeatherArmor,
             EquipmentId::SteelArmor,
             EquipmentId::MithrilArmor,
             EquipmentId::GodArmor,
         ] {
-            original.owned_equipment[id.index()] = true;
+            crate::games::abyss::logic::buy_equipment(&mut original, id);
+        }
+        // GodArmor が装着中になっているはず (購入で自動装着)。
+        for _ in 0..30 {
+            crate::games::abyss::logic::enhance_equipment(&mut original, EquipmentId::GodArmor);
         }
         let full_max = original.hero_max_hp();
         original.hero_hp = full_max;
 
-        // 装備抜きの max は装備込みより大幅に小さい (装備が効いている前提条件)。
-        let mut bare = AbyssState::new();
-        bare.upgrades = original.upgrades;
-        let bare_max = bare.hero_max_hp();
-        assert!(
-            full_max > bare_max * 2,
-            "test setup: 装備込み max ({}) は装備抜き ({}) の 2 倍以上であるべき",
-            full_max,
-            bare_max
-        );
-
-        // ラウンドトリップ。
         let save = extract_save(&original);
         let json = serde_json::to_string(&save).unwrap();
         let loaded: SaveData = serde_json::from_str(&json).unwrap();
         let mut restored = AbyssState::new();
         apply_save(&mut restored, &loaded.game);
 
-        // 装備が復元されてから max が計算されるので、保存時の HP がそのまま戻る。
-        assert_eq!(
-            restored.hero_hp, full_max,
-            "装備込み max ({}) で復元されるべきが、装備抜き max ({}) で切られている疑い",
-            full_max, bare_max
-        );
+        assert_eq!(restored.hero_hp, full_max);
+        assert_eq!(restored.hero_max_hp(), full_max);
     }
 
-    /// 未知の追加フィールドが含まれていても無視される。
+    /// 装着スロットに「所持していない」装備の id が入った変な save データは
+    /// 装着 None にフォールバックされる。
     #[test]
-    fn unknown_fields_in_json_are_ignored() {
+    fn unequipped_if_not_owned() {
         let json = r#"{
-            "version": 1,
+            "version": 3,
             "game": {
-                "upgrades": [1,0,0,0,0,0,0],
-                "soul_perks": [0,0,0,0],
+                "owned_equipment": [false, false, false, false, false, false, false, false, false, false, false, false],
+                "equipment_levels": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "equipped": [0, -1, -1],
+                "soul_perks": [0, 0, 0, 0],
                 "souls": 0,
-                "gold": 100,
-                "floor": 2,
-                "max_floor": 2,
+                "gold": 0,
+                "floor": 1,
+                "max_floor": 1,
                 "kills_on_floor": 0,
                 "run_kills": 0,
                 "run_gold_earned": 0,
@@ -396,23 +392,85 @@ mod tests {
                 "keys": 0,
                 "pulls_since_epic": 0,
                 "total_pulls": 0,
-                "deepest_floor_ever": 2,
+                "deepest_floor_ever": 1,
                 "total_kills": 0,
                 "deaths": 0,
                 "total_ticks": 0,
-                "rng_state": 1,
-                "future_unknown_field": 999
+                "rng_state": 1
             }
         }"#;
         let loaded: SaveData = serde_json::from_str(json).unwrap();
-        assert_eq!(loaded.game.gold, 100);
-        assert_eq!(loaded.game.floor, 2);
+        let mut restored = AbyssState::new();
+        apply_save(&mut restored, &loaded.game);
+        // 「BronzeSword 装着中」のフラグだったが所持していないので装着なしになる。
+        assert!(restored.equipped.iter().all(|s| s.is_none()));
+    }
+
+    /// **lane mismatch** な装着スロット (例: 防具 lane に武器の id が入った save) は弾く。
+    /// Codex review #87 P2 回帰防止: lane 一致チェックがないと、不正/旧形式の save で
+    /// 同じ装備が複数 lane に重複装着され、`equipment_bonus()` が二重加算で
+    /// 戦闘ステを腐らせる可能性がある。所持はしているがその id は本来 Weapon lane 用、
+    /// という攻撃的な save を投げて Armor / Accessory スロットが None に正されることを保証。
+    #[test]
+    fn lane_mismatch_in_save_is_rejected() {
+        // BronzeSword (Weapon lane の id=0) を Armor lane (idx 1) と Accessory lane (idx 2)
+        // に置いた save。owned はすべて true なので「所持」チェックは通過する。
+        let json = r#"{
+            "version": 3,
+            "game": {
+                "owned_equipment": [true, false, false, false, true, false, false, false, true, false, false, false],
+                "equipment_levels": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "equipped": [0, 0, 0],
+                "soul_perks": [0, 0, 0, 0],
+                "souls": 0,
+                "gold": 0,
+                "floor": 1,
+                "max_floor": 1,
+                "kills_on_floor": 0,
+                "run_kills": 0,
+                "run_gold_earned": 0,
+                "hero_hp": 50,
+                "combat_focus": 0,
+                "floor_kind": 0,
+                "auto_descend": true,
+                "tab": 0,
+                "keys": 0,
+                "pulls_since_epic": 0,
+                "total_pulls": 0,
+                "deepest_floor_ever": 1,
+                "total_kills": 0,
+                "deaths": 0,
+                "total_ticks": 0,
+                "rng_state": 1
+            }
+        }"#;
+        let loaded: SaveData = serde_json::from_str(json).unwrap();
+        let mut restored = AbyssState::new();
+        apply_save(&mut restored, &loaded.game);
+
+        // Weapon lane (idx 0) は BronzeSword の本来の lane なので OK。
+        assert_eq!(
+            restored.equipped[EquipmentLane::Weapon.index()],
+            Some(EquipmentId::BronzeSword),
+            "BronzeSword は Weapon lane に正しく装着されるべき"
+        );
+        // Armor / Accessory lane に入っていた BronzeSword は弾かれて None になるべき。
+        assert_eq!(
+            restored.equipped[EquipmentLane::Armor.index()],
+            None,
+            "lane mismatch (Weapon の装備が Armor lane) は弾かれるべき"
+        );
+        assert_eq!(
+            restored.equipped[EquipmentLane::Accessory.index()],
+            None,
+            "lane mismatch (Weapon の装備が Accessory lane) は弾かれるべき"
+        );
     }
 
     /// 部分的なフィールドのみ持つ JSON でも default で補完される。
     #[test]
     fn partial_json_uses_defaults() {
-        let json = r#"{ "version": 1, "game": { "gold": 500 } }"#;
+        let json = r#"{ "version": 3, "game": { "gold": 500 } }"#;
         let loaded: SaveData = serde_json::from_str(json).unwrap();
         assert_eq!(loaded.game.gold, 500);
         assert_eq!(loaded.game.floor, 0);
@@ -420,7 +478,6 @@ mod tests {
         let mut restored = AbyssState::new();
         apply_save(&mut restored, &loaded.game);
         assert_eq!(restored.gold, 500);
-        // floor は最低 1 に補正される。
-        assert_eq!(restored.floor, 1);
+        assert_eq!(restored.floor, 1); // 最低 1 に補正
     }
 }

@@ -5,19 +5,14 @@
 
 // ── サブタブ (各 Tab の直接切替: グループ内サブタブバー / 旧キー継承で使用) ──
 pub const TAB_UPGRADES: u16 = 10;
-/// 進捗サブタブ。旧 Souls タブの id (11) を継承 (save 互換維持)。
 pub const TAB_ROADMAP: u16 = 11;
 pub const TAB_STATS: u16 = 12;
 pub const TAB_GACHA: u16 = 13;
 pub const TAB_SETTINGS: u16 = 14;
-/// 装備ショップサブタブ。
 pub const TAB_SHOP: u16 = 15;
-/// 魂サブタブ (旧強化タブ末尾の魂セクションを独立分離)。
 pub const TAB_SOULS: u16 = 16;
 
 // ── トップグループ (メインメニュー 4 つ) ────────────────────
-// グループをクリックするとそのグループの default_tab() に切替。
-// 値域は既存の TAB_* (10-15) と被らない 50 番台に置く。
 pub const TAB_GROUP_GROWTH: u16 = 50;
 pub const TAB_GROUP_INFO: u16 = 51;
 pub const TAB_GROUP_GACHA: u16 = 52;
@@ -26,9 +21,6 @@ pub const TAB_GROUP_SETTINGS: u16 = 53;
 // ── トグル / 操作 ─────────────────────────────────────────
 pub const TOGGLE_AUTO_DESCEND: u16 = 20;
 pub const RETREAT_TO_SURFACE: u16 = 21;
-
-// ── 強化購入 (base + UpgradeKind::index, 0..7) ────────────
-pub const BUY_UPGRADE_BASE: u16 = 100;
 
 // ── 魂強化購入 (base + SoulPerk::index, 0..4) ─────────────
 pub const BUY_SOUL_PERK_BASE: u16 = 200;
@@ -43,3 +35,14 @@ pub const SCROLL_DOWN: u16 = 401;
 
 // ── 装備購入 (base + EquipmentId::index, 0..12) ───────────
 pub const BUY_EQUIPMENT_BASE: u16 = 500;
+
+// ── 装備装着切替 (base + EquipmentId::index, 0..12) ───────
+/// 既に所持している装備を、その lane に装着する。lane は EquipmentId から導出されるので
+/// アクション ID 1 種で「どの装備を装着」が一意に決まる (lane id を別に持たない)。
+pub const EQUIP_ITEM_BASE: u16 = 520;
+
+// ── 装備強化 (base + EquipmentId::index, 0..12) ───────────
+/// 指定装備の強化 Lv を 1 上げる。所持装備に対してしか UI から呼ばれない想定だが
+/// logic 側でも owned ガードはせず、cost と gold だけ見る (装備強化は所持に依らず
+/// state.equipment_levels に蓄積する設計 — 将来 prestige 系で使い回せるよう柔軟性確保)。
+pub const ENHANCE_EQUIPMENT_BASE: u16 = 540;

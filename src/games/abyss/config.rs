@@ -8,123 +8,18 @@
 //!
 //! 既定値は本体ゲームの現在のバランスを表す (リファクタ前後で挙動不変)。
 
-/// 区分線形カーブ。Lv ごとの per-level 増分が境界で変わる成長関数。
+/// ヒーローの基礎値と soul perk 倍率。
 ///
-/// 例: Sword の `[(0, 2.0), (10, 3.0), (25, 5.0)]` は
-///   Lv 1〜10  : +2/Lv → 累積 ATK = 2*Lv
-///   Lv 11〜25 : +3/Lv → 累積 ATK = 20 + 3*(Lv - 10)
-///   Lv 26〜   : +5/Lv → 累積 ATK = 20 + 45 + 5*(Lv - 25)
-///
-/// 元は段階名 (剣士/剣豪/…) を持つ「Tier」概念だったが、装備系統の追加で
-/// 段階表示の役割が装備ツリーに移った (装備の銅→鋼鉄→ミスリル→神 が段階を担う)
-/// ため、段階名フィールドは削除し純粋な「区分線形カーブの数学」のみを残した。
-/// hero stat 計算 (`hero_atk` 等) で `cumulative()` を呼ぶためだけに存続する。
-///
-/// 不正な状態 (空 / start_level が 0 から始まらない / 昇順でない) は構築時に
-/// panic させ、ランタイムの index アクセスで panic しないようにする。
-#[derive(Clone, Debug)]
-pub struct TierCurve {
-    /// `(start_level, per_level_delta)` の昇順配列。空不可。最初は必ず `start_level == 0`。
-    tiers: Vec<(u32, f64)>,
-}
-
-impl TierCurve {
-    /// バリデーション付きコンストラクタ。空 / 不正な順序を拒否する。
-    pub fn new(tiers: Vec<(u32, f64)>) -> Self {
-        assert!(!tiers.is_empty(), "TierCurve requires at least one tier");
-        assert_eq!(
-            tiers[0].0, 0,
-            "TierCurve first tier must start at level 0 (got {})",
-            tiers[0].0
-        );
-        for w in tiers.windows(2) {
-            assert!(
-                w[0].0 < w[1].0,
-                "TierCurve start_level must be strictly ascending (got {} -> {})",
-                w[0].0,
-                w[1].0
-            );
-        }
-        Self { tiers }
-    }
-
-    /// Lv `level` までの累積効果値を返す (合算)。
-    pub fn cumulative(&self, level: u32) -> f64 {
-        let mut total = 0.0;
-        for window in self.tiers.windows(2) {
-            let (start, delta) = window[0];
-            let (next_start, _) = window[1];
-            if level <= start {
-                break;
-            }
-            let span = (level.min(next_start) - start) as f64;
-            total += span * delta;
-        }
-        // 最後の段階 (上限なし)
-        if let Some(&(start, delta)) = self.tiers.last() {
-            if level > start {
-                let span = (level - start) as f64;
-                total += span * delta;
-            }
-        }
-        total
-    }
-}
-
-/// 既定の Sword (ATK) 区分線形カーブ。
-///
-/// 序盤 (Lv 1〜10) は旧線形バランスと一致 (+2/Lv) を維持し、Lv 11 以降は徐々に
-/// per-Lv 増分を上げて late-game の到達可能性 (B100) を担保する。
-fn default_sword_curve() -> TierCurve {
-    TierCurve::new(vec![
-        (0, 2.0),
-        (10, 3.0),
-        (25, 5.0),
-        (50, 8.0),
-        (100, 12.0),
-    ])
-}
-
-/// 既定の Vitality (HP) 区分線形カーブ。Lv 1〜10 は旧線形 (+10/Lv) と一致。
-fn default_vitality_curve() -> TierCurve {
-    TierCurve::new(vec![
-        (0, 10.0),
-        (10, 15.0),
-        (25, 25.0),
-        (50, 40.0),
-        (100, 60.0),
-    ])
-}
-
-/// 既定の Armor (DEF) 区分線形カーブ。Lv 1〜10 は旧線形 (+1/Lv)。
-fn default_armor_curve() -> TierCurve {
-    TierCurve::new(vec![
-        (0, 1.0),
-        (10, 2.0),
-        (25, 3.0),
-        (50, 5.0),
-        (100, 8.0),
-    ])
-}
-
-/// 既定の Speed 区分線形カーブ (倍率増分)。Lv 1〜10 は旧線形 (+0.05/Lv = 5%)。
-fn default_speed_curve() -> TierCurve {
-    TierCurve::new(vec![
-        (0, 0.05),
-        (10, 0.07),
-        (25, 0.10),
-        (50, 0.15),
-        (100, 0.20),
-    ])
-}
-
-/// ヒーローの基礎値とアップグレード効果。
+/// 旧来の per-Sword/Vitality/etc Lv 加算は **全廃** された。英雄ステは:
+///   `base_* + 装着中装備.scaled_bonus(Lv) × (1 + soul_perks)`
+/// に集約される。stat ごとの per-Lv 値は装備自体が
+/// `EquipmentDef::per_level_bonus` で持つ (装備ごとに伸び方が違って良い)。
 #[derive(Clone, Debug)]
 pub struct HeroConfig {
     pub base_hp: u64,
     pub base_atk: u64,
     pub base_def: u64,
-    /// 1 攻撃あたりの基礎 tick 数 (Speed 強化と戦闘集中で短縮)。
+    /// 1 攻撃あたりの基礎 tick 数 (装備の speed_pct と戦闘集中で短縮)。
     pub atk_period_base: u32,
     /// 攻撃間隔の下限 tick (これより短くしない)。
     pub atk_period_min: u32,
@@ -132,27 +27,10 @@ pub struct HeroConfig {
     /// 戦闘集中 (combat focus) の上限。攻撃成功で +1、死亡や撤退で 0 にリセット。
     pub focus_max: u32,
     /// focus 1 ポイントごとに攻撃間隔を短縮する係数 (0.0..=1.0)。
-    /// 例: 0.01 なら 1 ポイントで 1% 短縮、focus_max が 50 なら最大 50% 短縮。
     pub focus_reduction_per_point: f64,
 
-    // upgrade per-level deltas
-    pub atk_per_sword_lv: u64,
-    /// 段階制 ATK カーブ。設定時は `atk_per_sword_lv` を上書きする。
-    /// `None` の場合は旧線形 (`atk_per_sword_lv * level`) を使う。
-    pub sword_curve: Option<TierCurve>,
-    pub hp_per_vitality_lv: u64,
-    /// 段階制 HP カーブ。設定時は `hp_per_vitality_lv` を上書き。
-    pub vitality_curve: Option<TierCurve>,
-    pub def_per_armor_lv: u64,
-    /// 段階制 DEF カーブ。設定時は `def_per_armor_lv` を上書き。
-    pub armor_curve: Option<TierCurve>,
-    pub crit_per_lv: f64,
+    /// クリティカル率の上限。装備の crit_bonus 合計がこれを超えても切り詰められる。
     pub crit_cap: f64,
-    pub speed_per_lv: f64,
-    /// 段階制 Speed カーブ (倍率増分)。設定時は `speed_per_lv` を上書き。
-    pub speed_curve: Option<TierCurve>,
-    pub regen_per_lv_per_sec: f64,
-    pub gold_per_lv: f64,
 
     // soul perk multipliers
     pub might_per_lv: f64,
@@ -162,10 +40,6 @@ pub struct HeroConfig {
 }
 
 /// 敵のスケーリングパラメータ。
-///
-/// HP / ATK / gold の階層成長は `BalanceConfig::enemy_hp_schedule` 等の
-/// piecewise schedule で表現する (旧 `hp_growth: f64` 等の単一指数は
-/// B100 到達不能になるため撤去)。`def_per_floor` は線形なのでここに残す。
 #[derive(Clone, Debug)]
 pub struct EnemyConfig {
     pub hp_base: f64,
@@ -187,281 +61,431 @@ pub struct EnemyConfig {
 #[derive(Clone, Debug)]
 pub struct PacingConfig {
     pub enemies_per_floor: u32,
-    /// 雑魚撃破時、`floor / normal_souls_div` 切り上げが基礎魂量。
     pub normal_souls_div: u32,
-    /// ボス撃破時、`floor * boss_souls_mult` が基礎魂量。
     pub boss_souls_mult: u64,
-    /// 死亡時、`floor * death_souls_mult` が基礎魂量。
     pub death_souls_mult: u64,
-    /// ダンジョンの到達ゴールフロア。進捗タブの分母として使う。
-    /// 将来「短編 (50F)」「長編 (200F)」など難度差し替えで切り替えるため
-    /// BalanceConfig 経由で注入する。
     pub goal_floor: u32,
 }
 
 /// ガチャ・鍵ドロップ・フロア種別抽選の設定。
 #[derive(Clone, Debug)]
 pub struct GachaConfig {
-    /// ボス撃破で必ずもらえる基本鍵数。
     pub keys_per_boss: u64,
-    /// `floor % deep_floor_step == 0` の階層 (例: 10F毎) のボーナス鍵数。
     pub deep_floor_step: u32,
     pub deep_floor_bonus_keys: u64,
 
-    /// フロア種別の出現確率 (sum != 1 でも内部で正規化)。
-    /// `[Normal, Treasure, Elite, Bonanza]` の順。
     pub floor_kind_weights: [u32; 4],
-    /// 何階以下を必ず Normal にするか (序盤の把握しやすさ)。
     pub floor_kind_normal_below: u32,
 
-    /// ガチャ tier 確率 (千分率)。`[Common, Rare, Epic, Legendary]`。合計 1000。
     pub gacha_weights_milli: [u32; 4],
-    /// 何回引いて Epic+ が出なければ天井で Epic+ 確定にするか (0 で天井無効)。
     pub gacha_pity: u32,
 
-    /// Common ヒット時、`現フロアの基礎雑魚 gold * gain_min..gain_max` を獲得。
     pub common_gold_mult_min: u32,
     pub common_gold_mult_max: u32,
-    /// Epic ヒット時の魂量 = `floor * epic_souls_mult` (soul_multiplier 適用後)。
     pub epic_souls_mult: u64,
-    /// Legendary ヒット時の鍵数。
     pub legendary_keys: u64,
 }
 
-/// 装備の解放条件。すべて AND で満たす必要がある。
+/// 装備 1 個の定義 (id・名前・lane 帰属・購入条件・効果カーブ)。
 ///
-/// 設計判断: フロア到達条件は入れない (gold + 強化 Lv + 前装備のみ)。
-/// 「フロア降下のリスクを取らないと装備が解放されない」型のゲームではなく、
-/// 「ゴールドファームしながらでも装備計画を進められる」型にする (=
-/// idle ゲーム本来の自由度を保つ)。
-#[derive(Clone, Debug, Default)]
-pub struct EquipmentRequirement {
-    /// 必要 gold (購入時に消費される)。
-    pub gold_cost: u64,
-    /// 必要強化レベル。`(UpgradeKind, min_level)` の AND リスト。
-    /// 同じ UpgradeKind を複数入れる必要は無い (最大値だけ書けば十分)。
-    pub upgrade_levels: Vec<(super::state::UpgradeKind, u32)>,
-    /// 前提装備 (この装備を解放済みであること)。lane 連鎖の表現。
-    /// 通常は 1 個 (同 lane の前段階)。空なら lane 入り口の装備。
-    pub prerequisite: Option<super::state::EquipmentId>,
-}
-
-/// 装備 1 個の定義 (id・名前・lane 帰属・解放条件・効果)。
+/// 効果は **base + per_level × Lv** の形で表現される。これにより:
+/// - 銅剣は base 控えめ / per_level も控えめ → 序盤の足場
+/// - 神剣は base 爆発 / per_level も爆発 → 後期に強化を注ぎ込む対象
 ///
-/// Vec で持つので並びは `EquipmentId::all()` と必ず一致させる
-/// (`lookup` は index アクセスする想定)。テストで一致を保証する。
+/// と装備ごとに伸び方の質を変えられる。
+///
+/// Vec で持つので並びは `EquipmentId::all()` と必ず一致させる。テストで保証。
 #[derive(Clone, Debug)]
 pub struct EquipmentDef {
+    /// 自分の id。`config.equipment[i].id == EquipmentId::all()[i]` を SSOT 整合性
+    /// テスト (`equipment_table_matches_id_order`) で検証する用途のみで保持する。
+    /// コード側はインデックスアクセス (`config.equipment.get(id.index())`) で引くので、
+    /// 非 test ビルドでは読まれず dead_code 警告が出るのを抑制する。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub id: super::state::EquipmentId,
     pub name: &'static str,
+    /// UI 用の効果ラベル (Lv 0 時点の主要数値)。
     pub effect_label: &'static str,
-    pub requirement: EquipmentRequirement,
-    pub bonus: super::state::EquipmentBonus,
+    /// Lv 0 (購入直後) の bonus。
+    pub base_bonus: super::state::EquipmentBonus,
+    /// 強化 Lv 1 ごとに加算される bonus。
+    pub per_level_bonus: super::state::EquipmentBonus,
+
+    /// 購入コスト (gold)。
+    pub gold_cost: u64,
+    /// 前提装備 (この装備を所持していること)。lane 連鎖の表現。
+    /// 通常は 1 個 (同 lane の前段階)。空なら lane 入り口の装備。
+    pub prerequisite: Option<super::state::EquipmentId>,
+
+    /// 強化 Lv 0 → 1 のコスト (gold)。
+    pub enh_cost_base: u64,
+    /// 強化コストの geometric 成長率 (典型値 1.15..1.20)。
+    pub enh_cost_growth: f64,
 }
 
-/// 既定の装備テーブル (12 個 / 3 lane × 4 段階)。
+/// 既定の装備テーブル (18 個 / 3 lane × 6 段階)。
 ///
 /// バランス設計:
-/// - 武器 lane: ATK 系。各段階で +5% / +20% / +60% / +200% (additive 合計 +285%)
-/// - 防具 lane: HP 系 + DEF flat。HP +5% / +20% / +60% / +200%、DEF +5/+20/+50/+150
-/// - 装飾 lane: Speed/Crit/Regen/Gold 各種 + 終焉の冠で全方位ブースト
+/// - 武器 lane: ATK 系 (base + per-Lv で flat と % 両方が伸びる)
+/// - 防具 lane: HP 系 + DEF flat
+/// - 装飾 lane: Speed/Crit/Regen/Gold の混合 + 終焉の冠で全方位ブースト
 ///
-/// gold コストは「全装備解放までに ~30M gold が必要」になるよう調整。
-/// 強化 Lv 条件は既存 TierCurve の境界 (10/25/50/100) と整合させる。
+/// 6 段階に拡張した目的: 装備購入の milestone を 40h 全体に分散させること。
+/// 旧 4 段階だと最終装備が 3.5h で揃ってしまい、残り 36h は強化のみの
+/// 単調なフェーズになっていた。中間 (Iron/Chainmail/Bracelet) と
+/// 上位 (Dragon/Phoenix) を挿入し、cost 比 ×20-30 で延ばす。
+///
+/// 並びは `EquipmentId::all()` と一致させる必要がある (config 経由で index アクセス)。
 fn default_equipment_table() -> Vec<EquipmentDef> {
-    use super::state::{EquipmentBonus, EquipmentId, UpgradeKind};
+    use super::state::{EquipmentBonus, EquipmentId};
 
     vec![
         // ── 武器 lane ──
+        // tier 0: 銅 — 序盤の足場、tier 1 までの繋ぎ。
         EquipmentDef {
             id: EquipmentId::BronzeSword,
             name: "銅の剣",
-            effect_label: "ATK +5%",
-            requirement: EquipmentRequirement {
-                gold_cost: 100,
-                upgrade_levels: vec![(UpgradeKind::Sword, 5)],
-                prerequisite: None,
-            },
-            bonus: EquipmentBonus {
-                atk_pct: 0.05,
-                ..Default::default()
-            },
+            effect_label: "ATK +5% / +1 (Lv毎 +1%/+1)",
+            base_bonus: EquipmentBonus { atk_pct: 0.05, atk_flat: 1, ..Default::default() },
+            per_level_bonus: EquipmentBonus { atk_pct: 0.01, atk_flat: 1, ..Default::default() },
+            gold_cost: 100,
+            prerequisite: None,
+            enh_cost_base: 15,
+            enh_cost_growth: 1.16,
         },
+        // tier 1: 鉄 — 銅の上位、序盤後半の milestone。
+        EquipmentDef {
+            id: EquipmentId::IronSword,
+            name: "鉄の剣",
+            effect_label: "ATK +10% / +3 (Lv毎 +1.5%/+2)",
+            base_bonus: EquipmentBonus { atk_pct: 0.10, atk_flat: 3, ..Default::default() },
+            per_level_bonus: EquipmentBonus { atk_pct: 0.015, atk_flat: 2, ..Default::default() },
+            gold_cost: 1_000,
+            prerequisite: Some(EquipmentId::BronzeSword),
+            enh_cost_base: 150,
+            enh_cost_growth: 1.17,
+        },
+        // tier 2: 鋼鉄 — 中盤の主力、~30 分前後で到達。
         EquipmentDef {
             id: EquipmentId::SteelSword,
             name: "鋼鉄の剣",
-            effect_label: "ATK +20%",
-            requirement: EquipmentRequirement {
-                gold_cost: 5_000,
-                upgrade_levels: vec![(UpgradeKind::Sword, 20)],
-                prerequisite: Some(EquipmentId::BronzeSword),
-            },
-            bonus: EquipmentBonus {
-                atk_pct: 0.20,
-                ..Default::default()
-            },
+            effect_label: "ATK +20% / +5 (Lv毎 +2%/+3)",
+            base_bonus: EquipmentBonus { atk_pct: 0.20, atk_flat: 5, ..Default::default() },
+            per_level_bonus: EquipmentBonus { atk_pct: 0.02, atk_flat: 3, ..Default::default() },
+            gold_cost: 5_000,
+            prerequisite: Some(EquipmentId::IronSword),
+            enh_cost_base: 600,
+            enh_cost_growth: 1.18,
         },
+        // tier 3: ミスリル — 中盤後半、~1-2 時間で到達。
         EquipmentDef {
             id: EquipmentId::MithrilSword,
             name: "ミスリルの剣",
-            effect_label: "ATK +60%",
-            requirement: EquipmentRequirement {
-                gold_cost: 200_000,
-                upgrade_levels: vec![(UpgradeKind::Sword, 40)],
-                prerequisite: Some(EquipmentId::SteelSword),
-            },
-            bonus: EquipmentBonus {
-                atk_pct: 0.60,
-                ..Default::default()
-            },
+            effect_label: "ATK +60% / +20 (Lv毎 +5%/+10)",
+            base_bonus: EquipmentBonus { atk_pct: 0.60, atk_flat: 20, ..Default::default() },
+            per_level_bonus: EquipmentBonus { atk_pct: 0.05, atk_flat: 10, ..Default::default() },
+            gold_cost: 200_000,
+            prerequisite: Some(EquipmentId::SteelSword),
+            enh_cost_base: 25_000,
+            enh_cost_growth: 1.18,
         },
+        // tier 4: 竜骨剣 — 後期前半の主力。Mithril (ATK +60%) → God (ATK +400%) の中間で、
+        // tier 5 入手まで B50-75 を抜けるための火力を担う。
+        EquipmentDef {
+            id: EquipmentId::DragonboneSword,
+            name: "竜骨剣",
+            effect_label: "ATK +220% / +80 (Lv毎 +10%/+25)",
+            base_bonus: EquipmentBonus { atk_pct: 2.20, atk_flat: 80, ..Default::default() },
+            per_level_bonus: EquipmentBonus { atk_pct: 0.10, atk_flat: 25, ..Default::default() },
+            gold_cost: 5_000_000,
+            prerequisite: Some(EquipmentId::MithrilSword),
+            enh_cost_base: 800_000,
+            enh_cost_growth: 1.19,
+        },
+        // tier 5: 神剣 — 終端、~30 時間付近の milestone。
         EquipmentDef {
             id: EquipmentId::GodSword,
             name: "神剣エクスカリバー",
-            effect_label: "ATK +400%",
-            requirement: EquipmentRequirement {
-                gold_cost: 5_000_000,
-                upgrade_levels: vec![(UpgradeKind::Sword, 80)],
-                prerequisite: Some(EquipmentId::MithrilSword),
-            },
-            bonus: EquipmentBonus {
-                atk_pct: 4.00,
-                ..Default::default()
-            },
+            effect_label: "ATK +400% / +100 (Lv毎 +11%/+35)",
+            base_bonus: EquipmentBonus { atk_pct: 4.00, atk_flat: 100, ..Default::default() },
+            per_level_bonus: EquipmentBonus { atk_pct: 0.11, atk_flat: 35, ..Default::default() },
+            gold_cost: 180_000_000,
+            prerequisite: Some(EquipmentId::DragonboneSword),
+            enh_cost_base: 22_000_000,
+            enh_cost_growth: 1.20,
         },
         // ── 防具 lane ──
+        // tier 0: 革鎧。
         EquipmentDef {
             id: EquipmentId::LeatherArmor,
             name: "革鎧",
-            effect_label: "HP +5% / DEF +5",
-            requirement: EquipmentRequirement {
-                gold_cost: 150,
-                upgrade_levels: vec![(UpgradeKind::Armor, 5)],
-                prerequisite: None,
-            },
-            bonus: EquipmentBonus {
+            effect_label: "HP +5% / +5 / DEF +1 (Lv毎 +1%/+5/+1)",
+            base_bonus: EquipmentBonus {
                 hp_pct: 0.05,
-                def_flat: 5,
+                hp_flat: 5,
+                def_flat: 1,
                 ..Default::default()
             },
+            per_level_bonus: EquipmentBonus {
+                hp_pct: 0.01,
+                hp_flat: 5,
+                def_flat: 1,
+                ..Default::default()
+            },
+            gold_cost: 150,
+            prerequisite: None,
+            enh_cost_base: 20,
+            enh_cost_growth: 1.16,
         },
+        // tier 1: 鎖帷子 — 革と鋼鉄の中間。
+        EquipmentDef {
+            id: EquipmentId::Chainmail,
+            name: "鎖帷子",
+            effect_label: "HP +10% / +12 / DEF +2 (Lv毎 +1.5%/+8/+2)",
+            base_bonus: EquipmentBonus {
+                hp_pct: 0.10,
+                hp_flat: 12,
+                def_flat: 2,
+                ..Default::default()
+            },
+            per_level_bonus: EquipmentBonus {
+                hp_pct: 0.015,
+                hp_flat: 8,
+                def_flat: 2,
+                ..Default::default()
+            },
+            gold_cost: 1_500,
+            prerequisite: Some(EquipmentId::LeatherArmor),
+            enh_cost_base: 200,
+            enh_cost_growth: 1.17,
+        },
+        // tier 2: 鋼鉄の鎧。
         EquipmentDef {
             id: EquipmentId::SteelArmor,
             name: "鋼鉄の鎧",
-            effect_label: "HP +20% / DEF +20",
-            requirement: EquipmentRequirement {
-                gold_cost: 7_500,
-                upgrade_levels: vec![(UpgradeKind::Armor, 15), (UpgradeKind::Vitality, 10)],
-                prerequisite: Some(EquipmentId::LeatherArmor),
-            },
-            bonus: EquipmentBonus {
+            effect_label: "HP +20% / +25 / DEF +5 (Lv毎 +2%/+15/+2)",
+            base_bonus: EquipmentBonus {
                 hp_pct: 0.20,
-                def_flat: 20,
+                hp_flat: 25,
+                def_flat: 5,
                 ..Default::default()
             },
+            per_level_bonus: EquipmentBonus {
+                hp_pct: 0.02,
+                hp_flat: 15,
+                def_flat: 2,
+                ..Default::default()
+            },
+            gold_cost: 7_500,
+            prerequisite: Some(EquipmentId::Chainmail),
+            enh_cost_base: 900,
+            enh_cost_growth: 1.18,
         },
+        // tier 3: ミスリルの鎧。
         EquipmentDef {
             id: EquipmentId::MithrilArmor,
             name: "ミスリルの鎧",
-            effect_label: "HP +60% / DEF +50",
-            requirement: EquipmentRequirement {
-                gold_cost: 250_000,
-                upgrade_levels: vec![(UpgradeKind::Armor, 30), (UpgradeKind::Vitality, 30)],
-                prerequisite: Some(EquipmentId::SteelArmor),
-            },
-            bonus: EquipmentBonus {
+            effect_label: "HP +60% / +120 / DEF +20 (Lv毎 +5%/+50/+5)",
+            base_bonus: EquipmentBonus {
                 hp_pct: 0.60,
-                def_flat: 50,
+                hp_flat: 120,
+                def_flat: 20,
                 ..Default::default()
             },
+            per_level_bonus: EquipmentBonus {
+                hp_pct: 0.05,
+                hp_flat: 50,
+                def_flat: 5,
+                ..Default::default()
+            },
+            gold_cost: 250_000,
+            prerequisite: Some(EquipmentId::SteelArmor),
+            enh_cost_base: 30_000,
+            enh_cost_growth: 1.18,
         },
+        // tier 4: 竜鱗鎧 — 後期前半の盾、Mithril (HP +60%) → God (HP +600%) の中間。
+        EquipmentDef {
+            id: EquipmentId::DragonscaleArmor,
+            name: "竜鱗鎧",
+            effect_label: "HP +300% / +600 / DEF +70 (Lv毎 +10%/+150/+12)",
+            base_bonus: EquipmentBonus {
+                hp_pct: 3.00,
+                hp_flat: 600,
+                def_flat: 70,
+                ..Default::default()
+            },
+            per_level_bonus: EquipmentBonus {
+                hp_pct: 0.10,
+                hp_flat: 150,
+                def_flat: 12,
+                ..Default::default()
+            },
+            gold_cost: 6_000_000,
+            prerequisite: Some(EquipmentId::MithrilArmor),
+            enh_cost_base: 900_000,
+            enh_cost_growth: 1.19,
+        },
+        // tier 5: 神鎧アイギス。
         EquipmentDef {
             id: EquipmentId::GodArmor,
             name: "神鎧アイギス",
-            effect_label: "HP +600% / DEF +800",
-            requirement: EquipmentRequirement {
-                gold_cost: 6_000_000,
-                upgrade_levels: vec![(UpgradeKind::Armor, 60), (UpgradeKind::Vitality, 60)],
-                prerequisite: Some(EquipmentId::MithrilArmor),
-            },
-            bonus: EquipmentBonus {
+            effect_label: "HP +600% / +800 / DEF +100 (Lv毎 +11%/+150/+15)",
+            base_bonus: EquipmentBonus {
                 hp_pct: 6.00,
-                def_flat: 800,
+                hp_flat: 800,
+                def_flat: 100,
                 ..Default::default()
             },
+            per_level_bonus: EquipmentBonus {
+                hp_pct: 0.11,
+                hp_flat: 150,
+                def_flat: 15,
+                ..Default::default()
+            },
+            gold_cost: 220_000_000,
+            prerequisite: Some(EquipmentId::DragonscaleArmor),
+            enh_cost_base: 27_000_000,
+            enh_cost_growth: 1.20,
         },
         // ── 装飾 lane ──
+        // tier 0: 速攻のブーツ。
         EquipmentDef {
             id: EquipmentId::SwiftBoots,
             name: "速攻のブーツ",
-            effect_label: "攻撃速度 +20%",
-            requirement: EquipmentRequirement {
-                gold_cost: 200,
-                upgrade_levels: vec![(UpgradeKind::Speed, 5)],
-                prerequisite: None,
-            },
-            bonus: EquipmentBonus {
+            effect_label: "速度+20% / CRIT+2% (Lv毎 +1%/+0.2%)",
+            base_bonus: EquipmentBonus {
                 speed_pct: 0.20,
+                crit_bonus: 0.02,
                 ..Default::default()
             },
+            per_level_bonus: EquipmentBonus {
+                speed_pct: 0.01,
+                crit_bonus: 0.002,
+                ..Default::default()
+            },
+            gold_cost: 200,
+            prerequisite: None,
+            enh_cost_base: 25,
+            enh_cost_growth: 1.16,
         },
+        // tier 1: 戦士の腕輪 — 序盤後半に小さく全方位を補強。
+        EquipmentDef {
+            id: EquipmentId::WarriorBracelet,
+            name: "戦士の腕輪",
+            effect_label: "ATK+5% / HP+5% / 速度+5% (Lv毎 +1%/+1%/+0.5%)",
+            base_bonus: EquipmentBonus {
+                atk_pct: 0.05,
+                hp_pct: 0.05,
+                speed_pct: 0.05,
+                ..Default::default()
+            },
+            per_level_bonus: EquipmentBonus {
+                atk_pct: 0.01,
+                hp_pct: 0.01,
+                speed_pct: 0.005,
+                ..Default::default()
+            },
+            gold_cost: 2_000,
+            prerequisite: Some(EquipmentId::SwiftBoots),
+            enh_cost_base: 250,
+            enh_cost_growth: 1.17,
+        },
+        // tier 2: 双狼の指輪。
         EquipmentDef {
             id: EquipmentId::TwinWolfRing,
             name: "双狼の指輪",
-            effect_label: "CRIT +10%",
-            requirement: EquipmentRequirement {
-                gold_cost: 8_000,
-                upgrade_levels: vec![(UpgradeKind::Crit, 10)],
-                prerequisite: Some(EquipmentId::SwiftBoots),
-            },
-            bonus: EquipmentBonus {
+            effect_label: "CRIT +10% / 速度+10% (Lv毎 +0.5%/+1%)",
+            base_bonus: EquipmentBonus {
                 crit_bonus: 0.10,
+                speed_pct: 0.10,
                 ..Default::default()
             },
+            per_level_bonus: EquipmentBonus {
+                crit_bonus: 0.005,
+                speed_pct: 0.01,
+                ..Default::default()
+            },
+            gold_cost: 8_000,
+            prerequisite: Some(EquipmentId::WarriorBracelet),
+            enh_cost_base: 1_000,
+            enh_cost_growth: 1.18,
         },
+        // tier 3: 賢者のローブ。
         EquipmentDef {
             id: EquipmentId::SageRobe,
             name: "賢者のローブ",
-            effect_label: "回復 +1.5/s / 金 +30%",
-            requirement: EquipmentRequirement {
-                gold_cost: 300_000,
-                upgrade_levels: vec![(UpgradeKind::Regen, 20), (UpgradeKind::Gold, 15)],
-                prerequisite: Some(EquipmentId::TwinWolfRing),
-            },
-            bonus: EquipmentBonus {
+            effect_label: "回復+1.5/s / 金+30% (Lv毎 +0.1/s/+2%)",
+            base_bonus: EquipmentBonus {
                 regen_per_sec: 1.5,
                 gold_pct: 0.30,
+                crit_bonus: 0.05,
                 ..Default::default()
             },
+            per_level_bonus: EquipmentBonus {
+                regen_per_sec: 0.10,
+                gold_pct: 0.02,
+                crit_bonus: 0.002,
+                ..Default::default()
+            },
+            gold_cost: 300_000,
+            prerequisite: Some(EquipmentId::TwinWolfRing),
+            enh_cost_base: 40_000,
+            enh_cost_growth: 1.18,
         },
+        // tier 4: 不死鳥の翼 — 後期の生存・攻撃補強。
+        EquipmentDef {
+            id: EquipmentId::PhoenixWings,
+            name: "不死鳥の翼",
+            effect_label: "回復+5/s / ATK+50% / CRIT+12% (Lv毎 +0.25/s/+1.5%/+0.6%)",
+            base_bonus: EquipmentBonus {
+                regen_per_sec: 5.0,
+                atk_pct: 0.50,
+                crit_bonus: 0.12,
+                ..Default::default()
+            },
+            per_level_bonus: EquipmentBonus {
+                regen_per_sec: 0.25,
+                atk_pct: 0.015,
+                crit_bonus: 0.006,
+                ..Default::default()
+            },
+            gold_cost: 8_000_000,
+            prerequisite: Some(EquipmentId::SageRobe),
+            enh_cost_base: 1_200_000,
+            enh_cost_growth: 1.19,
+        },
+        // tier 5: 終焉の冠 — 装飾の頂点、全方位ブースト。
         EquipmentDef {
             id: EquipmentId::EndingCrown,
             name: "終焉の冠",
-            effect_label: "ATK +150% / HP +150%",
-            requirement: EquipmentRequirement {
-                gold_cost: 8_000_000,
-                upgrade_levels: vec![
-                    (UpgradeKind::Speed, 50),
-                    (UpgradeKind::Crit, 30),
-                    (UpgradeKind::Regen, 30),
-                    (UpgradeKind::Gold, 30),
-                ],
-                prerequisite: Some(EquipmentId::SageRobe),
-            },
-            bonus: EquipmentBonus {
+            effect_label: "ATK+150% / HP+150% / 全方位 (Lv毎 +2.5%系)",
+            base_bonus: EquipmentBonus {
                 atk_pct: 1.50,
                 hp_pct: 1.50,
+                speed_pct: 0.30,
+                crit_bonus: 0.20,
+                regen_per_sec: 3.0,
+                gold_pct: 0.50,
                 ..Default::default()
             },
+            per_level_bonus: EquipmentBonus {
+                atk_pct: 0.035,
+                hp_pct: 0.035,
+                speed_pct: 0.007,
+                crit_bonus: 0.0035,
+                regen_per_sec: 0.15,
+                gold_pct: 0.007,
+                ..Default::default()
+            },
+            gold_cost: 280_000_000,
+            prerequisite: Some(EquipmentId::PhoenixWings),
+            enh_cost_base: 34_000_000,
+            enh_cost_growth: 1.20,
         },
     ]
 }
 
 /// 敵成長の階層帯ごとの倍率テーブル。
-///
-/// 既定の指数成長 (`hp_growth.powf(F-1)`) では B100 の HP が天文学的になり
-/// 「全装備でもクリア不能」になるため、フロア帯ごとに growth rate を変える
-/// piecewise schedule を導入する。
 ///
 /// `steps` は `(start_floor, growth_rate)` の昇順配列。
 /// 例: `[(1, 1.32), (10, 1.20), (25, 1.12), (50, 1.10)]` のとき
@@ -469,9 +493,6 @@ fn default_equipment_table() -> Vec<EquipmentDef> {
 ///   B10-24 区間: 1.20 で 15 段成長 (約 ×15)
 ///   B25-49 区間: 1.12 で 25 段成長 (約 ×17)
 ///   B50+ 区間  : 1.10 で 残り段成長
-///
-/// `start_floor` は「この階で次の rate に切り替わる」境界。リストの最初は
-/// 必ず `start_floor=1` で始まる。
 #[derive(Clone, Debug)]
 pub struct EnemyGrowthSchedule {
     steps: Vec<(u32, f64)>,
@@ -497,12 +518,6 @@ impl EnemyGrowthSchedule {
     }
 
     /// `floor` の累積倍率を返す (B1 = 1.0)。
-    ///
-    /// 意味: 各遷移 B(f-1) → Bf で「Bf に当てはまる segment の rate」を 1 回掛ける。
-    /// `multiplier(F) = ∏_{f=2..=F} rate_at(f)`
-    /// 例: steps=[(1, 1.32), (10, 1.20)] のとき
-    ///   rate_at(2..=9) = 1.32, rate_at(10..) = 1.20
-    ///   multiplier(10) = 1.32^8 × 1.20^1
     pub fn multiplier(&self, floor: u32) -> f64 {
         if floor <= 1 {
             return 1.0;
@@ -516,7 +531,6 @@ impl EnemyGrowthSchedule {
             } else {
                 u32::MAX
             };
-            // この segment が支配する遷移 = `f in [max(seg_start, 2), min(floor+1, seg_end))`
             let lo = seg_start.max(2);
             let hi = (floor + 1).min(seg_end);
             if hi > lo {
@@ -539,17 +553,13 @@ pub struct BalanceConfig {
     pub gacha: GachaConfig,
     /// 装備の解放テーブル (12 個 = `EquipmentId::all()`)。順序は `EquipmentId::all()` と一致。
     pub equipment: Vec<EquipmentDef>,
-    /// 敵 HP の階層帯成長スケジュール (B100 到達可能性のため piecewise 化)。
     pub enemy_hp_schedule: EnemyGrowthSchedule,
-    /// 敵 ATK の階層帯成長スケジュール (HP と同じ理由)。
     pub enemy_atk_schedule: EnemyGrowthSchedule,
-    /// 敵 gold ドロップの階層帯成長スケジュール (gold rate もスローダウンしないと
-    /// 装備コストが届かなくなるが、深層では gold rate を残しておくと装備購入動機になる)。
     pub enemy_gold_schedule: EnemyGrowthSchedule,
 }
 
 impl Default for BalanceConfig {
-    /// 本体ゲームの既定難易度。値は変えるとゲームバランスが変わる。
+    /// 本体ゲームの既定難易度。
     fn default() -> Self {
         Self {
             hero: HeroConfig {
@@ -562,18 +572,7 @@ impl Default for BalanceConfig {
                 focus_max: 50,
                 focus_reduction_per_point: 0.012,
 
-                atk_per_sword_lv: 2,
-                sword_curve: Some(default_sword_curve()),
-                hp_per_vitality_lv: 10,
-                vitality_curve: Some(default_vitality_curve()),
-                def_per_armor_lv: 1,
-                armor_curve: Some(default_armor_curve()),
-                crit_per_lv: 0.01,
                 crit_cap: 0.60,
-                speed_per_lv: 0.05,
-                speed_curve: Some(default_speed_curve()),
-                regen_per_lv_per_sec: 0.2,
-                gold_per_lv: 0.05,
 
                 might_per_lv: 0.05,
                 endurance_per_lv: 0.05,
@@ -606,10 +605,8 @@ impl Default for BalanceConfig {
                 keys_per_boss: 1,
                 deep_floor_step: 10,
                 deep_floor_bonus_keys: 2,
-                // 50% Normal / 25% Treasure / 20% Elite / 5% Bonanza
                 floor_kind_weights: [50, 25, 20, 5],
                 floor_kind_normal_below: 3,
-                // 60% / 28% / 10% / 2%
                 gacha_weights_milli: [600, 280, 100, 20],
                 gacha_pity: 50,
                 common_gold_mult_min: 5,
@@ -618,28 +615,20 @@ impl Default for BalanceConfig {
                 legendary_keys: 5,
             },
             equipment: default_equipment_table(),
-            // piecewise growth: 早期は現状 (1.32) の手応えを保ち、深層は装備で
-            // 押し切れるレートまで段階的に緩める。
-            // B 1- 25: 旧バランス相当 (急峻、毎フロアの達成感)
-            // B26- 50: 装備中盤を活かす (中緩やか)
-            // B51- 75: 装備上位を必要とする (緩やか)
-            // B76+   : 神装備込みで届くレベル (極緩やか)
-            // B100 想定 HP = 14 × 1.32^9 × 1.20^15 × 1.10^25 × 1.04^25 × 1.015^25 ≈ 8k
             enemy_hp_schedule: EnemyGrowthSchedule::new(vec![
                 (1, 1.32),
                 (10, 1.20),
                 (25, 1.10),
-                (50, 1.04),
-                (75, 1.015),
+                (50, 1.05),
+                (75, 1.018),
             ]),
             enemy_atk_schedule: EnemyGrowthSchedule::new(vec![
                 (1, 1.22),
                 (10, 1.15),
                 (25, 1.08),
-                (50, 1.03),
-                (75, 1.01),
+                (50, 1.035),
+                (75, 1.013),
             ]),
-            // gold rate は早期 1.40 → 深層 1.18。装備購入が成立する高単価を維持。
             enemy_gold_schedule: EnemyGrowthSchedule::new(vec![
                 (1, 1.40),
                 (10, 1.30),
@@ -650,12 +639,10 @@ impl Default for BalanceConfig {
     }
 }
 
-// プリセット群はシミュレータ (= test build) でのみ参照される。本体ゲームに
-// 「難易度選択」を入れるときに #[cfg(test)] を外して runtime に昇格する。
 #[cfg(test)]
 impl BalanceConfig {
-    /// 「優しめ」プリセット — 各 segment を default より低く設定 (5 段階構造を維持)。
-    #[allow(clippy::field_reassign_with_default)] // schedule 群を書き直す方が冗長
+    /// 「優しめ」プリセット — 各 segment を default より低く設定。
+    #[allow(clippy::field_reassign_with_default)]
     pub fn easy() -> Self {
         let mut c = Self::default();
         c.enemy_hp_schedule = EnemyGrowthSchedule::new(vec![
@@ -682,8 +669,8 @@ impl BalanceConfig {
         c
     }
 
-    /// 「厳しめ」プリセット — 各 segment を default より高く設定 (5 段階構造を維持)。
-    #[allow(clippy::field_reassign_with_default)] // schedule 群を書き直す方が冗長
+    /// 「厳しめ」プリセット — 各 segment を default より高く設定。
+    #[allow(clippy::field_reassign_with_default)]
     pub fn hard() -> Self {
         let mut c = Self::default();
         c.enemy_hp_schedule = EnemyGrowthSchedule::new(vec![
@@ -712,7 +699,6 @@ mod tests {
 
     #[test]
     fn default_matches_legacy_constants() {
-        // 既存コードのリテラル値と一致していることを確認 (リファクタの安全網)。
         let c = BalanceConfig::default();
         assert_eq!(c.hero.base_hp, 50);
         assert_eq!(c.hero.base_atk, 5);
@@ -721,41 +707,30 @@ mod tests {
         assert_eq!(c.hero.atk_period_min, 3);
         assert_eq!(c.hero.focus_max, 50);
         assert!((c.hero.focus_reduction_per_point - 0.012).abs() < 1e-9);
-        assert_eq!(c.hero.atk_per_sword_lv, 2);
-        assert_eq!(c.hero.hp_per_vitality_lv, 10);
         assert!((c.hero.crit_cap - 0.60).abs() < 1e-9);
         assert_eq!(c.enemy.hp_base, 14.0);
         assert_eq!(c.enemy.atk_base, 4.0);
-        // boss_hp_mult / boss_atk_mult は 40h B100 設計に合わせて緩和済 (旧 5.0 → 4.0)。
         assert_eq!(c.enemy.boss_hp_mult, 4.0);
         assert!((c.enemy.boss_atk_mult - 1.3).abs() < 1e-9);
-        assert_eq!(c.enemy.normal_atk_period, 18);
-        assert_eq!(c.enemy.boss_atk_period, 14);
         assert_eq!(c.pacing.enemies_per_floor, 8);
-        assert_eq!(c.pacing.normal_souls_div, 5);
         assert_eq!(c.pacing.goal_floor, 100);
-        // piecewise schedule の早期 rate が旧定数と一致 (体感維持)。
         assert!((c.enemy_hp_schedule.multiplier(2) - 1.32).abs() < 1e-9);
         assert!((c.enemy_atk_schedule.multiplier(2) - 1.22).abs() < 1e-9);
-        // 装備テーブルは 12 個。
-        assert_eq!(c.equipment.len(), 12);
+        assert_eq!(c.equipment.len(), 18);
     }
 
     #[test]
     fn enemy_growth_schedule_piecewise() {
         let s = EnemyGrowthSchedule::new(vec![(1, 2.0), (5, 3.0)]);
-        // multiplier(1) = 1.0、multiplier(2..=4) は 2.0 系で乗算
         assert!((s.multiplier(1) - 1.0).abs() < 1e-9);
         assert!((s.multiplier(2) - 2.0).abs() < 1e-9);
         assert!((s.multiplier(4) - 8.0).abs() < 1e-9);
-        // floor 5 で 3.0 segment に切り替わる。multiplier(5) = 8.0 × 3.0 = 24.0
         assert!((s.multiplier(5) - 24.0).abs() < 1e-9);
         assert!((s.multiplier(6) - 72.0).abs() < 1e-9);
     }
 
     #[test]
     fn equipment_table_matches_id_order() {
-        // EquipmentDef::id 並びが EquipmentId::all() と一致する SSOT 保護網。
         let c = BalanceConfig::default();
         for (i, def) in c.equipment.iter().enumerate() {
             assert_eq!(def.id.index(), i, "equipment[{i}] id mismatch");
@@ -763,50 +738,10 @@ mod tests {
     }
 
     #[test]
-    fn tier_curve_single_tier_is_linear() {
-        // 1 段階のみのカーブは線形 (旧バランスと一致)
-        let c = TierCurve::new(vec![(0, 2.0)]);
-        assert_eq!(c.cumulative(0), 0.0);
-        assert_eq!(c.cumulative(10), 20.0);
-        assert_eq!(c.cumulative(50), 100.0);
-    }
-
-    #[test]
-    #[should_panic(expected = "at least one tier")]
-    fn tier_curve_rejects_empty() {
-        let _ = TierCurve::new(vec![]);
-    }
-
-    #[test]
-    #[should_panic(expected = "must start at level 0")]
-    fn tier_curve_rejects_non_zero_start() {
-        let _ = TierCurve::new(vec![(1, 2.0)]);
-    }
-
-    #[test]
-    #[should_panic(expected = "strictly ascending")]
-    fn tier_curve_rejects_non_ascending_starts() {
-        let _ = TierCurve::new(vec![(0, 2.0), (10, 3.0), (10, 5.0)]);
-    }
-
-    #[test]
-    fn tier_curve_multi_tier_accumulates_per_segment() {
-        let c = TierCurve::new(vec![(0, 2.0), (10, 3.0), (25, 5.0)]);
-        // Lv 0..=10 は最初の segment (+2/Lv)
-        assert_eq!(c.cumulative(10), 20.0);
-        // Lv 11..=25 は 20 + 3*(Lv-10)
-        assert_eq!(c.cumulative(15), 20.0 + 3.0 * 5.0);
-        assert_eq!(c.cumulative(25), 20.0 + 3.0 * 15.0); // 65
-        // Lv 26+ は 65 + 5*(Lv-25)
-        assert_eq!(c.cumulative(30), 65.0 + 5.0 * 5.0); // 90
-    }
-
-    #[test]
     fn presets_differ_from_default() {
         let easy = BalanceConfig::easy();
         let hard = BalanceConfig::hard();
         let def = BalanceConfig::default();
-        // 同じフロア (B100) における累積 HP 倍率で難易度差を比較。
         let f = 100u32;
         assert!(easy.enemy_hp_schedule.multiplier(f) < def.enemy_hp_schedule.multiplier(f));
         assert!(hard.enemy_hp_schedule.multiplier(f) > def.enemy_hp_schedule.multiplier(f));
