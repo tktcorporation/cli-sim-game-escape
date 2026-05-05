@@ -579,15 +579,35 @@ impl<'a> ScrollableTab<'a> {
 
         let inner = block.inner(area);
 
-        // Always reserve the scroll column when there is room — keeps the
-        // content width identical whether the list overflows or not, so the
-        // user's spatial expectations don't shift between renders.
-        let (content_area, scroll_col) = split_for_scroll(inner);
+        // Reserve the scroll column **only when overflow is actually
+        // present**. Always-reserving wastes 1 column of horizontal space
+        // and clips lines that were authored to fit the full inner.width
+        // (per Codex review #82). When content fits, callers get the full
+        // inner width and no dead right-edge tap surface.
+        //
+        // Note: `wrap=false` callers (the common case) have a line count
+        // independent of width, so the pre-split overflow check is exact.
+        // For `wrap=true` callers the post-split width is narrower, which
+        // can wrap a few more rows than the pre-split estimate suggests —
+        // worst case the last row gets clipped one cell short of the
+        // arrow, which is acceptable degradation vs. always-reserving.
+        let pre_content_h = if wrap {
+            list.visual_height(inner.width)
+        } else {
+            list.lines().len().min(u16::MAX as usize) as u16
+        };
+        let needs_scroll = pre_content_h > inner.height;
+        let (content_area, scroll_col) = if needs_scroll {
+            split_for_scroll(inner)
+        } else {
+            (inner, None)
+        };
 
         let content_h = if wrap {
             list.visual_height(content_area.width)
         } else {
-            list.lines().len().min(u16::MAX as usize) as u16
+            // wrap=false: line count is width-independent, reuse pre-check.
+            pre_content_h
         };
         let max_scroll = content_h.saturating_sub(content_area.height);
         let scroll = scroll_state.get().min(max_scroll);
@@ -1003,5 +1023,89 @@ mod tests {
         assert_eq!(cs.hit_test(2, 5), Some(2));
         // Outside the overlay → background
         assert_eq!(cs.hit_test(20, 5), Some(1));
+    }
+
+    // ── ScrollableTab tests ────────────────────────────────────
+
+    /// Codex review #82: when content fits, ScrollableTab must NOT reserve
+    /// the right-edge scroll column. Otherwise full-width-authored lines
+    /// (e.g. cafe Cards 32-cell line designs) clip the last cell. The
+    /// clickable list row span equals the full inner.width on no overflow.
+    #[test]
+    fn scrollable_tab_uses_full_width_when_no_overflow() {
+        use ratzilla::ratatui::backend::TestBackend;
+        use ratzilla::ratatui::widgets::Borders;
+        use ratzilla::ratatui::Terminal;
+
+        let scroll = Cell::new(0u16);
+        let mut terminal = Terminal::new(TestBackend::new(32, 20)).unwrap();
+        let mut cs = ClickState::new();
+        cs.terminal_cols = 32;
+        cs.terminal_rows = 20;
+
+        terminal
+            .draw(|f| {
+                let mut cl = ClickableList::new();
+                // 3 行 — height 20 buffer に楽勝で収まる → no overflow
+                cl.push_clickable(Line::from("row 0"), 100);
+                cl.push_clickable(Line::from("row 1"), 101);
+                cl.push_clickable(Line::from("row 2"), 102);
+                ScrollableTab::new(cl, &scroll, 200, 201)
+                    .block(Block::default().borders(Borders::ALL))
+                    .render(f, f.area(), &mut cs);
+            })
+            .unwrap();
+
+        // 行 0 (border の内側 = y=1) の右端 (x=30, 31 の Borders::ALL 内側) が
+        // **clickable list の row 0 (action_id=100)** にヒットすべき。
+        // もし scroll col が常時 reserve されていると、x=30 が dead column になり
+        // hit_test が None または別 ID を返すはず。
+        let inner_right = 30; // border ALL → x=1..30 が inner、x=30 = inner.width-1
+        assert_eq!(
+            cs.hit_test(inner_right, 1),
+            Some(100),
+            "no-overflow case must give clickable list the full inner width \
+             (right-edge cell {inner_right} should belong to row 0, not a dead scroll col)"
+        );
+    }
+
+    /// 対偶: overflow ありなら scroll 列が登録されて右端が ▼ になる。
+    #[test]
+    fn scrollable_tab_reserves_scroll_col_when_overflow() {
+        use ratzilla::ratatui::backend::TestBackend;
+        use ratzilla::ratatui::widgets::Borders;
+        use ratzilla::ratatui::Terminal;
+
+        let scroll = Cell::new(0u16);
+        let mut terminal = Terminal::new(TestBackend::new(32, 6)).unwrap();
+        let mut cs = ClickState::new();
+        cs.terminal_cols = 32;
+        cs.terminal_rows = 6;
+
+        terminal
+            .draw(|f| {
+                let mut cl = ClickableList::new();
+                // 20 行 — buffer 6 行 (border 引いて inner=4) を超える → overflow
+                for i in 0..20 {
+                    cl.push_clickable(Line::from(format!("row {i}")), 100 + i as u16);
+                }
+                ScrollableTab::new(cl, &scroll, 200, 201)
+                    .block(Block::default().borders(Borders::ALL))
+                    .render(f, f.area(), &mut cs);
+            })
+            .unwrap();
+
+        // 右端 (x=30, inner の最終列) が scroll-down (action_id=201) になるはず
+        let inner_right = 30;
+        let mut found_down = false;
+        for y in 1..5 {
+            if cs.hit_test(inner_right, y) == Some(201) {
+                found_down = true;
+            }
+        }
+        assert!(
+            found_down,
+            "overflow case must register ▼ scroll target on the right-edge column"
+        );
     }
 }
