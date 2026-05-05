@@ -220,6 +220,10 @@ pub struct CafeState {
 
     // ── UI ────────────────────────────────────────────
     pub hub_tab: HubTab,
+    /// Animation frame counter for the gacha reveal screen. Reset to 0 when
+    /// entering `GachaResult`, advanced once per `tick`. Drives the staged
+    /// reveal in `render/gacha.rs`.
+    pub gacha_anim_frame: u32,
 }
 
 impl CafeState {
@@ -269,6 +273,7 @@ impl CafeState {
             pending_recovery_bonus: None,
             today_business_runs: 0,
             hub_tab: HubTab::Home,
+            gacha_anim_frame: 0,
         }
     }
 

@@ -39,7 +39,7 @@ pub fn render(state: &CafeState, f: &mut Frame, area: Rect, click_state: &Rc<Ref
         }
         GamePhase::CharacterDetail { target } => interaction::render_character_detail(state, f, area, click_state, *target),
         GamePhase::CardScreen => gacha::render_card_screen(state, f, area, click_state),
-        GamePhase::GachaResult { card_ids } => gacha::render_gacha_result(f, area, click_state, card_ids),
+        GamePhase::GachaResult { card_ids } => gacha::render_gacha_result(state, f, area, click_state, card_ids),
         GamePhase::ProduceCharSelect => produce::render_produce_char_select(state, f, area, click_state),
         GamePhase::ProduceTraining => produce::render_produce_training(state, f, area, click_state),
         GamePhase::ProduceTurnResult { training } => produce::render_produce_turn_result(state, f, area, click_state, *training),
