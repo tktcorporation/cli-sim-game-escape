@@ -147,7 +147,7 @@ pub fn execute_town_choice(state: &mut RpgState, index: usize) -> bool {
                 return false;
             }
             state.gold -= 10;
-            state.hp = state.max_hp;
+            state.hp = state.effective_max_hp();
             state.mp = state.max_mp;
             state.satiety = state.satiety_max;
             state.buffs = PlayerBuffs::default();
@@ -1062,15 +1062,14 @@ pub fn tame_with_treat(state: &mut RpgState, treat_inv_idx: usize) -> bool {
         });
         state.dungeon.as_mut().unwrap().monsters.remove(idx);
         state.add_log(&format!("{}が懐いた！仲間になった！", info.name));
-        true
     } else {
         let info = enemy_info(kind);
         state.add_log(&format!("{}は餌を食べたがそっぽを向いた…", info.name));
         // Wake the monster (now hostile)
         state.dungeon.as_mut().unwrap().monsters[idx].awake = true;
-        on_player_action(state);
-        true
     }
+    on_player_action(state);
+    true
 }
 
 // ── Dungeon Events ───────────────────────────────────────────
