@@ -6,6 +6,7 @@ pub mod career;
 pub mod cookie;
 pub mod factory;
 pub mod godfield;
+pub mod metropolis;
 pub mod rpg;
 
 use std::cell::RefCell;
