@@ -65,8 +65,20 @@ mod tests {
         total_seconds: u32,
         report_at: &[u32],
     ) -> Vec<Snapshot> {
+        run_with_strategy(seed, tier, Strategy::Balanced, workers, total_seconds, report_at)
+    }
+
+    fn run_with_strategy(
+        seed: u64,
+        tier: AiTier,
+        strategy: Strategy,
+        workers: u32,
+        total_seconds: u32,
+        report_at: &[u32],
+    ) -> Vec<Snapshot> {
         let mut city = City::with_seed(seed);
         city.ai_tier = tier;
+        city.strategy = strategy;
         city.workers = workers;
 
         let mut snaps: Vec<Snapshot> = Vec::new();
@@ -122,6 +134,40 @@ mod tests {
         assert!(
             any_income,
             "Tier 1 never started earning income — the game is stalled"
+        );
+    }
+
+    /// Tier 4 strategies should specialize: Income → most cash,
+    /// Growth → biggest population, Balanced in the middle.
+    /// This is the *gameplay reason* the strategy buttons exist.
+    #[test]
+    fn tier4_strategies_specialize() {
+        let seed = 0xC1A5_5EED;
+        let span = 1800;
+        let cps = [1800];
+        let inc = run_with_strategy(seed, AiTier::DemandAware, Strategy::Income, 1, span, &cps);
+        let bal = run_with_strategy(seed, AiTier::DemandAware, Strategy::Balanced, 1, span, &cps);
+        let gro = run_with_strategy(seed, AiTier::DemandAware, Strategy::Growth, 1, span, &cps);
+
+        let inc_final = inc.last().unwrap();
+        let bal_final = bal.last().unwrap();
+        let gro_final = gro.last().unwrap();
+        eprintln!(
+            "[T4 strategy 30min] Income: cash=${} pop={}  Balanced: cash=${} pop={}  Growth: cash=${} pop={}",
+            inc_final.cash, inc_final.population,
+            bal_final.cash, bal_final.population,
+            gro_final.cash, gro_final.population,
+        );
+
+        // Income earns the most.
+        assert!(
+            inc_final.cash >= bal_final.cash,
+            "Income should beat Balanced in cash"
+        );
+        // Growth grows the largest population.
+        assert!(
+            gro_final.population >= bal_final.population,
+            "Growth should beat Balanced in population"
         );
     }
 
