@@ -15,13 +15,10 @@ use crate::widgets::{Clickable, ClickableList, TabBar};
 use super::actions::*;
 use super::logic;
 use super::state::{
-    AbyssState, EquipmentId, EquipmentLane, FloorKind, SoulPerk, Tab, TabGroup, UpgradeKind,
+    AbyssState, EquipmentId, EquipmentLane, FloorKind, SoulPerk, Tab, TabGroup,
 };
 
-/// 主要パネルの Rect。effect 配置と通常描画の両方で同じ値を使うため切り出し。
-///
-/// AbyssGame::render から「敵パネルだけ」に effect を当てたい時、layout 計算を
-/// render.rs と mod.rs で重複させないために共通化している。
+/// 主要パネルの Rect。
 pub struct AbyssLayout {
     pub header: Rect,
     pub combat: Rect,
@@ -32,31 +29,21 @@ pub struct AbyssLayout {
     pub body: Rect,
 }
 
-/// area から各パネル Rect を計算する。`render` の中でも、effect 配置時にも同じ式が使える。
 pub fn compute_layout(area: Rect) -> AbyssLayout {
     let narrow = is_narrow_layout(area.width);
-    // narrow 時は body に縦領域を渡したいので combat を 1 行詰める。
-    // hero panel は narrow で stats 行を省略済 (最大 5 行) なので inner=5 で収まる。
     let combat_height: u16 = if narrow { 7 } else { 9 };
-    // narrow 時はヘッダを 2 行 (B/floor_kind/最深 + 通貨 3 種) に分けるため
-    // 内部 2 行 + ALL ボーダー 2 = 4。wide は従来通り 1 行 (= 3)。
     let header_height: u16 = if narrow { 4 } else { 3 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(header_height),
             Constraint::Length(combat_height),
-            // toggle bar: 浅瀬に戻るボタン 1 行のみ (枠なし)。
-            // 自動潜行トグルは Settings タブに移動した。
             Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(8),
         ])
         .split(area);
 
-    // render_combat 内と同じ Block::default().borders(ALL) で内側 Rect を計算する。
-    // ここを式で揃えておかないと effect の領域がずれて「枠がフラッシュ対象外」みたいに
-    // ちぐはぐになるので、Block を経由して inner を取るのがいちばん安全。
     let combat = chunks[1];
     let combat_inner = Block::default().borders(Borders::ALL).inner(combat);
     let halves = Layout::default()
@@ -84,9 +71,6 @@ pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<Re
     render_toggle_bar(state, f, l.toggle, click_state);
     render_tab_bar(state, f, l.tab_bar, click_state);
 
-    // body 構成: (任意でサブタブバー 1 行) + タブコンテンツ + ログ。
-    // 育成・情報グループはサブタブが複数あるので 1 行のサブタブバーを差し込む。
-    // 単独タブ (ガチャ・設定) はサブタブバー無しでコンテンツに直行。
     let group = TabGroup::from_tab(state.tab);
     let log_h: u16 = if narrow { 4 } else { 5 };
     let constraints: Vec<Constraint> = if group.has_subtabs() {
@@ -124,7 +108,6 @@ pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<Re
 // ── ヘッダ ─────────────────────────────────────────────────
 
 fn render_header(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool) {
-    // 1 行目: フロア / 種別 / 最深
     let mut floor_spans: Vec<Span> = vec![Span::styled(
         format!(" B{}F ", state.floor),
         Style::default()
@@ -151,7 +134,6 @@ fn render_header(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool) {
         Style::default().fg(Color::DarkGray),
     ));
 
-    // 2 行目候補: 通貨 3 種 (gold / soul / key)
     let currency_spans: Vec<Span> = vec![
         Span::styled(
             format!(" 💰{}", format_num(state.gold)),
@@ -172,10 +154,8 @@ fn render_header(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool) {
     ];
 
     let lines: Vec<Line> = if narrow {
-        // narrow 時は 2 行構成。compute_layout の header_height=4 と整合。
         vec![Line::from(floor_spans), Line::from(currency_spans)]
     } else {
-        // wide 時は従来通り 1 行に詰める。spaces で区切る。
         let mut all = floor_spans;
         all.push(Span::raw(" "));
         all.extend(currency_spans);
@@ -224,7 +204,6 @@ fn render_combat(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool) {
         return;
     }
 
-    // 横半分ずつ hero / enemy
     let halves = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -265,7 +244,6 @@ fn render_hero_panel(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool
     )));
     lines.push(Line::from(make_hp_bar_line(state.hero_hp, max_hp, bar_width, Color::Green)));
 
-    // 攻撃進捗バー
     let progress = atk_progress(state.hero_atk_period(), state.hero_atk_cooldown);
     lines.push(Line::from(make_progress_line(
         " ATK ",
@@ -274,7 +252,6 @@ fn render_hero_panel(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool
         Color::Yellow,
     )));
 
-    // 戦闘集中バー (focus)。攻撃成功で溜まり、被弾で削れる。
     let focus_max = state.config.hero.focus_max.max(1);
     let focus_frac = state.combat_focus as f32 / focus_max as f32;
     lines.push(Line::from(make_progress_line(
@@ -364,7 +341,6 @@ fn render_enemy_panel(state: &AbyssState, f: &mut Frame, area: Rect, narrow: boo
     f.render_widget(Paragraph::new(lines), area);
 }
 
-/// 0.0..=1.0 の進捗を返す。cooldown=period (まだ攻撃直後) → 0.0、cooldown=0 (発射寸前) → 1.0
 fn atk_progress(period: u32, cooldown: u32) -> f32 {
     if period == 0 {
         return 1.0;
@@ -407,8 +383,6 @@ fn render_toggle_bar(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    // 自動潜行は Settings タブに移したので、ここは「浅瀬に戻る」1 ボタンのみ。
-    // 枠を外して 1 行に圧縮することで、強化リストに 2 行余分に渡せる。
     if area.height == 0 {
         return;
     }
@@ -424,12 +398,6 @@ fn render_toggle_bar(
 
 // ── タブバー ───────────────────────────────────────────────
 
-/// メインメニュー (4 つのトップグループ) を描画する。
-///
-/// 6 タブ → 4 グループへの階層化: `TabGroup::all()` を SSOT として描画順を取り、
-/// アクティブグループ (= 現在タブの所属グループ) を強調表示する。
-/// 同グループ内のサブタブ間で切り替えても、メインメニュー上はずっと同じ
-/// グループがアクティブのまま (= 認知負荷最小)。
 fn render_tab_bar(
     state: &AbyssState,
     f: &mut Frame,
@@ -450,8 +418,6 @@ fn render_tab_bar(
 
     let narrow = is_narrow_layout(area.width);
     let separator = if narrow { "|" } else { " │ " };
-    // narrow 40 列でも 4 グループはゆとりを持って収まるので、wide では絵文字付き、
-    // narrow ではグループ名そのまま (`TabGroup::name()`) で軽量化。
     let growth_label: &str = if narrow { TabGroup::Growth.name() } else { "🛡育成" };
     let info_label: &str = if narrow { TabGroup::Info.name() } else { "📊情報" };
     let gacha_label: &str = if narrow { TabGroup::Gacha.name() } else { "ガチャ🔑" };
@@ -466,8 +432,6 @@ fn render_tab_bar(
     bar.render(f, area, &mut cs);
 }
 
-/// サブタブバーを描画する (グループにサブタブが複数ある時のみ呼ぶ)。
-/// 占有領域は 1 行。育成グループ `[強化][装備][魂]`、情報グループ `[進捗][統計]`。
 fn render_subtab_bar(
     state: &AbyssState,
     f: &mut Frame,
@@ -532,9 +496,6 @@ fn subtab_color(tab: Tab) -> Color {
 
 // ── スクロール共通ヘルパー ─────────────────────────────────
 
-/// `body 内側の inner` を「コンテンツ領域」と「右端 1 列の ▲▼ スクロール列」に分割する。
-/// inner.width が 1 以下なら scroll 列を作らず content_area = inner を返す
-/// (極小幅でも壊れないように)。
 fn split_for_scroll(inner: Rect) -> (Rect, Option<Rect>) {
     if inner.width <= 1 {
         return (inner, None);
@@ -546,9 +507,6 @@ fn split_for_scroll(inner: Rect) -> (Rect, Option<Rect>) {
     (chunks[0], Some(chunks[1]))
 }
 
-/// `state.tab_scroll` を `[0, max_scroll]` に clamp して書き戻し、適用後の値を返す。
-/// `max_scroll = content_h - content_area_h` (saturating)。
-/// Cell 経由で Game::render の `&self` シグネチャを変えずに実現する。
 fn clamp_tab_scroll(state: &AbyssState, content_h: u16, content_area_h: u16) -> u16 {
     let max_scroll = content_h.saturating_sub(content_area_h);
     let s = state.tab_scroll.get().min(max_scroll);
@@ -556,10 +514,6 @@ fn clamp_tab_scroll(state: &AbyssState, content_h: u16, content_area_h: u16) -> 
     s
 }
 
-/// 右端のスクロール列に ▲▼ ボタンを描画する。
-/// scroll 列の上半分が ▲ tap area、下半分が ▼ tap area。
-/// ボタン自体は端に 1 セル文字で表示するが、Clickable の tap target は領域全体。
-/// (タッチ操作時のヒット領域を稼ぐため。1 セルだけだとモバイルでは tap 困難)
 fn render_scroll_indicators(
     f: &mut Frame,
     area: Rect,
@@ -575,14 +529,11 @@ fn render_scroll_indicators(
         .fg(Color::LightCyan)
         .add_modifier(Modifier::BOLD);
 
-    // 上半分: ▲ (scroll > 0 のときのみ表示・反応)
     if half > 0 && scroll > 0 {
         let up_rect = Rect::new(area.x, area.y, area.width, half);
         let para = Paragraph::new(Line::from(Span::styled("▲", style)));
         Clickable::new(para, SCROLL_UP).render(f, up_rect, cs);
     }
-    // 下半分: ▼ (scroll < max_scroll のときのみ表示・反応)。
-    // 下端に表示するため、上にスペーサ行を入れる。
     if scroll < max_scroll && area.height > half {
         let down_h = area.height - half;
         let down_rect = Rect::new(area.x, area.y + half, area.width, down_h);
@@ -597,25 +548,11 @@ fn render_scroll_indicators(
 
 // ── スクロール対応タブの抽象 ──────────────────────────────
 
-/// 「スクロール可能なタブ本体に入る描画コンテンツ」を表す trait。
-///
-/// 各タブ (強化/魂/設定/統計) は同じ「block + content + ▲▼ 列」レイアウトを
-/// 共有しているが、コンテンツの実体だけが `ClickableList` だったり `Paragraph`
-/// だったりする。この trait を介して `render_scrollable_tab` 1 関数で扱う。
-///
-/// **記述と実行の分離**: impl 側はコンテンツの「データ」(行数の見積もりと
-/// 描画手段) を提供するだけで、block 描画やスクロール列の管理は呼び出し側
-/// (`render_scrollable_tab`) が effect として実行する。
 trait ScrollableContent<'a> {
-    /// 指定 `content_width` で描画した時の visual 行数。max_scroll 計算に使う。
     fn content_height(&self, content_width: u16) -> u16;
-
-    /// `content_area` 内に描画する。`scroll` 分の縦オフセットは impl 側で適用。
-    /// `cs` はクリックターゲット登録が必要な実装 (ClickableList 等) のためだけに渡す。
     fn render(self, f: &mut Frame, content_area: Rect, scroll: u16, cs: &mut ClickState);
 }
 
-/// `ClickableList` を `wrap` 設定とセットで扱うアダプタ。
 struct WrappingClickableList<'a> {
     list: ClickableList<'a>,
     wrap: bool,
@@ -626,13 +563,10 @@ impl<'a> ScrollableContent<'a> for WrappingClickableList<'a> {
         if self.wrap {
             self.list.visual_height(content_width)
         } else {
-            // wrap=false なら論理 1 行 = visual 1 行。
             self.list.lines().len().min(u16::MAX as usize) as u16
         }
     }
     fn render(self, f: &mut Frame, content_area: Rect, scroll: u16, cs: &mut ClickState) {
-        // block は呼び出し側 (render_scrollable_tab) が既に描いているので、
-        // ここでは Block::default() (無 borders) を渡して content_area に直接描画。
         self.list
             .render(f, content_area, Block::default(), cs, self.wrap, scroll);
     }
@@ -640,7 +574,6 @@ impl<'a> ScrollableContent<'a> for WrappingClickableList<'a> {
 
 impl<'a> ScrollableContent<'a> for Vec<Line<'a>> {
     fn content_height(&self, _content_width: u16) -> u16 {
-        // 統計タブは wrap しない固定幅前提。論理 = visual。
         self.len().min(u16::MAX as usize) as u16
     }
     fn render(self, f: &mut Frame, content_area: Rect, scroll: u16, _cs: &mut ClickState) {
@@ -648,15 +581,6 @@ impl<'a> ScrollableContent<'a> for Vec<Line<'a>> {
     }
 }
 
-/// スクロール対応タブの汎用 render エントリ。
-///
-/// 1. `border_color` の枠を `area` 全体に描く
-/// 2. 内側を「コンテンツ + ▲▼ 列」に分割
-/// 3. `content.content_height` から max_scroll を算出して `state.tab_scroll` を clamp
-/// 4. コンテンツを content_area に描画 (clamp 後の scroll を渡す)
-/// 5. 必要に応じて ▲▼ を描画
-///
-/// 各タブの呼び出し箇所は「コンテンツを組み立てて渡す」だけになる。
 fn render_scrollable_tab<'a, C: ScrollableContent<'a>>(
     state: &AbyssState,
     f: &mut Frame,
@@ -685,12 +609,15 @@ fn render_scrollable_tab<'a, C: ScrollableContent<'a>>(
 
 // ── 強化サブタブ ───────────────────────────────────────────
 
-/// 強化サブタブ。線形に近い「Lv + 効果 + コスト」の純粋な投資画面。
+/// 強化サブタブ — **装着中の装備を gold で強化** する画面。
 ///
-/// 装備の追加で「段階的な達成感」が装備ツリーに移ったため、本タブは段階バッジ
-/// (`[剣士]`) や次段階プレビュー (`次: Lv11 [剣豪]`) を一切出さない。
-/// per-Lv の数値も `cumulative(lv+1) - cumulative(lv)` で計算するため、内部 TierCurve
-/// の境界をまたぐ Lv では数値が変化する (これは正しい挙動)。
+/// 表示:
+/// - 各 lane (武器/防具/装飾) ごとに 1 ブロック
+/// - 装着中の装備があれば: 名前 + 強化 Lv + 効果ラベル + 次の強化コスト + [強化] ボタン
+/// - 未装着なら: 「装備未装着」プレースホルダ + 装備タブ誘導文言
+///
+/// クリック: 装着中装備の行をタップで `EnhanceEquipment` を発火。
+/// gold 不足は灰色表示でも logic 側でブロックされる (押せはする)。
 fn render_upgrades(
     state: &AbyssState,
     f: &mut Frame,
@@ -700,48 +627,25 @@ fn render_upgrades(
     let narrow = is_narrow_layout(area.width);
     let mut cl = ClickableList::new();
 
-    for kind in UpgradeKind::all() {
-        let lv = state.upgrades[kind.index()];
-        let cost = state.upgrade_cost(*kind);
-        let affordable = state.gold >= cost;
-
-        let cost_str = format!("{}g", format_num(cost));
-        let cost_style = if affordable {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default().fg(Color::DarkGray)
-        };
-
-        let label_color = if affordable { Color::White } else { Color::DarkGray };
-        let label = format!(" {} ", kind.name());
-        // 次に 1 Lv 上げた時の実増分。curve 持ちは境界跨ぎで数値が変わる。
-        let effect = match state.upgrade_curve(*kind) {
-            Some(curve) => {
-                let delta = curve.cumulative(lv + 1) - curve.cumulative(lv);
-                match kind {
-                    UpgradeKind::Sword => format!("ATK+{}", delta.round() as u64),
-                    UpgradeKind::Vitality => format!("HP+{}", delta.round() as u64),
-                    UpgradeKind::Armor => format!("DEF+{}", delta.round() as u64),
-                    UpgradeKind::Speed => format!("速度+{}%", (delta * 100.0).round() as u64),
-                    _ => kind.effect().to_string(),
-                }
-            }
-            None => kind.effect().to_string(),
-        };
-        let lv_str = format!(" Lv.{}", lv);
-
-        cl.push_clickable(
-            Line::from(vec![
-                Span::styled(label, Style::default().fg(label_color).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{:<10}", effect), Style::default().fg(Color::Cyan)),
-                Span::styled(format!("{:>10}", cost_str), cost_style),
-                Span::styled(lv_str, Style::default().fg(Color::Magenta)),
-            ]),
-            BUY_UPGRADE_BASE + kind.index() as u16,
-        );
+    if !narrow {
+        cl.push(Line::from(vec![
+            Span::styled(
+                " 装備強化",
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                " — 装着中の 3 装備を gold で強化",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+        cl.push(Line::from(""));
     }
 
-    let _ = narrow; // 簡素化により narrow/wide で分岐するほどの内容差は無くなった
+    for &lane in EquipmentLane::all() {
+        push_lane_enhance_block(state, &mut cl, lane);
+        cl.push(Line::from(""));
+    }
+
     render_scrollable_tab(
         state,
         f,
@@ -752,11 +656,139 @@ fn render_upgrades(
     );
 }
 
+/// 強化タブの 1 lane 分のブロックを cl に push する。
+fn push_lane_enhance_block<'a>(
+    state: &AbyssState,
+    cl: &mut ClickableList<'a>,
+    lane: EquipmentLane,
+) {
+    let lane_color = lane_color(lane);
+    let header = format!(" ▣ {}", lane.name());
+
+    match state.equipped_at(lane) {
+        Some(id) => {
+            let def = match state.config.equipment.get(id.index()) {
+                Some(d) => d,
+                None => {
+                    cl.push(Line::from(Span::styled(
+                        header,
+                        Style::default().fg(lane_color).add_modifier(Modifier::BOLD),
+                    )));
+                    return;
+                }
+            };
+            let lv = state.equipment_levels[id.index()];
+            let cost = state.enhance_cost(id);
+            let affordable = state.gold >= cost;
+
+            // ヘッダ行: lane 名 + 装着中装備の名前 + 強化 Lv バッジ。
+            cl.push(Line::from(vec![
+                Span::styled(
+                    format!(" ▣ {} ", lane.name()),
+                    Style::default().fg(lane_color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    def.name.to_string(),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!("+{}", lv),
+                    Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
+                ),
+            ]));
+
+            // 効果プレビュー (ベース + 現 Lv 適用後の値)。
+            let effective = super::state::EquipmentBonus::scaled(
+                &def.base_bonus,
+                &def.per_level_bonus,
+                lv,
+            );
+            cl.push(Line::from(Span::styled(
+                format!("   現効果: {}", format_bonus_summary(&effective)),
+                Style::default().fg(Color::Cyan),
+            )));
+
+            // 強化ボタン行 (この行をクリックで強化発火)。
+            let cost_color = if affordable { Color::Yellow } else { Color::DarkGray };
+            let button_color = if affordable { Color::Green } else { Color::DarkGray };
+            cl.push_clickable(
+                Line::from(vec![
+                    Span::styled(
+                        "   ◆ 強化 ",
+                        Style::default()
+                            .fg(button_color)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled("→ Lv+1: ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{}g", format_num(cost)),
+                        Style::default().fg(cost_color).add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                ENHANCE_EQUIPMENT_BASE + id.index() as u16,
+            );
+        }
+        None => {
+            cl.push(Line::from(Span::styled(
+                header,
+                Style::default().fg(lane_color).add_modifier(Modifier::BOLD),
+            )));
+            cl.push(Line::from(Span::styled(
+                "   (装備未装着 — 装備タブで購入・装着してください)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+}
+
+/// EquipmentBonus を 1 行サマリ (主要な数値だけ)。0 のフィールドは出さない。
+fn format_bonus_summary(b: &super::state::EquipmentBonus) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if b.atk_pct > 0.0 || b.atk_flat > 0 {
+        let mut s = String::from("ATK");
+        if b.atk_pct > 0.0 {
+            s += &format!(" +{}%", (b.atk_pct * 100.0).round() as u64);
+        }
+        if b.atk_flat > 0 {
+            s += &format!("/+{}", b.atk_flat);
+        }
+        parts.push(s);
+    }
+    if b.hp_pct > 0.0 || b.hp_flat > 0 {
+        let mut s = String::from("HP");
+        if b.hp_pct > 0.0 {
+            s += &format!(" +{}%", (b.hp_pct * 100.0).round() as u64);
+        }
+        if b.hp_flat > 0 {
+            s += &format!("/+{}", b.hp_flat);
+        }
+        parts.push(s);
+    }
+    if b.def_flat > 0 {
+        parts.push(format!("DEF +{}", b.def_flat));
+    }
+    if b.crit_bonus > 0.0 {
+        parts.push(format!("CRIT +{:.1}%", b.crit_bonus * 100.0));
+    }
+    if b.speed_pct > 0.0 {
+        parts.push(format!("速度 +{}%", (b.speed_pct * 100.0).round() as u64));
+    }
+    if b.regen_per_sec > 0.0 {
+        parts.push(format!("回復 +{:.1}/s", b.regen_per_sec));
+    }
+    if b.gold_pct > 0.0 {
+        parts.push(format!("金 +{}%", (b.gold_pct * 100.0).round() as u64));
+    }
+    if parts.is_empty() {
+        "—".to_string()
+    } else {
+        parts.join(" / ")
+    }
+}
+
 // ── 魂サブタブ ─────────────────────────────────────────────
 
-/// 魂サブタブ。死亡で蓄積される魂を消費して買う永続バフ 4 種。
-/// 旧 `render_upgrades` 末尾の魂セクションを独立タブとして分離した
-/// (操作頻度が「ラン死亡後に集中」と強化と異なるため)。
 fn render_souls(
     state: &AbyssState,
     f: &mut Frame,
@@ -813,23 +845,12 @@ fn render_souls(
 
 // ── 進捗タブ ───────────────────────────────────────────────
 
-/// 100F ゴールに対する現在地・最深・節目を表示する。
-///
-/// 設計メモ:
-/// - 節目フロアは現状ハードコードのリスト (B10/B25/B50/B75/B100)。
-///   将来 Region 名や報酬の連動が決まったら config から注入する形にする。
-/// - クリッカブル要素を持たない純粋情報パネルなので Paragraph を直接使う。
-/// - バーは area_width に応じて伸縮し、narrow (40 セル) でも崩れない。
 fn render_roadmap(
     state: &AbyssState,
     f: &mut Frame,
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    // `render_scrollable_tab` 経由で他タブと同じ枠組みに揃える。
-    // `tab_scroll` の clamp / ▲▼ オーバーレイが自動で付く。
-    // 内側幅 (= scroll 列差し引き後) は呼び出し側からは見えないので、
-    // バー幅は area から保守的に算出する: 枠 2 + scroll 列 1 + 余白 4 = 7 を引く。
     let inner_width = area.width.saturating_sub(7);
     let goal = state.goal_floor().max(1);
     let cur = state.floor.min(goal);
@@ -837,13 +858,10 @@ fn render_roadmap(
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // タイトル + 進捗テキスト
     lines.push(Line::from(vec![
         Span::styled(
             " 進捗",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  — {}階のゴールまで", goal),
@@ -852,7 +870,6 @@ fn render_roadmap(
     ]));
     lines.push(Line::from(""));
 
-    // 現在地サマリ
     let pct = (cur as f64 / goal as f64 * 100.0).round() as u32;
     lines.push(Line::from(vec![
         Span::styled("  現在: ", Style::default().fg(Color::DarkGray)),
@@ -863,23 +880,12 @@ fn render_roadmap(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("  /  "),
-        Span::styled(
-            format!("B{}F", goal),
-            Style::default().fg(Color::White),
-        ),
-        Span::styled(
-            format!("  ({}%)", pct),
-            Style::default().fg(Color::Yellow),
-        ),
+        Span::styled(format!("B{}F", goal), Style::default().fg(Color::White)),
+        Span::styled(format!("  ({}%)", pct), Style::default().fg(Color::Yellow)),
     ]));
 
-    // 進捗バー — `█` = 現到達, `*` = 過去最深 (現在より深い時のみ), `░` = 未到達。
-    // 上限は撤廃。広い viewport ではバーを最大限引き伸ばし、「ゴールまでの距離」感を強調。
     let bar_width: u16 = inner_width.max(10);
     let filled = ((cur as u64 * bar_width as u64) / goal as u64) as u16;
-    // `deepest * bar_width / goal` は deepest == goal の時に bar_width 丁度になり、
-    // `for i in 0..bar_width` ループの範囲外になって `*` が消える。最終 cell に
-    // クランプして、ゴール到達経験者の最深マーカーを必ず描画する。
     let deepest_pos = ((deepest as u64 * bar_width as u64) / goal as u64) as u16;
     let deepest_pos = deepest_pos.min(bar_width.saturating_sub(1));
 
@@ -903,37 +909,20 @@ fn render_roadmap(
 
     if deepest > cur {
         lines.push(Line::from(vec![
-            Span::styled(
-                "  最深記録: ",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled("  最深記録: ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 format!("B{}F", deepest),
-                Style::default()
-                    .fg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "  (バー上の * 印)",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled("  (バー上の * 印)", Style::default().fg(Color::DarkGray)),
         ]));
     }
 
-    // 節目フロアリスト。各節目までの距離を出すことで「次の目標」を示す。
-    // 区画名・節目報酬は今後の Issue で埋める拡張点 (CLAUDE.md game design 参照)。
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         " 節目フロア",
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
     )));
-    // 節目は goal_floor の百分率で導出 (10/25/50/75/100%)。
-    // goal=100 なら従来の B10/B25/B50/B75/B100、goal=50 なら B5/B12/B25/B37/B50、
-    // goal=200 なら B20/B50/B100/B150/B200 と自動的に追従する。
-    // 重複除去 (goal が小さい時に同一 floor が複数回出るのを防ぐ) のため、
-    // 直前の milestone と異なる場合のみ表示する。
     let mut last_milestone: u32 = 0;
     for pct in [10u32, 25, 50, 75, 100] {
         let milestone = (((goal as u64 * pct as u64) / 100).max(1) as u32).min(goal);
@@ -950,14 +939,7 @@ fn render_roadmap(
         } else {
             ("·", Color::DarkGray)
         };
-        let line_color = if reached || ever_reached {
-            Color::White
-        } else {
-            Color::DarkGray
-        };
-        // ステータス文字列: 到達済 / 過去最深で踏破 / 未到達なら残り N フロア。
-        // 残距離は `milestone - cur` (1-indexed フロアなので素直な差分)。
-        // 例: cur=12 → B25F まで 13 階上昇 (12→13→...→25 で 13 ステップ)。
+        let line_color = if reached || ever_reached { Color::White } else { Color::DarkGray };
         let status = if reached {
             "(到達済)".to_string()
         } else if ever_reached {
@@ -974,10 +956,7 @@ fn render_roadmap(
         };
         lines.push(Line::from(vec![
             Span::styled(format!("  {} ", mark), Style::default().fg(mark_color)),
-            Span::styled(
-                format!("B{}F", milestone),
-                Style::default().fg(line_color),
-            ),
+            Span::styled(format!("B{}F", milestone), Style::default().fg(line_color)),
             Span::raw("  "),
             Span::styled(status, Style::default().fg(status_color)),
         ]));
@@ -988,15 +967,13 @@ fn render_roadmap(
 
 // ── 装備ショップタブ ───────────────────────────────────────
 
-/// 装備ショップタブ。lane 連鎖型の解放ツリー。
+/// 装備ショップタブ。lane ごとに購入と装着切替を行う中心ハブ。
 ///
-/// 表示ルール:
-/// - 解放済みは ✓ + 効果のフル表示
-/// - lane 内の「次に解放可能」(直前装備所持済み or lane 入口) は条件と効果を表示
-/// - その先 (= 次の次) は `???` で隠す。解放を進めると順次明らかになる
-///
-/// クリック: 「次」エントリで全条件 + gold が揃っていればタップで購入。
-/// 条件不足は灰色表示でタップしても無効 (logic 側で弾かれる)。
+/// 行の状態:
+/// - 装着中: ✓ + " (装着中)"
+/// - 所持済み (未装着): ✓ + [装着] ボタン (= EQUIP_ITEM クリックターゲット)
+/// - 次に解放可能: ◆/◇ + [購入] ボタン (= BUY_EQUIPMENT クリックターゲット)
+/// - その先以降: `???` で隠す (1 個だけ表示してリストを圧縮)
 fn render_shop(
     state: &AbyssState,
     f: &mut Frame,
@@ -1018,27 +995,19 @@ fn render_shop(
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                " — gold + 強化 Lv で永続装備を解放",
+                " — 各 lane で購入と装着切替",
                 Style::default().fg(Color::DarkGray),
             ),
         ]));
     }
 
-    // 各 lane を順に描画。lane の SSOT として全装備を走査して lane ごとに振り分ける。
-    for lane in [
-        EquipmentLane::Weapon,
-        EquipmentLane::Armor,
-        EquipmentLane::Accessory,
-    ] {
+    for lane in EquipmentLane::all().iter().copied() {
         cl.push(Line::from(""));
         cl.push(Line::from(Span::styled(
             format!(" ▣ {}", lane.name()),
-            Style::default()
-                .fg(lane_color(lane))
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(lane_color(lane)).add_modifier(Modifier::BOLD),
         )));
 
-        // この lane の装備を lane_index 順に取り出す。
         let mut lane_items: Vec<EquipmentId> = EquipmentId::all()
             .iter()
             .copied()
@@ -1046,8 +1015,7 @@ fn render_shop(
             .collect();
         lane_items.sort_by_key(|id| id.lane_index());
 
-        // 「次に見える」装備の lane_index を求める:
-        //   = 最後の所持装備の lane_index + 1 (誰も持ってなければ 0)
+        // 「次に見える」装備の lane_index = 最後の所持装備の lane_index + 1。
         let next_visible_idx = lane_items
             .iter()
             .rev()
@@ -1061,14 +1029,10 @@ fn render_shop(
             let li = id.lane_index();
 
             if owned {
-                cl.push(equipment_owned_line(state, id, narrow));
+                push_owned_equipment_line(state, &mut cl, id, lane);
             } else if li == next_visible_idx {
-                cl.push_clickable(
-                    equipment_next_line(state, id, narrow),
-                    BUY_EQUIPMENT_BASE + id.index() as u16,
-                );
+                push_buyable_equipment_line(state, &mut cl, id, narrow);
             } else {
-                // 「次の次」以降。1 行だけ ??? を出して以降は省略 (リスト圧縮)。
                 if !hid_a_step {
                     cl.push(Line::from(vec![
                         Span::raw("   "),
@@ -1098,16 +1062,25 @@ fn lane_color(lane: EquipmentLane) -> Color {
     }
 }
 
-/// 解放済み装備の 1 行表示。
-fn equipment_owned_line<'a>(state: &AbyssState, id: EquipmentId, _narrow: bool) -> Line<'a> {
+/// 所持済み装備の 1 行表示。装着中なら "(装着中)" タグ、それ以外なら [装着] ボタン。
+fn push_owned_equipment_line<'a>(
+    state: &AbyssState,
+    cl: &mut ClickableList<'a>,
+    id: EquipmentId,
+    lane: EquipmentLane,
+) {
     let def = match state.config.equipment.get(id.index()) {
         Some(d) => d,
-        None => return Line::from(""),
+        None => return,
     };
-    Line::from(vec![
+    let lv = state.equipment_levels[id.index()];
+    let is_equipped = state.equipped_at(lane) == Some(id);
+
+    let name_str = format!("{} +{}", def.name, lv);
+    let mut spans = vec![
         Span::styled(" ✓ ", Style::default().fg(Color::Green)),
         Span::styled(
-            def.name.to_string(),
+            name_str,
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
@@ -1115,21 +1088,47 @@ fn equipment_owned_line<'a>(state: &AbyssState, id: EquipmentId, _narrow: bool) 
             def.effect_label.to_string(),
             Style::default().fg(Color::Cyan),
         ),
-    ])
+    ];
+
+    if is_equipped {
+        // 装着中: タグだけ。クリック不可な行 (push、push_clickable ではなく)。
+        spans.push(Span::styled(
+            "  [装着中]",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ));
+        cl.push(Line::from(spans));
+    } else {
+        // 未装着: [装着] ボタン (= EQUIP_ITEM クリックターゲット)。
+        spans.push(Span::styled(
+            "  [装着]",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        ));
+        cl.push_clickable(Line::from(spans), EQUIP_ITEM_BASE + id.index() as u16);
+    }
 }
 
 /// 「次に解放可能」装備の 1 行表示。条件達成度で色を変える。
-fn equipment_next_line<'a>(state: &AbyssState, id: EquipmentId, narrow: bool) -> Line<'a> {
+fn push_buyable_equipment_line<'a>(
+    state: &AbyssState,
+    cl: &mut ClickableList<'a>,
+    id: EquipmentId,
+    narrow: bool,
+) {
     let def = match state.config.equipment.get(id.index()) {
         Some(d) => d,
-        None => return Line::from(""),
+        None => return,
     };
     let req_met = logic::equipment_requirements_met(state, id);
-    let cost = def.requirement.gold_cost;
+    let cost = def.gold_cost;
     let gold_ok = state.gold >= cost;
     let buyable = req_met && gold_ok;
 
-    // 状態マーカー: 全条件達成 = ◆、条件未達 = ◇
     let marker = if buyable { " ◆ " } else { " ◇ " };
     let marker_color = if buyable { Color::Yellow } else { Color::DarkGray };
     let label_color = if buyable { Color::White } else { Color::Gray };
@@ -1139,15 +1138,12 @@ fn equipment_next_line<'a>(state: &AbyssState, id: EquipmentId, narrow: bool) ->
         Span::styled(marker, Style::default().fg(marker_color)),
         Span::styled(
             def.name.to_string(),
-            Style::default()
-                .fg(label_color)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(label_color).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
         Span::styled(def.effect_label.to_string(), Style::default().fg(Color::Cyan)),
     ];
 
-    // narrow では cost のみ右に置く (条件詳細は次行)
     spans.push(Span::raw("  "));
     spans.push(Span::styled(
         format!("{}g", format_num(cost)),
@@ -1164,19 +1160,12 @@ fn equipment_next_line<'a>(state: &AbyssState, id: EquipmentId, narrow: bool) ->
     }
 
     if !narrow && !req_met {
-        // 不足条件を 1 行に詰めて表示 (wide のみ)。
         let mut missing: Vec<String> = Vec::new();
-        if let Some(prereq) = def.requirement.prerequisite {
+        if let Some(prereq) = def.prerequisite {
             if !state.owned_equipment[prereq.index()] {
                 if let Some(p_def) = state.config.equipment.get(prereq.index()) {
                     missing.push(format!("要 {}", p_def.name));
                 }
-            }
-        }
-        for &(kind, min_lv) in &def.requirement.upgrade_levels {
-            let cur = state.upgrades[kind.index()];
-            if cur < min_lv {
-                missing.push(format!("{} Lv {}/{}", kind.name(), cur, min_lv));
             }
         }
         if !missing.is_empty() {
@@ -1187,13 +1176,11 @@ fn equipment_next_line<'a>(state: &AbyssState, id: EquipmentId, narrow: bool) ->
         }
     }
 
-    Line::from(spans)
+    cl.push_clickable(Line::from(spans), BUY_EQUIPMENT_BASE + id.index() as u16);
 }
 
 // ── 設定タブ ───────────────────────────────────────────────
 
-/// 設定タブ。「セッションを通して頻繁に切り替えない項目」を集約する場所。
-/// 現状は自動潜行のみ。将来的に難易度・サウンド・倍速プレイ等を入れる想定。
 fn render_settings(
     state: &AbyssState,
     f: &mut Frame,
@@ -1203,7 +1190,6 @@ fn render_settings(
     let narrow = is_narrow_layout(area.width);
     let mut cl = ClickableList::new();
 
-    // ヘッダ。narrow では副題を畳む (強化タブと同じポリシー)。
     if narrow {
         cl.push(Line::from(Span::styled(
             " 設定",
@@ -1223,8 +1209,6 @@ fn render_settings(
         cl.push(Line::from(""));
     }
 
-    // ── 自動潜行トグル ──
-    // 行タップで TOGGLE_AUTO_DESCEND を発火 (action ID は toggle bar 時代から再利用)。
     let (state_label, state_color) = if state.auto_descend {
         ("ON ▼", Color::Green)
     } else {
@@ -1280,6 +1264,30 @@ fn render_stats(
     lines.push(stat_line("総撃破数", format_num(state.total_kills)));
     lines.push(stat_line("死亡回数", format_num(state.deaths)));
     lines.push(Line::from(""));
+
+    // 装着中装備一覧。
+    lines.push(Line::from(Span::styled(
+        " 装着中装備",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )));
+    for &lane in EquipmentLane::all() {
+        let label = match state.equipped_at(lane) {
+            Some(id) => {
+                let name = state
+                    .config
+                    .equipment
+                    .get(id.index())
+                    .map(|d| d.name)
+                    .unwrap_or("?");
+                let lv = state.equipment_levels[id.index()];
+                format!("{} +{}", name, lv)
+            }
+            None => "(未装着)".to_string(),
+        };
+        lines.push(stat_line(lane.name(), label));
+    }
+
+    lines.push(Line::from(""));
     lines.push(stat_line("ATK", format!("{}", state.hero_atk())));
     lines.push(stat_line("DEF", format!("{}", state.hero_def())));
     lines.push(stat_line("最大HP", format!("{}", state.hero_max_hp())));
@@ -1309,8 +1317,6 @@ fn render_stats(
         format!("×{:.2}", state.gold_multiplier()),
     ));
 
-    // ScrollableContent の Vec<Line> impl 経由で render_scrollable_tab に委譲。
-    // 強化/魂/設定タブと完全に同じパターンで描画される。
     render_scrollable_tab(state, f, area, click_state, Color::Cyan, lines);
 }
 
@@ -1323,14 +1329,6 @@ fn stat_line(label: &'static str, value: String) -> Line<'static> {
 
 // ── ガチャタブ ─────────────────────────────────────────────
 
-/// ガチャタブ。ヘッダ・1連/10連ボタン・直近結果・確率テーブルを縦に並べ、
-/// 全体を `render_scrollable_tab` に通して縦が足りない時は ▲▼ でスクロール
-/// できるようにする (他タブと同じ流儀)。
-///
-/// ボタンは `Block` 付きの `Clickable` ではなく、3 行のボックス絵文字を
-/// `ClickableList` の連続 push_clickable で組む — こうすると scroll/wrap と
-/// 整合した hit 領域が自動で得られる (タップ可能な行が 3 行分稼げるので、
-/// モバイルでも当てやすい)。
 fn render_gacha(
     state: &AbyssState,
     f: &mut Frame,
@@ -1378,15 +1376,11 @@ fn push_gacha_header<'a>(state: &AbyssState, cl: &mut ClickableList<'a>) {
     cl.push(Line::from(vec![
         Span::styled(
             " 🎲 深淵ガチャ",
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  所持: 🔑{}", format_num(state.keys)),
-            Style::default()
-                .fg(Color::LightCyan)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("  累計: {}回", format_num(state.total_pulls)),
@@ -1399,8 +1393,6 @@ fn push_gacha_header<'a>(state: &AbyssState, cl: &mut ClickableList<'a>) {
     )));
 }
 
-/// 3 行のボックス型ボタンを clickable line として積む。
-/// 全 3 行に同じ action_id を紐付けることで、行内のどこをタップしても発火する。
 fn push_gacha_button<'a>(
     cl: &mut ClickableList<'a>,
     label: &str,
@@ -1412,8 +1404,6 @@ fn push_gacha_button<'a>(
     let style = Style::default().fg(color);
     let bold = style.add_modifier(Modifier::BOLD);
 
-    // ボックス幅は narrow (40 列) でも収まる 20 セルに固定。
-    // 内側 18 セルに `▶ <label> ◀` を中央寄せで描画。
     let inner_w: usize = 18;
     let label_padded = format!("▶ {} ◀", label);
     let pad_total = inner_w.saturating_sub(label_padded.chars().count());
@@ -1443,9 +1433,7 @@ fn push_gacha_button<'a>(
 fn push_gacha_last_result<'a>(state: &AbyssState, cl: &mut ClickableList<'a>) {
     cl.push(Line::from(Span::styled(
         " ── 直近結果 ──",
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
     )));
 
     let Some(r) = &state.last_gacha else {
@@ -1456,31 +1444,23 @@ fn push_gacha_last_result<'a>(state: &AbyssState, cl: &mut ClickableList<'a>) {
         return;
     };
 
-    // 1 行目: 等級分布
     cl.push(Line::from(vec![
         Span::styled(
             format!(" x{} ", r.count),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!("C:{} ", r.by_tier[0]), Style::default().fg(Color::Gray)),
         Span::styled(format!("R:{} ", r.by_tier[1]), Style::default().fg(Color::Cyan)),
         Span::styled(
             format!("E:{} ", r.by_tier[2]),
-            Style::default()
-                .fg(Color::Magenta)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             format!("L:{} ", r.by_tier[3]),
-            Style::default()
-                .fg(Color::LightYellow)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
         ),
     ]));
 
-    // 2 行目: 報酬合計
     let mut reward_spans: Vec<Span> = vec![Span::raw(" ")];
     if r.gained_gold > 0 {
         reward_spans.push(Span::styled(
@@ -1500,9 +1480,9 @@ fn push_gacha_last_result<'a>(state: &AbyssState, cl: &mut ClickableList<'a>) {
             Style::default().fg(Color::LightCyan),
         ));
     }
-    if r.gained_upgrade_lv > 0 {
+    if r.gained_enh_lv > 0 {
         reward_spans.push(Span::styled(
-            format!("◆Lv+{} ", r.gained_upgrade_lv),
+            format!("◆強化+{} ", r.gained_enh_lv),
             Style::default().fg(Color::Green),
         ));
     }
@@ -1517,10 +1497,9 @@ fn push_gacha_table<'a>(state: &AbyssState, cl: &mut ClickableList<'a>, narrow: 
     let total: u32 = g.gacha_weights_milli.iter().sum::<u32>().max(1);
     let pct = |w: u32| -> String { format!("{:.1}%", (w as f64 / total as f64) * 100.0) };
 
-    // (label, label_color, weight_idx, weight_bold, reward_text)
     let rows: [(&'static str, Color, usize, bool, String); 4] = [
         ("Common   ", Color::Gray, 0, false, "💰 大量 gold".to_string()),
-        ("Rare     ", Color::Cyan, 1, false, "◆ 強化レベル+1 (永続)".to_string()),
+        ("Rare     ", Color::Cyan, 1, false, "◆ 装着中装備の強化 +1".to_string()),
         ("Epic     ", Color::Magenta, 2, true, "✦ 魂 (現フロア依存)".to_string()),
         (
             "Legendary",
@@ -1533,9 +1512,7 @@ fn push_gacha_table<'a>(state: &AbyssState, cl: &mut ClickableList<'a>, narrow: 
 
     cl.push(Line::from(Span::styled(
         " 確率テーブル",
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD),
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
     )));
 
     for (label, color, idx, bold, reward) in rows.iter() {
@@ -1548,7 +1525,6 @@ fn push_gacha_table<'a>(state: &AbyssState, cl: &mut ClickableList<'a>, narrow: 
         let pct_str = pct(g.gacha_weights_milli[*idx]);
 
         if narrow {
-            // 1 行目: 等級 + 確率。2 行目: 報酬説明 (インデント)。
             cl.push(Line::from(vec![
                 Span::styled(format!("  {} ", label), label_style),
                 Span::styled(pct_str, weight_style),
@@ -1630,9 +1606,7 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    /// ガチャタブを描画したとき、1連 / 10連ボタンが実描画位置に対して
-    /// クリックターゲット登録されていることを TestBackend で確認。
-    /// (CLAUDE.md: Widget Primitive 規約のチェックリスト)
+    /// ガチャタブの 1連/10連 ボタンが click target として登録されること。
     #[test]
     fn gacha_buttons_register_clickable_areas() {
         let mut state = AbyssState::new();
@@ -1640,14 +1614,8 @@ mod tests {
         state.keys = 100;
         let cs = Rc::new(RefCell::new(ClickState::new()));
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
-        terminal
-            .draw(|f| {
-                render(&state, f, f.area(), &cs);
-            })
-            .unwrap();
+        terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
 
-        // ボタン領域のいずれかのセルでヒットテストすると 1連/10連 ID が返る。
-        // 描画位置を厳密に固定せず、どこかで両方検出されることを確認する。
         let cs = cs.borrow();
         let mut found_one = false;
         let mut found_ten = false;
@@ -1660,20 +1628,16 @@ mod tests {
                 }
             }
         }
-        assert!(found_one, "GACHA_PULL_1 button not registered");
-        assert!(found_ten, "GACHA_PULL_10 button not registered");
+        assert!(found_one);
+        assert!(found_ten);
     }
 
-    /// メインメニューの 4 グループがクリック可能領域として登録されていることを確認。
-    /// 階層化前は 5 タブをトップに並べていたが、現在は 4 グループに集約されている。
     #[test]
     fn all_top_groups_registered() {
         let state = AbyssState::new();
         let cs = Rc::new(RefCell::new(ClickState::new()));
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
-        terminal
-            .draw(|f| render(&state, f, f.area(), &cs))
-            .unwrap();
+        terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
         let cs = cs.borrow();
         let mut found = [false; 4];
         for y in 0..30 {
@@ -1687,508 +1651,102 @@ mod tests {
                 }
             }
         }
-        assert!(found.iter().all(|&b| b), "missing top-group targets: {:?}", found);
+        assert!(found.iter().all(|&b| b));
     }
 
-    /// 育成グループ (multi-subtab) を開いた時、サブタブバーに 3 サブタブ
-    /// (強化/装備/魂) のクリックターゲットが登録されること。
     #[test]
     fn growth_group_renders_three_subtabs() {
         let state = AbyssState::new();
-        // 既定で Tab::Upgrades = 育成グループ。
         let cs = Rc::new(RefCell::new(ClickState::new()));
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
-        terminal
-            .draw(|f| render(&state, f, f.area(), &cs))
-            .unwrap();
+        terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
         let cs = cs.borrow();
-        let mut found = [false; 3];
+        let mut found_subtabs = [false; 3];
         for y in 0..30 {
             for x in 0..80 {
                 match cs.hit_test(x, y) {
-                    Some(TAB_UPGRADES) => found[0] = true,
-                    Some(TAB_SHOP) => found[1] = true,
-                    Some(TAB_SOULS) => found[2] = true,
+                    Some(TAB_UPGRADES) => found_subtabs[0] = true,
+                    Some(TAB_SHOP) => found_subtabs[1] = true,
+                    Some(TAB_SOULS) => found_subtabs[2] = true,
                     _ => {}
                 }
             }
         }
-        assert!(
-            found.iter().all(|&b| b),
-            "missing growth subtab targets: {:?}",
-            found
-        );
+        assert!(found_subtabs.iter().all(|&b| b));
     }
 
-    /// narrow (40 列) で全 7 タブをアクティブにして描画してもパニックせず、
-    /// **メインメニュー 4 グループ全て**がクリック可能領域として登録されること。
-    /// レイアウト変更で行数が膨らんで Constraint が負になる回帰も同時に防ぐ。
+    /// 強化タブで装着中装備の行が ENHANCE_EQUIPMENT_BASE+id クリックターゲットを持つこと。
     #[test]
-    fn narrow_layout_renders_all_top_groups() {
+    fn upgrades_tab_registers_enhance_target_for_equipped() {
         let mut state = AbyssState::new();
-        state.keys = 100;
-        let tabs = [
-            Tab::Upgrades,
-            Tab::Roadmap,
-            Tab::Stats,
-            Tab::Gacha,
-            Tab::Settings,
-            Tab::Shop,
-            Tab::Souls,
-        ];
-        for &tab in &tabs {
-            state.tab = tab;
-            let cs = Rc::new(RefCell::new(ClickState::new()));
-            let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
-            terminal
-                .draw(|f| render(&state, f, f.area(), &cs))
-                .unwrap();
-            let cs = cs.borrow();
-            let mut found = [false; 4];
-            for y in 0..30 {
-                for x in 0..40 {
-                    match cs.hit_test(x, y) {
-                        Some(TAB_GROUP_GROWTH) => found[0] = true,
-                        Some(TAB_GROUP_INFO) => found[1] = true,
-                        Some(TAB_GROUP_GACHA) => found[2] = true,
-                        Some(TAB_GROUP_SETTINGS) => found[3] = true,
-                        _ => {}
-                    }
-                }
-            }
-            assert!(
-                found.iter().all(|&b| b),
-                "narrow tab {:?}: missing top-group targets {:?}",
-                tab,
-                found
-            );
-        }
-    }
-
-    /// narrow (40 列) で 7 つの強化アイテム全てがクリック可能領域として
-    /// 登録されることを確認 — 縦が足りずに後半が切れて「下が見えない」回帰を防ぐ。
-    ///
-    /// 40x30 はモバイル縦の中でもタイトな部類 (キーボード表示時等)。
-    /// この高さで 7 アイテム全部 visible にできるかが narrow 設計の肝。
-    /// 高さを 47 等の余裕ある値にすると、修正前のレイアウトでも偶然通って
-    /// 回帰検出に失敗するため、わざと厳しめの高さで検証する。
-    #[test]
-    fn narrow_upgrades_all_visible() {
-        let mut state = AbyssState::new();
+        state.gold = 1_000_000;
+        // 銅剣を購入 → 自動装着。
+        super::super::logic::buy_equipment(&mut state, EquipmentId::BronzeSword);
         state.tab = Tab::Upgrades;
-        let cs = Rc::new(RefCell::new(ClickState::new()));
-        let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
-        terminal
-            .draw(|f| render(&state, f, f.area(), &cs))
-            .unwrap();
-        let cs = cs.borrow();
-        let mut found = [false; 7];
-        for y in 0..30 {
-            for x in 0..40 {
-                if let Some(id) = cs.hit_test(x, y) {
-                    if (BUY_UPGRADE_BASE..BUY_UPGRADE_BASE + 7).contains(&id) {
-                        found[(id - BUY_UPGRADE_BASE) as usize] = true;
-                    }
-                }
-            }
-        }
-        assert!(
-            found.iter().all(|&b| b),
-            "narrow upgrades not all visible at 40x30: {:?}",
-            found
-        );
-    }
 
-    /// タブ切替で `tab_scroll` が 0 にリセットされる。
-    /// (logic::set_tab で `tab_scroll.set(0)` してる挙動の回帰検知)
-    #[test]
-    fn tab_switch_resets_scroll() {
-        use crate::games::abyss::logic;
-        use crate::games::abyss::policy::PlayerAction;
-
-        let mut state = AbyssState::new();
-        state.tab_scroll.set(99);
-        logic::apply_action(&mut state, PlayerAction::SetTab(Tab::Roadmap));
-        assert_eq!(state.tab_scroll.get(), 0);
-    }
-
-    /// 極小縦サイズ (40x20) で強化タブを開くと初期状態では下が切れるが、
-    /// スクロールすれば最後の Gold (idx=6) のクリックターゲットに到達できる。
-    /// scroll の round-trip (action 適用 → render → 反映) を網羅的に検証する。
-    #[test]
-    fn narrow_upgrades_scroll_to_bottom() {
-        use crate::games::abyss::logic;
-        use crate::games::abyss::policy::PlayerAction;
-
-        let mut state = AbyssState::new();
-        state.tab = Tab::Upgrades;
-        let cs = Rc::new(RefCell::new(ClickState::new()));
-        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
-
-        // 初期 frame で render し、tab_scroll を clamp させる
-        // (visual_height ベースで max_scroll が決定する)
-        terminal
-            .draw(|f| render(&state, f, f.area(), &cs))
-            .unwrap();
-
-        // 何度か ScrollDown を流し続けて、その都度 render すれば必ず Gold が
-        // 見える位置に来る (clamp で max_scroll を超えない)。20 回以上で十分
-        // (7 アイテム × 平均 2 visual = 14 行に対し step 3、即ち 5 回程度で底)。
-        let mut found_gold = false;
-        for _ in 0..20 {
-            logic::apply_action(&mut state, PlayerAction::ScrollDown);
-            cs.borrow_mut().clear_targets();
-            terminal
-                .draw(|f| render(&state, f, f.area(), &cs))
-                .unwrap();
-            let cs_ref = cs.borrow();
-            for y in 0..20 {
-                for x in 0..40 {
-                    if cs_ref.hit_test(x, y) == Some(BUY_UPGRADE_BASE + 6) {
-                        found_gold = true;
-                    }
-                }
-            }
-            if found_gold {
-                break;
-            }
-        }
-        assert!(found_gold, "Gold (idx=6) never reachable via ScrollDown at 40x20");
-    }
-
-    /// 設定タブを開いた時、自動潜行トグルがクリック可能領域として登録されること。
-    /// (自動潜行を toggle bar から settings タブに移動した回帰検知用)
-    #[test]
-    fn settings_tab_registers_auto_descend_toggle() {
-        let mut state = AbyssState::new();
-        state.tab = Tab::Settings;
         let cs = Rc::new(RefCell::new(ClickState::new()));
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
-        terminal
-            .draw(|f| render(&state, f, f.area(), &cs))
-            .unwrap();
+        terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
         let cs = cs.borrow();
+        let target = ENHANCE_EQUIPMENT_BASE + EquipmentId::BronzeSword.index() as u16;
         let mut found = false;
         for y in 0..30 {
             for x in 0..80 {
-                if matches!(cs.hit_test(x, y), Some(TOGGLE_AUTO_DESCEND)) {
+                if cs.hit_test(x, y) == Some(target) {
                     found = true;
                 }
             }
         }
-        assert!(found, "TOGGLE_AUTO_DESCEND not clickable in settings tab");
+        assert!(found, "強化ターゲット {} が登録されていない", target);
     }
 
-    /// narrow (40 列) ガチャタブで、縦積みになったボタンが両方登録されること。
-    /// ガチャは header + button + result + table と要素が多いので height は
-    /// 余裕を持たせる (実機モバイルでも縦は十分確保できる前提)。
+    /// 装備タブで lane 入口装備が BUY_EQUIPMENT_BASE クリックターゲットを持つこと。
     #[test]
-    fn narrow_gacha_buttons_registered() {
+    fn shop_tab_registers_buy_target_for_lane_entry() {
         let mut state = AbyssState::new();
-        state.tab = Tab::Gacha;
-        state.keys = 100;
+        state.gold = 1_000;
+        state.tab = Tab::Shop;
+
         let cs = Rc::new(RefCell::new(ClickState::new()));
-        let mut terminal = Terminal::new(TestBackend::new(40, 50)).unwrap();
-        terminal
-            .draw(|f| render(&state, f, f.area(), &cs))
-            .unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
         let cs = cs.borrow();
-        let mut found_one = false;
-        let mut found_ten = false;
-        for y in 0..50 {
-            for x in 0..40 {
-                match cs.hit_test(x, y) {
-                    Some(GACHA_PULL_1) => found_one = true,
-                    Some(GACHA_PULL_10) => found_ten = true,
-                    _ => {}
+        let target = BUY_EQUIPMENT_BASE + EquipmentId::BronzeSword.index() as u16;
+        let mut found = false;
+        for y in 0..40 {
+            for x in 0..80 {
+                if cs.hit_test(x, y) == Some(target) {
+                    found = true;
                 }
             }
         }
-        assert!(found_one && found_ten, "narrow gacha buttons missing");
+        assert!(found, "購入ターゲット {} が登録されていない", target);
     }
 
-    /// 極小縦サイズ (40x22) でガチャタブを開くと、初期状態では確率テーブル末尾の
-    /// 「鍵入手:」行が見えないが、ScrollDown を繰り返せば必ずバッファに到達できる。
-    /// `render_scrollable_tab` 経由になっていない (= 末尾コンテンツが切り捨て) と
-    /// max_scroll が 0 のままになって never reach する回帰を防ぐ。
+    /// 所持済み (未装着) の装備に EQUIP_ITEM_BASE クリックターゲットが登録されること。
+    /// 銅剣を買って装着 → 鋼鉄の剣を買って自動装着 (新装備) → 銅剣は所持中だが未装着 → [装着] ボタン化。
     #[test]
-    fn narrow_gacha_table_reachable_via_scroll() {
-        use crate::games::abyss::logic;
-        use crate::games::abyss::policy::PlayerAction;
-
+    fn shop_tab_registers_equip_target_for_owned_unequipped() {
         let mut state = AbyssState::new();
-        state.tab = Tab::Gacha;
-        state.keys = 100;
-        let cs = Rc::new(RefCell::new(ClickState::new()));
-        let mut terminal = Terminal::new(TestBackend::new(40, 22)).unwrap();
+        state.gold = 1_000_000_000;
+        super::super::logic::buy_equipment(&mut state, EquipmentId::BronzeSword);
+        super::super::logic::buy_equipment(&mut state, EquipmentId::SteelSword);
+        // ここで装着中は SteelSword、所持中で未装着は BronzeSword。
+        state.tab = Tab::Shop;
 
-        // 確率テーブル末尾の「Legendary」行 (= 4 等級の最後) が画面バッファに
-        // 出ているかをチェックするヘルパー。ASCII のみなので CJK セル幅問題に
-        // 影響されない。Legendary は確率テーブル内にしか出ないので、見えていれば
-        // 末尾コンテンツに到達できたと判断できる。
-        let saw_legendary = |term: &Terminal<TestBackend>| -> bool {
-            let buf = term.backend().buffer();
-            let area = *buf.area();
-            for y in 0..area.height {
-                let mut row = String::new();
-                for x in 0..area.width {
-                    row.push_str(buf[(x, y)].symbol());
-                }
-                if row.contains("Legendary") {
-                    return true;
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
+        let cs = cs.borrow();
+        let target = EQUIP_ITEM_BASE + EquipmentId::BronzeSword.index() as u16;
+        let mut found = false;
+        for y in 0..40 {
+            for x in 0..80 {
+                if cs.hit_test(x, y) == Some(target) {
+                    found = true;
                 }
             }
-            false
-        };
-
-        terminal
-            .draw(|f| render(&state, f, f.area(), &cs))
-            .unwrap();
-
-        // 最大 30 回 ScrollDown を流せば、step 3 でも 90 行スクロールできる。
-        // 実コンテンツは 30 行未満なので必ず到達するはず。
-        let mut found = saw_legendary(&terminal);
-        for _ in 0..30 {
-            if found {
-                break;
-            }
-            logic::apply_action(&mut state, PlayerAction::ScrollDown);
-            cs.borrow_mut().clear_targets();
-            terminal
-                .draw(|f| render(&state, f, f.area(), &cs))
-                .unwrap();
-            found = saw_legendary(&terminal);
         }
-        assert!(
-            found,
-            "narrow gacha 40x22: Legendary 行に ScrollDown でも到達できない\
-             (render_scrollable_tab 経由の clamp/▼ が壊れている可能性)"
-        );
-    }
-
-    #[test]
-    fn format_num_basic() {
-        assert_eq!(format_num(0), "0");
-        assert_eq!(format_num(999), "999");
-        assert_eq!(format_num(9_999), "9999");
-        assert_eq!(format_num(10_000), "10.0K");
-        assert_eq!(format_num(1_500_000), "1.50M");
-    }
-
-    #[test]
-    fn atk_progress_bounds() {
-        assert!((atk_progress(10, 10) - 0.0).abs() < 1e-6);
-        assert!((atk_progress(10, 0) - 1.0).abs() < 1e-6);
-        assert!((atk_progress(10, 5) - 0.5).abs() < 1e-6);
-        assert!((atk_progress(0, 0) - 1.0).abs() < 1e-6);
-    }
-
-    /// 進捗タブの最深マーカー (`*`) は、過去にゴール (= goal_floor) に
-    /// 到達した状態で現在より浅い位置にいる時にも必ず描画される。
-    /// 旧実装は `(deepest * bar_width) / goal == bar_width` ちょうどになり
-    /// `for i in 0..bar_width` から外れて `*` が消える境階バグがあった。
-    ///
-    /// 注意: ロードマップタブには「(バー上の * 印)」というラベル文字列も
-    /// `deepest > cur` 時に出るので、画面全体で `*` を `any()` で探すと
-    /// production を壊しても false positive で pass してしまう。
-    /// **`*` は最低 2 回出る** (バー本体 + ラベル) ことを assert することで、
-    /// バー側の `*` 消失を確実に検出する。
-    #[test]
-    fn roadmap_deepest_marker_visible_when_deepest_equals_goal() {
-        let mut state = AbyssState::new();
-        state.tab = Tab::Roadmap;
-        state.floor = 30;
-        // ゴールちょうど = 100 を過去に踏んでいる状態。
-        state.deepest_floor_ever = state.goal_floor();
-        let cs = Rc::new(RefCell::new(ClickState::new()));
-        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
-        terminal
-            .draw(|f| {
-                render(&state, f, f.area(), &cs);
-            })
-            .unwrap();
-        let buf = terminal.backend().buffer();
-        let star_count = (0..buf.area().width)
-            .flat_map(|x| (0..buf.area().height).map(move |y| (x, y)))
-            .filter(|&(x, y)| buf[(x, y)].symbol() == "*")
-            .count();
-        assert!(
-            star_count >= 2,
-            "最深 == ゴール時に `*` マーカーがバーに描画されていない (off-by-one)。\
-             count={star_count} (ラベル分の 1 個のみ = false positive)"
-        );
-    }
-
-    /// 進捗タブの節目フロアは `goal_floor` の百分率から導出されるべき。
-    /// goal=50 のとき、B100F のような goal を超える行が出ていないこと、
-    /// および到達済みの中間 milestone (例: B25F = 50%) が表示されることを確認する。
-    ///
-    /// 注意: 80x30 のような小さい viewport では body 高さが ~10 行に縛られて
-    /// milestone 行がクリップされ、production が `[10,25,50,75,100]` 直書きでも
-    /// テストが pass してしまう viewport 依存の false positive がある。
-    /// **80x80 の十分大きな viewport** で実行することで、production 側の
-    /// バグが本物の B75F/B100F 行を描画してもテストが catch する。
-    #[test]
-    fn roadmap_milestones_scale_with_goal_floor() {
-        use super::super::config::BalanceConfig;
-        let mut config = BalanceConfig::default();
-        config.pacing.goal_floor = 50;
-        let mut state = AbyssState::with_config(config);
-        state.tab = Tab::Roadmap;
-        state.floor = 30;
-        state.deepest_floor_ever = 30;
-
-        let cs = Rc::new(RefCell::new(ClickState::new()));
-        // viewport 80x80 で milestone リスト全行が描画されることを保証。
-        let mut terminal = Terminal::new(TestBackend::new(80, 80)).unwrap();
-        terminal
-            .draw(|f| {
-                render(&state, f, f.area(), &cs);
-            })
-            .unwrap();
-
-        let mut rendered = String::new();
-        let buf = terminal.backend().buffer();
-        for y in 0..buf.area().height {
-            for x in 0..buf.area().width {
-                rendered.push_str(buf[(x, y)].symbol());
-            }
-            rendered.push('\n');
-        }
-
-        // goal=50 では goal を超える B75F / B100F の行は出ない。
-        assert!(
-            !rendered.contains("B75F"),
-            "goal=50 で B75F 行が出ている (milestone がハードコード): {rendered}"
-        );
-        assert!(
-            !rendered.contains("B100F"),
-            "goal=50 で B100F 行が出ている (milestone がハードコード): {rendered}"
-        );
-        // 50% (= B25F) と 100% (= B50F) は表示される。
-        assert!(rendered.contains("B25F"), "B25F (50%) が出ていない");
-        assert!(rendered.contains("B50F"), "B50F (100% = goal) が出ていない");
-    }
-
-    /// 進捗タブのサブタイトルは `goal_floor` から導出されるべき。
-    /// `"100階のゴールまで"` のハードコードは config 化と矛盾するので、
-    /// goal=50 のとき `50階` と表示されることを assert する。
-    #[test]
-    fn roadmap_subtitle_uses_configured_goal() {
-        use super::super::config::BalanceConfig;
-        let mut config = BalanceConfig::default();
-        config.pacing.goal_floor = 50;
-        let mut state = AbyssState::with_config(config);
-        state.tab = Tab::Roadmap;
-
-        let cs = Rc::new(RefCell::new(ClickState::new()));
-        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
-        terminal
-            .draw(|f| {
-                render(&state, f, f.area(), &cs);
-            })
-            .unwrap();
-
-        let mut rendered = String::new();
-        let buf = terminal.backend().buffer();
-        for y in 0..buf.area().height {
-            for x in 0..buf.area().width {
-                rendered.push_str(buf[(x, y)].symbol());
-            }
-            rendered.push('\n');
-        }
-
-        // ratatui の TestBackend は wide char (East Asian) を 2 セルに分割し、
-        // 二セル目に空白を入れるため、`.symbol()` を素朴に concat すると
-        // "50階のゴール" が "5 0 階 の ゴ ー ル" のように展開される。
-        // 空白を除去して論理的な substring 一致を確認する。
-        let collapsed = rendered.replace(' ', "");
-        assert!(
-            collapsed.contains("50階のゴール"),
-            "goal=50 でサブタイトルに 50階 が出ていない: {rendered}"
-        );
-        assert!(
-            !collapsed.contains("100階のゴール"),
-            "goal=50 でサブタイトルに 100階 が残っている (ハードコード): {rendered}"
-        );
-    }
-
-    /// 進捗タブも `render_scrollable_tab` 経由で描画されるため、`tab_scroll`
-    /// が他タブと同じく clamp + 反映される。`render_roadmap` を Paragraph 直
-    /// `render_widget` で書いていた時代は scroll が silently 無視されていた
-    /// (self-review Important #2)。回帰防止: スクロール後の表示が変わる。
-    #[test]
-    fn roadmap_responds_to_tab_scroll() {
-        // 高さ 8 の小さな viewport で、コンテンツが切れる状況を作る。
-        let mut state = AbyssState::new();
-        state.tab = Tab::Roadmap;
-        state.deepest_floor_ever = 50; // 節目フロアが複数行出る状態
-        let cs = Rc::new(RefCell::new(ClickState::new()));
-
-        let render_to_string = |state: &AbyssState| -> String {
-            let mut term = Terminal::new(TestBackend::new(40, 22)).unwrap();
-            term.draw(|f| {
-                render(state, f, f.area(), &cs);
-            })
-            .unwrap();
-            let buf = term.backend().buffer();
-            let mut s = String::new();
-            for y in 0..buf.area().height {
-                for x in 0..buf.area().width {
-                    s.push_str(buf[(x, y)].symbol());
-                }
-                s.push('\n');
-            }
-            s
-        };
-
-        let before = render_to_string(&state);
-        state.tab_scroll.set(5); // SCROLL_STEP 単位より大きい値で確実に動かす
-        let after = render_to_string(&state);
-
-        assert_ne!(
-            before, after,
-            "tab_scroll を変えても進捗タブの描画が変わらない (scrollable_tab に統合されていない)"
-        );
-    }
-
-    /// 節目フロアの placeholder (`???`) を撤廃して production-ready 文言にした。
-    /// (self-review Medium #7) 過去最深で B25F に到達済みなら「(過去最深で踏破)」、
-    /// 未到達ならば「あと NF」が出る。`???` が再混入しないよう保護。
-    #[test]
-    fn roadmap_milestone_status_is_production_ready() {
-        let mut state = AbyssState::new();
-        state.tab = Tab::Roadmap;
-        state.floor = 12; // B25F の手前
-        state.deepest_floor_ever = 12;
-
-        let cs = Rc::new(RefCell::new(ClickState::new()));
-        let mut terminal = Terminal::new(TestBackend::new(80, 80)).unwrap();
-        terminal
-            .draw(|f| {
-                render(&state, f, f.area(), &cs);
-            })
-            .unwrap();
-
-        let mut rendered = String::new();
-        let buf = terminal.backend().buffer();
-        for y in 0..buf.area().height {
-            for x in 0..buf.area().width {
-                rendered.push_str(buf[(x, y)].symbol());
-            }
-            rendered.push('\n');
-        }
-
-        assert!(
-            !rendered.contains("???"),
-            "進捗タブに placeholder ??? が残っている: {rendered}"
-        );
-        // B25F は未到達 → 「あと 13F」(25 - 12) のような残距離表記が出る。
-        // wide char の二セル展開で空白が混入するので、空白除去後に検査する。
-        let collapsed = rendered.replace(' ', "");
-        assert!(
-            collapsed.contains("13F"),
-            "B25F (cur=12) への残距離 13F が出ていない: {rendered}"
-        );
+        assert!(found, "装着切替ターゲット {} が登録されていない", target);
     }
 }

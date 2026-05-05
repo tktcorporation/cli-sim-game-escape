@@ -2,43 +2,36 @@
 //!
 //! 本体ゲームと完全に同じ `logic::tick` / `logic::apply_action` を駆動する。
 //! 違いは Policy が UI 入力ではなく自動行動を返すことだけ。難易度調整は
-//! `BalanceConfig` を差し替えるだけで済む ─ 効果は構造的に同等。
+//! `BalanceConfig` を差し替えるだけで済む。
+//!
+//! 進行軸が「装備購入 + 装着 + 強化」中心になったので、Policy も
+//! 「buy → equip (auto) → enhance」のサイクルを回す形になっている。
 //!
 //! 実行例:
 //! ```bash
 //! cargo test simulate_abyss_default -- --nocapture
-//! cargo test simulate_abyss_balance_sweep -- --nocapture
+//! cargo test simulate_abyss_long_run -- --nocapture
 //! ```
-//!
-//! 構造:
-//! - `Policy` trait: 各 tick で `PlayerAction` のリストを返す主体。
-//! - `Simulator`:    state + policy + metrics をまとめて run() する駆動部。
-//! - `SimMetrics`:   フロア到達時刻・gold/HP サンプル・死亡履歴を記録する観測部。
 
 #![cfg(test)]
 
 use super::config::BalanceConfig;
 use super::logic;
 use super::policy::PlayerAction;
-use super::state::{AbyssState, EquipmentId, SoulPerk, UpgradeKind};
+use super::state::{AbyssState, EquipmentId, EquipmentLane, SoulPerk};
 
 // ───────────────────────────────────────────────────────────────
 // Policy: 自動プレイヤーの抽象。
 // ───────────────────────────────────────────────────────────────
 
-/// 行動を選び続ける主体。本体ゲームは入力ハンドラ、シミュレータは Policy 実装。
 pub trait Policy {
-    /// 現在の state を見て、この瞬間に取りたい行動を返す。
-    /// 空 vec を返せば「何もしない」。
     fn choose_actions(&mut self, state: &AbyssState) -> Vec<PlayerAction>;
-
-    /// シミュレーション開始時に 1 度だけ呼ばれる。初期設定 (auto_descend ON など) に。
     fn on_start(&mut self, _state: &AbyssState) -> Vec<PlayerAction> {
         Vec::new()
     }
 }
 
-/// 何もしない Policy。「強化ゼロのまま放置すると何階まで行けるか?」を測る。
+/// 何もしない Policy。「装備ゼロのまま放置すると何階まで行けるか?」を測る。
 pub struct NoActionPolicy;
 
 impl Policy for NoActionPolicy {
@@ -47,25 +40,34 @@ impl Policy for NoActionPolicy {
     }
 }
 
-/// 一番安い強化を買い続ける貪欲 Policy。素朴な「だれでも遊べる」プレイヤーの近似。
-pub struct GreedyCheapestPolicy {
+/// 「次に解放可能な装備を即買う + 装着中装備のうち最安の lane を強化する」貪欲 Policy。
+/// シンプルだが装備中心の進行をしっかり回す。素朴な「だれでも遊べる」プレイヤーの近似。
+pub struct GreedyEnhancePolicy {
     pub spend_souls: bool,
 }
 
-impl Default for GreedyCheapestPolicy {
+impl Default for GreedyEnhancePolicy {
     fn default() -> Self {
         Self { spend_souls: true }
     }
 }
 
-impl Policy for GreedyCheapestPolicy {
+impl Policy for GreedyEnhancePolicy {
     fn choose_actions(&mut self, state: &AbyssState) -> Vec<PlayerAction> {
         let mut actions = Vec::new();
-        if let Some((kind, cost)) = cheapest_upgrade(state) {
-            if state.gold >= cost {
-                actions.push(PlayerAction::BuyUpgrade(kind));
-            }
+
+        // (1) 装備解放を最優先 — 全条件 + gold が揃っていれば即購入。
+        if let Some(action) = next_buy_equipment(state) {
+            actions.push(action);
+            return actions; // 1 tick で 1 個ずつ。次の tick でまた拾う。
         }
+
+        // (2) 装着中装備の中で「いま強化するのが最も安い」lane を強化。
+        if let Some(action) = cheapest_enhance(state) {
+            actions.push(action);
+        }
+
+        // (3) 魂パークも安いものから買う。
         if self.spend_souls {
             if let Some((perk, cost)) = cheapest_soul_perk(state) {
                 if state.souls >= cost {
@@ -77,61 +79,51 @@ impl Policy for GreedyCheapestPolicy {
     }
 }
 
-/// 「装備が解放できるなら最優先で買う」を加えた Balanced Policy。
-/// 40h B100 達成可能性の検証用 — 強化を伸ばしつつ、条件が揃った装備を逃さず買う。
-pub struct EquipmentSeekingPolicy {
-    pub weights: [f64; 7],
+/// lane 別 weight に従って強化を分配する Policy。
+///
+/// `weights[0]=武器, [1]=防具, [2]=装飾`。値が大きいほどその lane を優先強化する
+/// (現 Lv / weight が最小の lane を選ぶ方式 — WeightedPolicy の発想を踏襲)。
+pub struct LaneWeightedPolicy {
+    pub weights: [f64; 3],
     pub spend_souls: bool,
 }
 
-impl Default for EquipmentSeekingPolicy {
-    fn default() -> Self {
+impl LaneWeightedPolicy {
+    pub fn balanced() -> Self {
         Self {
-            weights: [3.0, 3.0, 2.0, 1.0, 1.5, 1.0, 1.5],
+            weights: [3.0, 2.0, 1.5],
+            spend_souls: true,
+        }
+    }
+
+    pub fn offense() -> Self {
+        Self {
+            weights: [4.0, 1.0, 2.0],
+            spend_souls: true,
+        }
+    }
+
+    pub fn defense() -> Self {
+        Self {
+            weights: [1.5, 4.0, 1.0],
             spend_souls: true,
         }
     }
 }
 
-impl Policy for EquipmentSeekingPolicy {
+impl Policy for LaneWeightedPolicy {
     fn choose_actions(&mut self, state: &AbyssState) -> Vec<PlayerAction> {
         let mut actions = Vec::new();
 
-        // (1) 装備解放を最優先 — 全条件 + gold が揃っていれば即購入。
-        for &id in EquipmentId::all() {
-            if state.owned_equipment[id.index()] {
-                continue;
-            }
-            if !logic::equipment_requirements_met(state, id) {
-                continue;
-            }
-            if let Some(def) = state.config.equipment.get(id.index()) {
-                if state.gold >= def.requirement.gold_cost {
-                    actions.push(PlayerAction::BuyEquipment(id));
-                    return actions; // 1 tick で 1 個ずつ。次の tick でまた拾う。
-                }
-            }
+        // (1) 装備解放を最優先。
+        if let Some(action) = next_buy_equipment(state) {
+            actions.push(action);
+            return actions;
         }
 
-        // (2) 強化購入 (WeightedPolicy::balanced と同じロジック)。
-        let mut best: Option<(UpgradeKind, f64)> = None;
-        for kind in UpgradeKind::all() {
-            let w = self.weights[kind.index()];
-            if w <= 0.0 {
-                continue;
-            }
-            let lv = state.upgrades[kind.index()] as f64;
-            let cost = state.upgrade_cost(*kind);
-            if state.gold < cost {
-                continue;
-            }
-            let score = lv / w;
-            if best.is_none_or(|(_, s)| score < s) {
-                best = Some((*kind, score));
-            }
-        }
-        if let Some((kind, _)) = best {
-            actions.push(PlayerAction::BuyUpgrade(kind));
+        // (2) 装着中の lane から weighted で 1 つ選んで強化。
+        if let Some(action) = weighted_enhance(state, &self.weights) {
+            actions.push(action);
         }
 
         // (3) 魂パーク。
@@ -146,76 +138,64 @@ impl Policy for EquipmentSeekingPolicy {
     }
 }
 
-/// 戦略的 Policy: weights に従って upgrade を伸ばす。
-///
-/// `weights` は (Sword, Vitality, Armor, Crit, Speed, Regen, Gold) の優先順位。
-/// 値が大きい upgrade ほど早めに買う ─ 「現 level / weight」が最小のものを選ぶ方式。
-pub struct WeightedPolicy {
-    pub weights: [f64; 7],
-    pub spend_souls: bool,
+/// 解放可能な装備のうち最も lane_index が浅いものを購入するアクションを返す。
+/// 解放不能 / gold 不足なら None。
+fn next_buy_equipment(state: &AbyssState) -> Option<PlayerAction> {
+    for &id in EquipmentId::all() {
+        if state.owned_equipment[id.index()] {
+            continue;
+        }
+        if !logic::equipment_requirements_met(state, id) {
+            continue;
+        }
+        if let Some(def) = state.config.equipment.get(id.index()) {
+            if state.gold >= def.gold_cost {
+                return Some(PlayerAction::BuyEquipment(id));
+            }
+        }
+    }
+    None
 }
 
-impl WeightedPolicy {
-    pub fn balanced() -> Self {
-        Self {
-            weights: [3.0, 3.0, 1.5, 1.0, 1.5, 1.0, 1.5],
-            spend_souls: true,
+/// 装着中装備のうち、強化コストが最安で gold が足りるものを返す。
+fn cheapest_enhance(state: &AbyssState) -> Option<PlayerAction> {
+    let mut best: Option<(EquipmentId, u64)> = None;
+    for slot in state.equipped.iter().flatten() {
+        let cost = state.enhance_cost(*slot);
+        if state.gold < cost {
+            continue;
+        }
+        if best.is_none_or(|(_, c)| cost < c) {
+            best = Some((*slot, cost));
         }
     }
-
-    pub fn offense() -> Self {
-        Self {
-            weights: [4.0, 1.5, 0.5, 2.5, 3.0, 0.5, 1.0],
-            spend_souls: true,
-        }
-    }
-
-    pub fn defense() -> Self {
-        Self {
-            weights: [1.5, 4.0, 3.0, 0.5, 1.0, 2.5, 1.0],
-            spend_souls: true,
-        }
-    }
+    best.map(|(id, _)| PlayerAction::EnhanceEquipment(id))
 }
 
-impl Policy for WeightedPolicy {
-    fn choose_actions(&mut self, state: &AbyssState) -> Vec<PlayerAction> {
-        let mut actions = Vec::new();
-        let mut best: Option<(UpgradeKind, f64)> = None;
-        for kind in UpgradeKind::all() {
-            let w = self.weights[kind.index()];
-            if w <= 0.0 {
-                continue;
-            }
-            let lv = state.upgrades[kind.index()] as f64;
-            let cost = state.upgrade_cost(*kind);
-            if state.gold < cost {
-                continue;
-            }
-            let score = lv / w;
-            if best.is_none_or(|(_, s)| score < s) {
-                best = Some((*kind, score));
-            }
+/// lane weight に従い「現 Lv / weight が最小」の装着 lane を強化する。
+/// gold 不足の lane はスキップ。
+fn weighted_enhance(state: &AbyssState, weights: &[f64; 3]) -> Option<PlayerAction> {
+    let mut best: Option<(EquipmentId, f64)> = None;
+    for &lane in EquipmentLane::all() {
+        let id = match state.equipped_at(lane) {
+            Some(id) => id,
+            None => continue,
+        };
+        let w = weights[lane.index()];
+        if w <= 0.0 {
+            continue;
         }
-        if let Some((kind, _)) = best {
-            actions.push(PlayerAction::BuyUpgrade(kind));
+        let cost = state.enhance_cost(id);
+        if state.gold < cost {
+            continue;
         }
-        if self.spend_souls {
-            if let Some((perk, cost)) = cheapest_soul_perk(state) {
-                if state.souls >= cost {
-                    actions.push(PlayerAction::BuySoulPerk(perk));
-                }
-            }
+        let lv = state.equipment_levels[id.index()] as f64;
+        let score = lv / w;
+        if best.is_none_or(|(_, s)| score < s) {
+            best = Some((id, score));
         }
-        actions
     }
-}
-
-fn cheapest_upgrade(state: &AbyssState) -> Option<(UpgradeKind, u64)> {
-    UpgradeKind::all()
-        .iter()
-        .map(|k| (*k, state.upgrade_cost(*k)))
-        .min_by_key(|(_, c)| *c)
+    best.map(|(id, _)| PlayerAction::EnhanceEquipment(id))
 }
 
 fn cheapest_soul_perk(state: &AbyssState) -> Option<(SoulPerk, u64)> {
@@ -229,7 +209,6 @@ fn cheapest_soul_perk(state: &AbyssState) -> Option<(SoulPerk, u64)> {
 // Simulator: 駆動部。
 // ───────────────────────────────────────────────────────────────
 
-/// シミュレーション中に集まるメトリクス。難易度調整の判断材料。
 #[derive(Clone, Debug, Default)]
 pub struct SimMetrics {
     pub total_ticks: u64,
@@ -240,16 +219,11 @@ pub struct SimMetrics {
     pub total_kills: u64,
     pub deaths: u64,
 
-    /// (tick, floor) のサンプル。
     pub floor_samples: Vec<(u64, u32)>,
-    /// (tick, gold) のサンプル。
     pub gold_samples: Vec<(u64, u64)>,
-    /// (tick, hero_hp_ratio) のサンプル。
     pub hp_samples: Vec<(u64, f64)>,
 
-    /// 各死亡時のフロア。
     pub death_floors: Vec<u32>,
-    /// 初到達: floor → tick。
     pub first_reached: Vec<(u32, u64)>,
 }
 
@@ -281,7 +255,6 @@ impl SimMetrics {
 
         if !self.first_reached.is_empty() {
             s.push_str("到達時刻 (フロア → 分):\n");
-            // 主要マイルストーンのみ抜粋: B2,5,10,15,20,30,50
             let milestones = [2u32, 5, 10, 15, 20, 30, 50];
             for &m in &milestones {
                 if let Some((_, t)) = self.first_reached.iter().find(|(f, _)| *f == m) {
@@ -314,12 +287,10 @@ impl SimMetrics {
     }
 }
 
-/// シミュレータ。本体ゲームの「Game trait 実装」に対応するもの ─ ただし UI なし。
 pub struct Simulator {
     pub state: AbyssState,
     policy: Box<dyn Policy>,
     metrics: SimMetrics,
-    /// メトリクスのサンプリング間隔 (tick 単位)。0 ならサンプリングしない。
     pub sample_every: u64,
     last_seen_floor: u32,
     last_seen_deaths: u64,
@@ -349,9 +320,6 @@ impl Simulator {
         }
     }
 
-    /// `total_ticks` ぶんシミュレーションを進める。
-    /// 内部では 1 tick ずつループし、毎 tick で
-    /// `policy.choose_actions` → `apply_action` → `logic::tick(1)` の順に実行する。
     pub fn run(&mut self, total_ticks: u64) {
         for _ in 0..total_ticks {
             self.step_one();
@@ -365,17 +333,12 @@ impl Simulator {
             logic::apply_action(&mut self.state, a);
         }
 
-        // tick 中に死亡 → state.floor が 1 にリセットされるので、tick 前の floor を
-        // 保存しておく。Retreat などで last_seen_floor が古くなっているケースでも
-        // 「いま死んだフロア」を正しく取れる。
         let floor_before_tick = self.state.floor;
         logic::tick(&mut self.state, 1);
 
         self.metrics.total_ticks += 1;
         let cur_tick = self.metrics.total_ticks;
 
-        // first_reached は「初到達の tick」なので、最深を上回った時だけ記録。
-        // (= last_seen_floor は「過去最深」を保持する役割)。
         if self.state.floor > self.last_seen_floor {
             for f in (self.last_seen_floor + 1)..=self.state.floor {
                 self.metrics.first_reached.push((f, cur_tick));
@@ -424,15 +387,14 @@ mod sanity_tests {
     use super::*;
 
     /// `PlayerAction::ScrollUp/ScrollDown` は UI only。simulator policy が
-    /// 絶対に生成しないことを代表的な policy で確認する (将来 policy 著者が
-    /// 誤って加えた回帰を検知)。
+    /// 絶対に生成しないことを代表的な policy で確認する。
     #[test]
     fn simulator_policies_never_emit_scroll() {
         let state = AbyssState::new();
         let policies: Vec<Box<dyn Policy>> = vec![
             Box::new(NoActionPolicy),
-            Box::new(GreedyCheapestPolicy::default()),
-            Box::new(WeightedPolicy::balanced()),
+            Box::new(GreedyEnhancePolicy::default()),
+            Box::new(LaneWeightedPolicy::balanced()),
         ];
         for mut policy in policies {
             for _ in 0..100 {
@@ -464,15 +426,15 @@ mod sanity_tests {
     }
 
     #[test]
-    fn greedy_player_progresses() {
+    fn greedy_enhance_player_progresses() {
         let mut sim = Simulator::new(
             BalanceConfig::default(),
-            Box::new(GreedyCheapestPolicy::default()),
+            Box::new(GreedyEnhancePolicy::default()),
         );
         sim.run(6_000);
         assert!(
             sim.metrics().deepest_floor >= 2,
-            "greedy should reach at least B2F, got B{}",
+            "greedy enhance should reach at least B2F, got B{}",
             sim.metrics().deepest_floor
         );
         assert!(sim.metrics().total_kills > 5);
@@ -487,7 +449,7 @@ mod sanity_tests {
         );
         let mut sim_b = Simulator::with_seed(
             BalanceConfig::default(),
-            Box::new(WeightedPolicy::balanced()),
+            Box::new(LaneWeightedPolicy::balanced()),
             0xA1A1A1,
         );
         sim_a.run(6_000);
@@ -504,12 +466,12 @@ mod sanity_tests {
     fn hard_config_makes_it_harder() {
         let mut sim_easy = Simulator::with_seed(
             BalanceConfig::easy(),
-            Box::new(GreedyCheapestPolicy::default()),
+            Box::new(GreedyEnhancePolicy::default()),
             0xBEEF,
         );
         let mut sim_hard = Simulator::with_seed(
             BalanceConfig::hard(),
-            Box::new(GreedyCheapestPolicy::default()),
+            Box::new(GreedyEnhancePolicy::default()),
             0xBEEF,
         );
         sim_easy.run(6_000);
@@ -527,7 +489,7 @@ mod sanity_tests {
         let run = || {
             let mut sim = Simulator::with_seed(
                 BalanceConfig::default(),
-                Box::new(GreedyCheapestPolicy::default()),
+                Box::new(GreedyEnhancePolicy::default()),
                 0x12345,
             );
             sim.run(3_000);
@@ -542,42 +504,29 @@ mod sanity_tests {
 
     #[test]
     fn death_floor_records_actual_not_stale_max() {
-        // 不変条件: 死亡が記録される時、death_floors には「死亡 tick 直前の floor」が入る。
-        // 過去に深く潜って Retreat で戻った状態 (last_seen_floor > state.floor) を
-        // 直接組み立て、その状態で死ぬと正しく floor=1 が記録されることを確認。
         let mut sim = Simulator::with_seed(
             BalanceConfig::default(),
             Box::new(NoActionPolicy),
             0xFEED,
         );
-        // 敵をスポーンさせる
         sim.run(20);
 
-        // 「過去に B5F まで到達 → Retreat で B1F に戻った」状態を直接組み立てる
         sim.state.floor = 1;
         sim.last_seen_floor = 5;
         sim.state.hero_hp = 1;
-        // 次 tick で確実に敵が攻撃するよう cooldown をリセット
         sim.state.current_enemy.atk_cooldown = 1;
 
         sim.run(50);
 
-        assert!(
-            !sim.metrics().death_floors.is_empty(),
-            "should have died at least once"
-        );
-        assert_eq!(
-            sim.metrics().death_floors[0],
-            1,
-            "death should be recorded at actual floor (1), not stale last_seen_floor (5)"
-        );
+        assert!(!sim.metrics().death_floors.is_empty());
+        assert_eq!(sim.metrics().death_floors[0], 1);
     }
 
     #[test]
     fn metrics_records_first_reached() {
         let mut sim = Simulator::with_seed(
             BalanceConfig::easy(),
-            Box::new(WeightedPolicy::offense()),
+            Box::new(LaneWeightedPolicy::offense()),
             0x1111,
         );
         sim.run(6_000);
@@ -590,7 +539,7 @@ mod sanity_tests {
     fn report_renders() {
         let mut sim = Simulator::new(
             BalanceConfig::default(),
-            Box::new(GreedyCheapestPolicy::default()),
+            Box::new(GreedyEnhancePolicy::default()),
         );
         sim.run(1_200);
         let report = sim.report();
@@ -601,15 +550,12 @@ mod sanity_tests {
 // ───────────────────────────────────────────────────────────────
 // Tuning runners (cargo test simulate_abyss_* -- --nocapture)
 // ───────────────────────────────────────────────────────────────
-//
-// 印字された結果を見ながら BalanceConfig を弄る。eprintln! を使うのは cookie の
-// シミュレータと同じ流儀 (--nocapture でだけ可視化される)。
 
 mod runners {
     use super::*;
 
     fn run_and_print(label: &str, config: BalanceConfig, mut policy: Box<dyn Policy>, ticks: u64) {
-        let _ = &mut policy; // silence in case future Policy needs &mut for setup
+        let _ = &mut policy;
         let mut sim = Simulator::new(config, policy);
         sim.run(ticks);
         eprintln!("\n══ {} ══", label);
@@ -617,73 +563,66 @@ mod runners {
     }
 
     /// 既定バランスで Greedy / Balanced / Offense / Defense を比較。
-    /// `cargo test simulate_abyss_default -- --nocapture` で可視化。
     #[test]
     fn simulate_abyss_default() {
-        let ticks = 36_000; // 60 分相当 (10 ticks/sec * 60 * 60)
+        let ticks = 36_000; // 60 分
         eprintln!("\n┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓");
         eprintln!("┃  Abyss Idle Balance Sim — preset: default, ticks: {}  ┃", ticks);
         eprintln!("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛");
 
         run_and_print(
-            "default + Greedy",
+            "default + GreedyEnhance",
             BalanceConfig::default(),
-            Box::new(GreedyCheapestPolicy::default()),
+            Box::new(GreedyEnhancePolicy::default()),
             ticks,
         );
         run_and_print(
             "default + Balanced",
             BalanceConfig::default(),
-            Box::new(WeightedPolicy::balanced()),
+            Box::new(LaneWeightedPolicy::balanced()),
             ticks,
         );
         run_and_print(
             "default + Offense",
             BalanceConfig::default(),
-            Box::new(WeightedPolicy::offense()),
+            Box::new(LaneWeightedPolicy::offense()),
             ticks,
         );
         run_and_print(
             "default + Defense",
             BalanceConfig::default(),
-            Box::new(WeightedPolicy::defense()),
+            Box::new(LaneWeightedPolicy::defense()),
             ticks,
         );
     }
 
-    /// 装備解放を含む 40 時間ロングランで B100 到達と所持装備数を測る。
-    /// 期待値: 40h 経過時点で 12 個全装備解放、最深 B100 付近に到達。
+    /// 装備中心の進行で 40h ロングランの最深と全装備到達を測る。
+    /// 期待値: 40h で 12 個全装備購入、最深 B100 付近に到達。
     /// `cargo test simulate_abyss_long_run -- --nocapture`
     #[test]
     fn simulate_abyss_long_run() {
-        // 40h = 144,000 秒 = 1,440,000 ticks (10 ticks/sec)。
-        let ticks = 1_440_000;
+        let ticks = 1_440_000; // 40h
         eprintln!("\n┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓");
-        eprintln!("┃  Abyss Idle Long Run — 40h, EquipmentSeekingPolicy     ┃");
+        eprintln!("┃  Abyss Idle Long Run — 40h, GreedyEnhance              ┃");
         eprintln!("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛");
 
         let mut sim = Simulator::with_seed(
             BalanceConfig::default(),
-            Box::new(EquipmentSeekingPolicy::default()),
+            Box::new(GreedyEnhancePolicy::default()),
             0xC0FFEE,
         );
         sim.run(ticks);
         eprintln!("{}", sim.report());
-        let owned = sim
-            .state
-            .owned_equipment
-            .iter()
-            .filter(|b| **b)
-            .count();
+        let owned = sim.state.owned_equipment.iter().filter(|b| **b).count();
+        let total_enh: u32 = sim.state.equipment_levels.iter().sum();
         eprintln!(
-            "解放装備: {}/{} | 最深: B{}F | 最終: B{}F",
+            "解放装備: {}/{} | 強化総計: +{} | 最深: B{}F | 最終: B{}F",
             owned,
             sim.state.owned_equipment.len(),
+            total_enh,
             sim.state.deepest_floor_ever,
             sim.state.floor
         );
-        // バランス健全性: 40h で「全装備解放」「B100 到達可能」を担保する。
-        // 観察用 eprintln! で具体数値を見つつ、test 自体は構造的不変条件を縛る。
         assert_eq!(
             owned,
             sim.state.owned_equipment.len(),
@@ -691,14 +630,12 @@ mod runners {
         );
         assert!(
             sim.state.deepest_floor_ever >= 100,
-            "40h で B100 到達できないと『全装備でクリア可能』設計が成立しない (got B{})",
+            "40h で B100 到達できないと『装備中心進行で達成可能』設計が成立しない (got B{})",
             sim.state.deepest_floor_ever
         );
     }
 
     /// 難易度プリセットを横断: easy / default / hard を Balanced Policy で比較。
-    /// 「最深フロア到達時刻が 2 倍以上ズレるか?」を見て難易度差の妥当性を判断する。
-    /// `cargo test simulate_abyss_balance_sweep -- --nocapture`
     #[test]
     fn simulate_abyss_balance_sweep() {
         let ticks = 36_000;
@@ -711,7 +648,7 @@ mod runners {
             ("default", BalanceConfig::default()),
             ("hard", BalanceConfig::hard()),
         ] {
-            run_and_print(label, cfg, Box::new(WeightedPolicy::balanced()), ticks);
+            run_and_print(label, cfg, Box::new(LaneWeightedPolicy::balanced()), ticks);
         }
     }
 }
