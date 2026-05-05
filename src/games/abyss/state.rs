@@ -401,6 +401,81 @@ impl Tab {
     }
 }
 
+/// メインメニューの上位グルーピング (UI only)。
+///
+/// 6 タブを 4 グループに畳んでメインメニューの認知負荷を下げる:
+///
+/// | グループ | 内訳 | 役割 |
+/// |---|---|---|
+/// | 育成 | 強化 + 装備 | 「投資して強くなる」系。アクティブな操作が中心 |
+/// | 情報 | 進捗 + 統計 | 「見るだけ」系。たまに開く |
+/// | ガチャ | (単独) | 鍵消費の独自 UX があり統合先がない |
+/// | 設定 | (単独) | 頻度低、独立性高 |
+///
+/// **save には保存しない**: 永続化対象は `Tab` のまま。`TabGroup` は
+/// `Tab` の関数 (`from_tab`) なので、save から `Tab` を復元すれば group は
+/// 一意に決まる。これにより既存セーブとの互換が崩れない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabGroup {
+    Growth,   // 強化 + 装備
+    Info,     // 進捗 + 統計
+    Gacha,
+    Settings,
+}
+
+impl TabGroup {
+    /// 全グループを宣言順 (= タブバー描画順) で返す。
+    pub const fn all() -> &'static [TabGroup] {
+        &[
+            TabGroup::Growth,
+            TabGroup::Info,
+            TabGroup::Gacha,
+            TabGroup::Settings,
+        ]
+    }
+
+    /// このグループに属する `Tab` をサブタブの並び順で返す。
+    pub fn tabs(self) -> &'static [Tab] {
+        match self {
+            TabGroup::Growth => &[Tab::Upgrades, Tab::Shop],
+            TabGroup::Info => &[Tab::Roadmap, Tab::Stats],
+            TabGroup::Gacha => &[Tab::Gacha],
+            TabGroup::Settings => &[Tab::Settings],
+        }
+    }
+
+    /// グループ表示名 (タブバーに出す)。
+    pub fn name(self) -> &'static str {
+        match self {
+            TabGroup::Growth => "育成",
+            TabGroup::Info => "情報",
+            TabGroup::Gacha => "ガチャ",
+            TabGroup::Settings => "設定",
+        }
+    }
+
+    /// グループ切替時に最初に表示するサブタブ。
+    pub fn default_tab(self) -> Tab {
+        self.tabs()[0]
+    }
+
+    /// 任意の `Tab` から所属グループを引き当てる (逆引き)。
+    /// `tabs()` の構成と必ず一致するように `match` で網羅する。
+    pub fn from_tab(tab: Tab) -> TabGroup {
+        match tab {
+            Tab::Upgrades | Tab::Shop => TabGroup::Growth,
+            Tab::Roadmap | Tab::Stats => TabGroup::Info,
+            Tab::Gacha => TabGroup::Gacha,
+            Tab::Settings => TabGroup::Settings,
+        }
+    }
+
+    /// このグループにサブタブが複数あるか (= サブタブバーを描く必要があるか)。
+    pub fn has_subtabs(self) -> bool {
+        self.tabs().len() > 1
+    }
+}
+
 /// 現フロアの種別。フロア降下時に抽選され、敵の数値修正と報酬倍率を変える。
 /// 1〜2 階は必ず Normal にする (序盤は把握しやすさを優先)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -863,6 +938,39 @@ mod tests {
         }
         // 範囲外 id は既定値にフォールバック
         assert_eq!(Tab::from_save_id(255), Tab::Upgrades);
+    }
+
+    /// `TabGroup::tabs()` と `from_tab()` が双方向で一貫していること。
+    /// 新グループ追加 / 既存グループへの Tab 追加で抜け漏れたら検出する。
+    #[test]
+    fn tab_group_round_trip_via_tabs_and_from_tab() {
+        for &group in TabGroup::all() {
+            for &tab in group.tabs() {
+                assert_eq!(
+                    TabGroup::from_tab(tab),
+                    group,
+                    "group {:?} declares tab {:?} but from_tab says {:?}",
+                    group,
+                    tab,
+                    TabGroup::from_tab(tab),
+                );
+            }
+        }
+        // 全 Tab がいずれかのグループに属すること (網羅性)。
+        for &tab in Tab::all() {
+            let g = TabGroup::from_tab(tab);
+            assert!(
+                g.tabs().contains(&tab),
+                "tab {:?} is mapped to {:?} but {:?}.tabs() doesn't contain it",
+                tab,
+                g,
+                g
+            );
+        }
+        // default_tab が tabs() の先頭と一致 (UI 約束)。
+        for &group in TabGroup::all() {
+            assert_eq!(group.default_tab(), group.tabs()[0]);
+        }
     }
 
     /// 同様に FloorKind も双方向 SSOT。

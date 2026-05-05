@@ -41,7 +41,7 @@ fn now_ms() -> Option<f64> {
 use actions::*;
 use effects::AbyssEffects;
 use policy::PlayerAction;
-use state::{AbyssState, EquipmentId, SoulPerk, Tab, UpgradeKind, EQUIPMENT_COUNT};
+use state::{AbyssState, EquipmentId, SoulPerk, Tab, TabGroup, UpgradeKind, EQUIPMENT_COUNT};
 
 pub struct AbyssGame {
     pub state: AbyssState,
