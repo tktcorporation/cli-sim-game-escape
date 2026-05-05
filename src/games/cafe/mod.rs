@@ -17,6 +17,8 @@ pub mod produce;
 mod render;
 pub mod save;
 mod scenario;
+#[cfg(test)]
+mod simulator;
 pub mod social_sys;
 pub mod state;
 
@@ -104,6 +106,14 @@ impl super::Game for CafeGame {
         // Periodic stamina recovery
         if now > 0.0 {
             self.state.stamina.recover(now);
+        }
+
+        // Drive the gacha-result reveal animation. Capped to avoid wraparound
+        // for players who linger on the screen — `gacha_anim_revealed` clamps
+        // anyway, but a tight ceiling keeps the value debugger-friendly.
+        if matches!(self.state.phase, state::GamePhase::GachaResult { .. }) {
+            self.state.gacha_anim_frame =
+                self.state.gacha_anim_frame.saturating_add(delta_ticks).min(1_000);
         }
 
         // Periodic save (~every 10 seconds)

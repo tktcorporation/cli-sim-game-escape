@@ -95,11 +95,10 @@ pub fn handle_key(state: &mut CafeState, ch: char) -> bool {
             'q' => { state.phase = GamePhase::Hub; true }
             _ => false,
         },
-        GamePhase::GachaResult { .. } => match ch {
+        GamePhase::GachaResult { card_ids } => match ch {
             ' ' | 'l' => {
-                state.phase = GamePhase::CardScreen;
-                save::save_game(state);
-                true
+                let ids = card_ids.clone();
+                handle_gacha_result_ok(state, &ids)
             }
             _ => false,
         },
@@ -260,11 +259,10 @@ pub fn handle_click(state: &mut CafeState, id: u16) -> bool {
             }
             _ => false,
         },
-        GamePhase::GachaResult { .. } => {
+        GamePhase::GachaResult { card_ids } => {
             if id == GACHA_RESULT_OK {
-                state.phase = GamePhase::CardScreen;
-                save::save_game(state);
-                return true;
+                let ids = card_ids.clone();
+                return handle_gacha_result_ok(state, &ids);
             }
             false
         }
@@ -332,7 +330,7 @@ fn try_daily_draw(state: &mut CafeState) -> bool {
     if state.card_state.daily_draw_used { return false; }
     let seed = (social_sys::now_ms() as u32).wrapping_mul(2654435761);
     let card_ids = gacha::daily_draw(&mut state.card_state, seed);
-    state.phase = GamePhase::GachaResult { card_ids };
+    enter_gacha_result(state, card_ids);
     save::save_game(state);
     true
 }
@@ -347,7 +345,7 @@ fn try_gacha_single(state: &mut CafeState) -> bool {
     // Mission tracking
     state.daily_missions.record(MissionType::GachaPull(1));
     state.weekly_missions.record(MissionType::GachaPull(1));
-    state.phase = GamePhase::GachaResult { card_ids: vec![card_id] };
+    enter_gacha_result(state, vec![card_id]);
     save::save_game(state);
     true
 }
@@ -369,9 +367,31 @@ fn try_gacha_ten(state: &mut CafeState) -> bool {
         state.daily_missions.record(MissionType::GachaPull(1));
         state.weekly_missions.record(MissionType::GachaPull(1));
     }
-    state.phase = GamePhase::GachaResult { card_ids };
+    enter_gacha_result(state, card_ids);
     save::save_game(state);
     true
+}
+
+/// Transition into `GachaResult` and arm the reveal animation.
+fn enter_gacha_result(state: &mut CafeState, card_ids: Vec<u32>) {
+    state.gacha_anim_frame = 0;
+    state.phase = GamePhase::GachaResult { card_ids };
+}
+
+/// First click on OK during the reveal anim skips to the end (showing all
+/// cards instantly); a second click dismisses the result and saves.
+/// Returns true if the click was handled.
+fn handle_gacha_result_ok(state: &mut CafeState, card_ids: &[u32]) -> bool {
+    let total = card_ids.len();
+    if !gacha::gacha_anim_is_complete(state.gacha_anim_frame, total) {
+        // Skip the staged reveal — jump straight to "all cards visible, OK ready".
+        state.gacha_anim_frame = gacha::gacha_anim_complete_frame(total);
+        true
+    } else {
+        state.phase = GamePhase::CardScreen;
+        save::save_game(state);
+        true
+    }
 }
 
 pub fn dismiss_popup(state: &mut CafeState) -> bool {

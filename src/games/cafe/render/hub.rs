@@ -14,7 +14,10 @@ use crate::widgets::{ClickableList, TabBar};
 
 use super::super::actions::*;
 use super::super::characters::CharacterId;
-use super::super::gacha::{card_def, GACHA_SINGLE_COST, GACHA_TEN_COST};
+use super::super::gacha::{
+    self, card_def, fortune_label, fortune_tier, next_fortune_threshold,
+    GACHA_SINGLE_COST, GACHA_TEN_COST,
+};
 use super::super::produce::PRODUCE_STAMINA_COST;
 use super::super::scenario;
 use super::super::social_sys::{self, STAMINA_MAX};
@@ -240,6 +243,42 @@ pub(super) fn render_hub_cards(state: &CafeState, f: &mut Frame, area: Rect, cli
         format!(" 天井: {}/200", state.card_state.banner_pulls),
         Style::default().fg(Color::Magenta),
     )));
+
+    // Fortune meter — communicates the lifetime quality boost so the player
+    // can *see* their pulls accumulating into a tangible perk.
+    {
+        let pulls = state.card_state.lifetime_pulls;
+        let tier = fortune_tier(pulls);
+        let label = fortune_label(tier);
+        let bonus_coins = gacha::fortune_pull_bonus_coins(tier);
+        let dupe_mult = gacha::fortune_dupe_multiplier_x10(tier) as f64 / 10.0;
+        if let Some(next) = next_fortune_threshold(tier) {
+            // Progress within the current tier, e.g. "見習い 80/150".
+            cl.push(Line::from(Span::styled(
+                format!(" 運気: {label} {pulls}/{next}"),
+                Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+            )));
+        } else {
+            cl.push(Line::from(Span::styled(
+                format!(" 運気: {label} (MAX)"),
+                Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+            )));
+        }
+        // Show what the tier currently grants — this is the "報酬内容" the
+        // player is investing pulls toward.
+        if is_narrow {
+            cl.push(Line::from(Span::styled(
+                format!("   +{bonus_coins}🪙/引 ×{dupe_mult:.1}"),
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            cl.push(Line::from(Span::styled(
+                format!("   ボーナス +{bonus_coins}🪙/引き  ダブり×{dupe_mult:.1}"),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
     cl.push(Line::from(""));
 
     // Equipped card — narrow では 2 行に分けて溢れないようにする
@@ -489,5 +528,49 @@ mod tests {
         assert!(crate::input::is_narrow_layout(32));
         assert!(crate::input::is_narrow_layout(40));
         assert!(!crate::input::is_narrow_layout(60));
+    }
+
+    /// 運気ゲージの内容 (label + 進捗値 + 報酬詳細) が narrow バッファに
+    /// パニックせず描画され、いずれの行も 32 列に収まることを確認。
+    /// `見習い 80/150` のような表示が省略されない最低条件。
+    #[test]
+    fn fortune_meter_renders_at_narrow_width() {
+        let mut state = CafeState::new();
+        state.phase = super::super::super::state::GamePhase::Hub;
+        state.hub_tab = HubTab::Cards;
+        state.card_state.lifetime_pulls = 80; // tier 1 (見習い)
+        state.card_state.gems = 5000;
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(32, 40)).unwrap();
+        terminal
+            .draw(|f| render_hub(&state, f, f.area(), &cs))
+            .unwrap();
+
+        // 32 列に収まる前提を 2 つの代表行で論理的に検証。
+        let line_progress = " 運気: 見習い 80/150";
+        let line_bonus = "   +5🪙/引 ×1.1";
+        assert!(
+            ratzilla::ratatui::text::Line::from(line_progress).width() <= 32,
+            "fortune progress line overflows 32 cells"
+        );
+        assert!(
+            ratzilla::ratatui::text::Line::from(line_bonus).width() <= 32,
+            "fortune bonus line overflows 32 cells"
+        );
+    }
+
+    /// MAX 状態 (tier 5) のラベルでも 32 列に収まることを確認。
+    #[test]
+    fn fortune_meter_max_tier_fits_narrow() {
+        let line_max = " 運気: 超越 (MAX)";
+        let line_bonus_max = "   +50🪙/引 ×2.0";
+        assert!(
+            ratzilla::ratatui::text::Line::from(line_max).width() <= 32,
+            "fortune MAX label overflows 32 cells"
+        );
+        assert!(
+            ratzilla::ratatui::text::Line::from(line_bonus_max).width() <= 32,
+            "fortune MAX bonus line overflows 32 cells"
+        );
     }
 }

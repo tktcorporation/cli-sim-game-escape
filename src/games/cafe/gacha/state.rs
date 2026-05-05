@@ -70,6 +70,11 @@ pub struct CardState {
     pub daily_draw_day: u32,
     /// Currently equipped card index.
     pub equipped_card: Option<usize>,
+    /// Lifetime paid gacha pulls (excludes daily draw). Drives the fortune
+    /// tier — the more you pull, the higher the base ★3/★2 rate becomes.
+    /// New field: defaults to 0 for existing saves via `#[serde(default)]`.
+    #[serde(default)]
+    pub lifetime_pulls: u32,
 }
 
 impl CardState {
@@ -95,17 +100,22 @@ impl CardState {
     }
 
     /// Add a card. Dupes give coins + character shards.
+    /// The duplicate coin reward scales with the fortune tier (derived from
+    /// `lifetime_pulls`) so high-tier players also see better content yield,
+    /// not just better rates.
     /// Returns (card_def, is_new, shards_given_to_character).
     pub fn add_card(&mut self, card_id: u32) -> Option<&'static super::cards::CardDef> {
         let def = card_def(card_id)?;
 
         if let Some(owned) = self.cards.iter_mut().find(|c| c.card_id == card_id) {
             owned.duplicates += 1;
-            self.coins += match def.rarity {
-                Rarity::Star1 => 10,
+            let base = match def.rarity {
+                Rarity::Star1 => 10u32,
                 Rarity::Star2 => 30,
                 Rarity::Star3 => 100,
             };
+            let mult_x10 = super::fortune_dupe_multiplier_x10(super::fortune_tier(self.lifetime_pulls));
+            self.coins = self.coins.saturating_add(base * mult_x10 / 10);
             // Note: character shards are handled by the caller based on card.character
         } else {
             self.cards.push(OwnedCard::new(card_id));
