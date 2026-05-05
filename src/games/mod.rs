@@ -43,6 +43,7 @@ pub enum GameChoice {
     Cafe,
     Abyss,
     Godfield,
+    Metropolis,
 }
 
 /// Top-level application state.
@@ -70,5 +71,6 @@ pub fn create_game(choice: &GameChoice) -> Box<dyn Game> {
         GameChoice::Cafe => Box::new(cafe::CafeGame::new()),
         GameChoice::Abyss => Box::new(abyss::AbyssGame::new()),
         GameChoice::Godfield => Box::new(godfield::GodFieldGame::new()),
+        GameChoice::Metropolis => Box::new(metropolis::MetropolisGame::new()),
     }
 }

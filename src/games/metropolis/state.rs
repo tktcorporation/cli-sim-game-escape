@@ -54,14 +54,6 @@ impl Building {
         }
     }
 
-    /// Display character on the grid (single ASCII byte for monospace).
-    pub fn glyph(self) -> char {
-        match self {
-            Building::Road => '+',
-            Building::House => 'H',
-            Building::Shop => 'S',
-        }
-    }
 }
 
 /// Player's strategic preference.  Drives how Tier-2+ AI weights its choices;
@@ -138,7 +130,13 @@ pub struct City {
     pub buildings_finished: u64,
     pub cash_earned_total: i64,
     pub cash_spent_total: i64,
+
+    /// Most-recent AI activity for the on-screen "thought log".
+    /// Newest first; older entries trimmed to `MAX_EVENTS`.
+    pub events: Vec<String>,
 }
+
+pub const MAX_EVENTS: usize = 8;
 
 impl City {
     pub fn new() -> Self {
@@ -162,6 +160,15 @@ impl City {
             buildings_finished: 0,
             cash_earned_total: 0,
             cash_spent_total: 0,
+            events: Vec::new(),
+        }
+    }
+
+    /// Record a new AI activity entry, keeping the log bounded.
+    pub fn push_event(&mut self, msg: impl Into<String>) {
+        self.events.insert(0, msg.into());
+        if self.events.len() > MAX_EVENTS {
+            self.events.truncate(MAX_EVENTS);
         }
     }
 
@@ -179,6 +186,7 @@ impl City {
         &self.grid[y][x]
     }
 
+    #[cfg(test)]
     pub fn set_tile(&mut self, x: usize, y: usize, t: Tile) {
         self.grid[y][x] = t;
     }

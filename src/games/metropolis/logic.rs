@@ -25,6 +25,7 @@ fn step_one_tick(city: &mut City) {
 
 /// Decrement every Construction tile; promote to Built when finished.
 fn advance_construction(city: &mut City) {
+    let mut completions: Vec<(usize, usize, Building)> = Vec::new();
     for y in 0..GRID_H {
         for x in 0..GRID_W {
             let tile = &mut city.grid[y][x];
@@ -37,11 +38,23 @@ fn advance_construction(city: &mut City) {
                     let kind = *target;
                     *tile = Tile::Built(kind);
                     city.buildings_finished += 1;
+                    completions.push((x, y, kind));
                 } else {
                     *ticks_remaining -= 1;
                 }
             }
         }
+    }
+    for (x, y, kind) in completions {
+        city.push_event(format!("✓ {} ({},{}) 完成", building_name(kind), x, y));
+    }
+}
+
+fn building_name(b: Building) -> &'static str {
+    match b {
+        Building::Road => "道路",
+        Building::House => "住宅",
+        Building::Shop => "店舗",
     }
 }
 
@@ -84,6 +97,13 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
         ticks_remaining: kind.build_ticks(),
     };
     city.buildings_started += 1;
+    city.push_event(format!(
+        "▷ {} ({},{}) 着工 -${}",
+        building_name(kind),
+        x,
+        y,
+        cost
+    ));
     true
 }
 
@@ -180,6 +200,7 @@ pub fn upgrade_ai(city: &mut City) -> bool {
     city.cash -= cost;
     city.cash_spent_total += cost;
     city.ai_tier = next;
+    city.push_event(format!("⚡ CPU進化 → {}", next.name()));
     true
 }
 
@@ -192,6 +213,7 @@ pub fn hire_worker(city: &mut City) -> bool {
     city.cash -= cost;
     city.cash_spent_total += cost;
     city.workers += 1;
+    city.push_event(format!("➕ 作業員雇用 → {}人", city.workers));
     true
 }
 

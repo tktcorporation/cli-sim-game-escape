@@ -10,17 +10,143 @@
 //!   • `logic.rs`  — pure functions (tick, income, construction).
 //!   • `ai.rs`     — strategy brains, one function per tier.
 //!   • `simulator.rs` — balance tests (cargo test, no rendering).
-//!
-//! `render.rs` and the `Game` trait wiring will be added once balance
-//! is verified.
-
-// MVP scaffold: nothing in main.rs touches these modules yet, so every
-// public function reads as dead code from the binary build's perspective.
-// Remove this allow once `impl Game for MetropolisGame` is wired up in
-// `games::create_game`.
-#![allow(dead_code)]
 
 pub mod ai;
 pub mod logic;
-pub mod state;
+pub mod render;
 pub mod simulator;
+pub mod state;
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use ratzilla::ratatui::layout::Rect;
+use ratzilla::ratatui::Frame;
+
+use crate::games::{Game, GameChoice};
+use crate::input::{ClickState, InputEvent};
+
+use state::{City, Strategy};
+
+// ── Action IDs scoped to MetropolisGame ─────────────────────────
+//
+// These are click/key actions on the manager panel.  Keep them stable —
+// they're persisted through Click events keyed by `ClickScope::Game(...)`.
+pub const ACT_STRATEGY_GROWTH: u16 = 1;
+pub const ACT_STRATEGY_INCOME: u16 = 2;
+pub const ACT_STRATEGY_BALANCED: u16 = 3;
+pub const ACT_HIRE_WORKER: u16 = 4;
+pub const ACT_UPGRADE_AI: u16 = 5;
+
+pub struct MetropolisGame {
+    pub state: City,
+}
+
+impl MetropolisGame {
+    pub fn new() -> Self {
+        let mut state = City::new();
+        state.push_event("🏙 都市建設を開始しました".to_string());
+        Self { state }
+    }
+}
+
+impl Default for MetropolisGame {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Game for MetropolisGame {
+    fn choice(&self) -> GameChoice {
+        GameChoice::Metropolis
+    }
+
+    fn handle_input(&mut self, event: &InputEvent) -> bool {
+        let action_id = match event {
+            InputEvent::Click(_, id) => *id,
+            InputEvent::Key(c) => match c {
+                'g' | 'G' => ACT_STRATEGY_GROWTH,
+                'i' | 'I' => ACT_STRATEGY_INCOME,
+                'b' | 'B' => ACT_STRATEGY_BALANCED,
+                'w' | 'W' => ACT_HIRE_WORKER,
+                'u' | 'U' => ACT_UPGRADE_AI,
+                _ => return false,
+            },
+        };
+
+        match action_id {
+            ACT_STRATEGY_GROWTH => {
+                self.state.strategy = Strategy::Growth;
+                self.state.push_event("📈 戦略: 成長重視".to_string());
+                true
+            }
+            ACT_STRATEGY_INCOME => {
+                self.state.strategy = Strategy::Income;
+                self.state.push_event("💰 戦略: 収入重視".to_string());
+                true
+            }
+            ACT_STRATEGY_BALANCED => {
+                self.state.strategy = Strategy::Balanced;
+                self.state.push_event("⚖ 戦略: バランス".to_string());
+                true
+            }
+            ACT_HIRE_WORKER => logic::hire_worker(&mut self.state),
+            ACT_UPGRADE_AI => logic::upgrade_ai(&mut self.state),
+            _ => false,
+        }
+    }
+
+    fn tick(&mut self, delta_ticks: u32) {
+        logic::tick(&mut self.state, delta_ticks);
+    }
+
+    fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+        render::render(&self.state, f, area, click_state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::ClickScope;
+
+    fn click(id: u16) -> InputEvent {
+        InputEvent::Click(ClickScope::Game(GameChoice::Metropolis), id)
+    }
+
+    #[test]
+    fn strategy_keys_change_state() {
+        let mut g = MetropolisGame::new();
+        g.handle_input(&InputEvent::Key('g'));
+        assert_eq!(g.state.strategy, Strategy::Growth);
+        g.handle_input(&InputEvent::Key('i'));
+        assert_eq!(g.state.strategy, Strategy::Income);
+        g.handle_input(&click(ACT_STRATEGY_BALANCED));
+        assert_eq!(g.state.strategy, Strategy::Balanced);
+    }
+
+    #[test]
+    fn unknown_input_returns_false() {
+        let mut g = MetropolisGame::new();
+        assert!(!g.handle_input(&InputEvent::Key('q')));
+        assert!(!g.handle_input(&click(9999)));
+    }
+
+    #[test]
+    fn hiring_costs_money() {
+        let mut g = MetropolisGame::new();
+        g.state.cash = 1000;
+        let before = g.state.workers;
+        assert!(g.handle_input(&InputEvent::Key('w')));
+        assert_eq!(g.state.workers, before + 1);
+        assert!(g.state.cash < 1000);
+    }
+
+    #[test]
+    fn tick_advances_simulation() {
+        let mut g = MetropolisGame::new();
+        let before = g.state.tick;
+        g.tick(50);
+        assert_eq!(g.state.tick, before + 50);
+    }
+}
