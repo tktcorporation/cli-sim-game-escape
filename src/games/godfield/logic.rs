@@ -48,27 +48,41 @@ pub const CPU_TURN_DELAY_TICKS: u32 = 8;
 pub const BETWEEN_TURNS_TICKS: u32 = 4;
 
 /// Advance simulated time. Drives CPU turns and inter-turn pauses.
-pub fn tick(state: &mut GfState, delta_ticks: u32) {
-    if delta_ticks == 0 { return; }
-    match state.phase {
-        Phase::CpuTurn { idx, ticks_left } => {
-            let new_left = ticks_left.saturating_sub(delta_ticks);
-            if new_left == 0 {
-                run_cpu_turn(state, idx);
-                advance_to_next_turn(state);
-            } else {
-                state.phase = Phase::CpuTurn { idx, ticks_left: new_left };
+///
+/// `delta_ticks` may exceed the current phase's remaining timer (e.g. after
+/// a tab pause or a stalled frame), so we loop until the budget is fully
+/// consumed.  Phases without a timer (`PlayerAction`, `Victory`, `Defeat`,
+/// `Intro`, the player-selection phases) break early — they can sit on a
+/// large `delta_ticks` without misbehaving because they don't track elapsed
+/// time at all.
+pub fn tick(state: &mut GfState, mut delta_ticks: u32) {
+    while delta_ticks > 0 {
+        match state.phase {
+            Phase::CpuTurn { idx, ticks_left } => {
+                if delta_ticks >= ticks_left {
+                    delta_ticks -= ticks_left;
+                    run_cpu_turn(state, idx);
+                    advance_to_next_turn(state);
+                    // Loop continues — the new phase (BetweenTurns or
+                    // CpuTurn for the next NPC) may consume more ticks.
+                } else {
+                    state.phase = Phase::CpuTurn { idx, ticks_left: ticks_left - delta_ticks };
+                    break;
+                }
             }
-        }
-        Phase::BetweenTurns { ticks_left } => {
-            let new_left = ticks_left.saturating_sub(delta_ticks);
-            if new_left == 0 {
-                begin_turn(state);
-            } else {
-                state.phase = Phase::BetweenTurns { ticks_left: new_left };
+            Phase::BetweenTurns { ticks_left } => {
+                if delta_ticks >= ticks_left {
+                    delta_ticks -= ticks_left;
+                    begin_turn(state);
+                } else {
+                    state.phase = Phase::BetweenTurns { ticks_left: ticks_left - delta_ticks };
+                    break;
+                }
             }
+            // Phases without a timer: nothing to advance.  Stop so we don't
+            // spin forever burning ticks against a wall.
+            _ => break,
         }
-        _ => {}
     }
 }
 
@@ -256,8 +270,13 @@ pub fn resolve_attack(
     let mut defender_used: Vec<Card> = Vec::new();
 
     if def_choice.reflect {
-        // Reflect: send half damage back, take none yourself, consume Reflect card.
+        // 半減反射: 生ダメージを半分ずつ攻撃者と防御者で受ける。
+        // 床関数 (raw/2) なので、奇数時は防御者側に +1 残る (例: raw=7 → 攻撃者 3 / 防御者 4)。
+        // 合計が raw を超えないので「反射で総ダメ増し」のチート挙動を防げる。
+        // Reflect の発動条件は `attack_dmg >= 6` なので raw=1 などの極小ケースは
+        // そもそも出てこない。
         reflected = raw_damage / 2;
+        blocked = reflected; // 攻撃者が肩代わりする分が「防いだ」量。
         let mut sorted_def = def_choice.card_indices.clone();
         sorted_def.sort_unstable_by(|a, b| b.cmp(a));
         for &i in &sorted_def {
@@ -265,8 +284,12 @@ pub fn resolve_attack(
                 defender_used.push(state.players[defender_idx].hand.remove(i));
             }
         }
+        let self_take = raw_damage - reflected;
         state.push_log(
-            format!("  → {} は「反射」で {} ダメージを跳ね返した！", state.players[defender_idx].name, reflected),
+            format!(
+                "  → {} は「反射」を発動！ 攻撃者へ {} 跳ね返し、自身は {} 被弾",
+                state.players[defender_idx].name, reflected, self_take,
+            ),
             LogKind::Defend,
         );
     } else if !def_choice.card_indices.is_empty() {
@@ -299,6 +322,9 @@ pub fn resolve_attack(
     let final_damage = (raw_damage - blocked).max(0);
 
     if def_choice.reflect {
+        // 半減反射: 防御者・攻撃者ともに半分を被弾。
+        // 防御者の被弾は `blocked = raw - halved` を引いた `final_damage`。
+        apply_damage(state, defender_idx, final_damage);
         apply_damage(state, attacker_idx, reflected);
     } else {
         apply_damage(state, defender_idx, final_damage);
@@ -662,14 +688,38 @@ mod tests {
     }
 
     #[test]
-    fn reflect_returns_damage_to_attacker() {
+    fn reflect_splits_damage_evenly_for_even_total() {
         let mut s = make_state();
         set_hand(&mut s, 0, &[Card::Greatsword]); // 6 dmg
         set_hand(&mut s, 1, &[Card::Reflect]);
         resolve_attack(&mut s, 0, 1, &[0]);
-        // Reflect triggers (>=6 dmg threshold). Defender unhurt, attacker takes some.
-        assert_eq!(s.players[1].hp, STARTING_HP);
-        assert!(s.players[0].hp < STARTING_HP);
+        // 半減反射: raw 6 → 攻撃者 3 / 防御者 3
+        assert_eq!(s.players[0].hp, STARTING_HP - 3);
+        assert_eq!(s.players[1].hp, STARTING_HP - 3);
+    }
+
+    #[test]
+    fn reflect_total_damage_does_not_exceed_raw_for_odd_total() {
+        // raw=7 (Greatsword 6 + Knife なら 8 になるので、別途構成)
+        // 銃 (8) で reflect → 攻撃者 4 / 防御者 4 = total 8 = raw
+        // 神剣 (12) で reflect → 攻撃者 6 / 防御者 6 = total 12 = raw
+        let mut s = make_state();
+        set_hand(&mut s, 0, &[Card::Gun]); // 8 dmg
+        set_hand(&mut s, 1, &[Card::Reflect]);
+        resolve_attack(&mut s, 0, 1, &[0]);
+        let total_taken = (STARTING_HP - s.players[0].hp) + (STARTING_HP - s.players[1].hp);
+        assert_eq!(total_taken, 8, "reflect must not amplify total damage");
+    }
+
+    #[test]
+    fn reflect_consumes_reflect_card() {
+        let mut s = make_state();
+        set_hand(&mut s, 0, &[Card::Greatsword]);
+        set_hand(&mut s, 1, &[Card::Reflect, Card::Shield]);
+        resolve_attack(&mut s, 0, 1, &[0]);
+        assert!(!s.players[1].hand.contains(&Card::Reflect));
+        // Shield は使わないので残るはず。
+        assert!(s.players[1].hand.contains(&Card::Shield));
     }
 
     #[test]
@@ -814,5 +864,41 @@ mod tests {
         s.phase = Phase::BetweenTurns { ticks_left: 4 };
         tick(&mut s, 4);
         assert!(matches!(s.phase, Phase::PlayerAction));
+    }
+
+    #[test]
+    fn tick_consumes_leftover_across_transitions() {
+        // 大量の delta_ticks (タブ復帰直後の代表例) を一発で渡しても、
+        // CPU の番が連続して進み、最終的に止まるべきフェーズで止まること。
+        let mut s = make_state();
+        s.turn = 1;
+        s.phase = Phase::CpuTurn { idx: 1, ticks_left: CPU_TURN_DELAY_TICKS };
+        // 100 ticks: CPU1 (8) + Between (4) + CPU2 (8) + Between (4) + CPU3 (8)
+        // + Between (4) + PlayerAction (止まる) = 36 で枯渇するまで進める。
+        tick(&mut s, 100);
+        // 最終的に人間の番に戻っているはず (もしくは Victory/Defeat)。
+        match s.phase {
+            Phase::PlayerAction | Phase::Victory | Phase::Defeat => {}
+            other => panic!("expected to settle at PlayerAction/Victory/Defeat, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tick_partial_progress_within_phase() {
+        // delta_ticks < ticks_left の通常ケースは引き算だけ進む。
+        let mut s = make_state();
+        s.phase = Phase::BetweenTurns { ticks_left: 4 };
+        tick(&mut s, 1);
+        assert_eq!(s.phase, Phase::BetweenTurns { ticks_left: 3 });
+    }
+
+    #[test]
+    fn tick_idle_phase_does_not_loop_forever() {
+        // タイマーのないフェーズで巨大な delta_ticks を受け取っても、
+        // ループ内で破棄せず即座に抜ける (無限ループしない)。
+        let mut s = make_state();
+        s.phase = Phase::PlayerAction;
+        tick(&mut s, u32::MAX);
+        assert_eq!(s.phase, Phase::PlayerAction);
     }
 }
