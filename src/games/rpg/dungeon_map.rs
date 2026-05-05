@@ -6,7 +6,9 @@
 // Grid algorithms use index-based loops for clarity.
 #![allow(clippy::needless_range_loop)]
 
-use super::state::{CellType, DungeonMap, Facing, MapCell, Room, Tile};
+use super::state::{
+    enemy_info, floor_enemies, CellType, DungeonMap, Facing, MapCell, Monster, Room, Tile,
+};
 
 // ── RNG (same LCG as logic.rs) ──────────────────────────────
 
@@ -191,6 +193,9 @@ pub fn generate_map(floor: u32, rng_seed: &mut u64) -> DungeonMap {
     // Place special events on RoomFloor tiles
     place_events(&mut grid, w, h, floor, rng_seed, start_x, start_y, stairs_x, stairs_y);
 
+    // Spawn monster entities (separate from cell types)
+    let monsters = spawn_monsters(&grid, w, h, floor, start_x, start_y, stairs_x, stairs_y, rng_seed);
+
     DungeonMap {
         floor_num: floor,
         width: w,
@@ -200,7 +205,90 @@ pub fn generate_map(floor: u32, rng_seed: &mut u64) -> DungeonMap {
         player_y: start_y,
         last_dir: Facing::North,
         rooms,
+        monsters,
     }
+}
+
+/// Spawn monster entities on walkable tiles (room floors, away from
+/// entrance/stairs/event cells). The bottom floor (B10F) spawns the
+/// Demon Lord at the stairs cell as a boss encounter.
+#[allow(clippy::too_many_arguments)]
+fn spawn_monsters(
+    grid: &[Vec<MapCell>],
+    w: usize,
+    h: usize,
+    floor: u32,
+    entrance_x: usize,
+    entrance_y: usize,
+    stairs_x: usize,
+    stairs_y: usize,
+    rng_seed: &mut u64,
+) -> Vec<Monster> {
+    let mut monsters = Vec::new();
+
+    // Boss floor: just the Demon Lord at the stairs tile.
+    if floor >= super::state::MAX_FLOOR {
+        let info = enemy_info(super::state::EnemyKind::DemonLord);
+        monsters.push(Monster {
+            kind: super::state::EnemyKind::DemonLord,
+            x: stairs_x,
+            y: stairs_y,
+            hp: info.max_hp,
+            max_hp: info.max_hp,
+            awake: true,
+            charging: false,
+        });
+        return monsters;
+    }
+
+    // Collect candidate tiles: walkable, not on entrance/stairs, no event.
+    let mut candidates: Vec<(usize, usize)> = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let cell = &grid[y][x];
+            if !cell.is_walkable() { continue; }
+            if (x, y) == (entrance_x, entrance_y) { continue; }
+            if (x, y) == (stairs_x, stairs_y) { continue; }
+            if cell.cell_type != CellType::Corridor { continue; }
+            if cell.tile != Tile::RoomFloor { continue; }
+            // Don't spawn within 4 tiles of entrance (give player breathing room)
+            let dx = x as i32 - entrance_x as i32;
+            let dy = y as i32 - entrance_y as i32;
+            if dx * dx + dy * dy < 16 { continue; }
+            candidates.push((x, y));
+        }
+    }
+
+    // Shuffle
+    for i in (1..candidates.len()).rev() {
+        let j = rng_range(rng_seed, (i + 1) as u32) as usize;
+        candidates.swap(i, j);
+    }
+
+    // Spawn count scales with floor
+    let count = match floor {
+        1..=2 => 4,
+        3..=5 => 6,
+        6..=9 => 8,
+        _ => 10,
+    };
+    let pool = floor_enemies(floor);
+
+    for &(x, y) in candidates.iter().take(count) {
+        let kind = pool[rng_range(rng_seed, pool.len() as u32) as usize];
+        let info = enemy_info(kind);
+        monsters.push(Monster {
+            kind,
+            x,
+            y,
+            hp: info.max_hp,
+            max_hp: info.max_hp,
+            awake: false,
+            charging: false,
+        });
+    }
+
+    monsters
 }
 
 /// Carve a horizontal corridor connecting left_room and right_room.
@@ -492,20 +580,18 @@ fn place_events(
 
     // Determine event counts based on floor
     let total = candidates.len();
-    let (enemies, treasures, traps, springs, lores, npcs) = room_distribution(floor, total);
+    let (treasures, traps, springs, lores, npcs) = room_distribution(floor, total);
 
     for (placed, &(x, y)) in candidates.iter().enumerate() {
-        if placed < enemies {
-            grid[y][x].cell_type = CellType::Enemy;
-        } else if placed < enemies + treasures {
+        if placed < treasures {
             grid[y][x].cell_type = CellType::Treasure;
-        } else if placed < enemies + treasures + traps {
+        } else if placed < treasures + traps {
             grid[y][x].cell_type = CellType::Trap;
-        } else if placed < enemies + treasures + traps + springs {
+        } else if placed < treasures + traps + springs {
             grid[y][x].cell_type = CellType::Spring;
-        } else if placed < enemies + treasures + traps + springs + lores {
+        } else if placed < treasures + traps + springs + lores {
             grid[y][x].cell_type = CellType::Lore;
-        } else if placed < enemies + treasures + traps + springs + lores + npcs {
+        } else if placed < treasures + traps + springs + lores + npcs {
             grid[y][x].cell_type = CellType::Npc;
         } else {
             break;
@@ -513,19 +599,18 @@ fn place_events(
     }
 }
 
-/// Room distribution: how many of each type based on floor and total available cells.
-fn room_distribution(floor: u32, total: usize) -> (usize, usize, usize, usize, usize, usize) {
+/// Room distribution: how many of each event type based on floor and total cells.
+/// Enemies are spawned separately as Monster entities.
+fn room_distribution(floor: u32, total: usize) -> (usize, usize, usize, usize, usize) {
     let t = total as f32;
-    // Total event density ~30-40% so most steps are quiet exploration.
-    let (enemy_pct, treasure_pct, trap_pct, spring_pct, lore_pct, npc_pct) = match floor {
-        1..=2 => (0.12, 0.06, 0.02, 0.05, 0.04, 0.03), // ~32%
-        3..=5 => (0.15, 0.05, 0.04, 0.04, 0.03, 0.02), // ~33%
-        6..=9 => (0.18, 0.05, 0.05, 0.03, 0.02, 0.02), // ~35%
-        _ => (0.20, 0.04, 0.06, 0.03, 0.02, 0.01),     // ~36%
+    let (treasure_pct, trap_pct, spring_pct, lore_pct, npc_pct) = match floor {
+        1..=2 => (0.06, 0.02, 0.05, 0.04, 0.03),
+        3..=5 => (0.05, 0.04, 0.04, 0.03, 0.02),
+        6..=9 => (0.05, 0.05, 0.03, 0.02, 0.02),
+        _ => (0.04, 0.06, 0.03, 0.02, 0.01),
     };
 
     (
-        (t * enemy_pct).round() as usize,
         (t * treasure_pct).round() as usize,
         (t * trap_pct).round() as usize,
         (t * spring_pct).round() as usize,
@@ -595,9 +680,22 @@ mod tests {
             .flatten()
             .map(|c| c.cell_type)
             .collect();
-        assert!(types.contains(&CellType::Enemy));
         assert!(types.contains(&CellType::Entrance));
         assert!(types.contains(&CellType::Stairs));
+    }
+
+    #[test]
+    fn map_spawns_monsters() {
+        let mut seed = 42u64;
+        let map = generate_map(3, &mut seed);
+        assert!(!map.monsters.is_empty(), "Floor 3 should spawn monsters");
+    }
+
+    #[test]
+    fn boss_floor_spawns_demon_lord() {
+        let mut seed = 42u64;
+        let map = generate_map(10, &mut seed);
+        assert!(map.monsters.iter().any(|m| m.kind == super::super::state::EnemyKind::DemonLord));
     }
 
     #[test]

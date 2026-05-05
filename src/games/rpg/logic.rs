@@ -1,16 +1,16 @@
 //! Dungeon Dive — pure game logic (no rendering / IO).
 //!
-//! Core loop: Town → Grid Dungeon (first-person exploration) → Events/Battle → Town.
-//! Exploration with 3D view is the central experience.
+//! Inline-combat roguelike: player and monsters share the grid.
+//! Each player action triggers a monster turn (chase + attack).
 
 use super::dungeon_map::generate_map;
 use super::events::{generate_event, resolve_event, EventOutcome};
 use super::lore::{atmosphere_text, floor_entry_text, floor_theme};
 use super::state::{
-    enemy_info, floor_enemies, item_info, level_stats, shop_items, skill_element, skill_info,
-    BattleEnemy, BattlePhase, BattleState, CellType, EnemyKind, Facing,
-    InventoryItem, ItemCategory, ItemKind, Overlay, RoomResult, RpgState, Scene,
-    SkillKind, Tile, ALL_SKILLS, MAX_FLOOR, MAX_LEVEL,
+    affix_info, enemy_info, item_info, level_stats, shop_items, skill_element, skill_info,
+    CellType, EnemyKind, Facing, InventoryItem, ItemCategory, ItemKind,
+    Overlay, Pet, PlayerBuffs, Quest, QuestKind, RpgState, Scene, SkillKind,
+    Tile, ALL_AFFIXES, ALL_SKILLS, MAX_FLOOR, MAX_LEVEL,
 };
 
 // ── Tick (no-op: command-based game) ─────────────────────────
@@ -24,7 +24,8 @@ fn next_rng(seed: u64) -> u64 {
         .wrapping_add(1442695040888963407)
 }
 
-fn rng_range(state: &mut RpgState, max: u32) -> u32 {
+pub(super) fn rng_range(state: &mut RpgState, max: u32) -> u32 {
+    if max == 0 { return 0; }
     state.rng_seed = next_rng(state.rng_seed);
     ((state.rng_seed >> 33) % max as u64) as u32
 }
@@ -51,13 +52,20 @@ pub fn advance_intro(state: &mut RpgState) {
             state.scene = Scene::Intro(1);
         }
         1 => {
-            // Give starting equipment
-            state.weapon = Some(ItemKind::WoodenSword);
-            state.armor = Some(ItemKind::TravelClothes);
+            // Give starting equipment (in inventory + equipped)
+            state.inventory.push(InventoryItem {
+                kind: ItemKind::WoodenSword, count: 1, affix: None,
+            });
+            state.weapon_idx = Some(state.inventory.len() - 1);
+            state.inventory.push(InventoryItem {
+                kind: ItemKind::TravelClothes, count: 1, affix: None,
+            });
+            state.armor_idx = Some(state.inventory.len() - 1);
             state.gold += 50;
             add_item(state, ItemKind::Herb, 3);
+            add_item(state, ItemKind::Bread, 2);
             state.add_log("木の剣と旅人の服を受け取った！");
-            state.add_log("薬草x3と50Gを受け取った！");
+            state.add_log("薬草x3 / パンx2 / 50G を受け取った！");
             state.scene = Scene::Town;
             update_town_text(state);
         }
@@ -71,10 +79,7 @@ pub fn advance_intro(state: &mut RpgState) {
 // ── Town ──────────────────────────────────────────────────────
 
 pub fn update_town_text(state: &mut RpgState) {
-    let mut lines = vec![
-        "＜冒険者ギルド＞".into(),
-        "".into(),
-    ];
+    let mut lines = vec!["＜冒険者ギルド＞".into(), "".into()];
 
     if state.max_floor_reached == 0 {
         lines.push("受付嬢「ダンジョンに挑戦してみましょう！」".into());
@@ -86,6 +91,10 @@ pub fn update_town_text(state: &mut RpgState) {
             state.max_floor_reached
         ));
     }
+    if let Some(q) = &state.active_quest {
+        lines.push("".into());
+        lines.push(format!("受託中: {}", q.description()));
+    }
 
     state.scene_text = lines;
 }
@@ -96,15 +105,13 @@ pub struct Choice {
 }
 
 pub fn town_choices(state: &RpgState) -> Vec<Choice> {
-    let mut choices = vec![Choice {
-        label: "ダンジョンに入る".into(),
-    }];
-    choices.push(Choice {
-        label: "ショップ".into(),
-    });
-    if state.hp < state.max_hp || state.mp < state.max_mp {
+    let mut choices = vec![Choice { label: "ダンジョンに入る".into() }];
+    choices.push(Choice { label: "ショップ".into() });
+    choices.push(Choice { label: "依頼書 (掲示板)".into() });
+    choices.push(Choice { label: "祭壇で祈る".into() });
+    if state.hp < state.max_hp || state.mp < state.max_mp || state.satiety < state.satiety_max {
         choices.push(Choice {
-            label: "休息 (HP/MP全回復)".into(),
+            label: "宿で休む (HP/MP/満腹度回復, 10G)".into(),
         });
     }
     choices
@@ -116,33 +123,191 @@ pub fn execute_town_choice(state: &mut RpgState, index: usize) -> bool {
         return false;
     }
 
-    let mut pos = 0;
-
-    // Enter dungeon
-    if index == pos {
-        enter_dungeon(state, 1);
-        return true;
+    match index {
+        0 => {
+            enter_dungeon(state, 1);
+            true
+        }
+        1 => {
+            state.overlay = Some(Overlay::Shop);
+            true
+        }
+        2 => {
+            state.overlay = Some(Overlay::QuestBoard);
+            true
+        }
+        3 => {
+            state.overlay = Some(Overlay::PrayMenu);
+            true
+        }
+        4 => {
+            // Inn (only if needed)
+            if state.gold < 10 {
+                state.add_log("お金が足りない (宿代10G)");
+                return false;
+            }
+            state.gold -= 10;
+            state.hp = state.max_hp;
+            state.mp = state.max_mp;
+            state.satiety = state.satiety_max;
+            state.buffs = PlayerBuffs::default();
+            if let Some(p) = &mut state.pet { p.hp = p.max_hp; }
+            state.add_log("宿でゆっくり休んだ。完全回復！");
+            update_town_text(state);
+            true
+        }
+        _ => false,
     }
-    pos += 1;
+}
 
-    // Shop
-    if index == pos {
-        state.overlay = Some(Overlay::Shop);
-        return true;
+// ── Quests ───────────────────────────────────────────────────
+
+/// Available quests at the town board (regenerates on visit).
+pub fn available_quests(state: &RpgState) -> Vec<Quest> {
+    let mut seed = state.rng_seed ^ (state.completed_quests as u64).wrapping_mul(31);
+    let mut roll = |max: u32| -> u32 {
+        seed = next_rng(seed);
+        if max == 0 { 0 } else { ((seed >> 33) % max as u64) as u32 }
+    };
+    let max_floor = state.max_floor_reached.max(1);
+    let mut quests = Vec::new();
+
+    // Slay quest
+    {
+        let target_floor = 1 + roll(max_floor);
+        let pool = super::state::floor_enemies(target_floor);
+        let kind = pool[roll(pool.len() as u32) as usize];
+        let count = 2 + roll(3);
+        let info = enemy_info(kind);
+        quests.push(Quest {
+            kind: QuestKind::Slay { target: kind, count, floor: target_floor },
+            reward_gold: info.gold * count + 30 * target_floor,
+            reward_exp: info.exp * count / 2,
+            progress: 0,
+        });
     }
-    pos += 1;
 
-    // Rest
-    if (state.hp < state.max_hp || state.mp < state.max_mp) && index == pos {
-        state.hp = state.max_hp;
-        state.mp = state.max_mp;
-        state.add_log("ゆっくり休んだ。HP/MPが全回復した！");
-        update_town_text(state);
-        return true;
+    // Reach quest
+    {
+        let target_floor = (max_floor + 1).min(MAX_FLOOR);
+        quests.push(Quest {
+            kind: QuestKind::Reach { floor: target_floor },
+            reward_gold: 50 * target_floor,
+            reward_exp: 20 * target_floor,
+            progress: 0,
+        });
     }
 
-    let _ = pos;
-    false
+    // Collect quest
+    {
+        let item = if max_floor >= 4 { ItemKind::MagicWater } else { ItemKind::Herb };
+        let count = 3 + roll(3);
+        quests.push(Quest {
+            kind: QuestKind::Collect { item, count },
+            reward_gold: 40 + 10 * count,
+            reward_exp: 10 * count,
+            progress: 0,
+        });
+    }
+
+    quests
+}
+
+pub fn accept_quest(state: &mut RpgState, idx: usize) -> bool {
+    let qs = available_quests(state);
+    if idx >= qs.len() { return false; }
+    if state.active_quest.is_some() {
+        state.add_log("既に他の依頼を受託中。完了か破棄が必要");
+        return false;
+    }
+    let q = qs[idx].clone();
+    state.add_log(&format!("依頼を受けた: {}", q.description()));
+    state.active_quest = Some(q);
+    state.overlay = None;
+    update_town_text(state);
+    true
+}
+
+pub fn abandon_quest(state: &mut RpgState) -> bool {
+    if state.active_quest.is_none() { return false; }
+    state.active_quest = None;
+    state.add_log("依頼を破棄した");
+    update_town_text(state);
+    true
+}
+
+fn check_quest_complete(state: &mut RpgState) {
+    let complete = state.active_quest.as_ref().map(|q| q.is_complete()).unwrap_or(false);
+    if !complete { return; }
+    let q = state.active_quest.take().unwrap();
+    state.gold += q.reward_gold;
+    state.exp += q.reward_exp;
+    state.completed_quests += 1;
+    state.faith = state.faith.saturating_add(2);
+    state.add_log(&format!("依頼達成！ +{}G +{}EXP", q.reward_gold, q.reward_exp));
+    check_level_up(state);
+}
+
+// ── Prayer ───────────────────────────────────────────────────
+
+pub fn pray(state: &mut RpgState) -> bool {
+    if state.prayed_this_run {
+        state.add_log("今日はもう祈った。次の冒険まで待つ");
+        return false;
+    }
+    state.prayed_this_run = true;
+    state.faith = state.faith.saturating_add(1);
+    let roll = rng_range(state, 100);
+    let blessing_thresh = 40 + state.faith.min(40);
+    state.overlay = None;
+
+    if roll < 10 {
+        // Curse (low chance)
+        let dmg = state.max_hp / 6;
+        state.hp = state.hp.saturating_sub(dmg).max(1);
+        state.add_log("…神は応えなかった。心に虚しさが残る…");
+    } else if roll < blessing_thresh {
+        // Major blessing
+        let kind = rng_range(state, 4);
+        match kind {
+            0 => {
+                state.hp = state.max_hp;
+                state.mp = state.max_mp;
+                state.add_log("神の加護！ HP/MPが完全回復した！");
+            }
+            1 => {
+                add_item(state, ItemKind::CookedMeal, 2);
+                state.add_log("神の恵み！ 温かい料理x2を授かった");
+            }
+            2 => {
+                state.gold += 100 + state.faith * 5;
+                state.add_log(&format!("神の恵み！ {}Gを授かった", 100 + state.faith * 5));
+            }
+            _ => {
+                // Random affixed weapon (level-appropriate)
+                let base = pick_random_weapon(state.max_floor_reached);
+                let affix = ALL_AFFIXES[rng_range(state, ALL_AFFIXES.len() as u32) as usize];
+                state.inventory.push(InventoryItem {
+                    kind: base, count: 1, affix: Some(affix),
+                });
+                let name = format!("{}{}", affix_info(affix).prefix, item_info(base).name);
+                state.add_log(&format!("神の恵み！ {}を授かった", name));
+            }
+        }
+    } else {
+        // Minor blessing
+        state.hp = (state.hp + state.max_hp / 4).min(state.max_hp);
+        state.mp = (state.mp + state.max_mp / 4).min(state.max_mp);
+        state.add_log("祈りが届いた。HP/MPが少し回復した");
+    }
+    update_town_text(state);
+    true
+}
+
+fn pick_random_weapon(max_floor: u32) -> ItemKind {
+    if max_floor >= 7 { ItemKind::SteelSword }
+    else if max_floor >= 4 { ItemKind::IronSword }
+    else { ItemKind::WoodenSword }
 }
 
 // ── Dungeon: Grid-Based Exploration ───────────────────────────
@@ -150,53 +315,71 @@ pub fn execute_town_choice(state: &mut RpgState, index: usize) -> bool {
 pub fn enter_dungeon(state: &mut RpgState, floor: u32) {
     let first_entry = state.max_floor_reached == 0;
 
-    // Reset run stats if starting fresh
     if floor == 1 {
         state.run_gold_earned = 0;
         state.run_exp_earned = 0;
         state.run_enemies_killed = 0;
         state.run_rooms_explored = 0;
+        state.prayed_this_run = false;
+        state.buffs = PlayerBuffs::default();
     }
 
     let mut map = generate_map(floor, &mut state.rng_seed);
 
-    // Mark entrance as visited + revealed
     let px = map.player_x;
     let py = map.player_y;
     map.grid[py][px].visited = true;
     map.grid[py][px].revealed = true;
-    map.grid[py][px].event_done = true; // Don't trigger entrance event on entry
+    map.grid[py][px].event_done = true;
 
-    // Reveal the starting room
     reveal_room(&mut map, px, py);
+
+    // Place pet next to player if possible
+    if let Some(pet) = &mut state.pet {
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            let nx = px as i32 + dir.dx();
+            let ny = py as i32 + dir.dy();
+            if nx >= 0 && ny >= 0 && (nx as usize) < map.width && (ny as usize) < map.height
+                && map.grid[ny as usize][nx as usize].is_walkable()
+                && map.monster_at(nx as usize, ny as usize).is_none()
+            {
+                pet.x = nx as usize;
+                pet.y = ny as usize;
+                break;
+            }
+        }
+    }
 
     state.dungeon = Some(map);
     state.scene = Scene::DungeonExplore;
-    state.room_result = None;
     state.active_event = None;
 
-    // Update max floor
     if floor > state.max_floor_reached {
         state.max_floor_reached = floor;
     }
 
-    // Show floor entry text
+    // Quest progress: Reach
+    if let Some(q) = &mut state.active_quest {
+        if let QuestKind::Reach { floor: target } = q.kind {
+            if floor >= target { q.progress = floor; }
+        }
+    }
+    check_quest_complete(state);
+
     let theme = floor_theme(floor);
     let mut texts = floor_entry_text(floor, theme);
 
-    // First dungeon entry: add control guide
     if first_entry {
         texts.push(String::new());
         texts.push("※ ←↑↓→ で1歩ずつ移動".into());
-        texts.push("  マップタップで通路を一気に進む".into());
+        texts.push("  敵に隣接して移動方向を押すと攻撃".into());
+        texts.push("  満腹度が0になるとHPが減るので食料を持参".into());
     }
 
     state.scene_text = texts;
     state.add_log(&format!("B{}Fに踏み込んだ…", floor));
 }
 
-/// Reveal all tiles in the room containing (x, y).
-/// If the tile has a room_id, set `revealed = true` for all tiles with that room_id.
 fn reveal_room(map: &mut super::state::DungeonMap, x: usize, y: usize) {
     let room_id = match map.grid[y][x].room_id {
         Some(id) => id,
@@ -211,7 +394,6 @@ fn reveal_room(map: &mut super::state::DungeonMap, x: usize, y: usize) {
     }
 }
 
-/// Check if the adjacent tile in direction `dir` from (x, y) is walkable.
 fn is_adjacent_walkable(map: &super::state::DungeonMap, x: usize, y: usize, dir: Facing) -> bool {
     let nx = x as i32 + dir.dx();
     let ny = y as i32 + dir.dy();
@@ -221,87 +403,117 @@ fn is_adjacent_walkable(map: &super::state::DungeonMap, x: usize, y: usize, dir:
     map.cell(nx as usize, ny as usize).is_walkable()
 }
 
-/// Try to move the player one cell in the given cardinal direction.
-/// Returns true if movement succeeded.
+/// Try to move the player one cell. If a monster is on the target,
+/// attack it instead. Either way, monsters take their turn after.
 pub fn try_move(state: &mut RpgState, dir: Facing) -> bool {
-    let (can_move, nx, ny) = {
-        let map = match &state.dungeon {
-            Some(m) => m,
-            None => return false,
-        };
-        let tx = map.player_x as i32 + dir.dx();
-        let ty = map.player_y as i32 + dir.dy();
-        if !map.in_bounds(tx, ty) {
-            (false, 0, 0)
-        } else {
-            let ux = tx as usize;
-            let uy = ty as usize;
-            if map.cell(ux, uy).is_walkable() {
-                (true, ux, uy)
-            } else {
-                (false, 0, 0)
-            }
+    let (target_action, nx, ny) = compute_move_target(state, dir);
+    match target_action {
+        MoveAction::Blocked => {
+            state.add_log("壁だ。進めない。");
+            false
         }
-    };
+        MoveAction::AttackMonster(idx) => {
+            attack_monster(state, idx);
+            on_player_action(state);
+            true
+        }
+        MoveAction::SwapPet => {
+            // Swap positions with pet (just step onto pet's tile, pet moves to player's old)
+            if let (Some(map), Some(pet)) = (&mut state.dungeon, &mut state.pet) {
+                let old = (map.player_x, map.player_y);
+                pet.x = old.0;
+                pet.y = old.1;
+                map.player_x = nx;
+                map.player_y = ny;
+                map.last_dir = dir;
+            }
+            after_move(state, nx, ny);
+            on_player_action(state);
+            true
+        }
+        MoveAction::Walk => {
+            if let Some(map) = &mut state.dungeon {
+                map.player_x = nx;
+                map.player_y = ny;
+                map.last_dir = dir;
+            }
+            after_move(state, nx, ny);
+            on_player_action(state);
+            true
+        }
+    }
+}
 
-    if !can_move {
-        state.add_log("壁だ。進めない。");
-        return false;
+enum MoveAction {
+    Blocked,
+    Walk,
+    AttackMonster(usize),
+    SwapPet,
+}
+
+fn compute_move_target(state: &RpgState, dir: Facing) -> (MoveAction, usize, usize) {
+    let map = match &state.dungeon {
+        Some(m) => m,
+        None => return (MoveAction::Blocked, 0, 0),
+    };
+    let tx = map.player_x as i32 + dir.dx();
+    let ty = map.player_y as i32 + dir.dy();
+    if !map.in_bounds(tx, ty) {
+        return (MoveAction::Blocked, 0, 0);
+    }
+    let ux = tx as usize;
+    let uy = ty as usize;
+    if !map.cell(ux, uy).is_walkable() {
+        return (MoveAction::Blocked, 0, 0);
+    }
+    if let Some(idx) = map.monster_at(ux, uy) {
+        return (MoveAction::AttackMonster(idx), ux, uy);
+    }
+    if let Some(p) = &state.pet {
+        if p.x == ux && p.y == uy {
+            return (MoveAction::SwapPet, ux, uy);
+        }
+    }
+    (MoveAction::Walk, ux, uy)
+}
+
+fn after_move(state: &mut RpgState, nx: usize, ny: usize) {
+    let was_visited;
+    let cell_type;
+    let event_done;
+    {
+        let map = state.dungeon.as_mut().unwrap();
+        was_visited = map.grid[ny][nx].visited;
+        map.grid[ny][nx].visited = true;
+        map.grid[ny][nx].revealed = true;
+        reveal_room(map, nx, ny);
+        cell_type = map.grid[ny][nx].cell_type;
+        event_done = map.grid[ny][nx].event_done;
     }
 
-    let map = state.dungeon.as_mut().unwrap();
-    map.player_x = nx;
-    map.player_y = ny;
-    map.last_dir = dir;
-
-    let was_visited = map.grid[ny][nx].visited;
-    map.grid[ny][nx].visited = true;
-    map.grid[ny][nx].revealed = true;
-
-    // If entering a room, reveal the entire room
-    reveal_room(map, nx, ny);
-
-    // Count newly explored tiles
     if !was_visited {
         state.run_rooms_explored += 1;
     }
 
-    // Atmosphere text
     let floor = state.dungeon.as_ref().unwrap().floor_num;
     let theme = floor_theme(floor);
     let rng_val = rng_range(state, 100);
     let atmo = atmosphere_text(theme, rng_val);
     state.scene_text = vec![atmo.into()];
 
-    // Check if this cell has an unresolved event
-    let cell_type = state.dungeon.as_ref().unwrap().grid[ny][nx].cell_type;
-    let event_done = state.dungeon.as_ref().unwrap().grid[ny][nx].event_done;
-
     if cell_type != CellType::Corridor && !event_done {
-        // Generate and trigger event
-        let floor = state.dungeon.as_ref().unwrap().floor_num;
-        let theme = floor_theme(floor);
         if let Some(event) = generate_event(cell_type, floor, theme, &mut state.rng_seed) {
             state.active_event = Some(event);
             state.scene = Scene::DungeonEvent;
         }
     }
-
-    true
 }
 
-/// Move in an absolute cardinal direction with auto-walk (map tap).
-///
-/// Moves in the given direction. If the destination is a plain corridor
-/// with only one exit (besides where we came from), auto-walk continues
-/// until a junction, event, or dead end.
+/// Move in a direction with auto-walk through corridors.
 pub fn move_direction(state: &mut RpgState, dir: Facing) -> bool {
-    // Try to move
     if !try_move(state, dir) {
         return false;
     }
-
-    // Auto-walk: continue through corridors until junction/event/dead-end
     let mut steps = 0;
     let max_steps = 8;
     while steps < max_steps && state.scene == Scene::DungeonExplore {
@@ -309,67 +521,560 @@ pub fn move_direction(state: &mut RpgState, dir: Facing) -> bool {
             Some(d) => d,
             None => break,
         };
-
         if !try_move(state, next_dir) {
             break;
         }
         steps += 1;
     }
-
     if steps > 0 {
-        let total = steps + 1;
-        state.scene_text.insert(0, format!("通路を{}歩進んだ。", total));
+        state.scene_text.insert(0, format!("通路を{}歩進んだ。", steps + 1));
     }
-
     true
 }
 
-/// Returns the only exit direction from the current cell (excluding the
-/// direction we came from). Returns `None` if there are 0 or 2+ exits
-/// (dead-end or junction), or if the cell has an unresolved event.
 fn auto_walk_direction(state: &RpgState) -> Option<Facing> {
-    let map = match &state.dungeon {
-        Some(m) => m,
-        None => return None,
-    };
-
+    let map = state.dungeon.as_ref()?;
     let cell = map.player_cell();
 
-    // Don't auto-walk if this cell has an unresolved event
-    if cell.cell_type != CellType::Corridor && !cell.event_done {
-        return None;
-    }
+    if cell.cell_type != CellType::Corridor && !cell.event_done { return None; }
+    if cell.cell_type == CellType::Entrance || cell.cell_type == CellType::Stairs { return None; }
+    if cell.tile == Tile::RoomFloor { return None; }
 
-    // Don't auto-walk from entrance or stairs (important navigation points)
-    if cell.cell_type == CellType::Entrance || cell.cell_type == CellType::Stairs {
-        return None;
-    }
-
-    // Don't auto-walk when entering a room (stop at room boundary)
-    if cell.tile == Tile::RoomFloor {
+    // Stop if any awake monster is visible (within 4 tiles)
+    let px = map.player_x as i32;
+    let py = map.player_y as i32;
+    if map.monsters.iter().any(|m| {
+        m.hp > 0 && m.awake && {
+            let dx = m.x as i32 - px;
+            let dy = m.y as i32 - py;
+            dx * dx + dy * dy <= 16
+        }
+    }) {
         return None;
     }
 
     let came_from = map.last_dir.reverse();
     let mut exits = Vec::new();
-
     for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
-        if dir == came_from {
-            continue;
-        }
+        if dir == came_from { continue; }
         if is_adjacent_walkable(map, map.player_x, map.player_y, dir) {
             exits.push(dir);
         }
     }
+    if exits.len() == 1 { Some(exits[0]) } else { None }
+}
 
-    if exits.len() == 1 {
-        Some(exits[0])
+// ── Inline Combat ────────────────────────────────────────────
+
+/// Player attacks the monster at `monsters[idx]`.
+pub fn attack_monster(state: &mut RpgState, idx: usize) {
+    let player_atk = state.total_atk();
+    let player_element = state.weapon_element();
+    let element_dmg = state.weapon_element_dmg();
+    let vamp_pct = state.weapon_vampiric_pct();
+
+    let (kind, einfo, hp_before) = {
+        let m = &state.dungeon.as_ref().unwrap().monsters[idx];
+        (m.kind, enemy_info(m.kind), m.hp)
+    };
+
+    let crit_roll = rng_range(state, 100);
+    let is_crit = crit_roll < 10;
+    let mut base = player_atk.saturating_sub(einfo.def / 2).max(1);
+    if is_crit { base = base * 3 / 2; }
+
+    // Affix elemental bonus
+    let mut bonus = 0;
+    if let Some(elem) = player_element {
+        bonus += element_dmg;
+        if einfo.weakness == Some(elem) {
+            bonus += element_dmg; // weakness doubles affix damage
+        }
+    }
+
+    let damage = base + bonus;
+
+    {
+        let m = &mut state.dungeon.as_mut().unwrap().monsters[idx];
+        m.hp = m.hp.saturating_sub(damage);
+        m.awake = true;
+    }
+
+    let weak_str = match einfo.weakness {
+        Some(e) if Some(e) == player_element => " [弱点!]",
+        _ => "",
+    };
+    if is_crit {
+        state.add_log(&format!("会心の一撃！ {}に{}ダメージ{}", einfo.name, damage, weak_str));
     } else {
-        None
+        state.add_log(&format!("{}に{}ダメージ{}", einfo.name, damage, weak_str));
+    }
+
+    if vamp_pct > 0 {
+        let drain = (damage * vamp_pct / 100).max(1);
+        state.hp = (state.hp + drain).min(state.effective_max_hp());
+        state.add_log(&format!("血を吸った。HP+{}", drain));
+    }
+
+    let died = state.dungeon.as_ref().unwrap().monsters[idx].hp == 0;
+    if died {
+        on_monster_killed(state, idx, kind, hp_before);
     }
 }
 
-/// Resolve a dungeon event choice.
+fn on_monster_killed(state: &mut RpgState, _idx: usize, kind: EnemyKind, _hp_before: u32) {
+    let info = enemy_info(kind);
+    state.exp += info.exp;
+    state.gold += info.gold;
+    state.run_gold_earned += info.gold;
+    state.run_exp_earned += info.exp;
+    state.run_enemies_killed += 1;
+    state.add_log(&format!("{}を倒した！ EXP+{} +{}G", info.name, info.exp, info.gold));
+
+    // Drop
+    if let Some((drop_item, pct)) = info.drop {
+        if rng_range(state, 100) < pct {
+            // Chance for affixed drop on tougher enemies
+            let affixed_chance = match kind {
+                EnemyKind::Skeleton | EnemyKind::Golem | EnemyKind::DarkKnight => 25,
+                EnemyKind::Demon | EnemyKind::Dragon => 50,
+                _ => 5,
+            };
+            add_item(state, drop_item, 1);
+            state.add_log(&format!("{}をドロップ！", item_info(drop_item).name));
+            // Bonus affixed equipment chance
+            if rng_range(state, 100) < affixed_chance {
+                drop_random_affix_equipment(state, kind);
+            }
+        }
+    }
+
+    // Quest progress: Slay
+    let floor = state.dungeon.as_ref().unwrap().floor_num;
+    if let Some(q) = &mut state.active_quest {
+        if let QuestKind::Slay { target, floor: tf, .. } = q.kind {
+            if target == kind && tf == floor {
+                q.progress += 1;
+            }
+        }
+    }
+    check_quest_complete(state);
+
+    check_level_up(state);
+
+    // Game clear (Demon Lord)
+    if kind == EnemyKind::DemonLord {
+        state.game_cleared = true;
+        state.total_clears += 1;
+        state.faith = state.faith.saturating_add(20);
+        state.scene = Scene::GameClear;
+    }
+}
+
+fn drop_random_affix_equipment(state: &mut RpgState, killer: EnemyKind) {
+    // Pick weapon or armor based on the kind
+    let max_floor = state.max_floor_reached.max(1);
+    let is_weapon = rng_range(state, 2) == 0;
+    let kind = if is_weapon {
+        pick_random_weapon(max_floor)
+    } else if max_floor >= 7 {
+        ItemKind::ChainMail
+    } else if max_floor >= 4 {
+        ItemKind::LeatherArmor
+    } else {
+        ItemKind::TravelClothes
+    };
+    let affix_idx = rng_range(state, ALL_AFFIXES.len() as u32) as usize;
+    let affix = ALL_AFFIXES[affix_idx];
+    state.inventory.push(InventoryItem {
+        kind, count: 1, affix: Some(affix),
+    });
+    let name = format!("{}{}", affix_info(affix).prefix, item_info(kind).name);
+    state.add_log(&format!("{}が{}を落とした！", enemy_info(killer).name, name));
+}
+
+/// Called after every player action. Triggers monster turn, satiety,
+/// buff tick, pet turn, and death checks.
+pub fn on_player_action(state: &mut RpgState) {
+    if state.dungeon.is_none() || state.scene == Scene::GameClear {
+        return;
+    }
+    state.turn_count = state.turn_count.wrapping_add(1);
+
+    // Buffs tick
+    state.buffs.tick_down();
+
+    // Satiety
+    tick_satiety(state);
+    if state.hp == 0 { return; }
+
+    // Wake monsters
+    wake_monsters(state);
+
+    // Monster turns
+    monster_turn(state);
+
+    // Pet turn
+    pet_turn(state);
+
+    // Cleanup dead monsters
+    if let Some(map) = &mut state.dungeon {
+        map.monsters.retain(|m| m.hp > 0);
+    }
+
+    if state.hp == 0 {
+        process_dungeon_death(state);
+    }
+}
+
+fn tick_satiety(state: &mut RpgState) {
+    if state.satiety > 0 {
+        state.satiety -= 1;
+        // Hunger thresholds
+        if state.satiety == state.satiety_max / 4 {
+            state.add_log("お腹が空いてきた…");
+        }
+        if state.satiety == 50 {
+            state.add_log("飢餓寸前！何か食べないと…");
+        }
+    } else {
+        // Starving — drain HP each turn
+        let drain = (state.max_hp / 30).max(1);
+        state.hp = state.hp.saturating_sub(drain);
+        if state.turn_count.is_multiple_of(5) {
+            state.add_log(&format!("飢えで体力が削れる… -{}HP", drain));
+        }
+    }
+}
+
+/// Wake monsters that share the player's room or are within 3 tiles
+/// (corridor pursuit). Wakes all monsters in the same room when player
+/// enters; in corridors, radius-3 awareness.
+fn wake_monsters(state: &mut RpgState) {
+    let map = match &state.dungeon {
+        Some(m) => m,
+        None => return,
+    };
+    let player_room_id = map.player_cell().room_id;
+    let px = map.player_x as i32;
+    let py = map.player_y as i32;
+
+    let to_wake: Vec<usize> = map
+        .monsters
+        .iter()
+        .enumerate()
+        .filter_map(|(i, m)| {
+            if m.awake || m.hp == 0 { return None; }
+            let m_room = map.grid[m.y][m.x].room_id;
+            let same_room = match (player_room_id, m_room) {
+                (Some(p), Some(q)) => p == q,
+                _ => false,
+            };
+            let dx = m.x as i32 - px;
+            let dy = m.y as i32 - py;
+            let close = dx * dx + dy * dy <= 9;
+            if same_room || close { Some(i) } else { None }
+        })
+        .collect();
+
+    if !to_wake.is_empty() {
+        let map = state.dungeon.as_mut().unwrap();
+        for i in to_wake { map.monsters[i].awake = true; }
+    }
+}
+
+/// All awake monsters take a turn: attack player if adjacent, otherwise
+/// step toward player (greedy chase).
+fn monster_turn(state: &mut RpgState) {
+    let count = state.dungeon.as_ref().map(|d| d.monsters.len()).unwrap_or(0);
+    for i in 0..count {
+        if state.hp == 0 { break; }
+        monster_act(state, i);
+    }
+}
+
+fn monster_act(state: &mut RpgState, idx: usize) {
+    let (mx, my, kind, charging, can_charge, awake, hp) = {
+        let m = match state.dungeon.as_ref().and_then(|d| d.monsters.get(idx)) {
+            Some(m) => m,
+            None => return,
+        };
+        (m.x, m.y, m.kind, m.charging, enemy_info(m.kind).can_charge, m.awake, m.hp)
+    };
+    if hp == 0 || !awake { return; }
+    let einfo = enemy_info(kind);
+
+    let (px, py) = {
+        let m = state.dungeon.as_ref().unwrap();
+        (m.player_x as i32, m.player_y as i32)
+    };
+
+    let dx = px - mx as i32;
+    let dy = py - my as i32;
+    let adjacent_to_player = dx.abs() + dy.abs() == 1;
+
+    if charging {
+        // Release charged attack
+        if adjacent_to_player {
+            let damage = (einfo.atk * 2).saturating_sub(state.total_def() / 2).max(1);
+            state.hp = state.hp.saturating_sub(damage);
+            state.add_log(&format!("{}の渾身の一撃！ {}ダメージ！", einfo.name, damage));
+        } else {
+            state.add_log(&format!("{}の渾身の一撃は空振り…", einfo.name));
+        }
+        state.dungeon.as_mut().unwrap().monsters[idx].charging = false;
+        return;
+    }
+
+    if adjacent_to_player {
+        // Maybe charge
+        if can_charge && rng_range(state, 100) < 25 {
+            state.dungeon.as_mut().unwrap().monsters[idx].charging = true;
+            state.add_log(&format!("{}は力を溜めている！", einfo.name));
+            return;
+        }
+        // Normal attack
+        let damage = einfo.atk.saturating_sub(state.total_def() / 2).max(1);
+        state.hp = state.hp.saturating_sub(damage);
+        state.add_log(&format!("{}の攻撃！ {}ダメージ！", einfo.name, damage));
+        return;
+    }
+
+    // Step toward player (or pet if closer)
+    let target = best_target(state, mx, my);
+    let step = step_toward(state, mx, my, target);
+    if let Some((nx, ny)) = step {
+        let map = state.dungeon.as_mut().unwrap();
+        map.monsters[idx].x = nx;
+        map.monsters[idx].y = ny;
+    }
+}
+
+/// Pick the monster's target — prefer player, fall back to pet if much closer.
+fn best_target(state: &RpgState, mx: usize, my: usize) -> (i32, i32) {
+    let map = state.dungeon.as_ref().unwrap();
+    let to_player = (
+        map.player_x as i32 - mx as i32,
+        map.player_y as i32 - my as i32,
+    );
+    let dp_sq = to_player.0 * to_player.0 + to_player.1 * to_player.1;
+
+    if let Some(pet) = &state.pet {
+        let to_pet = (pet.x as i32 - mx as i32, pet.y as i32 - my as i32);
+        let dpet_sq = to_pet.0 * to_pet.0 + to_pet.1 * to_pet.1;
+        if dpet_sq + 4 < dp_sq {
+            return (pet.x as i32, pet.y as i32);
+        }
+    }
+    (map.player_x as i32, map.player_y as i32)
+}
+
+/// Greedy chase: pick the cardinal step that reduces Manhattan distance
+/// most, preferring axis with greater delta. Avoids walls and other entities.
+fn step_toward(state: &RpgState, mx: usize, my: usize, target: (i32, i32)) -> Option<(usize, usize)> {
+    let map = state.dungeon.as_ref()?;
+    let dx = target.0 - mx as i32;
+    let dy = target.1 - my as i32;
+
+    let mut tries: Vec<Facing> = Vec::new();
+    if dx.abs() > dy.abs() {
+        tries.push(if dx > 0 { Facing::East } else { Facing::West });
+        tries.push(if dy > 0 { Facing::South } else { Facing::North });
+    } else {
+        tries.push(if dy > 0 { Facing::South } else { Facing::North });
+        tries.push(if dx > 0 { Facing::East } else { Facing::West });
+    }
+
+    for d in tries {
+        let nx = mx as i32 + d.dx();
+        let ny = my as i32 + d.dy();
+        if !map.in_bounds(nx, ny) { continue; }
+        let ux = nx as usize;
+        let uy = ny as usize;
+        if !map.cell(ux, uy).is_walkable() { continue; }
+        if (ux, uy) == (map.player_x, map.player_y) { continue; }
+        if map.monsters.iter().any(|m| m.hp > 0 && m.x == ux && m.y == uy) { continue; }
+        if let Some(p) = &state.pet { if (ux, uy) == (p.x, p.y) { continue; } }
+        return Some((ux, uy));
+    }
+    None
+}
+
+// ── Pet ──────────────────────────────────────────────────────
+
+fn pet_turn(state: &mut RpgState) {
+    let pet = match &state.pet {
+        Some(p) => p.clone(),
+        None => return,
+    };
+    let map = match &state.dungeon {
+        Some(m) => m,
+        None => return,
+    };
+
+    // Find nearest awake monster
+    let nearest = map
+        .monsters
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.hp > 0 && m.awake)
+        .min_by_key(|(_, m)| {
+            let dx = m.x as i32 - pet.x as i32;
+            let dy = m.y as i32 - pet.y as i32;
+            dx * dx + dy * dy
+        });
+
+    if let Some((idx, m)) = nearest {
+        let dx = m.x as i32 - pet.x as i32;
+        let dy = m.y as i32 - pet.y as i32;
+        let adj = dx.abs() + dy.abs() == 1;
+        if adj {
+            // Pet attacks
+            let info = enemy_info(pet.kind);
+            let pet_atk = info.atk + pet.level * 2;
+            let target_def = enemy_info(m.kind).def;
+            let dmg = pet_atk.saturating_sub(target_def / 2).max(1);
+            let target_name = enemy_info(m.kind).name;
+            state.add_log(&format!("{}が{}に{}ダメージ！", pet.name, target_name, dmg));
+            let map = state.dungeon.as_mut().unwrap();
+            map.monsters[idx].hp = map.monsters[idx].hp.saturating_sub(dmg);
+            if map.monsters[idx].hp == 0 {
+                let killed_kind = map.monsters[idx].kind;
+                let pre = map.monsters[idx].max_hp;
+                state.add_log(&format!("{}が{}を倒した！", pet.name, target_name));
+                on_monster_killed(state, idx, killed_kind, pre);
+            }
+            return;
+        }
+        // Step toward monster
+        let step = pet_step_toward(state, &pet, (m.x as i32, m.y as i32));
+        if let Some((nx, ny)) = step {
+            if let Some(p) = &mut state.pet { p.x = nx; p.y = ny; }
+            return;
+        }
+    }
+
+    // No nearby target — follow player
+    let target = (map.player_x as i32, map.player_y as i32);
+    let step = pet_step_toward(state, &pet, target);
+    if let Some((nx, ny)) = step {
+        // Don't step adjacent if already adjacent (idle next to player)
+        let dx = (target.0 - nx as i32).abs();
+        let dy = (target.1 - ny as i32).abs();
+        if dx + dy >= 1 {
+            if let Some(p) = &mut state.pet { p.x = nx; p.y = ny; }
+        }
+    }
+}
+
+fn pet_step_toward(state: &RpgState, pet: &Pet, target: (i32, i32)) -> Option<(usize, usize)> {
+    let map = state.dungeon.as_ref()?;
+    let dx = target.0 - pet.x as i32;
+    let dy = target.1 - pet.y as i32;
+
+    let mut tries: Vec<Facing> = Vec::new();
+    if dx.abs() > dy.abs() {
+        tries.push(if dx > 0 { Facing::East } else { Facing::West });
+        tries.push(if dy > 0 { Facing::South } else { Facing::North });
+    } else {
+        tries.push(if dy > 0 { Facing::South } else { Facing::North });
+        tries.push(if dx > 0 { Facing::East } else { Facing::West });
+    }
+    for d in tries {
+        let nx = pet.x as i32 + d.dx();
+        let ny = pet.y as i32 + d.dy();
+        if !map.in_bounds(nx, ny) { continue; }
+        let ux = nx as usize; let uy = ny as usize;
+        if !map.cell(ux, uy).is_walkable() { continue; }
+        if (ux, uy) == (map.player_x, map.player_y) { continue; }
+        if map.monsters.iter().any(|m| m.hp > 0 && m.x == ux && m.y == uy) { continue; }
+        return Some((ux, uy));
+    }
+    None
+}
+
+/// Try to tame an adjacent monster by feeding it a Pet Treat.
+pub fn tame_with_treat(state: &mut RpgState, treat_inv_idx: usize) -> bool {
+    if state.pet.is_some() {
+        state.add_log("既にペットがいる");
+        return false;
+    }
+    if treat_inv_idx >= state.inventory.len() { return false; }
+    if state.inventory[treat_inv_idx].kind != ItemKind::PetTreat { return false; }
+
+    // Find adjacent tameable monster
+    let map = match &state.dungeon {
+        Some(m) => m,
+        None => {
+            state.add_log("ダンジョン内でしか使えない");
+            return false;
+        }
+    };
+    let px = map.player_x as i32;
+    let py = map.player_y as i32;
+    let candidate = map
+        .monsters
+        .iter()
+        .position(|m| {
+            m.hp > 0
+                && enemy_info(m.kind).tameable
+                && (m.x as i32 - px).abs() + (m.y as i32 - py).abs() == 1
+        });
+
+    let idx = match candidate {
+        Some(i) => i,
+        None => {
+            state.add_log("隣接したテイム可能な魔物がいない");
+            return false;
+        }
+    };
+
+    // Tame chance: based on monster HP ratio (lower = easier)
+    let m = &state.dungeon.as_ref().unwrap().monsters[idx];
+    let hp_ratio = m.hp * 100 / m.max_hp;
+    let chance = 80u32.saturating_sub(hp_ratio / 2);
+
+    consume_inventory_slot(state, treat_inv_idx);
+
+    let kind;
+    let mx;
+    let my;
+    let max_hp;
+    {
+        let m = &state.dungeon.as_ref().unwrap().monsters[idx];
+        kind = m.kind;
+        mx = m.x;
+        my = m.y;
+        max_hp = m.max_hp;
+    }
+
+    if rng_range(state, 100) < chance {
+        // Success
+        let info = enemy_info(kind);
+        state.pet = Some(Pet {
+            kind,
+            name: info.name.to_string(),
+            x: mx,
+            y: my,
+            hp: max_hp,
+            max_hp,
+            level: 1,
+        });
+        state.dungeon.as_mut().unwrap().monsters.remove(idx);
+        state.add_log(&format!("{}が懐いた！仲間になった！", info.name));
+        true
+    } else {
+        let info = enemy_info(kind);
+        state.add_log(&format!("{}は餌を食べたがそっぽを向いた…", info.name));
+        // Wake the monster (now hostile)
+        state.dungeon.as_mut().unwrap().monsters[idx].awake = true;
+        on_player_action(state);
+        true
+    }
+}
+
+// ── Dungeon Events ───────────────────────────────────────────
+
 pub fn resolve_event_choice(state: &mut RpgState, choice_index: usize) -> bool {
     let event = match &state.active_event {
         Some(e) => e.clone(),
@@ -386,72 +1091,38 @@ pub fn resolve_event_choice(state: &mut RpgState, choice_index: usize) -> bool {
         .as_ref()
         .map(|m| m.grid[m.player_y][m.player_x].cell_type)
         .unwrap_or(CellType::Corridor);
-    let floor = state
-        .dungeon
-        .as_ref()
-        .map(|m| m.floor_num)
-        .unwrap_or(1);
+    let floor = state.dungeon.as_ref().map(|m| m.floor_num).unwrap_or(1);
 
     let outcome = resolve_event(action, cell_type, floor, state.level, &mut state.rng_seed);
 
-    // Apply outcome
     apply_event_outcome(state, &outcome);
 
-    // Mark event as done
     if let Some(map) = &mut state.dungeon {
         map.grid[map.player_y][map.player_x].event_done = true;
     }
-
     state.active_event = None;
 
-    // Handle special outcomes
-    if outcome.start_battle {
-        // Start a battle
-        let floor = state.dungeon.as_ref().map(|d| d.floor_num).unwrap_or(1);
-        let enemies = floor_enemies(floor);
-        let idx = rng_range(state, enemies.len() as u32) as usize;
-        let is_boss = floor >= MAX_FLOOR && cell_type == CellType::Stairs;
-        start_battle(state, enemies[idx], is_boss);
-
-        // Apply first strike damage to enemy
-        if outcome.first_strike {
-            let player_atk = state.total_atk();
-            if let Some(b) = &mut state.battle {
-                let damage = player_atk / 2;
-                b.enemy.hp = b.enemy.hp.saturating_sub(damage);
-                b.log.push(format!("先制攻撃！ {}ダメージ！", damage));
-            }
-        }
-    } else if outcome.descend {
+    if outcome.descend {
         let next_floor = floor + 1;
         enter_dungeon(state, next_floor);
     } else if outcome.return_to_town {
         retreat_to_town(state);
     } else if state.dungeon.is_some() {
-        // Skip result screen — show outcome in log and scene text, then
-        // return directly to exploration for smoother flow.
         for desc in &outcome.description {
-            if !desc.is_empty() {
-                state.add_log(desc);
-            }
+            if !desc.is_empty() { state.add_log(desc); }
         }
         state.scene_text = outcome.description;
         state.scene = Scene::DungeonExplore;
     }
-
     true
 }
 
 fn apply_event_outcome(state: &mut RpgState, outcome: &EventOutcome) {
-    // Gold
     if outcome.gold > 0 {
         state.gold += outcome.gold as u32;
         state.run_gold_earned += outcome.gold as u32;
     }
-
-    // HP change
     if outcome.hp_change == 9999 {
-        // Special: 25% heal
         let heal = state.max_hp / 4;
         state.hp = (state.hp + heal).min(state.max_hp);
     } else if outcome.hp_change < 0 {
@@ -460,34 +1131,32 @@ fn apply_event_outcome(state: &mut RpgState, outcome: &EventOutcome) {
     } else if outcome.hp_change > 0 {
         state.hp = (state.hp + outcome.hp_change as u32).min(state.max_hp);
     }
-
-    // MP change
     if outcome.mp_change == 9999 {
         let heal = state.max_mp / 4;
         state.mp = (state.mp + heal).min(state.max_mp);
     } else if outcome.mp_change > 0 {
         state.mp = (state.mp + outcome.mp_change as u32).min(state.max_mp);
     }
-
-    // Item
     if let Some((item_kind, count)) = outcome.item {
         add_item(state, item_kind, count);
+        // Quest progress: collect
+        if let Some(q) = &mut state.active_quest {
+            if let QuestKind::Collect { item, .. } = q.kind {
+                if item == item_kind { q.progress += count; }
+            }
+        }
+        check_quest_complete(state);
     }
-
-    // Lore
     if let Some(lore_id) = outcome.lore_id {
         if !state.lore_found.contains(&lore_id) {
             state.lore_found.push(lore_id);
         }
     }
-
-    // Check death
     if state.hp == 0 {
         process_dungeon_death(state);
     }
 }
 
-/// Retreat back to town, keeping all loot + return bonus.
 pub fn retreat_to_town(state: &mut RpgState) {
     let run_gold = state.run_gold_earned;
     let run_exp = state.run_exp_earned;
@@ -495,17 +1164,14 @@ pub fn retreat_to_town(state: &mut RpgState) {
     let rooms = state.run_rooms_explored;
     let floor = state.dungeon.as_ref().map(|d| d.floor_num).unwrap_or(1);
 
-    // Return bonus: floor × rooms × 3
     let bonus = return_bonus(floor, rooms);
-    if bonus > 0 {
-        state.gold += bonus;
-    }
+    if bonus > 0 { state.gold += bonus; }
 
     state.dungeon = None;
-    state.battle = None;
-    state.room_result = None;
     state.active_event = None;
     state.scene = Scene::Town;
+    state.faith = state.faith.saturating_add(1);
+
     if run_kills > 0 || run_gold > 0 {
         if bonus > 0 {
             state.add_log(&format!(
@@ -513,10 +1179,7 @@ pub fn retreat_to_town(state: &mut RpgState) {
                 run_gold, run_exp, run_kills, bonus
             ));
         } else {
-            state.add_log(&format!(
-                "帰還！ 獲得: {}G / {}EXP / {}体撃破",
-                run_gold, run_exp, run_kills
-            ));
+            state.add_log(&format!("帰還！ 獲得: {}G / {}EXP / {}体撃破", run_gold, run_exp, run_kills));
         }
     } else {
         state.add_log("町に戻った。");
@@ -524,7 +1187,6 @@ pub fn retreat_to_town(state: &mut RpgState) {
     update_town_text(state);
 }
 
-/// Calculate return bonus for surviving a dungeon run.
 pub fn return_bonus(floor: u32, rooms_explored: u32) -> u32 {
     floor * rooms_explored * 3
 }
@@ -537,409 +1199,118 @@ fn process_dungeon_death(state: &mut RpgState) {
     state.gold -= lost_gold;
     state.hp = state.max_hp / 2;
     state.mp = state.max_mp / 2;
+    state.satiety = state.satiety_max / 2;
     state.dungeon = None;
-    state.battle = None;
-    state.room_result = None;
     state.active_event = None;
     state.scene = Scene::Town;
     state.add_log(&format!("力尽きた… {}G失った", lost_gold));
     update_town_text(state);
 }
 
-/// After DungeonResult is shown, return to exploration.
-pub fn continue_exploration(state: &mut RpgState) {
-    if state.hp == 0 {
-        process_dungeon_death(state);
-        return;
-    }
-    state.room_result = None;
-    state.scene = Scene::DungeonExplore;
-}
+// ── Skills (inline) ──────────────────────────────────────────
 
-// ── Battle ───────────────────────────────────────────────────
+/// Use a skill from the skill menu. Returns true if a turn was consumed.
+pub fn use_skill(state: &mut RpgState, skill_index: usize) -> bool {
+    let skills = available_skills(state.level);
+    if skill_index >= skills.len() { return false; }
+    let skill = skills[skill_index];
+    let info = skill_info(skill);
 
-pub fn start_battle(state: &mut RpgState, enemy_kind: EnemyKind, is_boss: bool) {
-    let info = enemy_info(enemy_kind);
-    state.battle = Some(BattleState {
-        enemy: BattleEnemy {
-            kind: enemy_kind,
-            hp: info.max_hp,
-            max_hp: info.max_hp,
-        },
-        phase: BattlePhase::SelectAction,
-        player_def_boost: 0,
-        player_atk_boost: 0,
-        log: vec![format!("{}が現れた！", info.name)],
-        is_boss,
-        enemy_charging: false,
-        player_berserk: false,
-    });
-    state.scene = Scene::Battle;
-}
-
-pub fn battle_attack(state: &mut RpgState) -> bool {
-    let player_atk = state.total_atk();
-    let battle = match &mut state.battle {
-        Some(b) => b,
-        None => return false,
-    };
-    if battle.phase != BattlePhase::SelectAction {
+    if state.mp < info.mp_cost {
+        state.add_log("MPが足りない！");
         return false;
     }
 
-    let total_atk = player_atk + battle.player_atk_boost;
-    let enemy_kind = battle.enemy.kind;
-    let einfo = enemy_info(enemy_kind);
-    let base_damage = total_atk.saturating_sub(einfo.def / 2).max(1);
+    // Find adjacent enemy for damage skills
+    let adj_enemy = adjacent_monster(state);
 
-    // Critical hit: 10% chance, 1.5x damage
-    let crit_roll = rng_range(state, 100);
-    let is_critical = crit_roll < 10;
-    let damage = if is_critical {
-        base_damage * 3 / 2
-    } else {
-        base_damage
-    };
-
-    let battle = state.battle.as_mut().unwrap();
-    if is_critical {
-        battle
-            .log
-            .push(format!("会心の一撃！ {}に{}ダメージ！", einfo.name, damage));
-    } else {
-        battle
-            .log
-            .push(format!("攻撃！ {}に{}ダメージ！", einfo.name, damage));
-    }
-
-    battle.enemy.hp = battle.enemy.hp.saturating_sub(damage);
-    if battle.enemy.hp == 0 {
-        battle.phase = BattlePhase::Victory;
-        let name = enemy_info(battle.enemy.kind).name;
-        battle.log.push(format!("{}を倒した！", name));
-    } else {
-        process_enemy_turn(state);
-    }
-    true
-}
-
-pub fn battle_use_skill(state: &mut RpgState, skill_index: usize) -> bool {
-    let available = available_skills(state.level);
-    if skill_index >= available.len() {
-        return false;
-    }
-    let skill_kind = available[skill_index];
-    let sinfo = skill_info(skill_kind);
-
-    if state.mp < sinfo.mp_cost {
-        if let Some(b) = &mut state.battle {
-            b.log.push("MPが足りない！".into());
-        }
-        return false;
-    }
-    state.mp -= sinfo.mp_cost;
-
-    let enemy_kind = match &state.battle {
-        Some(b) => b.enemy.kind,
-        None => return false,
-    };
-    let einfo = enemy_info(enemy_kind);
-
-    // Check elemental weakness
-    let element = skill_element(skill_kind);
-    let is_weak = element.is_some() && einfo.weakness == element;
-    let weak_str = if is_weak { " [弱点!]" } else { "" };
-
-    // Pre-compute values that require &self before mutable borrow of battle
-    let player_atk = state.total_atk();
-    let mag = state.mag;
-    let max_hp = state.max_hp;
-
-    let battle = state.battle.as_mut().unwrap();
-    match skill_kind {
-        SkillKind::Fire => {
-            let base = (mag * sinfo.value)
-                .saturating_sub(einfo.def / 3)
-                .max(1);
-            let damage = if is_weak { base * 3 / 2 } else { base };
-            battle
-                .log
-                .push(format!("ファイア！ {}ダメージ！{}", damage, weak_str));
-            battle.enemy.hp = battle.enemy.hp.saturating_sub(damage);
+    match skill {
+        SkillKind::Fire | SkillKind::IceBlade | SkillKind::Thunder | SkillKind::Drain => {
+            let idx = match adj_enemy {
+                Some(i) => i,
+                None => {
+                    state.add_log("隣接した敵がいない");
+                    return false;
+                }
+            };
+            state.mp -= info.mp_cost;
+            cast_damage_skill(state, skill, idx);
         }
         SkillKind::Heal => {
-            let heal = mag * sinfo.value;
-            state.hp = (state.hp + heal).min(max_hp);
-            battle.log.push(format!("ヒール！ HP{}回復！", heal));
+            state.mp -= info.mp_cost;
+            let heal = state.total_mag() * info.value;
+            state.hp = (state.hp + heal).min(state.effective_max_hp());
+            state.add_log(&format!("ヒール！ HP+{}", heal));
         }
         SkillKind::Shield => {
-            battle.player_def_boost += sinfo.value;
-            battle
-                .log
-                .push(format!("シールド！ DEF+{}！", sinfo.value));
-        }
-        SkillKind::IceBlade => {
-            let base = (player_atk / 2 + mag * sinfo.value)
-                .saturating_sub(einfo.def / 3)
-                .max(1);
-            let damage = if is_weak { base * 3 / 2 } else { base };
-            battle
-                .log
-                .push(format!("アイスブレード！ {}ダメージ！{}", damage, weak_str));
-            battle.enemy.hp = battle.enemy.hp.saturating_sub(damage);
-        }
-        SkillKind::Thunder => {
-            let base = (mag * sinfo.value)
-                .saturating_sub(einfo.def / 4)
-                .max(1);
-            let damage = if is_weak { base * 3 / 2 } else { base };
-            battle
-                .log
-                .push(format!("サンダー！ {}ダメージ！{}", damage, weak_str));
-            battle.enemy.hp = battle.enemy.hp.saturating_sub(damage);
-        }
-        SkillKind::Drain => {
-            let damage = (mag * sinfo.value)
-                .saturating_sub(einfo.def / 3)
-                .max(1);
-            let heal = damage / 2;
-            state.hp = (state.hp + heal).min(max_hp);
-            battle.log.push(format!(
-                "ドレイン！ {}ダメージ！ HP{}回復！",
-                damage, heal
-            ));
-            battle.enemy.hp = battle.enemy.hp.saturating_sub(damage);
+            state.mp -= info.mp_cost;
+            state.buffs.shield_value = info.value;
+            state.buffs.shield_turns = 5;
+            state.add_log(&format!("シールド！ DEF+{} (5T)", info.value));
         }
         SkillKind::Berserk => {
-            battle.player_atk_boost += sinfo.value;
-            battle.player_def_boost = battle.player_def_boost.saturating_sub(5);
-            battle.player_berserk = true;
-            battle
-                .log
-                .push(format!("バーサク！ ATK+{}！ DEF-5！", sinfo.value));
+            state.mp -= info.mp_cost;
+            state.buffs.berserk_atk = info.value;
+            state.buffs.berserk_turns = 5;
+            state.add_log(&format!("バーサク！ ATK+{} DEF-5 (5T)", info.value));
         }
     }
 
-    let battle = state.battle.as_mut().unwrap();
-    if battle.enemy.hp == 0 {
-        battle.phase = BattlePhase::Victory;
-        let name = enemy_info(battle.enemy.kind).name;
-        battle.log.push(format!("{}を倒した！", name));
-    } else {
-        battle.phase = BattlePhase::SelectAction;
-        process_enemy_turn(state);
-    }
+    state.overlay = None;
+    on_player_action(state);
     true
 }
 
-pub fn battle_use_item(state: &mut RpgState, inv_index: usize) -> bool {
-    let consumables: Vec<usize> = state
-        .inventory
+fn cast_damage_skill(state: &mut RpgState, skill: SkillKind, idx: usize) {
+    let info = skill_info(skill);
+    let mag = state.total_mag();
+    let player_atk = state.total_atk();
+    let elem = skill_element(skill);
+    let (kind, einfo) = {
+        let m = &state.dungeon.as_ref().unwrap().monsters[idx];
+        (m.kind, enemy_info(m.kind))
+    };
+
+    let mut damage = match skill {
+        SkillKind::Fire => (mag * info.value).saturating_sub(einfo.def / 3).max(1),
+        SkillKind::IceBlade => (player_atk / 2 + mag * info.value).saturating_sub(einfo.def / 3).max(1),
+        SkillKind::Thunder => (mag * info.value).saturating_sub(einfo.def / 4).max(1),
+        SkillKind::Drain => (mag * info.value).saturating_sub(einfo.def / 3).max(1),
+        _ => 0,
+    };
+    let is_weak = elem.is_some() && einfo.weakness == elem;
+    if is_weak { damage = damage * 3 / 2; }
+
+    {
+        let m = &mut state.dungeon.as_mut().unwrap().monsters[idx];
+        m.hp = m.hp.saturating_sub(damage);
+        m.awake = true;
+    }
+
+    let weak_str = if is_weak { " [弱点!]" } else { "" };
+    let name = einfo.name;
+    state.add_log(&format!("{}！ {}に{}ダメージ{}", info.name, name, damage, weak_str));
+
+    if matches!(skill, SkillKind::Drain) {
+        let drain = damage / 2;
+        state.hp = (state.hp + drain).min(state.effective_max_hp());
+        state.add_log(&format!("HPを{}吸収", drain));
+    }
+
+    if state.dungeon.as_ref().unwrap().monsters[idx].hp == 0 {
+        on_monster_killed(state, idx, kind, 0);
+    }
+}
+
+fn adjacent_monster(state: &RpgState) -> Option<usize> {
+    let map = state.dungeon.as_ref()?;
+    let px = map.player_x as i32;
+    let py = map.player_y as i32;
+    map.monsters
         .iter()
-        .enumerate()
-        .filter(|(_, i)| item_info(i.kind).category == ItemCategory::Consumable && i.count > 0)
-        .map(|(idx, _)| idx)
-        .collect();
-    if inv_index >= consumables.len() {
-        return false;
-    }
-
-    let actual_idx = consumables[inv_index];
-    let item_kind = state.inventory[actual_idx].kind;
-    let iinfo = item_info(item_kind);
-    state.inventory[actual_idx].count -= 1;
-    if state.inventory[actual_idx].count == 0 {
-        state.inventory.remove(actual_idx);
-    }
-
-    let battle = match &mut state.battle {
-        Some(b) => b,
-        None => return false,
-    };
-    match item_kind {
-        ItemKind::Herb => {
-            state.hp = (state.hp + iinfo.value).min(state.max_hp);
-            battle
-                .log
-                .push(format!("薬草を使った！ HP{}回復！", iinfo.value));
-        }
-        ItemKind::MagicWater => {
-            state.mp = (state.mp + iinfo.value).min(state.max_mp);
-            battle
-                .log
-                .push(format!("魔法の水を使った！ MP{}回復！", iinfo.value));
-        }
-        ItemKind::StrengthPotion => {
-            battle.player_atk_boost += iinfo.value;
-            battle
-                .log
-                .push(format!("力の薬を使った！ ATK+{}！", iinfo.value));
-        }
-        _ => {
-            battle.log.push("そのアイテムは使えない".into());
-            return false;
-        }
-    }
-
-    let battle = state.battle.as_mut().unwrap();
-    battle.phase = BattlePhase::SelectAction;
-    process_enemy_turn(state);
-    true
-}
-
-pub fn battle_flee(state: &mut RpgState) -> bool {
-    let battle = match &mut state.battle {
-        Some(b) => b,
-        None => return false,
-    };
-    if battle.is_boss {
-        battle.log.push("ボスからは逃げられない！".into());
-        return false;
-    }
-    if rng_range(state, 100) < 60 {
-        let battle = state.battle.as_mut().unwrap();
-        battle.log.push("うまく逃げ切った！".into());
-        battle.phase = BattlePhase::Fled;
-    } else {
-        let battle = state.battle.as_mut().unwrap();
-        battle.log.push("逃げられなかった！".into());
-        process_enemy_turn(state);
-    }
-    true
-}
-
-fn process_enemy_turn(state: &mut RpgState) {
-    let player_def = state.total_def();
-
-    let (enemy_kind, enemy_hp, is_charging, can_charge, def_boost) = {
-        let battle = match &state.battle {
-            Some(b) => b,
-            None => return,
-        };
-        if battle.enemy.hp == 0 {
-            return;
-        }
-        (
-            battle.enemy.kind,
-            battle.enemy.hp,
-            battle.enemy_charging,
-            enemy_info(battle.enemy.kind).can_charge,
-            battle.player_def_boost,
-        )
-    };
-
-    let _ = enemy_hp;
-    let einfo = enemy_info(enemy_kind);
-    let total_def = player_def + def_boost;
-
-    if is_charging {
-        let damage = (einfo.atk * 2).saturating_sub(total_def / 2).max(1);
-        let battle = state.battle.as_mut().unwrap();
-        battle.enemy_charging = false;
-        let msg = match enemy_kind {
-            EnemyKind::Dragon => format!("{}のブレス！ {}ダメージ！", einfo.name, damage),
-            EnemyKind::DemonLord => {
-                format!("{}の闇の波動！ {}ダメージ！", einfo.name, damage)
-            }
-            _ => format!("{}の渾身の一撃！ {}ダメージ！", einfo.name, damage),
-        };
-        battle.log.push(msg);
-        state.hp = state.hp.saturating_sub(damage);
-    } else if can_charge {
-        let charge_roll = rng_range(state, 100);
-        if charge_roll < 25 {
-            let battle = state.battle.as_mut().unwrap();
-            battle.enemy_charging = true;
-            let telegraph = match enemy_kind {
-                EnemyKind::Golem => format!("{}は大振りの構えを取った！", einfo.name),
-                EnemyKind::Dragon => format!("{}がブレスの準備をしている！", einfo.name),
-                EnemyKind::DemonLord => format!("{}が闇の力を集めている…", einfo.name),
-                _ => format!("{}は力を溜めている！", einfo.name),
-            };
-            battle.log.push(telegraph);
-            return;
-        } else {
-            let battle = state.battle.as_mut().unwrap();
-            let damage = einfo.atk.saturating_sub(total_def / 2).max(1);
-            battle
-                .log
-                .push(format!("{}の攻撃！ {}ダメージ！", einfo.name, damage));
-            state.hp = state.hp.saturating_sub(damage);
-        }
-    } else {
-        let battle = state.battle.as_mut().unwrap();
-        let damage = einfo.atk.saturating_sub(total_def / 2).max(1);
-        battle
-            .log
-            .push(format!("{}の攻撃！ {}ダメージ！", einfo.name, damage));
-        state.hp = state.hp.saturating_sub(damage);
-    }
-
-    if state.hp == 0 {
-        let battle = state.battle.as_mut().unwrap();
-        battle.phase = BattlePhase::Defeat;
-        battle.log.push("力尽きた...".into());
-    }
-}
-
-pub fn process_victory(state: &mut RpgState) {
-    let battle = match &state.battle {
-        Some(b) => b,
-        None => return,
-    };
-    let enemy_kind = battle.enemy.kind;
-    let einfo = enemy_info(enemy_kind);
-
-    state.exp += einfo.exp;
-    state.gold += einfo.gold;
-    state.run_gold_earned += einfo.gold;
-    state.run_exp_earned += einfo.exp;
-    state.run_enemies_killed += 1;
-    state.add_log(&format!(
-        "{}を倒した！ EXP+{} {}G",
-        einfo.name, einfo.exp, einfo.gold
-    ));
-
-    // Item drop
-    if let Some((drop_item, drop_pct)) = einfo.drop {
-        if rng_range(state, 100) < drop_pct {
-            add_item(state, drop_item, 1);
-            state.add_log(&format!("{}をドロップ！", item_info(drop_item).name));
-        }
-    }
-
-    check_level_up(state);
-    state.battle = None;
-
-    // Check game clear (demon lord defeated)
-    if enemy_kind == EnemyKind::DemonLord {
-        state.game_cleared = true;
-        state.total_clears += 1;
-        state.scene = Scene::GameClear;
-        return;
-    }
-
-    // Return to dungeon exploration
-    state.scene = Scene::DungeonResult;
-    state.room_result = Some(RoomResult {
-        description: vec![
-            format!("{}を倒した！", einfo.name),
-            format!("EXP+{} {}G獲得", einfo.exp, einfo.gold),
-        ],
-    });
-}
-
-pub fn process_defeat(state: &mut RpgState) {
-    state.battle = None;
-    process_dungeon_death(state);
-}
-
-pub fn process_fled(state: &mut RpgState) {
-    state.battle = None;
-    // Return to dungeon exploration
-    state.scene = Scene::DungeonExplore;
-    state.room_result = None;
-    state.add_log("うまく逃げ切った！");
+        .position(|m| {
+            m.hp > 0 && (m.x as i32 - px).abs() + (m.y as i32 - py).abs() == 1
+        })
 }
 
 // ── Level Up ─────────────────────────────────────────────────
@@ -959,6 +1330,14 @@ fn check_level_up(state: &mut RpgState) {
             state.hp = state.max_hp;
             state.mp = state.max_mp;
             state.add_log(&format!("レベルアップ！ Lv.{}", state.level));
+            // Pet levels up too
+            let pet_msg = state.pet.as_mut().map(|p| {
+                p.level += 1;
+                p.max_hp += 8;
+                p.hp = p.max_hp;
+                format!("{}も成長した！", p.name)
+            });
+            if let Some(msg) = pet_msg { state.add_log(&msg); }
             for &skill in ALL_SKILLS {
                 let sinfo = skill_info(skill);
                 if sinfo.learn_level == state.level {
@@ -974,10 +1353,30 @@ fn check_level_up(state: &mut RpgState) {
 // ── Inventory ────────────────────────────────────────────────
 
 pub fn add_item(state: &mut RpgState, kind: ItemKind, count: u32) {
-    if let Some(entry) = state.inventory.iter_mut().find(|i| i.kind == kind) {
+    // Stackable items merge with existing non-affixed entry
+    if let Some(entry) = state.inventory.iter_mut().find(|i| i.kind == kind && i.affix.is_none()) {
         entry.count += count;
     } else {
-        state.inventory.push(InventoryItem { kind, count });
+        state.inventory.push(InventoryItem { kind, count, affix: None });
+    }
+}
+
+/// Remove one count from inventory slot, deleting the entry if empty.
+/// Adjusts equipped indices to remain valid.
+fn consume_inventory_slot(state: &mut RpgState, idx: usize) {
+    if idx >= state.inventory.len() { return; }
+    state.inventory[idx].count -= 1;
+    if state.inventory[idx].count == 0 {
+        state.inventory.remove(idx);
+        // Re-anchor equipped indices
+        if let Some(w) = state.weapon_idx {
+            state.weapon_idx = if w == idx { None }
+                else if w > idx { Some(w - 1) } else { Some(w) };
+        }
+        if let Some(a) = state.armor_idx {
+            state.armor_idx = if a == idx { None }
+                else if a > idx { Some(a - 1) } else { Some(a) };
+        }
     }
 }
 
@@ -991,11 +1390,11 @@ pub fn use_item(state: &mut RpgState, inv_index: usize) -> bool {
     match iinfo.category {
         ItemCategory::Consumable => match kind {
             ItemKind::Herb => {
-                if state.hp >= state.max_hp {
+                if state.hp >= state.effective_max_hp() {
                     state.add_log("HPは満タン");
                     return false;
                 }
-                state.hp = (state.hp + iinfo.value).min(state.max_hp);
+                state.hp = (state.hp + iinfo.value).min(state.effective_max_hp());
                 state.add_log(&format!("薬草を使った！ HP{}回復", iinfo.value));
             }
             ItemKind::MagicWater => {
@@ -1007,45 +1406,48 @@ pub fn use_item(state: &mut RpgState, inv_index: usize) -> bool {
                 state.add_log(&format!("魔法の水を使った！ MP{}回復", iinfo.value));
             }
             ItemKind::StrengthPotion => {
-                state.add_log("戦闘中にしか使えない");
-                return false;
+                state.buffs.potion_atk = iinfo.value;
+                state.buffs.potion_turns = 8;
+                state.add_log(&format!("力の薬！ ATK+{} (8T)", iinfo.value));
+            }
+            ItemKind::PetTreat => {
+                return tame_with_treat(state, inv_index);
             }
             _ => {
                 state.add_log("使えないアイテム");
                 return false;
             }
         },
+        ItemCategory::Food => {
+            if state.satiety >= state.satiety_max {
+                state.add_log("満腹で食べられない");
+                return false;
+            }
+            state.satiety = (state.satiety + iinfo.value).min(state.satiety_max);
+            if matches!(kind, ItemKind::CookedMeal) {
+                state.hp = (state.hp + 20).min(state.effective_max_hp());
+            }
+            state.add_log(&format!("{}を食べた。満腹度+{}", iinfo.name, iinfo.value));
+        }
         ItemCategory::Weapon => {
-            let old = state.weapon;
-            state.weapon = Some(kind);
-            state.inventory[inv_index].count -= 1;
-            if state.inventory[inv_index].count == 0 {
-                state.inventory.remove(inv_index);
-            }
-            if let Some(old_kind) = old {
-                add_item(state, old_kind, 1);
-            }
-            state.add_log(&format!("{}を装備した", iinfo.name));
-            return true;
+            // Equip
+            state.weapon_idx = Some(inv_index);
+            let display = state.inventory[inv_index].display_name();
+            state.add_log(&format!("{}を装備した", display));
+            return true; // do not consume
         }
         ItemCategory::Armor => {
-            let old = state.armor;
-            state.armor = Some(kind);
-            state.inventory[inv_index].count -= 1;
-            if state.inventory[inv_index].count == 0 {
-                state.inventory.remove(inv_index);
-            }
-            if let Some(old_kind) = old {
-                add_item(state, old_kind, 1);
-            }
-            state.add_log(&format!("{}を装備した", iinfo.name));
+            state.armor_idx = Some(inv_index);
+            let display = state.inventory[inv_index].display_name();
+            state.add_log(&format!("{}を装備した", display));
             return true;
         }
     }
-    // Consumable used
-    state.inventory[inv_index].count -= 1;
-    if state.inventory[inv_index].count == 0 {
-        state.inventory.remove(inv_index);
+
+    // Consume one
+    consume_inventory_slot(state, inv_index);
+    if state.dungeon.is_some() {
+        on_player_action(state);
     }
     true
 }
@@ -1079,190 +1481,140 @@ pub fn available_skills(level: u32) -> Vec<SkillKind> {
         .collect()
 }
 
-pub fn battle_consumables(state: &RpgState) -> Vec<(usize, ItemKind, u32)> {
-    state
-        .inventory
-        .iter()
-        .enumerate()
-        .filter(|(_, i)| item_info(i.kind).category == ItemCategory::Consumable && i.count > 0)
-        .map(|(idx, i)| (idx, i.kind, i.count))
-        .collect()
-}
-
 // ── Tests ────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::games::rpg::state::Facing;
-
-    #[test]
-    fn tick_is_noop() {
-        let mut s = RpgState::new();
-        tick(&mut s, 1000);
-        assert_eq!(s.hp, 50);
-    }
-
-    #[test]
-    fn intro_step0() {
-        let mut s = RpgState::new();
-        assert_eq!(s.scene, Scene::Intro(0));
-        advance_intro(&mut s);
-        assert_eq!(s.scene, Scene::Intro(1));
-    }
+    use super::super::state::{Affix, Monster};
 
     #[test]
     fn intro_full_sequence() {
         let mut s = RpgState::new();
-        advance_intro(&mut s); // 0 -> 1
-        advance_intro(&mut s); // 1 -> Town
-        assert!(s.weapon.is_some());
-        assert!(s.armor.is_some());
+        advance_intro(&mut s);
+        advance_intro(&mut s);
+        assert!(s.weapon().is_some());
+        assert!(s.armor().is_some());
         assert_eq!(s.gold, 50);
         assert_eq!(s.scene, Scene::Town);
     }
 
     #[test]
-    fn town_choices_basic() {
-        let mut s = RpgState::new();
-        s.scene = Scene::Town;
-        let choices = town_choices(&s);
-        assert_eq!(choices.len(), 2);
-        s.hp = 30;
-        let choices2 = town_choices(&s);
-        assert_eq!(choices2.len(), 3);
-    }
-
-    #[test]
-    fn enter_dungeon_creates_grid_map() {
+    fn enter_dungeon_creates_grid_map_with_monsters() {
         let mut s = RpgState::new();
         enter_dungeon(&mut s, 1);
         assert_eq!(s.scene, Scene::DungeonExplore);
         assert!(s.dungeon.is_some());
         let d = s.dungeon.as_ref().unwrap();
-        assert_eq!(d.floor_num, 1);
-        assert_eq!(d.width, 27);
-        assert_eq!(d.height, 27);
-        assert_eq!(d.last_dir, Facing::North);
-        // Player should be on entrance
-        assert_eq!(d.player_cell().cell_type, CellType::Entrance);
-        assert!(d.player_cell().is_walkable());
+        assert!(!d.monsters.is_empty(), "Should spawn monsters on floor 1");
     }
 
     #[test]
-    fn try_move_works() {
+    fn satiety_decreases_each_turn() {
         let mut s = RpgState::new();
         enter_dungeon(&mut s, 1);
-        // The entrance is in a room, so there should be walkable tiles nearby
-        let map = s.dungeon.as_ref().unwrap();
+        let before = s.satiety;
+        on_player_action(&mut s);
+        assert!(s.satiety < before);
+    }
+
+    #[test]
+    fn starvation_damages_hp() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        s.satiety = 0;
+        let before = s.hp;
+        on_player_action(&mut s);
+        assert!(s.hp < before);
+    }
+
+    #[test]
+    fn bump_attack_damages_monster() {
+        let mut s = RpgState::new();
+        advance_intro(&mut s);
+        advance_intro(&mut s);
+        enter_dungeon(&mut s, 1);
+        // Place a slime adjacent to the player
+        let map = s.dungeon.as_mut().unwrap();
         let px = map.player_x;
         let py = map.player_y;
-        // Find an open direction
+        // Find an adjacent walkable empty tile
         for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
-            if is_adjacent_walkable(map, px, py, dir) {
-                assert!(try_move(&mut s, dir));
-                let map = s.dungeon.as_ref().unwrap();
-                let new_x = (px as i32 + dir.dx()) as usize;
-                let new_y = (py as i32 + dir.dy()) as usize;
-                assert_eq!(map.player_x, new_x);
-                assert_eq!(map.player_y, new_y);
-                assert_eq!(map.last_dir, dir);
-                break;
+            let nx = px as i32 + dir.dx();
+            let ny = py as i32 + dir.dy();
+            if !map.in_bounds(nx, ny) { continue; }
+            let ux = nx as usize; let uy = ny as usize;
+            if !map.cell(ux, uy).is_walkable() { continue; }
+            if map.monster_at(ux, uy).is_some() { continue; }
+            map.monsters.push(Monster {
+                kind: EnemyKind::Slime,
+                x: ux, y: uy, hp: 12, max_hp: 12,
+                awake: true, charging: false,
+            });
+            // Attack by trying to move into the monster
+            let mlen = map.monsters.len();
+            try_move(&mut s, dir);
+            let map2 = s.dungeon.as_ref().unwrap();
+            // Either the slime is dead (removed) or has less HP
+            if map2.monsters.len() < mlen {
+                // Killed
+            } else {
+                let m = map2.monsters.iter().find(|m| m.x == ux && m.y == uy).unwrap();
+                assert!(m.hp < 12);
             }
+            return;
         }
     }
 
     #[test]
-    fn try_move_blocked_by_wall() {
+    fn quest_slay_progress() {
         let mut s = RpgState::new();
+        s.active_quest = Some(Quest {
+            kind: QuestKind::Slay { target: EnemyKind::Slime, count: 1, floor: 1 },
+            reward_gold: 50, reward_exp: 10, progress: 0,
+        });
         enter_dungeon(&mut s, 1);
-        let map = s.dungeon.as_ref().unwrap();
-        let px = map.player_x;
-        let py = map.player_y;
-        // Find a direction that's blocked (wall tile)
-        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
-            if !is_adjacent_walkable(map, px, py, dir) {
-                let old_pos = (px, py);
-                assert!(!try_move(&mut s, dir));
-                let map = s.dungeon.as_ref().unwrap();
-                assert_eq!((map.player_x, map.player_y), old_pos);
-                break;
-            }
-        }
+        // Insert and kill a slime via attack
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: 0, y: 0, hp: 1, max_hp: 12,
+            awake: true, charging: false,
+        });
+        attack_monster(&mut s, 0);
+        // Quest should be cleared (completed and removed)
+        assert!(s.active_quest.is_none());
+        assert_eq!(s.completed_quests, 1);
     }
 
     #[test]
-    fn retreat_to_town_preserves_loot() {
+    fn pray_consumes_for_run() {
         let mut s = RpgState::new();
-        s.gold = 100;
-        s.run_gold_earned = 50;
-        enter_dungeon(&mut s, 1);
-        retreat_to_town(&mut s);
-        assert_eq!(s.scene, Scene::Town);
-        assert_eq!(s.gold, 100); // gold preserved (no rooms explored, bonus = 0)
-        assert!(s.dungeon.is_none());
+        advance_intro(&mut s);
+        advance_intro(&mut s);
+        let _ = pray(&mut s);
+        assert!(s.prayed_this_run);
+        // Second pray should fail
+        let result = pray(&mut s);
+        assert!(!result);
     }
 
     #[test]
-    fn battle_attack_damages_enemy() {
+    fn affix_weapon_increases_atk() {
         let mut s = RpgState::new();
-        s.weapon = Some(ItemKind::IronSword);
-        start_battle(&mut s, EnemyKind::Slime, false);
-        assert!(battle_attack(&mut s));
-        let b = s.battle.as_ref().unwrap();
-        assert!(b.enemy.hp < 12);
+        s.inventory.push(InventoryItem {
+            kind: ItemKind::IronSword, count: 1, affix: Some(Affix::Sharp),
+        });
+        s.weapon_idx = Some(0);
+        // 5 base + 8 sword + 4 sharp = 17
+        assert_eq!(s.total_atk(), 17);
     }
 
     #[test]
-    fn battle_victory_gives_rewards() {
-        let mut s = RpgState::new();
-        s.weapon = Some(ItemKind::HolySword);
-        enter_dungeon(&mut s, 1);
-        start_battle(&mut s, EnemyKind::Slime, false);
-        battle_attack(&mut s);
-        assert_eq!(s.battle.as_ref().unwrap().phase, BattlePhase::Victory);
-        process_victory(&mut s);
-        assert!(s.exp > 0);
-        assert!(s.gold > 0);
-        assert_eq!(s.scene, Scene::DungeonResult);
-    }
-
-    #[test]
-    fn defeat_returns_to_town() {
-        let mut s = RpgState::new();
-        s.gold = 100;
-        enter_dungeon(&mut s, 1);
-        start_battle(&mut s, EnemyKind::Slime, false);
-        s.hp = 0;
-        s.battle.as_mut().unwrap().phase = BattlePhase::Defeat;
-        process_defeat(&mut s);
-        assert_eq!(s.scene, Scene::Town);
-        assert_eq!(s.gold, 80);
-    }
-
-    #[test]
-    fn add_item_stacks() {
-        let mut s = RpgState::new();
-        add_item(&mut s, ItemKind::Herb, 2);
-        assert_eq!(s.item_count(ItemKind::Herb), 2);
-        add_item(&mut s, ItemKind::Herb, 3);
-        assert_eq!(s.item_count(ItemKind::Herb), 5);
-    }
-
-    #[test]
-    fn equip_weapon() {
-        let mut s = RpgState::new();
-        add_item(&mut s, ItemKind::IronSword, 1);
-        assert!(use_item(&mut s, 0));
-        assert_eq!(s.weapon, Some(ItemKind::IronSword));
-    }
-
-    #[test]
-    fn buy_item_at_shop() {
-        let mut s = RpgState::new();
-        s.gold = 100;
-        assert!(buy_item(&mut s, 0)); // Herb costs 20
-        assert_eq!(s.gold, 80);
+    fn return_bonus_scales() {
+        assert_eq!(return_bonus(1, 0), 0);
+        assert_eq!(return_bonus(1, 3), 9);
+        assert_eq!(return_bonus(5, 4), 60);
     }
 
     #[test]
@@ -1275,128 +1627,44 @@ mod tests {
     }
 
     #[test]
-    fn return_bonus_scales() {
-        assert_eq!(return_bonus(1, 0), 0);
-        assert_eq!(return_bonus(1, 3), 9);
-        assert_eq!(return_bonus(5, 4), 60);
-    }
-
-    #[test]
-    fn retreat_gives_return_bonus() {
+    fn defeat_returns_to_town() {
         let mut s = RpgState::new();
-        s.gold = 50;
-        enter_dungeon(&mut s, 3);
-        s.run_rooms_explored = 4;
-        s.run_gold_earned = 20;
-        s.run_enemies_killed = 2;
-        let gold_before = s.gold;
-        retreat_to_town(&mut s);
-        // Bonus = 3 * 4 * 3 = 36
-        assert_eq!(s.gold, gold_before + 36);
-    }
-
-    #[test]
-    fn new_skills_available_at_correct_levels() {
-        assert_eq!(available_skills(1).len(), 1);
-        assert_eq!(available_skills(2).len(), 2);
-        assert_eq!(available_skills(3).len(), 3);
-        assert_eq!(available_skills(8).len(), 7);
-    }
-
-    #[test]
-    fn continue_exploration_returns_to_dungeon() {
-        let mut s = RpgState::new();
+        advance_intro(&mut s);
+        advance_intro(&mut s);
+        s.gold = 100;
         enter_dungeon(&mut s, 1);
-        s.scene = Scene::DungeonResult;
-        s.room_result = Some(RoomResult {
-            description: vec!["test".into()],
-        });
-        continue_exploration(&mut s);
-        assert_eq!(s.scene, Scene::DungeonExplore);
-        assert!(s.room_result.is_none());
+        s.hp = 0;
+        process_dungeon_death(&mut s);
+        assert_eq!(s.scene, Scene::Town);
+        assert_eq!(s.gold, 80);
     }
 
     #[test]
-    fn try_move_moves_exactly_one_cell() {
+    fn buy_item_at_shop() {
         let mut s = RpgState::new();
-        enter_dungeon(&mut s, 1);
-        let map = s.dungeon.as_ref().unwrap();
-        let px = map.player_x;
-        let py = map.player_y;
-        // Find an open direction
-        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
-            if is_adjacent_walkable(map, px, py, dir) {
-                let old_pos = (px, py);
-                assert!(try_move(&mut s, dir));
-                let map = s.dungeon.as_ref().unwrap();
-                let new_pos = (map.player_x, map.player_y);
-                // Should have moved exactly 1 cell
-                let dist = (new_pos.0 as i32 - old_pos.0 as i32).abs()
-                    + (new_pos.1 as i32 - old_pos.1 as i32).abs();
-                assert_eq!(dist, 1, "try_move should move exactly 1 cell");
-                assert_eq!(map.last_dir, dir);
-                break;
-            }
-        }
+        s.gold = 100;
+        let shop = shop_items(0);
+        let herb_idx = shop.iter().position(|(k, _)| *k == ItemKind::Herb).unwrap();
+        assert!(buy_item(&mut s, herb_idx));
+        assert_eq!(s.gold, 80);
     }
 
     #[test]
-    fn move_direction_moves() {
+    fn food_restores_satiety() {
         let mut s = RpgState::new();
-        enter_dungeon(&mut s, 1);
-        assert_eq!(s.dungeon.as_ref().unwrap().last_dir, Facing::North);
-
-        // Find an open direction
-        let map = s.dungeon.as_ref().unwrap();
-        let px = map.player_x;
-        let py = map.player_y;
-        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
-            if is_adjacent_walkable(map, px, py, dir) {
-                let old_pos = (px, py);
-                assert!(move_direction(&mut s, dir));
-                let map = s.dungeon.as_ref().unwrap();
-                let new_pos = (map.player_x, map.player_y);
-                assert_ne!(old_pos, new_pos);
-                break;
-            }
-        }
+        s.satiety = 100;
+        add_item(&mut s, ItemKind::Bread, 1);
+        let idx = s.inventory.iter().position(|i| i.kind == ItemKind::Bread).unwrap();
+        assert!(use_item(&mut s, idx));
+        assert_eq!(s.satiety, 400);
     }
 
     #[test]
-    fn move_direction_blocked() {
+    fn equip_weapon_via_use_item() {
         let mut s = RpgState::new();
-        enter_dungeon(&mut s, 1);
-
-        let map = s.dungeon.as_ref().unwrap();
-        let px = map.player_x;
-        let py = map.player_y;
-        // Find a direction that's blocked
-        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
-            if !is_adjacent_walkable(map, px, py, dir) {
-                let old_pos = (px, py);
-                assert!(!move_direction(&mut s, dir));
-                let map = s.dungeon.as_ref().unwrap();
-                assert_eq!((map.player_x, map.player_y), old_pos);
-                break;
-            }
-        }
-    }
-
-    #[test]
-    fn auto_walk_stops_at_junction() {
-        let mut s = RpgState::new();
-        enter_dungeon(&mut s, 1);
-
-        let map = s.dungeon.as_ref().unwrap();
-        let px = map.player_x;
-        let py = map.player_y;
-        if is_adjacent_walkable(map, px, py, Facing::North) {
-            move_direction(&mut s, Facing::North);
-            // Should still be exploring (not crashed or stuck)
-            assert!(
-                s.scene == Scene::DungeonExplore
-                    || s.scene == Scene::DungeonEvent
-            );
-        }
+        add_item(&mut s, ItemKind::IronSword, 1);
+        let idx = s.inventory.iter().position(|i| i.kind == ItemKind::IronSword).unwrap();
+        assert!(use_item(&mut s, idx));
+        assert_eq!(s.weapon_idx, Some(idx));
     }
 }
