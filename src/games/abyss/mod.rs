@@ -41,7 +41,7 @@ fn now_ms() -> Option<f64> {
 use actions::*;
 use effects::AbyssEffects;
 use policy::PlayerAction;
-use state::{AbyssState, SoulPerk, Tab, UpgradeKind};
+use state::{AbyssState, EquipmentId, SoulPerk, Tab, TabGroup, UpgradeKind, EQUIPMENT_COUNT};
 
 pub struct AbyssGame {
     pub state: AbyssState,
@@ -64,6 +64,7 @@ fn is_save_worthy(action: PlayerAction) -> bool {
         action,
         PlayerAction::BuyUpgrade(_)
             | PlayerAction::BuySoulPerk(_)
+            | PlayerAction::BuyEquipment(_)
             | PlayerAction::GachaPull(_)
             | PlayerAction::Retreat
             | PlayerAction::ToggleAutoDescend
@@ -85,6 +86,8 @@ struct PrevSnapshot {
     last_enemy_dmg: Option<(u64, bool)>,
     /// gacha の累計引き回数。増えた瞬間に「新規ガチャが回った」と判定する。
     gacha_total_pulls: u64,
+    /// 解放済み装備数 (新装備が増えた瞬間に演出をトリガ)。
+    owned_equipment_count: u32,
 }
 
 impl AbyssGame {
@@ -117,6 +120,7 @@ impl AbyssGame {
             enemy_is_boss: s.current_enemy.is_boss,
             last_enemy_dmg: s.last_enemy_damage.map(|(a, _, c)| (a, c)),
             gacha_total_pulls: s.total_pulls,
+            owned_equipment_count: s.owned_equipment.iter().filter(|b| **b).count() as u32,
         }
     }
 
@@ -180,6 +184,12 @@ impl AbyssGame {
             }
         }
 
+        // ── 装備解放 (所持数が増えた瞬間、タブが Shop なら body 内で演出) ──
+        let cur_owned = s.owned_equipment.iter().filter(|b| **b).count() as u32;
+        if cur_owned > prev.owned_equipment_count {
+            effects.push_equipment_unlock(layout.body);
+        }
+
         // 次の snapshot に更新
         self.prev.set(Self::snapshot(s));
     }
@@ -208,11 +218,21 @@ impl AbyssGame {
     /// 1 本道で処理される (動作の乖離はここで構造的に防ぐ)。
     fn click_to_action(&self, action_id: u16) -> Option<PlayerAction> {
         match action_id {
+            // ── サブタブ直接切替 (グループ内サブタブバー由来) ──
             TAB_UPGRADES => Some(PlayerAction::SetTab(Tab::Upgrades)),
             TAB_ROADMAP => Some(PlayerAction::SetTab(Tab::Roadmap)),
             TAB_STATS => Some(PlayerAction::SetTab(Tab::Stats)),
             TAB_GACHA => Some(PlayerAction::SetTab(Tab::Gacha)),
             TAB_SETTINGS => Some(PlayerAction::SetTab(Tab::Settings)),
+            TAB_SHOP => Some(PlayerAction::SetTab(Tab::Shop)),
+            TAB_SOULS => Some(PlayerAction::SetTab(Tab::Souls)),
+            // ── トップグループ切替 (メインメニュー由来): default_tab に飛ぶ ──
+            // ただし「同じグループ内に既に居る」場合はサブタブを保持する
+            // (例: 強化サブタブを開いた状態で [育成] を再タップしても強化のまま)。
+            TAB_GROUP_GROWTH => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Growth))),
+            TAB_GROUP_INFO => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Info))),
+            TAB_GROUP_GACHA => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Gacha))),
+            TAB_GROUP_SETTINGS => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Settings))),
             TOGGLE_AUTO_DESCEND => Some(PlayerAction::ToggleAutoDescend),
             RETREAT_TO_SURFACE => Some(PlayerAction::Retreat),
             GACHA_PULL_1 => Some(PlayerAction::GachaPull(1)),
@@ -227,7 +247,24 @@ impl AbyssGame {
                 let idx = (id - BUY_SOUL_PERK_BASE) as usize;
                 SoulPerk::from_index(idx).map(PlayerAction::BuySoulPerk)
             }
+            id if (BUY_EQUIPMENT_BASE..BUY_EQUIPMENT_BASE + EQUIPMENT_COUNT as u16)
+                .contains(&id) =>
+            {
+                let idx = (id - BUY_EQUIPMENT_BASE) as usize;
+                EquipmentId::from_index(idx).map(PlayerAction::BuyEquipment)
+            }
             _ => None,
+        }
+    }
+
+    /// グループタブをタップした時に飛ぶ Tab を返す:
+    /// 現在タブが既に同グループ内なら現状維持 (サブタブ位置を破壊しない)、
+    /// 別グループからの遷移なら group の `default_tab()`。
+    fn preserve_or_default(&self, group: TabGroup) -> Tab {
+        if TabGroup::from_tab(self.state.tab) == group {
+            self.state.tab
+        } else {
+            group.default_tab()
         }
     }
 
@@ -242,25 +279,31 @@ impl AbyssGame {
 
     fn key_to_action(&self, ch: char) -> Option<PlayerAction> {
         match ch {
-            '{' => Some(PlayerAction::SetTab(Tab::Upgrades)),
-            // 旧 Souls タブ位置 (`|`) を Roadmap に継承。
-            // 魂パーク購入は強化タブ統合後 `q/w/e/r` で Tab::Upgrades 内から行う。
-            '|' => Some(PlayerAction::SetTab(Tab::Roadmap)),
-            '}' => Some(PlayerAction::SetTab(Tab::Stats)),
-            '~' => Some(PlayerAction::SetTab(Tab::Gacha)),
-            '\\' => Some(PlayerAction::SetTab(Tab::Settings)),
+            // タブグループ切替 (メインメニュー 4 つに対応)。
+            // 旧 5 タブ時代の `{`|`}`~`\` はそれぞれ単独タブを直接指していたが、
+            // グループ階層化後は最初の 4 個 (`{`|`}`~) を 4 グループにマップする。
+            // `\` (旧 Settings) は廃止し、設定は `~` 隣の touch regex 範囲外
+            // に追い出さず `~` 統合先を持たないため、touch では menu→group click のみ。
+            '{' => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Growth))),
+            '|' => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Info))),
+            '}' => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Gacha))),
+            '~' => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Settings))),
             'a' | 'A' => Some(PlayerAction::ToggleAutoDescend),
             'p' | 'P' => Some(PlayerAction::Retreat),
+            // 強化サブタブ: 1-7 で各強化購入。
             '1'..='7' if matches!(self.state.tab, Tab::Upgrades) => {
                 let idx = (ch as u8 - b'1') as usize;
                 UpgradeKind::from_index(idx).map(PlayerAction::BuyUpgrade)
             }
-            // 魂パーク購入 (旧 Souls タブの `q/w/e/r` を踏襲)。
-            // **大文字** に変えているのは、小文字 `q` が main.rs のグローバル
-            // back-to-menu キー (Esc も `q` にマップ) と衝突するため。
-            // Upgrades が default タブになった #78 以降、小文字 q を魂購入に
-            // 使うとメニュー戻りが効かなくなる UX 退行が発生する (Codex review #78 参照)。
-            'Q' | 'W' | 'E' | 'R' if matches!(self.state.tab, Tab::Upgrades) => {
+            // 魂サブタブ: 1-4 で各魂パーク購入 (強化サブタブの慣習を踏襲)。
+            '1'..='4' if matches!(self.state.tab, Tab::Souls) => {
+                let idx = (ch as u8 - b'1') as usize;
+                SoulPerk::from_index(idx).map(PlayerAction::BuySoulPerk)
+            }
+            // 旧 `Q/W/E/R` (Tab::Upgrades 内で魂購入) は魂サブタブ独立後も互換維持として
+            // **魂サブタブ内でのみ** 反応させる。小文字 `q` は main.rs の back-to-menu
+            // と衝突するため大文字のみ受ける (Codex review #78 参照)。
+            'Q' | 'W' | 'E' | 'R' if matches!(self.state.tab, Tab::Souls) => {
                 let idx = match ch {
                     'Q' => 0,
                     'W' => 1,
@@ -353,7 +396,8 @@ mod tests {
     }
 
     #[test]
-    fn click_tab_switch() {
+    fn click_subtab_switch() {
+        // サブタブ ID 直接クリック (グループ内サブタブバー由来)。
         let mut g = AbyssGame::new();
         g.handle_input(&click(TAB_ROADMAP));
         assert_eq!(g.state.tab, Tab::Roadmap);
@@ -361,6 +405,33 @@ mod tests {
         assert_eq!(g.state.tab, Tab::Stats);
         g.handle_input(&click(TAB_UPGRADES));
         assert_eq!(g.state.tab, Tab::Upgrades);
+        g.handle_input(&click(TAB_SOULS));
+        assert_eq!(g.state.tab, Tab::Souls);
+    }
+
+    #[test]
+    fn click_top_group_goes_to_default_tab() {
+        // 別グループから [育成] グループタブをクリック → 育成 default = Upgrades
+        let mut g = AbyssGame::new();
+        g.state.tab = Tab::Roadmap;
+        g.handle_input(&click(TAB_GROUP_GROWTH));
+        assert_eq!(g.state.tab, Tab::Upgrades);
+        // [情報] グループ → Roadmap が default
+        g.handle_input(&click(TAB_GROUP_INFO));
+        assert_eq!(g.state.tab, Tab::Roadmap);
+    }
+
+    #[test]
+    fn click_top_group_preserves_subtab_when_already_inside() {
+        // 既に育成グループ内 (Tab::Souls) で [育成] を再タップ → サブタブ位置を保持
+        let mut g = AbyssGame::new();
+        g.state.tab = Tab::Souls;
+        g.handle_input(&click(TAB_GROUP_GROWTH));
+        assert_eq!(
+            g.state.tab,
+            Tab::Souls,
+            "同グループ内ならサブタブを破壊しない"
+        );
     }
 
     #[test]
@@ -396,14 +467,29 @@ mod tests {
     }
 
     #[test]
-    fn buy_soul_perk_via_key() {
+    fn buy_soul_perk_via_key_on_souls_tab() {
+        // 魂強化購入は Tab::Souls (魂サブタブ) 内でのみ反応する。
+        // 大文字 Q/W/E/R は旧 Tab::Upgrades 統合時代の互換キーとして残してあり、
+        // 新規ユーザー向けには 1-4 のショートカットも併設している。
         let mut g = AbyssGame::new();
-        // 魂強化購入は強化タブ統合後 Tab::Upgrades 内から行う。
-        // 小文字 `q` は back-to-menu と衝突するため**大文字** Q/W/E/R を使う。
-        g.state.tab = Tab::Upgrades;
+        g.state.tab = Tab::Souls;
         g.state.souls = 100;
         g.handle_input(&InputEvent::Key('Q'));
         assert_eq!(g.state.soul_perks[SoulPerk::Might.index()], 1);
+        // 1-4 ショートカット (強化サブタブの 1-7 と慣習統一)。
+        g.handle_input(&InputEvent::Key('2'));
+        assert_eq!(g.state.soul_perks[SoulPerk::Endurance.index()], 1);
+    }
+
+    /// Tab::Upgrades タブで Q/W/E/R を押しても **魂は買わない** (魂サブタブ独立後の規約)。
+    #[test]
+    fn upgrades_tab_does_not_consume_soul_keys() {
+        let mut g = AbyssGame::new();
+        g.state.tab = Tab::Upgrades;
+        g.state.souls = 999;
+        let consumed = g.handle_input(&InputEvent::Key('Q'));
+        assert!(!consumed, "Q on Upgrades tab should not trigger soul purchase");
+        assert_eq!(g.state.soul_perks[SoulPerk::Might.index()], 0);
     }
 
     /// 小文字 `q` は main.rs の back-to-menu キー (Esc 同等)。Upgrades タブ

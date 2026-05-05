@@ -11,10 +11,10 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
-use super::state::{AbyssState, FloorKind, Tab};
+use super::state::{AbyssState, FloorKind, Tab, EQUIPMENT_COUNT};
 
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 1;
+const SAVE_VERSION: u32 = 2;
 
 #[cfg(target_arch = "wasm32")]
 const MIN_COMPATIBLE_VERSION: u32 = 1;
@@ -71,6 +71,12 @@ struct GameSave {
     deaths: u64,
     total_ticks: u64,
     rng_state: u32,
+
+    /// 解放済み装備フラグ。Vec<bool> でシリアライズ (bool はそのまま JSON に残る)。
+    /// 旧 save (v1) には欠落 → `#[serde(default)]` で空 Vec が入り、apply_save で
+    /// EQUIPMENT_COUNT の空配列にパディングされる。
+    #[serde(default)]
+    owned_equipment: Vec<bool>,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -100,6 +106,7 @@ fn extract_save(state: &AbyssState) -> SaveData {
             deaths: state.deaths,
             total_ticks: state.total_ticks,
             rng_state: state.rng_state,
+            owned_equipment: state.owned_equipment.to_vec(),
         },
     }
 }
@@ -115,6 +122,15 @@ fn apply_save(state: &mut AbyssState, save: &GameSave) {
     state.kills_on_floor = save.kills_on_floor;
     state.run_kills = save.run_kills;
     state.run_gold_earned = save.run_gold_earned;
+
+    // 装備フラグを **hero_max_hp() の依存物なので HP clamp より前に** 復元する。
+    // 装備込みの max HP を計算してから hero_hp を clamp しないと、HP 強化系装備
+    // 込みのセーブが「装備抜き max」で先に切られて読み込まれてしまう
+    // (Codex review #80 P2)。EQUIPMENT_COUNT より長い場合は超過分を捨てる。
+    for (i, slot) in state.owned_equipment.iter_mut().enumerate() {
+        *slot = save.owned_equipment.get(i).copied().unwrap_or(false);
+    }
+    let _ = EQUIPMENT_COUNT; // doc-anchor: バッファサイズが想定と一致することを確認
 
     let max_hp = state.hero_max_hp();
     state.hero_hp = if save.hero_hp == 0 {
@@ -306,6 +322,55 @@ mod tests {
         let mut restored = AbyssState::new();
         apply_save(&mut restored, &loaded.game);
         assert!(restored.hero_hp <= restored.hero_max_hp());
+    }
+
+    /// HP +%装備を所持した状態のセーブで、現 HP が装備込み max HP に基づいて
+    /// 復元されること。Codex review #80 P2 回帰防止: 旧実装では装備フラグ復元
+    /// 前に hero_max_hp() を呼んでいたため、装備込みセーブが「装備抜き max」で
+    /// 切られて読み込まれていた。
+    #[test]
+    fn equipment_restored_before_hp_clamp() {
+        use crate::games::abyss::state::{EquipmentId, UpgradeKind};
+
+        // 元 state で HP +%装備系統を全部解放、HP も装備込み max にしておく。
+        let mut original = AbyssState::new();
+        original.upgrades[UpgradeKind::Armor.index()] = 60;
+        original.upgrades[UpgradeKind::Vitality.index()] = 60;
+        for id in [
+            EquipmentId::LeatherArmor,
+            EquipmentId::SteelArmor,
+            EquipmentId::MithrilArmor,
+            EquipmentId::GodArmor,
+        ] {
+            original.owned_equipment[id.index()] = true;
+        }
+        let full_max = original.hero_max_hp();
+        original.hero_hp = full_max;
+
+        // 装備抜きの max は装備込みより大幅に小さい (装備が効いている前提条件)。
+        let mut bare = AbyssState::new();
+        bare.upgrades = original.upgrades;
+        let bare_max = bare.hero_max_hp();
+        assert!(
+            full_max > bare_max * 2,
+            "test setup: 装備込み max ({}) は装備抜き ({}) の 2 倍以上であるべき",
+            full_max,
+            bare_max
+        );
+
+        // ラウンドトリップ。
+        let save = extract_save(&original);
+        let json = serde_json::to_string(&save).unwrap();
+        let loaded: SaveData = serde_json::from_str(&json).unwrap();
+        let mut restored = AbyssState::new();
+        apply_save(&mut restored, &loaded.game);
+
+        // 装備が復元されてから max が計算されるので、保存時の HP がそのまま戻る。
+        assert_eq!(
+            restored.hero_hp, full_max,
+            "装備込み max ({}) で復元されるべきが、装備抜き max ({}) で切られている疑い",
+            full_max, bare_max
+        );
     }
 
     /// 未知の追加フィールドが含まれていても無視される。

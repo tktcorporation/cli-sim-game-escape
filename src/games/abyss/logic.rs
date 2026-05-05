@@ -10,7 +10,8 @@
 use super::config::BalanceConfig;
 use super::policy::PlayerAction;
 use super::state::{
-    AbyssState, Enemy, FloorKind, GachaResultSummary, GachaTier, SoulPerk, Tab, UpgradeKind,
+    AbyssState, Enemy, EquipmentId, FloorKind, GachaResultSummary, GachaTier, SoulPerk, Tab,
+    UpgradeKind,
 };
 
 /// メインの tick 処理。delta_ticks 回ぶん戦闘を進める。
@@ -301,10 +302,12 @@ pub fn make_enemy(floor: u32, is_boss: bool, config: &BalanceConfig, rng_seed: &
 
     let e = &config.enemy;
     let f = floor as f64;
-    let mut hp = e.hp_base * e.hp_growth.powf(f - 1.0);
-    let mut atk = e.atk_base * e.atk_growth.powf(f - 1.0);
+    // HP / ATK / gold は piecewise schedule に切替 (旧 hp_growth.powf は撤去)。
+    // 装備込みで B100 まで届くよう深層は緩める設計。詳細は config.rs:EnemyGrowthSchedule。
+    let mut hp = e.hp_base * config.enemy_hp_schedule.multiplier(floor);
+    let mut atk = e.atk_base * config.enemy_atk_schedule.multiplier(floor);
     let mut def = e.def_base + (f - 1.0) * e.def_per_floor;
-    let mut gold = e.gold_base * e.gold_growth.powf(f - 1.0);
+    let mut gold = e.gold_base * config.enemy_gold_schedule.multiplier(floor);
 
     if is_boss {
         hp *= e.boss_hp_mult;
@@ -352,9 +355,6 @@ pub fn buy_upgrade(state: &mut AbyssState, kind: UpgradeKind) -> bool {
         None
     };
 
-    // 段階制カーブを持つ強化は、購入前後で段階名が変わったかチェックする (演出用)。
-    let tier_before = state.upgrade_tier(kind).map(|(name, _)| name);
-
     state.upgrades[kind.index()] = state.upgrades[kind.index()].saturating_add(1);
 
     if let Some(before) = max_before {
@@ -364,20 +364,6 @@ pub fn buy_upgrade(state: &mut AbyssState, kind: UpgradeKind) -> bool {
     }
 
     state.add_log(format!("◆ {} Lv.{}", kind.name(), state.upgrades[kind.index()]));
-
-    // 段階突破 → 専用ログで "層が上がった" 感を出す。
-    if let Some(before_name) = tier_before {
-        if let Some((after_name, _)) = state.upgrade_tier(kind) {
-            if before_name != after_name {
-                state.add_log(format!(
-                    "☆ {} 段階突破: {} → {}",
-                    kind.name(),
-                    before_name,
-                    after_name
-                ));
-            }
-        }
-    }
     true
 }
 
@@ -398,6 +384,62 @@ pub fn buy_soul_perk(state: &mut AbyssState, perk: SoulPerk) -> bool {
     }
 
     state.add_log(format!("✦ {} Lv.{}", perk.name(), state.soul_perks[perk.index()]));
+    true
+}
+
+/// 装備の解放条件を全て満たしているか判定する (gold は別途チェック)。
+/// UI からは「未解放だが解放可能」を表示するために使う。
+pub fn equipment_requirements_met(state: &AbyssState, id: EquipmentId) -> bool {
+    let def = match state.config.equipment.get(id.index()) {
+        Some(d) => d,
+        None => return false,
+    };
+    let req = &def.requirement;
+    if let Some(prereq) = req.prerequisite {
+        if !state.owned_equipment[prereq.index()] {
+            return false;
+        }
+    }
+    for &(kind, min_lv) in &req.upgrade_levels {
+        if state.upgrades[kind.index()] < min_lv {
+            return false;
+        }
+    }
+    true
+}
+
+/// 装備を 1 個解放する。条件未達 / gold 不足 / 既に所持済みなら false。
+pub fn buy_equipment(state: &mut AbyssState, id: EquipmentId) -> bool {
+    if state.owned_equipment[id.index()] {
+        return false;
+    }
+    if !equipment_requirements_met(state, id) {
+        return false;
+    }
+    let def = match state.config.equipment.get(id.index()) {
+        Some(d) => d,
+        None => return false,
+    };
+    let cost = def.requirement.gold_cost;
+    if state.gold < cost {
+        return false;
+    }
+    state.gold -= cost;
+    let name = def.name;
+    let label = def.effect_label;
+
+    // 「装備購入で max HP が増えた分だけ現 HP も底上げ」の正しい計算。
+    // 旧実装は `new_max * bonus_hp_pct + bonus_hp_flat` を delta としていたが、
+    // 既存装備込みの new_max に対して bonus_hp_pct を適用するので、新装備の
+    // 実際の max HP 増分を大幅に超過し「死にかけでも全回復」してしまう
+    // (Codex review #80 P1)。Vitality 購入と同じ「before/after の差分」方式に統一する。
+    let max_before = state.hero_max_hp();
+    state.owned_equipment[id.index()] = true;
+    let max_after = state.hero_max_hp();
+    let delta = max_after.saturating_sub(max_before);
+    state.hero_hp = state.hero_hp.saturating_add(delta).min(max_after);
+
+    state.add_log(format!("✦ 装備解放: {} ({})", name, label));
     true
 }
 
@@ -426,6 +468,7 @@ pub fn apply_action(state: &mut AbyssState, action: PlayerAction) -> bool {
     match action {
         PlayerAction::BuyUpgrade(kind) => buy_upgrade(state, kind),
         PlayerAction::BuySoulPerk(perk) => buy_soul_perk(state, perk),
+        PlayerAction::BuyEquipment(id) => buy_equipment(state, id),
         PlayerAction::ToggleAutoDescend => {
             toggle_auto_descend(state);
             true
@@ -589,8 +632,7 @@ fn apply_gacha_reward(state: &mut AbyssState, tier: GachaTier, summary: &mut Gac
 /// `make_enemy` と同じ式で「指定フロアの基礎雑魚 gold」を再計算する。
 /// ガチャ Common の報酬基準にだけ使う (敵生成と数値が乖離しないよう同式に揃える)。
 fn base_normal_gold(floor: u32, config: &BalanceConfig) -> u64 {
-    let f = floor as f64;
-    let g = config.enemy.gold_base * config.enemy.gold_growth.powf(f - 1.0);
+    let g = config.enemy.gold_base * config.enemy_gold_schedule.multiplier(floor);
     g.round().max(1.0) as u64
 }
 
@@ -787,6 +829,47 @@ mod tests {
         s.hero_hp = 1;
         retreat(&mut s);
         assert_eq!(s.floor, 1);
+        assert!(s.hero_hp > 1);
+    }
+
+    /// 装備購入時の HP bump が「実際の max HP 増分だけ」乗ること。
+    /// Codex review #80 P1 の回帰防止: 旧実装は `new_max * bonus_pct` を
+    /// 加算していて、低 HP からの装備購入で全回復してしまっていた。
+    #[test]
+    fn buy_equipment_hp_bump_uses_actual_max_diff() {
+        use crate::games::abyss::state::EquipmentId;
+
+        // GodArmor は HP +600% の代表例。前提装備を全て埋めて解放可能にする。
+        let mut s = AbyssState::new();
+        s.upgrades[UpgradeKind::Armor.index()] = 60;
+        s.upgrades[UpgradeKind::Vitality.index()] = 60;
+        s.gold = 1_000_000_000;
+        // ミスリル鎧までを連鎖購入で解放 (前装備 prereq を満たすため)。
+        for id in [
+            EquipmentId::LeatherArmor,
+            EquipmentId::SteelArmor,
+            EquipmentId::MithrilArmor,
+        ] {
+            assert!(buy_equipment(&mut s, id), "prereq purchase failed");
+        }
+
+        // 「死にかけ」状態にしてから GodArmor を買う。
+        s.hero_hp = 1;
+        let max_before = s.hero_max_hp();
+        assert!(buy_equipment(&mut s, EquipmentId::GodArmor));
+        let max_after = s.hero_max_hp();
+        let actual_delta = max_after - max_before;
+
+        // 不変条件 1: 現 HP の増加分 ≤ max HP の増加分 (over-heal しない)。
+        assert!(
+            s.hero_hp <= 1 + actual_delta,
+            "hero_hp ({}) must not exceed 1 + actual max diff ({}); over-heal regression",
+            s.hero_hp,
+            1 + actual_delta
+        );
+        // 不変条件 2: 必ず max を超えない。
+        assert!(s.hero_hp <= max_after);
+        // 不変条件 3: HP が増えた装備なので最低でも 1 は増える。
         assert!(s.hero_hp > 1);
     }
 

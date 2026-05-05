@@ -182,6 +182,151 @@ impl SoulPerk {
     }
 }
 
+/// 装備の系統。lane 内では前装備が次の前提になる連鎖構造。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EquipmentLane {
+    /// 武器系統 (Sword 強化と連動して伸びる)。
+    Weapon,
+    /// 防具系統 (Armor + Vitality 強化と連動)。
+    Armor,
+    /// 装飾系統 (Speed/Crit/Regen/Gold と複合的に絡む)。
+    Accessory,
+}
+
+impl EquipmentLane {
+    pub fn name(self) -> &'static str {
+        match self {
+            EquipmentLane::Weapon => "武器",
+            EquipmentLane::Armor => "防具",
+            EquipmentLane::Accessory => "装飾",
+        }
+    }
+}
+
+/// 装備の識別子。各 lane に 4 段階で計 12 種。
+///
+/// 数値・解放条件・効果は `BalanceConfig::equipment` 経由でデータドリブンに
+/// 持つ (UpgradeKind が `base_cost`/`growth` を enum 内に持つのと違い、
+/// 装備はバランス調整頻度が高いと予想されるため)。enum 自体は識別と
+/// `index()` / `lane()` / `lane_index()` の構造情報だけを担う。
+///
+/// 並びは `all()` の順。**save id は宣言順固定**: 末尾追加なら旧 save 互換。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EquipmentId {
+    // 武器 lane
+    BronzeSword,
+    SteelSword,
+    MithrilSword,
+    GodSword,
+    // 防具 lane
+    LeatherArmor,
+    SteelArmor,
+    MithrilArmor,
+    GodArmor,
+    // 装飾 lane
+    SwiftBoots,
+    TwinWolfRing,
+    SageRobe,
+    EndingCrown,
+}
+
+/// 装備の総数。`AbyssState::owned_equipment` 配列のサイズに使う。
+pub const EQUIPMENT_COUNT: usize = 12;
+
+impl EquipmentId {
+    /// 全装備を宣言順で返す (save id の SSOT)。
+    pub fn all() -> &'static [EquipmentId] {
+        &[
+            EquipmentId::BronzeSword,
+            EquipmentId::SteelSword,
+            EquipmentId::MithrilSword,
+            EquipmentId::GodSword,
+            EquipmentId::LeatherArmor,
+            EquipmentId::SteelArmor,
+            EquipmentId::MithrilArmor,
+            EquipmentId::GodArmor,
+            EquipmentId::SwiftBoots,
+            EquipmentId::TwinWolfRing,
+            EquipmentId::SageRobe,
+            EquipmentId::EndingCrown,
+        ]
+    }
+
+    pub fn index(self) -> usize {
+        Self::all()
+            .iter()
+            .position(|&e| e == self)
+            .expect("EquipmentId variant must appear in EquipmentId::all()")
+    }
+
+    pub fn from_index(idx: usize) -> Option<EquipmentId> {
+        Self::all().get(idx).copied()
+    }
+
+    pub fn lane(self) -> EquipmentLane {
+        match self {
+            EquipmentId::BronzeSword
+            | EquipmentId::SteelSword
+            | EquipmentId::MithrilSword
+            | EquipmentId::GodSword => EquipmentLane::Weapon,
+            EquipmentId::LeatherArmor
+            | EquipmentId::SteelArmor
+            | EquipmentId::MithrilArmor
+            | EquipmentId::GodArmor => EquipmentLane::Armor,
+            EquipmentId::SwiftBoots
+            | EquipmentId::TwinWolfRing
+            | EquipmentId::SageRobe
+            | EquipmentId::EndingCrown => EquipmentLane::Accessory,
+        }
+    }
+
+    /// lane 内での段階 (0 が最序盤)。同 lane の前段階が `lane_index() - 1`。
+    pub fn lane_index(self) -> usize {
+        match self {
+            EquipmentId::BronzeSword | EquipmentId::LeatherArmor | EquipmentId::SwiftBoots => 0,
+            EquipmentId::SteelSword | EquipmentId::SteelArmor | EquipmentId::TwinWolfRing => 1,
+            EquipmentId::MithrilSword | EquipmentId::MithrilArmor | EquipmentId::SageRobe => 2,
+            EquipmentId::GodSword | EquipmentId::GodArmor | EquipmentId::EndingCrown => 3,
+        }
+    }
+}
+
+/// 装備が hero ステータスに与える効果の集合。
+///
+/// 加算 (`*_flat`) と乗算 % (`*_pct`) を分けて持つ。乗算は同種を合算した上で
+/// 「(base + flat) × (1 + sum_of_pct)」の形で適用する (soul perk と同じ流儀)。
+/// chain 乗算ではなく additive にしている理由は、UI で「合計 +X%」と
+/// 一発提示しやすく、バランス調整も線形で予測しやすいため。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct EquipmentBonus {
+    pub atk_pct: f64,
+    pub atk_flat: u64,
+    pub hp_pct: f64,
+    pub hp_flat: u64,
+    pub def_flat: u64,
+    pub crit_bonus: f64,
+    pub speed_pct: f64,
+    pub regen_per_sec: f64,
+    pub gold_pct: f64,
+}
+
+impl EquipmentBonus {
+    /// 2 つの bonus を合成する (additive)。
+    pub fn merge(&self, other: &EquipmentBonus) -> EquipmentBonus {
+        EquipmentBonus {
+            atk_pct: self.atk_pct + other.atk_pct,
+            atk_flat: self.atk_flat.saturating_add(other.atk_flat),
+            hp_pct: self.hp_pct + other.hp_pct,
+            hp_flat: self.hp_flat.saturating_add(other.hp_flat),
+            def_flat: self.def_flat.saturating_add(other.def_flat),
+            crit_bonus: self.crit_bonus + other.crit_bonus,
+            speed_pct: self.speed_pct + other.speed_pct,
+            regen_per_sec: self.regen_per_sec + other.regen_per_sec,
+            gold_pct: self.gold_pct + other.gold_pct,
+        }
+    }
+}
+
 /// 現在対峙している敵。スポーンの度に作り直される。
 #[derive(Clone, Debug)]
 pub struct Enemy {
@@ -200,10 +345,11 @@ pub struct Enemy {
 /// メイン画面のタブ。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
-    /// 強化タブ。gold で買う通常強化と soul で買う魂パークを同居させる
-    /// (どちらも「永続強化への投資」というメンタルモデルが共通なため)。
+    /// 強化サブタブ。gold で買う通常強化のみ (魂は `Tab::Souls` に分離)。
+    /// 装備が「段階的な達成感」を担うようになったため、本タブは線形な数値投資に
+    /// 専念する: 段階バッジ・次段階プレビューは廃止し、Lv + コスト + per-Lv 効果のみ表示。
     Upgrades,
-    /// 進捗タブ。100F ゴールに対する現在地、最深記録、節目フロアの一覧を表示。
+    /// 進捗サブタブ。100F ゴールに対する現在地、最深記録、節目フロアの一覧を表示。
     /// `Tab::all()` 内で旧 `Souls` の位置 (save id 1) を継承し、
     /// 既存セーブの Stats/Gacha/Settings の id を維持する。
     Roadmap,
@@ -212,12 +358,21 @@ pub enum Tab {
     /// 設定 (自動潜行 ON/OFF など、頻繁に切り替えない項目)。
     /// idle 系はメイン画面の縦領域を強化リストに優先したいので、設定系は別タブへ追い出す。
     Settings,
+    /// 装備ショップサブタブ。lane 連鎖型の解放ツリー。「次は見える / その先は ???」。
+    /// 普段は開かなくて良い (HUD には出さない)。気が向いた時だけ訪問するメニュー。
+    Shop,
+    /// 魂サブタブ。死亡で蓄積される魂による永続バフ (旧 `Tab::Upgrades` 内の魂セクションを分離)。
+    /// 操作頻度が `Tab::Upgrades` と異なる (魂はラン死亡後に集中) ため、サブタブ独立で UX 整理。
+    Souls,
 }
 
 impl Tab {
-    /// 全タブを宣言順に返す。**SSOT**: save id・タブバー描画順・テスト
-    /// イテレーションは全てこのリストから派生させる。新タブ追加時は
-    /// ここに足すだけで自動的に save 番号が割当たる (末尾追加が安全)。
+    /// 全タブを宣言順に返す。**SSOT**: save id・テストイテレーションの基準。
+    /// グループ階層化後は UI のタブバー描画順は `TabGroup::all()` に移ったため、
+    /// このリストは save id 専用 SSOT になっている (= save / test だけが利用)。
+    /// `to_save_id` / `from_save_id` と同じく cfg gate でデフォルト build の
+    /// dead_code を避ける。
+    #[cfg(any(target_arch = "wasm32", test))]
     pub const fn all() -> &'static [Tab] {
         &[
             Tab::Upgrades,
@@ -225,11 +380,17 @@ impl Tab {
             Tab::Stats,
             Tab::Gacha,
             Tab::Settings,
+            // 末尾追加: 既存セーブの save id (Upgrades=0..Settings=4) を維持するため
+            // 新タブは末尾に置く。UI 上の表示順は `TabGroup` が制御する。
+            Tab::Shop,
+            Tab::Souls,
         ]
     }
 
     /// セーブデータ用のタブ番号 (`all()` 内のインデックス)。
-    /// render.rs ではアクティブタブ index としても再利用 (= タブ宣言順 == 描画順)。
+    /// 利用箇所が cfg-gated な save.rs / test だけなので、デフォルトビルドでの
+    /// dead_code を避けるため同じ gate を付与。
+    #[cfg(any(target_arch = "wasm32", test))]
     pub fn to_save_id(self) -> u8 {
         Self::all()
             .iter()
@@ -237,16 +398,94 @@ impl Tab {
             .expect("Tab variant must appear in Tab::all()") as u8
     }
 
-    /// セーブデータからタブを復元。未知の id は `Upgrades` にフォールバック
-    /// (旧 save / 将来 enum 縮小による不整合に対する防御)。
-    /// 利用箇所が cfg-gated な save.rs / test だけなので、デフォルトビルドでの
-    /// dead_code を避けるため同じ gate を付与。
+    /// セーブデータからタブを復元。未知の id は `Upgrades` にフォールバック。
     #[cfg(any(target_arch = "wasm32", test))]
     pub fn from_save_id(id: u8) -> Self {
         Self::all()
             .get(id as usize)
             .copied()
             .unwrap_or(Tab::Upgrades)
+    }
+}
+
+/// メインメニューの上位グルーピング (UI only)。
+///
+/// 6 タブを 4 グループに畳んでメインメニューの認知負荷を下げる:
+///
+/// | グループ | 内訳 | 役割 |
+/// |---|---|---|
+/// | 育成 | 強化 + 装備 | 「投資して強くなる」系。アクティブな操作が中心 |
+/// | 情報 | 進捗 + 統計 | 「見るだけ」系。たまに開く |
+/// | ガチャ | (単独) | 鍵消費の独自 UX があり統合先がない |
+/// | 設定 | (単独) | 頻度低、独立性高 |
+///
+/// **save には保存しない**: 永続化対象は `Tab` のまま。`TabGroup` は
+/// `Tab` の関数 (`from_tab`) なので、save から `Tab` を復元すれば group は
+/// 一意に決まる。これにより既存セーブとの互換が崩れない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabGroup {
+    Growth,   // 強化 + 装備
+    Info,     // 進捗 + 統計
+    Gacha,
+    Settings,
+}
+
+impl TabGroup {
+    /// 全グループを宣言順 (= タブバー描画順) で返す。
+    /// 利用は SSOT 整合性 test だけなので、デフォルトビルドの dead_code を
+    /// 避けるため `Tab::all` と同じ cfg-gate を当てる。
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub const fn all() -> &'static [TabGroup] {
+        &[
+            TabGroup::Growth,
+            TabGroup::Info,
+            TabGroup::Gacha,
+            TabGroup::Settings,
+        ]
+    }
+
+    /// このグループに属する `Tab` をサブタブの並び順で返す。
+    pub fn tabs(self) -> &'static [Tab] {
+        match self {
+            // 育成は 3 サブタブ: 強化 (gold) / 装備 (gold + 強化Lv連鎖) / 魂 (souls)
+            // 強化と装備は毎分操作する系、魂はラン死亡後に集中する系で頻度差があるため
+            // 同じグループ内のサブタブとして並列に並べる。
+            TabGroup::Growth => &[Tab::Upgrades, Tab::Shop, Tab::Souls],
+            TabGroup::Info => &[Tab::Roadmap, Tab::Stats],
+            TabGroup::Gacha => &[Tab::Gacha],
+            TabGroup::Settings => &[Tab::Settings],
+        }
+    }
+
+    /// グループ表示名 (タブバーに出す)。
+    pub fn name(self) -> &'static str {
+        match self {
+            TabGroup::Growth => "育成",
+            TabGroup::Info => "情報",
+            TabGroup::Gacha => "ガチャ",
+            TabGroup::Settings => "設定",
+        }
+    }
+
+    /// グループ切替時に最初に表示するサブタブ。
+    pub fn default_tab(self) -> Tab {
+        self.tabs()[0]
+    }
+
+    /// 任意の `Tab` から所属グループを引き当てる (逆引き)。
+    /// `tabs()` の構成と必ず一致するように `match` で網羅する。
+    pub fn from_tab(tab: Tab) -> TabGroup {
+        match tab {
+            Tab::Upgrades | Tab::Shop | Tab::Souls => TabGroup::Growth,
+            Tab::Roadmap | Tab::Stats => TabGroup::Info,
+            Tab::Gacha => TabGroup::Gacha,
+            Tab::Settings => TabGroup::Settings,
+        }
+    }
+
+    /// このグループにサブタブが複数あるか (= サブタブバーを描く必要があるか)。
+    pub fn has_subtabs(self) -> bool {
+        self.tabs().len() > 1
     }
 }
 
@@ -389,6 +628,9 @@ pub struct AbyssState {
     pub upgrades: [u32; 7],
     pub soul_perks: [u32; 4],
     pub souls: u64,
+    /// 解放済み装備フラグ (`EquipmentId::index()` でアクセス)。
+    /// 一度解放したら永続。付け替え無し、効果は累積加算。
+    pub owned_equipment: [bool; EQUIPMENT_COUNT],
 
     // ── ラン (1回の冒険) 単位の状態 ──
     pub gold: u64,
@@ -474,6 +716,7 @@ impl AbyssState {
             upgrades: [0; 7],
             soul_perks: [0; 4],
             souls: 0,
+            owned_equipment: [false; EQUIPMENT_COUNT],
             gold: 0,
             floor: 1,
             max_floor: 1,
@@ -510,7 +753,22 @@ impl AbyssState {
         s
     }
 
-    /// 現在の最大 HP (upgrades + soul perks の合算)。
+    /// 装備の合計効果。所持中の `EquipmentDef::bonus` を additive で合算する。
+    /// 毎フレーム呼ばれうるが装備数は最大 12 なので O(N) で十分。
+    pub fn equipment_bonus(&self) -> EquipmentBonus {
+        let mut total = EquipmentBonus::default();
+        for def in self.config.equipment.iter() {
+            if self.owned_equipment[def.id.index()] {
+                total = total.merge(&def.bonus);
+            }
+        }
+        total
+    }
+
+    /// 現在の最大 HP (upgrades + soul perks + 装備の合算)。
+    ///
+    /// 計算式: `(base + curve_cumul + equipment_flat) × (1 + endurance_pct + equipment_pct)`
+    /// pct は additive で合算してから掛ける (chain 乗算ではない)。
     pub fn hero_max_hp(&self) -> u64 {
         let h = &self.config.hero;
         let lv = self.upgrades[UpgradeKind::Vitality.index()];
@@ -518,9 +776,10 @@ impl AbyssState {
             Some(curve) => curve.cumulative(lv).round() as u64,
             None => lv as u64 * h.hp_per_vitality_lv,
         };
-        let base = h.base_hp + upgrade_hp;
+        let eq = self.equipment_bonus();
+        let base = h.base_hp + upgrade_hp + eq.hp_flat;
         let endurance_lv = self.soul_perks[SoulPerk::Endurance.index()];
-        let mult = 1.0 + endurance_lv as f64 * h.endurance_per_lv;
+        let mult = 1.0 + endurance_lv as f64 * h.endurance_per_lv + eq.hp_pct;
         ((base as f64) * mult).round() as u64
     }
 
@@ -531,13 +790,17 @@ impl AbyssState {
             Some(curve) => curve.cumulative(lv).round() as u64,
             None => lv as u64 * h.atk_per_sword_lv,
         };
-        let base = h.base_atk + upgrade_atk;
+        let eq = self.equipment_bonus();
+        let base = h.base_atk + upgrade_atk + eq.atk_flat;
         let might_lv = self.soul_perks[SoulPerk::Might.index()];
-        let mult = 1.0 + might_lv as f64 * h.might_per_lv;
+        let mult = 1.0 + might_lv as f64 * h.might_per_lv + eq.atk_pct;
         ((base as f64) * mult).round() as u64
     }
 
-    /// 指定強化の段階カーブ参照を返す (curve 未定義なら None)。
+    /// 指定強化のカーブ参照を返す (curve 未定義なら None)。
+    /// 内部の hero stat 計算 (`hero_atk` / `hero_max_hp` 等) で `cumulative()` を使うために保持。
+    /// UI からは段階表示を撤去した (装備が段階の役目を担うため) ので、UI で
+    /// このメソッドを呼ぶ箇所は無い。
     pub fn upgrade_curve(&self, kind: UpgradeKind) -> Option<&super::config::TierCurve> {
         let h = &self.config.hero;
         match kind {
@@ -550,17 +813,6 @@ impl AbyssState {
         }
     }
 
-    /// 強化の現在段階名と次段階情報を返す。UI 表示用。curve 未定義なら None。
-    pub fn upgrade_tier(
-        &self,
-        kind: UpgradeKind,
-    ) -> Option<(&'static str, Option<(u32, &'static str)>)> {
-        let curve = self.upgrade_curve(kind)?;
-        let lv = self.upgrades[kind.index()];
-        let (_, name) = curve.tier_at(lv);
-        Some((name, curve.next_tier(lv)))
-    }
-
     pub fn hero_def(&self) -> u64 {
         let h = &self.config.hero;
         let lv = self.upgrades[UpgradeKind::Armor.index()];
@@ -568,14 +820,16 @@ impl AbyssState {
             Some(curve) => curve.cumulative(lv).round() as u64,
             None => lv as u64 * h.def_per_armor_lv,
         };
-        h.base_def + upgrade_def
+        let eq = self.equipment_bonus();
+        h.base_def + upgrade_def + eq.def_flat
     }
 
-    /// クリティカル率 (0.0..=`crit_cap`)。
+    /// クリティカル率 (0.0..=`crit_cap`)。装備の crit_bonus も加算。
     pub fn hero_crit_rate(&self) -> f64 {
         let h = &self.config.hero;
         let lv = self.upgrades[UpgradeKind::Crit.index()] as f64;
-        (lv * h.crit_per_lv).min(h.crit_cap)
+        let eq = self.equipment_bonus();
+        (lv * h.crit_per_lv + eq.crit_bonus).min(h.crit_cap)
     }
 
     /// 1 攻撃にかかる tick 数。SPD upgrade と戦闘集中で短縮、`atk_period_min` を下限。
@@ -586,7 +840,8 @@ impl AbyssState {
             Some(curve) => curve.cumulative(lv),
             None => lv as f64 * h.speed_per_lv,
         };
-        let speed_mult = 1.0 + speed_bonus;
+        let eq = self.equipment_bonus();
+        let speed_mult = 1.0 + speed_bonus + eq.speed_pct;
         let focus_factor = self.focus_factor();
         let period = (h.atk_period_base as f64 * focus_factor / speed_mult).round() as u32;
         period.max(h.atk_period_min)
@@ -599,17 +854,22 @@ impl AbyssState {
         (1.0 - focus * h.focus_reduction_per_point).max(0.1)
     }
 
-    /// HP regen (HP/秒)。
+    /// HP regen (HP/秒)。装備の regen_per_sec も加算。
     pub fn hero_regen_per_sec(&self) -> f64 {
+        let eq = self.equipment_bonus();
         self.upgrades[UpgradeKind::Regen.index()] as f64 * self.config.hero.regen_per_lv_per_sec
+            + eq.regen_per_sec
     }
 
-    /// gold 取得倍率 (1.0 + upgrades + soul perks)。
+    /// gold 取得倍率 (1.0 + upgrades + soul perks + equipment)。
     pub fn gold_multiplier(&self) -> f64 {
         let h = &self.config.hero;
         let upgrade_lv = self.upgrades[UpgradeKind::Gold.index()];
         let fortune_lv = self.soul_perks[SoulPerk::Fortune.index()];
-        1.0 + upgrade_lv as f64 * h.gold_per_lv + fortune_lv as f64 * h.fortune_per_lv
+        let eq = self.equipment_bonus();
+        1.0 + upgrade_lv as f64 * h.gold_per_lv
+            + fortune_lv as f64 * h.fortune_per_lv
+            + eq.gold_pct
     }
 
     /// 撃破時の魂取得倍率 (Reaper perk 由来)。
@@ -683,6 +943,39 @@ mod tests {
         }
         // 範囲外 id は既定値にフォールバック
         assert_eq!(Tab::from_save_id(255), Tab::Upgrades);
+    }
+
+    /// `TabGroup::tabs()` と `from_tab()` が双方向で一貫していること。
+    /// 新グループ追加 / 既存グループへの Tab 追加で抜け漏れたら検出する。
+    #[test]
+    fn tab_group_round_trip_via_tabs_and_from_tab() {
+        for &group in TabGroup::all() {
+            for &tab in group.tabs() {
+                assert_eq!(
+                    TabGroup::from_tab(tab),
+                    group,
+                    "group {:?} declares tab {:?} but from_tab says {:?}",
+                    group,
+                    tab,
+                    TabGroup::from_tab(tab),
+                );
+            }
+        }
+        // 全 Tab がいずれかのグループに属すること (網羅性)。
+        for &tab in Tab::all() {
+            let g = TabGroup::from_tab(tab);
+            assert!(
+                g.tabs().contains(&tab),
+                "tab {:?} is mapped to {:?} but {:?}.tabs() doesn't contain it",
+                tab,
+                g,
+                g
+            );
+        }
+        // default_tab が tabs() の先頭と一致 (UI 約束)。
+        for &group in TabGroup::all() {
+            assert_eq!(group.default_tab(), group.tabs()[0]);
+        }
     }
 
     /// 同様に FloorKind も双方向 SSOT。

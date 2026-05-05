@@ -20,7 +20,7 @@
 use super::config::BalanceConfig;
 use super::logic;
 use super::policy::PlayerAction;
-use super::state::{AbyssState, SoulPerk, UpgradeKind};
+use super::state::{AbyssState, EquipmentId, SoulPerk, UpgradeKind};
 
 // ───────────────────────────────────────────────────────────────
 // Policy: 自動プレイヤーの抽象。
@@ -66,6 +66,75 @@ impl Policy for GreedyCheapestPolicy {
                 actions.push(PlayerAction::BuyUpgrade(kind));
             }
         }
+        if self.spend_souls {
+            if let Some((perk, cost)) = cheapest_soul_perk(state) {
+                if state.souls >= cost {
+                    actions.push(PlayerAction::BuySoulPerk(perk));
+                }
+            }
+        }
+        actions
+    }
+}
+
+/// 「装備が解放できるなら最優先で買う」を加えた Balanced Policy。
+/// 40h B100 達成可能性の検証用 — 強化を伸ばしつつ、条件が揃った装備を逃さず買う。
+pub struct EquipmentSeekingPolicy {
+    pub weights: [f64; 7],
+    pub spend_souls: bool,
+}
+
+impl Default for EquipmentSeekingPolicy {
+    fn default() -> Self {
+        Self {
+            weights: [3.0, 3.0, 2.0, 1.0, 1.5, 1.0, 1.5],
+            spend_souls: true,
+        }
+    }
+}
+
+impl Policy for EquipmentSeekingPolicy {
+    fn choose_actions(&mut self, state: &AbyssState) -> Vec<PlayerAction> {
+        let mut actions = Vec::new();
+
+        // (1) 装備解放を最優先 — 全条件 + gold が揃っていれば即購入。
+        for &id in EquipmentId::all() {
+            if state.owned_equipment[id.index()] {
+                continue;
+            }
+            if !logic::equipment_requirements_met(state, id) {
+                continue;
+            }
+            if let Some(def) = state.config.equipment.get(id.index()) {
+                if state.gold >= def.requirement.gold_cost {
+                    actions.push(PlayerAction::BuyEquipment(id));
+                    return actions; // 1 tick で 1 個ずつ。次の tick でまた拾う。
+                }
+            }
+        }
+
+        // (2) 強化購入 (WeightedPolicy::balanced と同じロジック)。
+        let mut best: Option<(UpgradeKind, f64)> = None;
+        for kind in UpgradeKind::all() {
+            let w = self.weights[kind.index()];
+            if w <= 0.0 {
+                continue;
+            }
+            let lv = state.upgrades[kind.index()] as f64;
+            let cost = state.upgrade_cost(*kind);
+            if state.gold < cost {
+                continue;
+            }
+            let score = lv / w;
+            if best.is_none_or(|(_, s)| score < s) {
+                best = Some((*kind, score));
+            }
+        }
+        if let Some((kind, _)) = best {
+            actions.push(PlayerAction::BuyUpgrade(kind));
+        }
+
+        // (3) 魂パーク。
         if self.spend_souls {
             if let Some((perk, cost)) = cheapest_soul_perk(state) {
                 if state.souls >= cost {
@@ -579,6 +648,51 @@ mod runners {
             BalanceConfig::default(),
             Box::new(WeightedPolicy::defense()),
             ticks,
+        );
+    }
+
+    /// 装備解放を含む 40 時間ロングランで B100 到達と所持装備数を測る。
+    /// 期待値: 40h 経過時点で 12 個全装備解放、最深 B100 付近に到達。
+    /// `cargo test simulate_abyss_long_run -- --nocapture`
+    #[test]
+    fn simulate_abyss_long_run() {
+        // 40h = 144,000 秒 = 1,440,000 ticks (10 ticks/sec)。
+        let ticks = 1_440_000;
+        eprintln!("\n┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓");
+        eprintln!("┃  Abyss Idle Long Run — 40h, EquipmentSeekingPolicy     ┃");
+        eprintln!("┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛");
+
+        let mut sim = Simulator::with_seed(
+            BalanceConfig::default(),
+            Box::new(EquipmentSeekingPolicy::default()),
+            0xC0FFEE,
+        );
+        sim.run(ticks);
+        eprintln!("{}", sim.report());
+        let owned = sim
+            .state
+            .owned_equipment
+            .iter()
+            .filter(|b| **b)
+            .count();
+        eprintln!(
+            "解放装備: {}/{} | 最深: B{}F | 最終: B{}F",
+            owned,
+            sim.state.owned_equipment.len(),
+            sim.state.deepest_floor_ever,
+            sim.state.floor
+        );
+        // バランス健全性: 40h で「全装備解放」「B100 到達可能」を担保する。
+        // 観察用 eprintln! で具体数値を見つつ、test 自体は構造的不変条件を縛る。
+        assert_eq!(
+            owned,
+            sim.state.owned_equipment.len(),
+            "40h で全 12 装備解放できないとバランス崩壊"
+        );
+        assert!(
+            sim.state.deepest_floor_ever >= 100,
+            "40h で B100 到達できないと『全装備でクリア可能』設計が成立しない (got B{})",
+            sim.state.deepest_floor_ever
         );
     }
 

@@ -144,6 +144,23 @@ impl AbyssEffects {
         self.manager.add_effect(effect);
     }
 
+    // ── 装備系 ──────────────────────────────────────────────
+
+    /// 装備解放演出。タブコンテンツ領域を黄色フェードで包み、所有感を強調する。
+    /// duration は 600ms — ガチャ Legendary より控えめだが、強化購入のログ流れより
+    /// 確実に視認できる長さ。
+    pub fn push_equipment_unlock(&mut self, body: Rect) {
+        let mut effect = fx::sweep_in(
+            Motion::LeftToRight,
+            10,
+            3,
+            Color::Indexed(220), // 明るい黄
+            Duration::from_millis(600),
+        );
+        effect.set_area(body);
+        self.manager.add_effect(effect);
+    }
+
     // ── 共通 ────────────────────────────────────────────────
 
     /// 1 フレーム分の経過時間を進めて、Buffer に effect を適用する。
