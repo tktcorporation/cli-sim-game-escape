@@ -70,8 +70,14 @@ fn handle_key(state: &mut RpgState, ch: char) -> bool {
     match state.scene {
         Scene::Intro(_) => handle_intro_key(state, ch),
         Scene::Town => handle_town_key(state, ch),
-        Scene::DungeonExplore => handle_dungeon_explore_key(state, ch),
-        Scene::DungeonEvent => handle_dungeon_event_key(state, ch),
+        Scene::DungeonExplore => {
+            // When an event popup is active, route input there first.
+            if state.active_event.is_some() {
+                handle_dungeon_event_key(state, ch)
+            } else {
+                handle_dungeon_explore_key(state, ch)
+            }
+        }
         Scene::GameClear => handle_game_clear_key(state, ch),
     }
 }
@@ -84,8 +90,13 @@ fn handle_click(state: &mut RpgState, id: u16) -> bool {
     match state.scene {
         Scene::Intro(_) => handle_intro_click(state, id),
         Scene::Town => handle_town_click(state, id),
-        Scene::DungeonExplore => handle_dungeon_explore_click(state, id),
-        Scene::DungeonEvent => handle_dungeon_event_click(state, id),
+        Scene::DungeonExplore => {
+            if state.active_event.is_some() {
+                handle_dungeon_event_click(state, id)
+            } else {
+                handle_dungeon_explore_click(state, id)
+            }
+        }
         Scene::GameClear => handle_game_clear_click(state, id),
     }
 }
@@ -150,27 +161,64 @@ fn handle_town_click(state: &mut RpgState, id: u16) -> bool {
 
 fn handle_dungeon_explore_key(state: &mut RpgState, ch: char) -> bool {
     match ch {
+        // Movement: arrow keys (h/j/k/l after KeyCode mapping) and WASD.
+        // 'a' is reserved for the A button; use 'h' or arrow-left for west.
         'W' | 'w' | 'k' => logic::try_move(state, state::Facing::North),
-        'A' | 'a' | 'h' => logic::try_move(state, state::Facing::West),
+        'h' => logic::try_move(state, state::Facing::West),
         'S' | 's' | 'j' => logic::try_move(state, state::Facing::South),
         'D' | 'd' | 'l' => logic::try_move(state, state::Facing::East),
-        'I' | 'i' => {
+        // A button — context-sensitive primary action.
+        ' ' | 'A' | 'a' => trigger_a_button(state),
+        // B button — unified menu (持ち物 / スキル / ステータス).
+        'b' | 'B' | 'I' | 'i' => {
             state.overlay = Some(Overlay::Inventory);
+            true
+        }
+        // Skill / Status shortcuts kept for keyboard users.
+        'Z' | 'z' => {
+            state.overlay = Some(Overlay::SkillMenu);
             true
         }
         'X' | 'x' => {
             state.overlay = Some(Overlay::Status);
             true
         }
-        'Z' | 'z' => {
-            state.overlay = Some(Overlay::SkillMenu);
-            true
-        }
         _ => false,
     }
 }
 
+/// Implements the A button:
+/// adjacent enemy → open skill menu, foot event → primary choice,
+/// otherwise → wait one turn.
+fn trigger_a_button(state: &mut RpgState) -> bool {
+    if state.active_event.is_some() {
+        // primary choice = first choice (events are designed so [0] is the
+        // intuitive "do it" option, e.g. 開ける / 飲む / 読む / 降りる).
+        return logic::resolve_event_choice(state, 0);
+    }
+    if let Some(map) = &state.dungeon {
+        let px = map.player_x as i32;
+        let py = map.player_y as i32;
+        if map
+            .monsters
+            .iter()
+            .any(|m| m.hp > 0 && (m.x as i32 - px).abs() + (m.y as i32 - py).abs() == 1)
+        {
+            state.overlay = Some(Overlay::SkillMenu);
+            return true;
+        }
+    }
+    logic::wait_in_place(state)
+}
+
 fn handle_dungeon_explore_click(state: &mut RpgState, id: u16) -> bool {
+    if id == AB_A_BUTTON {
+        return trigger_a_button(state);
+    }
+    if id == AB_B_BUTTON {
+        state.overlay = Some(Overlay::Inventory);
+        return true;
+    }
     handle_dpad_tap(state, id)
         || handle_map_tap(state, id)
         || handle_overlay_open_click(state, id)
@@ -228,6 +276,17 @@ fn handle_dungeon_event_key(state: &mut RpgState, ch: char) -> bool {
     }
 
     match ch {
+        // A button — primary choice (index 0).
+        ' ' | 'A' | 'a' => logic::resolve_event_choice(state, 0),
+        // B button — skip / "explore on" (last choice, conventionally Ignore).
+        'b' | 'B' => {
+            let last = state
+                .active_event
+                .as_ref()
+                .map(|e| e.choices.len().saturating_sub(1))
+                .unwrap_or(0);
+            logic::resolve_event_choice(state, last)
+        }
         'I' | 'i' => {
             state.overlay = Some(Overlay::Inventory);
             true
@@ -237,6 +296,17 @@ fn handle_dungeon_event_key(state: &mut RpgState, ch: char) -> bool {
 }
 
 fn handle_dungeon_event_click(state: &mut RpgState, id: u16) -> bool {
+    if id == AB_A_BUTTON {
+        return logic::resolve_event_choice(state, 0);
+    }
+    if id == AB_B_BUTTON {
+        let last = state
+            .active_event
+            .as_ref()
+            .map(|e| e.choices.len().saturating_sub(1))
+            .unwrap_or(0);
+        return logic::resolve_event_choice(state, last);
+    }
     if (EVENT_CHOICE_BASE..EVENT_CHOICE_BASE + 10).contains(&id) {
         let index = (id - EVENT_CHOICE_BASE) as usize;
         return logic::resolve_event_choice(state, index);
@@ -267,6 +337,28 @@ fn handle_overlay_open_click(state: &mut RpgState, id: u16) -> bool {
 // ── Overlays ───────────────────────────────────────────────
 
 fn handle_overlay_key(state: &mut RpgState, ch: char) -> bool {
+    // Tab cycle (h/l) when on a menu tab.
+    if state.overlay.map(|o| o.is_menu_tab()).unwrap_or(false) {
+        match ch {
+            'l' => {
+                state.overlay = Some(match state.overlay.unwrap() {
+                    Overlay::Inventory => Overlay::SkillMenu,
+                    Overlay::SkillMenu => Overlay::Status,
+                    _ => Overlay::Inventory,
+                });
+                return true;
+            }
+            'h' => {
+                state.overlay = Some(match state.overlay.unwrap() {
+                    Overlay::Status => Overlay::SkillMenu,
+                    Overlay::SkillMenu => Overlay::Inventory,
+                    _ => Overlay::Status,
+                });
+                return true;
+            }
+            _ => {}
+        }
+    }
     match state.overlay {
         Some(Overlay::Inventory) => match ch {
             '0' | '-' => {
@@ -340,6 +432,25 @@ fn handle_overlay_click(state: &mut RpgState, id: u16) -> bool {
     if id == CLOSE_OVERLAY {
         state.overlay = None;
         return true;
+    }
+
+    // Tab switch within the unified menu (Inventory / SkillMenu / Status).
+    if state.overlay.map(|o| o.is_menu_tab()).unwrap_or(false) {
+        match id {
+            MENU_TAB_INVENTORY => {
+                state.overlay = Some(Overlay::Inventory);
+                return true;
+            }
+            MENU_TAB_SKILL => {
+                state.overlay = Some(Overlay::SkillMenu);
+                return true;
+            }
+            MENU_TAB_STATUS => {
+                state.overlay = Some(Overlay::Status);
+                return true;
+            }
+            _ => {}
+        }
     }
 
     match state.overlay {
@@ -507,6 +618,99 @@ mod tests {
         g.handle_input(&InputEvent::Key('1'));
         let result = g.handle_input(&click(CHOICE_BASE));
         assert!(result);
+    }
+
+    #[test]
+    fn a_button_waits_when_no_event_no_enemy() {
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        assert_eq!(g.state.scene, Scene::DungeonExplore);
+        // Clear all monsters so A button just waits.
+        g.state.dungeon.as_mut().unwrap().monsters.clear();
+        let turns_before = g.state.turn_count;
+        g.handle_input(&click(AB_A_BUTTON));
+        // Wait consumes a turn → turn_count increments.
+        assert_eq!(g.state.turn_count, turns_before + 1);
+        assert!(g.state.overlay.is_none());
+    }
+
+    #[test]
+    fn a_button_opens_skill_when_enemy_adjacent() {
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        let map = g.state.dungeon.as_mut().unwrap();
+        let px = map.player_x;
+        let py = map.player_y;
+        // Place a slime adjacent to the player.
+        for &dir in &[
+            state::Facing::North,
+            state::Facing::East,
+            state::Facing::South,
+            state::Facing::West,
+        ] {
+            let nx = px as i32 + dir.dx();
+            let ny = py as i32 + dir.dy();
+            if !map.in_bounds(nx, ny) { continue; }
+            let ux = nx as usize; let uy = ny as usize;
+            if !map.cell(ux, uy).is_walkable() { continue; }
+            map.monsters.clear();
+            map.monsters.push(state::Monster {
+                kind: state::EnemyKind::Slime,
+                x: ux, y: uy, hp: 12, max_hp: 12,
+                awake: true, charging: false,
+            });
+            break;
+        }
+        g.handle_input(&click(AB_A_BUTTON));
+        assert_eq!(g.state.overlay, Some(Overlay::SkillMenu));
+    }
+
+    #[test]
+    fn b_button_opens_unified_menu() {
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&click(AB_B_BUTTON));
+        assert_eq!(g.state.overlay, Some(Overlay::Inventory));
+    }
+
+    #[test]
+    fn menu_tab_switch_via_click() {
+        let mut g = make_game();
+        g.state.overlay = Some(Overlay::Inventory);
+        g.handle_input(&click(MENU_TAB_SKILL));
+        assert_eq!(g.state.overlay, Some(Overlay::SkillMenu));
+        g.handle_input(&click(MENU_TAB_STATUS));
+        assert_eq!(g.state.overlay, Some(Overlay::Status));
+        g.handle_input(&click(MENU_TAB_INVENTORY));
+        assert_eq!(g.state.overlay, Some(Overlay::Inventory));
+    }
+
+    #[test]
+    fn dungeon_event_stays_in_explore_scene() {
+        // Issue #89: events become popups; the scene must not switch.
+        let mut g = make_game();
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        g.handle_input(&InputEvent::Key('1'));
+        // Manually trigger an event by injecting it.
+        g.state.active_event = Some(state::DungeonEvent {
+            description: vec!["test".into()],
+            choices: vec![state::EventChoice {
+                label: "ok".into(),
+                action: state::EventAction::Continue,
+            }],
+        });
+        assert_eq!(g.state.scene, Scene::DungeonExplore);
+        g.handle_input(&click(AB_A_BUTTON));
+        // After resolving, scene is still DungeonExplore, event cleared.
+        assert_eq!(g.state.scene, Scene::DungeonExplore);
+        assert!(g.state.active_event.is_none());
     }
 
     #[test]

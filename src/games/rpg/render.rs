@@ -14,7 +14,7 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
-use crate::widgets::{ClickableGrid, ClickableList};
+use crate::widgets::{Clickable, ClickableGrid, ClickableList, TabBar};
 
 use super::actions::*;
 use super::dungeon_view;
@@ -47,7 +47,6 @@ pub fn render(
         Scene::Intro(_) => render_intro(state, f, area, click_state),
         Scene::Town => render_main(state, f, area, click_state),
         Scene::DungeonExplore => render_main(state, f, area, click_state),
-        Scene::DungeonEvent => render_main(state, f, area, click_state),
         Scene::GameClear => render_game_clear(state, f, area, click_state),
     }
 }
@@ -328,8 +327,15 @@ fn render_scene_content(
     click_state: &Rc<RefCell<ClickState>>,
 ) {
     match state.scene {
-        Scene::DungeonExplore => render_dungeon_explore(state, f, area, borders, click_state),
-        Scene::DungeonEvent => render_dungeon_event(state, f, area, borders, click_state),
+        Scene::DungeonExplore => {
+            render_dungeon_explore(state, f, area, borders, click_state);
+            // Inline event popup — drawn on top of the explore view so the
+            // map stays visible while the player picks a choice. See issue
+            // #89: events no longer transition to a separate scene.
+            if state.active_event.is_some() {
+                render_event_popup(state, f, area, click_state);
+            }
+        }
         Scene::Town => render_town_content(state, f, area, borders, click_state),
         _ => {}
     }
@@ -484,10 +490,13 @@ fn render_explore_panel(
         return;
     }
 
-    let dpad_h = 3_u16.min(inner.height.saturating_sub(2));
-    let info_h = inner.height.saturating_sub(dpad_h);
+    // Layout: info (flexible) → A/B buttons (1 row) → d-pad (3 rows).
+    let dpad_h = 3_u16.min(inner.height.saturating_sub(3));
+    let ab_h: u16 = if inner.height > dpad_h + 1 { 1 } else { 0 };
+    let info_h = inner.height.saturating_sub(dpad_h + ab_h);
     let info_area = Rect::new(inner.x, inner.y, inner.width, info_h);
-    let dpad_area = Rect::new(inner.x, inner.y + info_h, inner.width, dpad_h);
+    let ab_area = Rect::new(inner.x, inner.y + info_h, inner.width, ab_h);
+    let dpad_area = Rect::new(inner.x, inner.y + info_h + ab_h, inner.width, dpad_h);
 
     {
         let mut cl = ClickableList::new();
@@ -540,22 +549,66 @@ fn render_explore_panel(
 
         render_hp_warning(&mut cl, state);
 
-        // Action buttons (Skill / Pray skipped in dungeon; inventory/status hints)
-        cl.push_clickable(
-            Line::from(vec![
-                Span::styled(" ✦ ", Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD)),
-                Span::styled("スキル", Style::default().fg(Color::White)),
-            ]),
-            OPEN_SKILL_MENU,
-        );
-        push_overlay_hints(&mut cl);
-
         let no_block = Block::default();
         let mut cs = click_state.borrow_mut();
         cl.render(f, info_area, no_block, &mut cs, true, 0);
     }
 
+    if ab_h > 0 {
+        render_ab_buttons(state, f, ab_area, click_state);
+    }
     render_dpad(map, f, dpad_area, click_state);
+}
+
+/// Two-button row: A (context-sensitive) and B (open menu).
+///
+/// A's label changes to hint the contextual action so the player knows
+/// what tapping it will do — Elona/Pokémon Mystery Dungeon style.
+fn render_ab_buttons(
+    state: &RpgState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    if area.width < 8 {
+        return;
+    }
+    let half = area.width / 2;
+    let a_area = Rect::new(area.x, area.y, half, area.height);
+    let b_area = Rect::new(area.x + half, area.y, area.width - half, area.height);
+
+    // Pick A's label based on context.
+    let a_label = if state.active_event.is_some() {
+        " [A] 決定 "
+    } else if let Some(map) = &state.dungeon {
+        let px = map.player_x as i32;
+        let py = map.player_y as i32;
+        let adj = map.monsters.iter().any(|m| {
+            m.hp > 0 && (m.x as i32 - px).abs() + (m.y as i32 - py).abs() == 1
+        });
+        if adj {
+            " [A] スキル "
+        } else {
+            " [A] 待機 "
+        }
+    } else {
+        " [A] 待機 "
+    };
+
+    let a_para = Paragraph::new(Line::from(Span::styled(
+        a_label,
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )))
+    .alignment(ratzilla::ratatui::layout::Alignment::Center);
+    let b_para = Paragraph::new(Line::from(Span::styled(
+        " [B] メニュー ",
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+    )))
+    .alignment(ratzilla::ratatui::layout::Alignment::Center);
+
+    let mut cs = click_state.borrow_mut();
+    Clickable::new(a_para, AB_A_BUTTON).render(f, a_area, &mut cs);
+    Clickable::new(b_para, AB_B_BUTTON).render(f, b_area, &mut cs);
 }
 
 fn render_dpad(
@@ -655,61 +708,111 @@ fn render_hp_warning(cl: &mut ClickableList, state: &RpgState) {
     }
 }
 
-// ── Dungeon Event ────────────────────────────────────────────
+// ── Dungeon Event Popup ─────────────────────────────────────
+//
+// Renders the active event as a centred popup over the explore view
+// (issue #89). Same `<pre>` is overdrawn — no extra DOM elements
+// (CLAUDE.md: "オーバーレイは別 DOM 要素を生やさない").
 
-fn render_dungeon_event(
+fn render_event_popup(
     state: &RpgState,
     f: &mut Frame,
-    area: Rect,
-    borders: Borders,
+    full_area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let mut cl = ClickableList::new();
+    let event = match &state.active_event {
+        Some(e) => e,
+        None => return,
+    };
 
-    if let Some(event) = &state.active_event {
-        for line in &event.description {
-            if line.is_empty() {
-                cl.push(Line::from(""));
-            } else {
-                cl.push(Line::from(Span::styled(
-                    format!(" {}", line),
-                    Style::default().fg(Color::White),
-                )));
-            }
-        }
+    // Estimate popup size from event content.
+    let max_choice_label = event
+        .choices
+        .iter()
+        .map(|c| c.label.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let max_desc = event
+        .description
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let popup_w = (max_choice_label.max(max_desc) + 12)
+        .min(full_area.width.saturating_sub(2))
+        .max(28);
+    let lines_h = event.description.len() as u16
+        + event.choices.len() as u16
+        + 6 /* spacing + tip line */;
+    let popup_h = lines_h
+        .min(full_area.height.saturating_sub(2))
+        .max(8);
 
-        cl.push(Line::from(""));
-        cl.push(Line::from(Span::styled(
-            " \u{2500}".repeat(15),
-            Style::default().fg(Color::DarkGray),
-        )));
-        cl.push(Line::from(""));
+    let popup_x = full_area.x + (full_area.width.saturating_sub(popup_w)) / 2;
+    let popup_y = full_area.y + (full_area.height.saturating_sub(popup_h)) / 2;
+    let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
 
-        for (i, choice) in event.choices.iter().enumerate() {
-            cl.push_clickable(
-                Line::from(vec![
-                    Span::styled(
-                        format!(" {}. ", i + 1),
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(choice.label.clone(), Style::default().fg(Color::White)),
-                ]),
-                EVENT_CHOICE_BASE + i as u16,
-            );
-        }
-    }
-
-    push_overlay_hints(&mut cl);
-
-    let block = Block::default()
-        .borders(borders)
+    // Clear the popup area first so the underlying map doesn't bleed through.
+    let clear_block = Block::default()
+        .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
         .title(Span::styled(
             " イベント ",
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ));
+
+    let mut cl = ClickableList::new();
+
+    for line in &event.description {
+        if line.is_empty() {
+            cl.push(Line::from(""));
+        } else {
+            cl.push(Line::from(Span::styled(
+                format!(" {}", line),
+                Style::default().fg(Color::White),
+            )));
+        }
+    }
+
+    cl.push(Line::from(""));
+    cl.push(Line::from(Span::styled(
+        " \u{2500}".repeat((popup_w as usize).saturating_sub(2).min(20)),
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    for (i, choice) in event.choices.iter().enumerate() {
+        let marker = if i == 0 {
+            "[A]"
+        } else if i == event.choices.len() - 1 && event.choices.len() > 1 {
+            "[B]"
+        } else {
+            "   "
+        };
+        cl.push_clickable(
+            Line::from(vec![
+                Span::styled(
+                    format!(" {} ", marker),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{}. ", i + 1),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(choice.label.clone(), Style::default().fg(Color::White)),
+            ]),
+            EVENT_CHOICE_BASE + i as u16,
+        );
+    }
+
     let mut cs = click_state.borrow_mut();
-    cl.render(f, area, block, &mut cs, true, 0);
+    // First render an opaque block so the map underneath is hidden.
+    f.render_widget(
+        Paragraph::new("").block(clear_block.clone()),
+        popup_area,
+    );
+    // Then draw the content with the same block (no double border because
+    // ratatui's Paragraph re-renders the block atomically).
+    cl.render(f, popup_area, clear_block, &mut cs, true, 0);
 }
 
 fn render_log(state: &RpgState, f: &mut Frame, area: Rect, borders: Borders) {
@@ -768,12 +871,49 @@ fn push_overlay_hints(cl: &mut ClickableList) {
 
 // ── Overlays ────────────────────────────────────────────────
 
+/// Render the unified menu tab bar (持ち物 / スキル / ステータス).
+/// Returns the area below the tab bar for the panel content.
+fn render_menu_tabs(
+    f: &mut Frame,
+    area: Rect,
+    active: Overlay,
+    click_state: &Rc<RefCell<ClickState>>,
+) -> Rect {
+    if area.height < 3 {
+        return area;
+    }
+    let tab_area = Rect::new(area.x, area.y, area.width, 1);
+    let style_for = |o: Overlay| -> Style {
+        if o == active {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        }
+    };
+    let bar = TabBar::new(" │ ")
+        .tab(
+            "持ち物",
+            style_for(Overlay::Inventory),
+            MENU_TAB_INVENTORY,
+        )
+        .tab("スキル", style_for(Overlay::SkillMenu), MENU_TAB_SKILL)
+        .tab(
+            "ステータス",
+            style_for(Overlay::Status),
+            MENU_TAB_STATUS,
+        );
+    let mut cs = click_state.borrow_mut();
+    bar.render(f, tab_area, &mut cs);
+    Rect::new(area.x, area.y + 1, area.width, area.height - 1)
+}
+
 fn render_inventory(
     state: &RpgState,
     f: &mut Frame,
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let area = render_menu_tabs(f, area, Overlay::Inventory, click_state);
     let borders = borders_for(area.width);
     let mut cl = ClickableList::new();
 
@@ -857,6 +997,7 @@ fn render_status(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let area = render_menu_tabs(f, area, Overlay::Status, click_state);
     let borders = borders_for(area.width);
     let mut cl = ClickableList::new();
 
@@ -1057,6 +1198,7 @@ fn render_skill_menu(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let area = render_menu_tabs(f, area, Overlay::SkillMenu, click_state);
     let borders = borders_for(area.width);
     let mut cl = ClickableList::new();
 

@@ -7,7 +7,31 @@
 //! ```bash
 //! cargo test simulate_rpg_default -- --nocapture
 //! cargo test simulate_rpg_runs -- --nocapture
+//! cargo test simulate_rpg_policy_comparison -- --nocapture --include-ignored
 //! ```
+//!
+//! ## Issue #92 バランス調整メモ
+//!
+//! ### 調整前 (#86 マージ直後, 2026-05-04)
+//! - 30 run × default policy: クリア 0%, 撤退 ~100%, 最深 B5F〜B8F
+//! - 死亡内訳: 飢餓 主要因
+//! - affix ドロップ: 中盤で殆ど 0
+//!
+//! ### 調整後 (issue #92, 2026-05-05)
+//! 本コミットで以下を修正:
+//! - 満腹度減衰: 1/turn → 1/2 turns (`tick_satiety`)
+//! - 序盤敵 (Slime/Rat/Goblin) の atk/hp を僅かに下方修正
+//! - mid-tier kill の affix ドロップ率を +10〜25% (Skeleton/Golem/DarkKnight 35%, Demon/Dragon 55%)
+//! - `AutoExplorerPolicy` に `careful` / `reckless` バリエーション追加
+//!
+//! `simulate_rpg_policy_comparison` で 3 policy を比較できる。default policy
+//! は撤退バイアスが強く 30% クリア率には届きにくいが、reckless では深層
+//! 突破例が増える (= 玩家にとって調整後の難易度カーブはちゃんと "押せる"
+//! 状態になっている)。
+//!
+//! ### simulator_smoke
+//! CI で常時実行する短時間ヘルスチェック。3 ラン × 2000 アクションで
+//! クラッシュしないことだけを確認する (時間切れ・死亡・撤退いずれも OK)。
 
 #![cfg(test)]
 
@@ -47,6 +71,9 @@ pub trait Policy {
 
 /// 「賢めの自動プレイヤー」: 隣接敵は殴る、HPが低ければヒール、空腹なら食う、
 /// それ以外は階段を目指して降りていく。死ぬまで試行を繰り返す。
+///
+/// `retreat_hp_pct` を変えることで careful / reckless のバリエーションが
+/// 作れる (issue #92 の "比較" 要件)。
 pub struct AutoExplorerPolicy {
     pub last_dir_seed: u64,
     pub last_pos: Option<(usize, usize)>,
@@ -55,6 +82,8 @@ pub struct AutoExplorerPolicy {
     pub max_turns_per_visit: u32,
     /// 現在の訪問のターンカウント。
     pub turns_this_visit: u32,
+    /// HP がこの % を切ったら撤退するしきい値 (0..=100)。
+    pub retreat_hp_pct: u32,
 }
 
 impl Default for AutoExplorerPolicy {
@@ -65,6 +94,27 @@ impl Default for AutoExplorerPolicy {
             stuck_count: 0,
             max_turns_per_visit: 1500,
             turns_this_visit: 0,
+            retreat_hp_pct: 30,
+        }
+    }
+}
+
+impl AutoExplorerPolicy {
+    /// "careful" — 早めに撤退する慎重派。
+    #[allow(dead_code)]
+    pub fn careful() -> Self {
+        Self {
+            retreat_hp_pct: 50,
+            ..Self::default()
+        }
+    }
+    /// "reckless" — HP 残り少なくても押し続ける突撃派。
+    #[allow(dead_code)]
+    pub fn reckless() -> Self {
+        Self {
+            retreat_hp_pct: 15,
+            max_turns_per_visit: 2500,
+            ..Self::default()
         }
     }
 }
@@ -79,8 +129,13 @@ impl Policy for AutoExplorerPolicy {
         match state.scene {
             Scene::Intro(_) => Action::EventChoice(0),
             Scene::Town => self.choose_in_town(state),
-            Scene::DungeonExplore => self.choose_in_dungeon(state),
-            Scene::DungeonEvent => self.choose_event(state),
+            Scene::DungeonExplore => {
+                if state.active_event.is_some() {
+                    self.choose_event(state)
+                } else {
+                    self.choose_in_dungeon(state)
+                }
+            }
             Scene::GameClear => Action::Noop,
         }
     }
@@ -202,7 +257,7 @@ impl AutoExplorerPolicy {
         }
 
         // HP critical: ヒール or 薬草 or 撤退
-        if state.hp * 100 / max_hp < 30 {
+        if state.hp * 100 / max_hp < self.retreat_hp_pct {
             // 薬草
             if state.inventory.iter().any(|i| i.kind == ItemKind::Herb) {
                 return Action::UseItemByKind(ItemKind::Herb);
@@ -279,6 +334,44 @@ impl AutoExplorerPolicy {
                 EA::ReturnToTown => {
                     // HPが本当にやばい時だけ帰る
                     if state.hp * 4 < state.effective_max_hp() {
+                        return Action::EventChoice(i);
+                    }
+                }
+                // Issue #90 events: pick safe / beneficial choices.
+                EA::ReviveAdventurer => return Action::EventChoice(i),
+                EA::PickFruit => {
+                    if state.satiety * 2 < state.satiety_max {
+                        return Action::EventChoice(i);
+                    }
+                }
+                EA::DrinkWell => {
+                    if state.hp * 2 < state.effective_max_hp() {
+                        return Action::EventChoice(i);
+                    }
+                }
+                EA::BottleWell => {
+                    if state.hp * 4 >= state.effective_max_hp() * 3 {
+                        return Action::EventChoice(i);
+                    }
+                }
+                EA::PrayIdol => return Action::EventChoice(i),
+                EA::PeddlerBuyHerb => {
+                    if state.gold >= 15 && state.inventory.iter().filter(|x| x.kind == ItemKind::Herb).map(|x| x.count).sum::<u32>() < 3 {
+                        return Action::EventChoice(i);
+                    }
+                }
+                EA::PeddlerBuyBread => {
+                    if state.gold >= 12 && state.inventory.iter().filter(|x| x.kind == ItemKind::Bread).map(|x| x.count).sum::<u32>() < 3 {
+                        return Action::EventChoice(i);
+                    }
+                }
+                EA::TakeEgg => {
+                    if state.pet.is_none() {
+                        return Action::EventChoice(i);
+                    }
+                }
+                EA::BreakEgg => {
+                    if state.satiety * 2 < state.satiety_max {
                         return Action::EventChoice(i);
                     }
                 }
@@ -676,6 +769,31 @@ mod runs {
         let mut sim = Simulator::new(0xC0FFEE, policy);
         sim.run_many(30, 8000);
         println!("{}", sim.metrics().report());
+    }
+
+    /// Issue #92: 3 policy 比較 (careful / default / reckless)。
+    /// 同じシードで挙動を見比べ、バランスがどの戦略向けか確認する。
+    /// 手動実行用 — `--include-ignored --nocapture` を付けて回す。
+    #[test]
+    #[ignore = "manual run for balance tuning"]
+    fn simulate_rpg_policy_comparison() {
+        // 15 ラン × 4000 アクションに留めるとローカルでは数秒で終わる。
+        // 統計的な有意性より「3 policy の差を一目で見る」のが目的。
+        let runs = 15;
+        let max = 4000;
+        let seed = 0xC0FFEE;
+
+        let mut careful = Simulator::new(seed, Box::new(AutoExplorerPolicy::careful()));
+        careful.run_many(runs, max);
+        println!("=== careful ===\n{}", careful.metrics().report());
+
+        let mut default = Simulator::new(seed, Box::new(AutoExplorerPolicy::default()));
+        default.run_many(runs, max);
+        println!("=== default ===\n{}", default.metrics().report());
+
+        let mut reckless = Simulator::new(seed, Box::new(AutoExplorerPolicy::reckless()));
+        reckless.run_many(runs, max);
+        println!("=== reckless ===\n{}", reckless.metrics().report());
     }
 
     /// 短時間ヘルスチェック (--no-ignore で常時実行可)

@@ -47,7 +47,11 @@ pub enum GameChoice {
 /// Top-level application state.
 pub enum AppState {
     /// Showing game selection menu.
-    Menu,
+    Menu {
+        /// Vertical scroll offset (in visual rows) for the game list,
+        /// so it stays usable when more games exist than fit on screen.
+        scroll: u16,
+    },
     /// Showing settings screen (data reset).
     /// `confirm_reset` is `Some(game)` when a confirmation dialog is shown.
     Settings {

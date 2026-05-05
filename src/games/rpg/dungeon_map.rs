@@ -580,43 +580,79 @@ fn place_events(
 
     // Determine event counts based on floor
     let total = candidates.len();
-    let (treasures, traps, springs, lores, npcs) = room_distribution(floor, total);
+    let dist = room_distribution(floor, total);
 
-    for (placed, &(x, y)) in candidates.iter().enumerate() {
-        if placed < treasures {
-            grid[y][x].cell_type = CellType::Treasure;
-        } else if placed < treasures + traps {
-            grid[y][x].cell_type = CellType::Trap;
-        } else if placed < treasures + traps + springs {
-            grid[y][x].cell_type = CellType::Spring;
-        } else if placed < treasures + traps + springs + lores {
-            grid[y][x].cell_type = CellType::Lore;
-        } else if placed < treasures + traps + springs + lores + npcs {
-            grid[y][x].cell_type = CellType::Npc;
-        } else {
+    let plan: [(usize, CellType); 11] = [
+        (dist.treasures, CellType::Treasure),
+        (dist.traps, CellType::Trap),
+        (dist.springs, CellType::Spring),
+        (dist.lores, CellType::Lore),
+        (dist.npcs, CellType::Npc),
+        // Issue #90: Elona-flavored encounters scattered across floors.
+        (dist.fallen, CellType::FallenAdventurer),
+        (dist.fruits, CellType::FruitTree),
+        (dist.wells, CellType::Well),
+        (dist.idols, CellType::Idol),
+        (dist.peddlers, CellType::Peddler),
+        (dist.eggs, CellType::MonsterEgg),
+    ];
+
+    let mut placed = 0usize;
+    for &(count, cell_type) in &plan {
+        for &(x, y) in candidates.iter().skip(placed).take(count) {
+            grid[y][x].cell_type = cell_type;
+        }
+        placed += count;
+        if placed >= candidates.len() {
             break;
         }
     }
 }
 
+struct RoomDist {
+    treasures: usize,
+    traps: usize,
+    springs: usize,
+    lores: usize,
+    npcs: usize,
+    fallen: usize,
+    fruits: usize,
+    wells: usize,
+    idols: usize,
+    peddlers: usize,
+    eggs: usize,
+}
+
 /// Room distribution: how many of each event type based on floor and total cells.
 /// Enemies are spawned separately as Monster entities.
-fn room_distribution(floor: u32, total: usize) -> (usize, usize, usize, usize, usize) {
+///
+/// Issue #90: density bumped from ~30% to ~40% by adding 6 new event types.
+/// Each type has its own per-floor curve so the player encounters a varied
+/// mix instead of the old "treasure/trap dominate" feel.
+fn room_distribution(floor: u32, total: usize) -> RoomDist {
     let t = total as f32;
-    let (treasure_pct, trap_pct, spring_pct, lore_pct, npc_pct) = match floor {
-        1..=2 => (0.06, 0.02, 0.05, 0.04, 0.03),
-        3..=5 => (0.05, 0.04, 0.04, 0.03, 0.02),
-        6..=9 => (0.05, 0.05, 0.03, 0.02, 0.02),
-        _ => (0.04, 0.06, 0.03, 0.02, 0.01),
+    // Per floor band: (treasure, trap, spring, lore, npc, fallen, fruit, well, idol, peddler, egg).
+    let pct: [f32; 11] = match floor {
+        1..=2 => [0.05, 0.02, 0.04, 0.04, 0.02, 0.03, 0.04, 0.03, 0.02, 0.02, 0.03],
+        3..=5 => [0.05, 0.03, 0.03, 0.03, 0.02, 0.04, 0.03, 0.03, 0.03, 0.03, 0.03],
+        6..=9 => [0.05, 0.04, 0.02, 0.02, 0.02, 0.04, 0.02, 0.03, 0.04, 0.04, 0.03],
+        _ => [0.04, 0.05, 0.02, 0.02, 0.01, 0.05, 0.02, 0.03, 0.04, 0.03, 0.03],
     };
 
-    (
-        (t * treasure_pct).round() as usize,
-        (t * trap_pct).round() as usize,
-        (t * spring_pct).round() as usize,
-        (t * lore_pct).round() as usize,
-        (t * npc_pct).round() as usize,
-    )
+    let n = |p: f32| -> usize { (t * p).round() as usize };
+    RoomDist {
+        treasures: n(pct[0]),
+        traps: n(pct[1]),
+        springs: n(pct[2]),
+        lores: n(pct[3]),
+        npcs: n(pct[4]),
+        fallen: n(pct[5]),
+        fruits: n(pct[6]),
+        wells: n(pct[7]),
+        idols: n(pct[8]),
+        peddlers: n(pct[9]),
+        eggs: n(pct[10]),
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────

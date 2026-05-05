@@ -8,7 +8,7 @@ use super::events::{generate_event, resolve_event, EventOutcome};
 use super::lore::{atmosphere_text, floor_entry_text, floor_theme};
 use super::state::{
     affix_info, enemy_info, item_info, level_stats, shop_items, skill_element, skill_info,
-    CellType, EnemyKind, Facing, InventoryItem, ItemCategory, ItemKind,
+    CellType, EnemyKind, Facing, InventoryItem, ItemCategory, ItemKind, Monster,
     Overlay, Pet, PlayerBuffs, Quest, QuestKind, RpgState, Scene, SkillKind,
     Tile, ALL_AFFIXES, ALL_SKILLS, MAX_FLOOR, MAX_LEVEL,
 };
@@ -503,10 +503,23 @@ fn after_move(state: &mut RpgState, nx: usize, ny: usize) {
 
     if cell_type != CellType::Corridor && !event_done {
         if let Some(event) = generate_event(cell_type, floor, theme, &mut state.rng_seed) {
+            // Stay in DungeonExplore — the event is rendered as a popup
+            // overlay on the same scene (see issue #89).
             state.active_event = Some(event);
-            state.scene = Scene::DungeonEvent;
         }
     }
+}
+
+/// Wait in place for one turn — same monster/satiety tick as moving,
+/// but the player doesn't change cell. Used by the A button when there's
+/// no contextual action (no event under foot, no adjacent enemy).
+pub fn wait_in_place(state: &mut RpgState) -> bool {
+    if state.dungeon.is_none() || state.scene != Scene::DungeonExplore {
+        return false;
+    }
+    state.add_log("一息入れた…");
+    on_player_action(state);
+    true
 }
 
 /// Move in a direction with auto-walk through corridors.
@@ -634,11 +647,14 @@ fn on_monster_killed(state: &mut RpgState, _idx: usize, kind: EnemyKind, _hp_bef
     // Drop
     if let Some((drop_item, pct)) = info.drop {
         if rng_range(state, 100) < pct {
-            // Chance for affixed drop on tougher enemies
+            // Issue #92 (balance): mid-game (B4-7) had near-zero affix
+            // drops, leading to a flatline in player power. Bumped the
+            // mid-tier kills' affix chance so the difficulty curve has
+            // matching gear progression.
             let affixed_chance = match kind {
-                EnemyKind::Skeleton | EnemyKind::Golem | EnemyKind::DarkKnight => 25,
-                EnemyKind::Demon | EnemyKind::Dragon => 50,
-                _ => 5,
+                EnemyKind::Skeleton | EnemyKind::Golem | EnemyKind::DarkKnight => 35,
+                EnemyKind::Demon | EnemyKind::Dragon => 55,
+                _ => 8,
             };
             add_item(state, drop_item, 1);
             state.add_log(&format!("{}をドロップ！", item_info(drop_item).name));
@@ -728,8 +744,15 @@ pub fn on_player_action(state: &mut RpgState) {
 }
 
 fn tick_satiety(state: &mut RpgState) {
+    // Issue #92 (balance): satiety drains every other turn instead of every
+    // turn. Pre-tuning the simulator showed >50% of "in-dungeon" deaths were
+    // actually starvation cascade (HP drain → bad combat). Halving the drain
+    // rate keeps food meaningful (still depletes mid-floor) without making
+    // it the dominant failure mode.
     if state.satiety > 0 {
-        state.satiety -= 1;
+        if state.turn_count.is_multiple_of(2) {
+            state.satiety -= 1;
+        }
         // Hunger thresholds
         if state.satiety == state.satiety_max / 4 {
             state.add_log("お腹が空いてきた…");
@@ -1111,15 +1134,41 @@ pub fn resolve_event_choice(state: &mut RpgState, choice_index: usize) -> bool {
             if !desc.is_empty() { state.add_log(desc); }
         }
         state.scene_text = outcome.description;
-        state.scene = Scene::DungeonExplore;
+        // Scene remains DungeonExplore — event popup auto-closes
+        // because active_event is now None (cleared above).
     }
     true
 }
 
 fn apply_event_outcome(state: &mut RpgState, outcome: &EventOutcome) {
+    // require_consume gates the rest of the outcome. If the player doesn't
+    // have it, replace with a "no offering" message and bail out before
+    // applying gold / hp / etc.
+    if let Some(needed) = outcome.require_consume {
+        let idx = state
+            .inventory
+            .iter()
+            .position(|i| i.kind == needed && i.affix.is_none());
+        match idx {
+            Some(i) => {
+                consume_inventory_slot(state, i);
+            }
+            None => {
+                state.add_log("供える物がない…");
+                return;
+            }
+        }
+    }
     if outcome.gold > 0 {
         state.gold += outcome.gold as u32;
         state.run_gold_earned += outcome.gold as u32;
+    } else if outcome.gold < 0 {
+        let cost = (-outcome.gold) as u32;
+        if state.gold < cost {
+            state.add_log("お金が足りない…");
+            return;
+        }
+        state.gold -= cost;
     }
     if outcome.hp_change == 9999 {
         let heal = state.max_hp / 4;
@@ -1151,9 +1200,78 @@ fn apply_event_outcome(state: &mut RpgState, outcome: &EventOutcome) {
             state.lore_found.push(lore_id);
         }
     }
+    if outcome.satiety_change != 0 {
+        if outcome.satiety_change > 0 {
+            state.satiety = (state.satiety + outcome.satiety_change as u32).min(state.satiety_max);
+        } else {
+            state.satiety = state.satiety.saturating_sub((-outcome.satiety_change) as u32);
+        }
+    }
+    if outcome.faith_change > 0 {
+        state.faith = state.faith.saturating_add(outcome.faith_change);
+    }
+    if let Some(kind) = outcome.spawn_pet {
+        if state.pet.is_none() {
+            let info = enemy_info(kind);
+            // Place pet on the player's tile (they'll swap on next move).
+            let (px, py) = state
+                .dungeon
+                .as_ref()
+                .map(|m| (m.player_x, m.player_y))
+                .unwrap_or((0, 0));
+            state.pet = Some(Pet {
+                kind,
+                name: info.name.to_string(),
+                x: px,
+                y: py,
+                hp: info.max_hp,
+                max_hp: info.max_hp,
+                level: 1,
+            });
+        } else {
+            state.add_log("既にペットがいるので卵は連れて行けない");
+        }
+    }
+    if let Some(kind) = outcome.spawn_hostile {
+        spawn_hostile_near_player(state, kind);
+    }
     if state.hp == 0 {
         process_dungeon_death(state);
     }
+}
+
+fn spawn_hostile_near_player(state: &mut RpgState, kind: EnemyKind) {
+    let (px, py) = match &state.dungeon {
+        Some(m) => (m.player_x, m.player_y),
+        None => return,
+    };
+    let info = enemy_info(kind);
+    // Find a free adjacent tile; fall back to player's tile if none.
+    let dirs = [Facing::North, Facing::East, Facing::South, Facing::West];
+    let map = state.dungeon.as_ref().unwrap();
+    let mut spot = (px, py);
+    for d in &dirs {
+        let nx = px as i32 + d.dx();
+        let ny = py as i32 + d.dy();
+        if !map.in_bounds(nx, ny) { continue; }
+        let ux = nx as usize; let uy = ny as usize;
+        if !map.cell(ux, uy).is_walkable() { continue; }
+        if map.monsters.iter().any(|m| m.hp > 0 && m.x == ux && m.y == uy) {
+            continue;
+        }
+        spot = (ux, uy);
+        break;
+    }
+    let map = state.dungeon.as_mut().unwrap();
+    map.monsters.push(Monster {
+        kind,
+        x: spot.0,
+        y: spot.1,
+        hp: info.max_hp,
+        max_hp: info.max_hp,
+        awake: true,
+        charging: false,
+    });
 }
 
 pub fn retreat_to_town(state: &mut RpgState) {
@@ -1509,12 +1627,16 @@ mod tests {
     }
 
     #[test]
-    fn satiety_decreases_each_turn() {
+    fn satiety_decreases_over_time() {
+        // Issue #92 (balance): satiety drains every 2 turns now, not every
+        // turn — verify it drops after a couple of actions.
         let mut s = RpgState::new();
         enter_dungeon(&mut s, 1);
         let before = s.satiety;
-        on_player_action(&mut s);
-        assert!(s.satiety < before);
+        for _ in 0..4 {
+            on_player_action(&mut s);
+        }
+        assert!(s.satiety < before, "satiety should decrease after 4 turns");
     }
 
     #[test]

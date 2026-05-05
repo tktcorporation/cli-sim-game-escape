@@ -3,7 +3,7 @@
 //! inline (monster entities on the grid).
 
 use super::state::{
-    CellType, DungeonEvent, EventAction, EventChoice, FloorTheme, ItemKind,
+    CellType, DungeonEvent, EnemyKind, EventAction, EventChoice, FloorTheme, ItemKind,
 };
 
 // ── RNG ─────────────────────────────────────────────────────
@@ -35,6 +35,123 @@ pub fn generate_event(
         CellType::Stairs => Some(stairs_event(floor)),
         CellType::Entrance => Some(entrance_event()),
         CellType::Corridor => None,
+        CellType::FallenAdventurer => Some(fallen_adventurer_event(rng_seed)),
+        CellType::FruitTree => Some(fruit_tree_event(theme)),
+        CellType::Well => Some(well_event(theme)),
+        CellType::Idol => Some(idol_event(theme)),
+        CellType::Peddler => Some(peddler_event(rng_seed)),
+        CellType::MonsterEgg => Some(monster_egg_event(rng_seed)),
+    }
+}
+
+// ── Issue #90: New event generators ─────────────────────────
+
+fn fallen_adventurer_event(rng_seed: &mut u64) -> DungeonEvent {
+    let descs = [
+        "倒れた冒険者を見つけた。装備が立派だ…",
+        "壁にもたれて息絶えた冒険者がいる。",
+        "うつ伏せに倒れた冒険者。微かに息がある？",
+    ];
+    let idx = rng_range(rng_seed, descs.len() as u32) as usize;
+    DungeonEvent {
+        description: vec![descs[idx].into()],
+        choices: vec![
+            EventChoice { label: "助け起こす".into(), action: EventAction::ReviveAdventurer },
+            EventChoice { label: "装備を奪う".into(), action: EventAction::LootAdventurer },
+            EventChoice { label: "見過ごす".into(), action: EventAction::Ignore },
+        ],
+    }
+}
+
+fn fruit_tree_event(theme: FloorTheme) -> DungeonEvent {
+    let desc = match theme {
+        FloorTheme::MossyRuins => "崩れた壁から太い枝が伸びている。実が成っているようだ。",
+        FloorTheme::Underground => "地下水脈の傍に奇妙な果樹が育っている。",
+        FloorTheme::AncientTemple => "祭壇の脇に古い果樹が残されている。",
+        FloorTheme::VolcanicDepths => "熱気の中、紅い実をつけた樹が立っている。",
+        FloorTheme::DemonCastle => "歪な果実をつけた黒い樹がある。",
+    };
+    DungeonEvent {
+        description: vec![desc.into()],
+        choices: vec![
+            EventChoice { label: "実を採る (満腹度+リンゴ)".into(), action: EventAction::PickFruit },
+            EventChoice { label: "木を揺する (大量+リスク)".into(), action: EventAction::ShakeTree },
+            EventChoice { label: "通り過ぎる".into(), action: EventAction::Ignore },
+        ],
+    }
+}
+
+fn well_event(theme: FloorTheme) -> DungeonEvent {
+    let desc = match theme {
+        FloorTheme::MossyRuins => "古い石組みの井戸がある。深く暗い。",
+        FloorTheme::Underground => "地下水を汲み上げる井戸が残っている。",
+        FloorTheme::AncientTemple => "聖域の井戸。水面が淡く輝く。",
+        FloorTheme::VolcanicDepths => "熱湯ではない不思議な冷水井戸。",
+        FloorTheme::DemonCastle => "底が見えぬ漆黒の井戸…",
+    };
+    DungeonEvent {
+        description: vec![desc.into(), "水を飲むのは賭けだ。".into()],
+        choices: vec![
+            EventChoice { label: "水を飲む (運次第)".into(), action: EventAction::DrinkWell },
+            EventChoice { label: "瓶に汲む (薬草化)".into(), action: EventAction::BottleWell },
+            EventChoice { label: "覗き込む".into(), action: EventAction::PeerWell },
+            EventChoice { label: "離れる".into(), action: EventAction::Ignore },
+        ],
+    }
+}
+
+fn idol_event(theme: FloorTheme) -> DungeonEvent {
+    let desc = match theme {
+        FloorTheme::MossyRuins => "苔むした神像が静かに立っている。",
+        FloorTheme::Underground => "地下に佇む朽ちかけた神像。",
+        FloorTheme::AncientTemple => "黄金に光る荘厳な神像。",
+        FloorTheme::VolcanicDepths => "炎で焦げた神像が残されている。",
+        FloorTheme::DemonCastle => "禍々しい彫像。これは…神か？",
+    };
+    DungeonEvent {
+        description: vec![desc.into()],
+        choices: vec![
+            EventChoice { label: "祈りを捧げる (信仰+1)".into(), action: EventAction::PrayIdol },
+            EventChoice { label: "薬草を供える (恵み)".into(), action: EventAction::OfferIdol },
+            EventChoice { label: "そっと立ち去る".into(), action: EventAction::Ignore },
+        ],
+    }
+}
+
+fn peddler_event(rng_seed: &mut u64) -> DungeonEvent {
+    let descs = [
+        "怪しい行商人が荷を広げている。",
+        "頭巾を被った商人が呼び止めてきた。",
+        "深層では珍しい行商人だ。",
+    ];
+    let idx = rng_range(rng_seed, descs.len() as u32) as usize;
+    DungeonEvent {
+        description: vec![
+            descs[idx].into(),
+            "「特別価格でいかがですか？」".into(),
+        ],
+        choices: vec![
+            EventChoice { label: "薬草 (15G)".into(), action: EventAction::PeddlerBuyHerb },
+            EventChoice { label: "魔法の水 (40G)".into(), action: EventAction::PeddlerBuyMagicWater },
+            EventChoice { label: "パン (12G)".into(), action: EventAction::PeddlerBuyBread },
+            EventChoice { label: "立ち去る".into(), action: EventAction::Ignore },
+        ],
+    }
+}
+
+fn monster_egg_event(rng_seed: &mut u64) -> DungeonEvent {
+    let descs = [
+        "床に大きな卵が転がっている。微かに脈動している。",
+        "巣に置き去りの卵。何かが孵りそうだ…",
+    ];
+    let idx = rng_range(rng_seed, descs.len() as u32) as usize;
+    DungeonEvent {
+        description: vec![descs[idx].into()],
+        choices: vec![
+            EventChoice { label: "持ち帰る (ペット化挑戦)".into(), action: EventAction::TakeEgg },
+            EventChoice { label: "割る (黄身を食べる)".into(), action: EventAction::BreakEgg },
+            EventChoice { label: "そっとしておく".into(), action: EventAction::Ignore },
+        ],
     }
 }
 
@@ -185,6 +302,7 @@ fn entrance_event() -> DungeonEvent {
 
 pub struct EventOutcome {
     pub description: Vec<String>,
+    /// Net gold change; negative deducts (used by peddler).
     pub gold: i32,
     pub hp_change: i32,
     pub mp_change: i32,
@@ -192,6 +310,18 @@ pub struct EventOutcome {
     pub descend: bool,
     pub return_to_town: bool,
     pub lore_id: Option<u32>,
+    /// Issue #90: outcome may extend the satiety bar (fruit/peddler bread).
+    pub satiety_change: i32,
+    /// Issue #90: outcome may grant +faith (idol).
+    pub faith_change: u32,
+    /// Issue #90: spawn a pet of this kind on success (egg event).
+    pub spawn_pet: Option<EnemyKind>,
+    /// Issue #90: spawn a hostile monster adjacent to player.
+    /// Used by ShakeTree / failed TakeEgg.
+    pub spawn_hostile: Option<EnemyKind>,
+    /// Issue #90: consume one of these from inventory before applying.
+    /// If absent the outcome falls back to a "no offering" message.
+    pub require_consume: Option<ItemKind>,
 }
 
 impl EventOutcome {
@@ -205,6 +335,11 @@ impl EventOutcome {
             descend: false,
             return_to_town: false,
             lore_id: None,
+            satiety_change: 0,
+            faith_change: 0,
+            spawn_pet: None,
+            spawn_hostile: None,
+            require_consume: None,
         }
     }
 }
@@ -312,6 +447,219 @@ pub fn resolve_event(
         (EventAction::ReturnToTown, CellType::Entrance) => EventOutcome {
             description: vec!["町へ帰還する。".into()],
             return_to_town: true,
+            ..EventOutcome::empty()
+        },
+        // ── Issue #90 resolutions ──
+        (EventAction::ReviveAdventurer, CellType::FallenAdventurer) => {
+            // 25% chance the body was a mimic — bites the player.
+            let roll = rng_range(rng_seed, 100);
+            if roll < 25 {
+                let dmg = 8 + floor * 2;
+                EventOutcome {
+                    description: vec![
+                        "冒険者の死体が突然動き出した！ ミミックだ！".into(),
+                        format!("{}ダメージ！", dmg),
+                    ],
+                    hp_change: -(dmg as i32),
+                    spawn_hostile: Some(EnemyKind::Goblin),
+                    ..EventOutcome::empty()
+                }
+            } else {
+                EventOutcome {
+                    description: vec![
+                        "冒険者は息を吹き返した。「礼を…」".into(),
+                        "薬草と少しの金を分けてもらった。".into(),
+                    ],
+                    item: Some((ItemKind::Herb, 2)),
+                    gold: 20 + floor as i32 * 10,
+                    ..EventOutcome::empty()
+                }
+            }
+        }
+        (EventAction::LootAdventurer, CellType::FallenAdventurer) => {
+            // High chance of an affixed item drop. Marked via item field so
+            // the logic layer can apply the affix; actual affix selection
+            // is delegated there because rng on State is owned by logic.rs.
+            // For now, drop gold + a guaranteed potion as proxy.
+            let gold = 25 + floor * 12 + rng_range(rng_seed, 20);
+            EventOutcome {
+                description: vec![
+                    "冒険者の装備を回収した。".into(),
+                    format!("{}Gと装備品の一部を手に入れた。", gold),
+                ],
+                gold: gold as i32,
+                item: Some((ItemKind::StrengthPotion, 1)),
+                ..EventOutcome::empty()
+            }
+        }
+        (EventAction::PickFruit, CellType::FruitTree) => {
+            let n = 1 + rng_range(rng_seed, 3);
+            EventOutcome {
+                description: vec![
+                    "実をいくつか採った。".into(),
+                    format!("リンゴx{}を手に入れた。", n),
+                ],
+                item: Some((ItemKind::Apple, n)),
+                satiety_change: 80,
+                ..EventOutcome::empty()
+            }
+        }
+        (EventAction::ShakeTree, CellType::FruitTree) => {
+            let big = 3 + rng_range(rng_seed, 3);
+            // 35% chance to wake a monster.
+            let bad = rng_range(rng_seed, 100) < 35;
+            let mut desc = vec![format!("枝を揺すり、リンゴx{}が落ちてきた。", big)];
+            let hostile = if bad {
+                desc.push("…と同時に何かが樹から飛び降りた！".into());
+                Some(EnemyKind::Bat)
+            } else {
+                None
+            };
+            EventOutcome {
+                description: desc,
+                item: Some((ItemKind::Apple, big)),
+                satiety_change: 120,
+                spawn_hostile: hostile,
+                ..EventOutcome::empty()
+            }
+        }
+        (EventAction::DrinkWell, CellType::Well) => {
+            let roll = rng_range(rng_seed, 100);
+            if roll < 35 {
+                EventOutcome {
+                    description: vec![
+                        "澄んだ水だ。体力が満ちる。".into(),
+                    ],
+                    hp_change: 9999,
+                    mp_change: 9999,
+                    ..EventOutcome::empty()
+                }
+            } else if roll < 65 {
+                let dmg = 5 + floor;
+                EventOutcome {
+                    description: vec![
+                        "苦い…毒水だった！".into(),
+                        format!("{}ダメージ！", dmg),
+                    ],
+                    hp_change: -(dmg as i32),
+                    ..EventOutcome::empty()
+                }
+            } else if roll < 85 {
+                EventOutcome {
+                    description: vec!["何ともなかった。井戸水は冷たい。".into()],
+                    ..EventOutcome::empty()
+                }
+            } else {
+                // Lucky: minor blessing +faith
+                EventOutcome {
+                    description: vec![
+                        "水面から光が立ち昇った。神の祝福だ！".into(),
+                    ],
+                    faith_change: 1,
+                    hp_change: 9999,
+                    ..EventOutcome::empty()
+                }
+            }
+        }
+        (EventAction::BottleWell, CellType::Well) => EventOutcome {
+            description: vec!["井戸の水を瓶に汲んだ。薬草代わりになる。".into()],
+            item: Some((ItemKind::Herb, 1)),
+            ..EventOutcome::empty()
+        },
+        (EventAction::PeerWell, CellType::Well) => {
+            let roll = rng_range(rng_seed, 100);
+            if roll < 40 {
+                let g = 10 + floor * 5 + rng_range(rng_seed, 20);
+                EventOutcome {
+                    description: vec![
+                        "底に何か光るものを見つけた…".into(),
+                        format!("{}Gを拾い上げた！", g),
+                    ],
+                    gold: g as i32,
+                    ..EventOutcome::empty()
+                }
+            } else {
+                EventOutcome {
+                    description: vec!["底は暗くて何も見えない。".into()],
+                    ..EventOutcome::empty()
+                }
+            }
+        }
+        (EventAction::PrayIdol, CellType::Idol) => {
+            let roll = rng_range(rng_seed, 100);
+            let mut out = EventOutcome {
+                description: vec!["神像に祈った。心が落ち着く。".into()],
+                faith_change: 1,
+                ..EventOutcome::empty()
+            };
+            if roll < 30 {
+                out.description.push("わずかに体力が回復した。".into());
+                out.hp_change = 15;
+            } else if roll < 50 {
+                out.description.push("僅かな魔力が満ちる。".into());
+                out.mp_change = 8;
+            }
+            out
+        }
+        (EventAction::OfferIdol, CellType::Idol) => EventOutcome {
+            description: vec![
+                "薬草を供えた。神像が淡く光った！".into(),
+                "信仰が大きく深まり、HP/MPが回復した。".into(),
+            ],
+            faith_change: 3,
+            hp_change: 9999,
+            mp_change: 9999,
+            require_consume: Some(ItemKind::Herb),
+            ..EventOutcome::empty()
+        },
+        (EventAction::PeddlerBuyHerb, CellType::Peddler) => EventOutcome {
+            description: vec!["「毎度どうも」".into(), "薬草を買った (-15G)".into()],
+            gold: -15,
+            item: Some((ItemKind::Herb, 1)),
+            ..EventOutcome::empty()
+        },
+        (EventAction::PeddlerBuyMagicWater, CellType::Peddler) => EventOutcome {
+            description: vec!["「お得ですよ」".into(), "魔法の水を買った (-40G)".into()],
+            gold: -40,
+            item: Some((ItemKind::MagicWater, 1)),
+            ..EventOutcome::empty()
+        },
+        (EventAction::PeddlerBuyBread, CellType::Peddler) => EventOutcome {
+            description: vec!["「焼きたてですよ」".into(), "パンを買った (-12G)".into()],
+            gold: -12,
+            item: Some((ItemKind::Bread, 1)),
+            ..EventOutcome::empty()
+        },
+        (EventAction::TakeEgg, CellType::MonsterEgg) => {
+            // 50% chance to gain a Slime/Rat as pet, else hostile hatch.
+            let pool = [EnemyKind::Slime, EnemyKind::Rat, EnemyKind::Goblin, EnemyKind::Bat];
+            let kind = pool[rng_range(rng_seed, pool.len() as u32) as usize];
+            let lucky = rng_range(rng_seed, 100) < 50;
+            if lucky {
+                let _ = player_level;
+                EventOutcome {
+                    description: vec![
+                        "卵が孵った！ 小さな魔物が懐いた！".into(),
+                    ],
+                    spawn_pet: Some(kind),
+                    ..EventOutcome::empty()
+                }
+            } else {
+                EventOutcome {
+                    description: vec![
+                        "卵が突然孵化し、敵対的な魔物が現れた！".into(),
+                    ],
+                    spawn_hostile: Some(kind),
+                    ..EventOutcome::empty()
+                }
+            }
+        }
+        (EventAction::BreakEgg, CellType::MonsterEgg) => EventOutcome {
+            description: vec![
+                "卵を割って黄身をすすった。".into(),
+                "満腹度が回復した。".into(),
+            ],
+            satiety_change: 250,
             ..EventOutcome::empty()
         },
         (EventAction::Ignore | EventAction::Continue, _) => EventOutcome {
@@ -449,6 +797,65 @@ mod tests {
             &mut seed,
         );
         assert_eq!(outcome.hp_change, 9999);
+    }
+
+    #[test]
+    fn fallen_adventurer_event_has_three_choices() {
+        let mut seed = 42u64;
+        let event = generate_event(CellType::FallenAdventurer, 3, FloorTheme::Underground, &mut seed);
+        assert!(event.is_some());
+        assert_eq!(event.unwrap().choices.len(), 3);
+    }
+
+    #[test]
+    fn fruit_tree_pick_grants_apples() {
+        let mut seed = 42u64;
+        let outcome = resolve_event(
+            &EventAction::PickFruit,
+            CellType::FruitTree,
+            2, 1,
+            &mut seed,
+        );
+        assert!(matches!(outcome.item, Some((ItemKind::Apple, _))));
+        assert!(outcome.satiety_change > 0);
+    }
+
+    #[test]
+    fn peddler_buy_costs_gold() {
+        let mut seed = 42u64;
+        let outcome = resolve_event(
+            &EventAction::PeddlerBuyHerb,
+            CellType::Peddler,
+            1, 1,
+            &mut seed,
+        );
+        assert_eq!(outcome.gold, -15);
+        assert!(matches!(outcome.item, Some((ItemKind::Herb, 1))));
+    }
+
+    #[test]
+    fn idol_offering_requires_consumable() {
+        let mut seed = 42u64;
+        let outcome = resolve_event(
+            &EventAction::OfferIdol,
+            CellType::Idol,
+            1, 1,
+            &mut seed,
+        );
+        assert_eq!(outcome.require_consume, Some(ItemKind::Herb));
+        assert!(outcome.faith_change > 0);
+    }
+
+    #[test]
+    fn egg_take_may_spawn_pet_or_hostile() {
+        let mut seed = 1u64;
+        let outcome = resolve_event(
+            &EventAction::TakeEgg,
+            CellType::MonsterEgg,
+            1, 1,
+            &mut seed,
+        );
+        assert!(outcome.spawn_pet.is_some() || outcome.spawn_hostile.is_some());
     }
 
     #[test]

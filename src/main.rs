@@ -29,6 +29,8 @@ pub const MENU_SELECT_CAFE: u16 = 5;
 pub const MENU_SELECT_ABYSS: u16 = 6;
 pub const MENU_SELECT_GODFIELD: u16 = 7;
 pub const MENU_SELECT_SETTINGS: u16 = 8;
+pub const MENU_SCROLL_UP: u16 = 9;
+pub const MENU_SCROLL_DOWN: u16 = 10;
 pub const BACK_TO_MENU: u16 = 65535;
 
 // ── Settings action IDs ─────────────────────────────────────────
@@ -204,7 +206,7 @@ fn handle_tap(
 /// release.
 fn click_scope_matches_state(scope: &ClickScope, state: &AppState) -> bool {
     match (scope, state) {
-        (ClickScope::Menu, AppState::Menu) => true,
+        (ClickScope::Menu, AppState::Menu { .. }) => true,
         (ClickScope::Settings, AppState::Settings { .. }) => true,
         (ClickScope::Game(c), AppState::Playing { game }) => *c == game.choice(),
         _ => false,
@@ -228,7 +230,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
     }
 
     match &mut *state {
-        AppState::Menu => {
+        AppState::Menu { scroll } => {
             let choice = match event {
                 InputEvent::Key('1') | InputEvent::Click(_, MENU_SELECT_COOKIE) => {
                     Some(GameChoice::Cookie)
@@ -263,6 +265,16 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 *state = AppState::Settings {
                     confirm_reset: None,
                 };
+            } else {
+                match event {
+                    InputEvent::Key('k') | InputEvent::Click(_, MENU_SCROLL_UP) => {
+                        *scroll = scroll.saturating_sub(2);
+                    }
+                    InputEvent::Key('j') | InputEvent::Click(_, MENU_SCROLL_DOWN) => {
+                        *scroll = scroll.saturating_add(2);
+                    }
+                    _ => {}
+                }
             }
         }
         AppState::Settings { confirm_reset } => {
@@ -295,7 +307,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                         *confirm_reset = Some(GameChoice::Abyss);
                     }
                     InputEvent::Key('q') | InputEvent::Click(_, BACK_TO_MENU) => {
-                        *state = AppState::Menu;
+                        *state = AppState::Menu { scroll: 0 };
                     }
                     _ => {}
                 }
@@ -306,7 +318,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 // Let the game handle back first (e.g., sub-screen → main screen).
                 // Only go to menu if the game didn't consume it.
                 if !game.handle_input(event) {
-                    *state = AppState::Menu;
+                    *state = AppState::Menu { scroll: 0 };
                 }
             } else {
                 game.handle_input(event);
@@ -331,7 +343,7 @@ fn perform_reset(game: &GameChoice) {
 fn main() -> io::Result<()> {
     console_error_panic_hook::set_once();
 
-    let app_state = Rc::new(RefCell::new(AppState::Menu));
+    let app_state = Rc::new(RefCell::new(AppState::Menu { scroll: 0 }));
     let click_state = Rc::new(RefCell::new(ClickState::new()));
     let game_time = Rc::new(RefCell::new(GameTime::new(10)));
     let backend = DomBackend::new()?;
@@ -398,13 +410,13 @@ fn main() -> io::Result<()> {
             // so handle_tap can pair it with the action ID for dispatch-time
             // validation.
             click_state.borrow_mut().set_scope(match &*state {
-                AppState::Menu => ClickScope::Menu,
+                AppState::Menu { .. } => ClickScope::Menu,
                 AppState::Settings { .. } => ClickScope::Settings,
                 AppState::Playing { game } => ClickScope::Game(game.choice()),
             });
             match &mut *state {
-                AppState::Menu => {
-                    render_menu(f, size, &click_state);
+                AppState::Menu { scroll } => {
+                    render_menu(f, size, &click_state, scroll);
                 }
                 AppState::Settings { confirm_reset } => {
                     render_settings(f, size, &click_state, confirm_reset.as_ref());
@@ -441,6 +453,7 @@ fn render_menu(
     f: &mut ratzilla::ratatui::Frame,
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
+    scroll: &mut u16,
 ) {
     let is_narrow = is_narrow_layout(area.width);
 
@@ -605,9 +618,54 @@ fn render_menu(
         .borders(borders)
         .border_style(Style::default().fg(Color::Green))
         .title(" Games ");
+
+    // Clamp scroll to content height. With wrap=false each logical line is
+    // exactly one visual row, so visible_rows is the inner height.
+    let inner = menu_block.inner(chunks[1]);
+    let total_lines = cl.len() as u16;
+    let visible_rows = inner.height;
+    let max_scroll = total_lines.saturating_sub(visible_rows);
+    if *scroll > max_scroll {
+        *scroll = max_scroll;
+    }
+    let can_scroll_up = *scroll > 0;
+    let can_scroll_down = *scroll < max_scroll;
+    let scroll_value = *scroll;
+
     {
         let mut cs = click_state.borrow_mut();
-        cl.render(f, chunks[1], menu_block, &mut cs, false, 0);
+        cl.render(f, chunks[1], menu_block, &mut cs, false, scroll_value);
+    }
+
+    // Scroll indicator overlays — registered last so they win over rows below.
+    if can_scroll_up && inner.height > 0 && inner.width > 0 {
+        let arrow_area = Rect::new(inner.x + inner.width - 3, inner.y, 3, 1);
+        let arrow = Paragraph::new(Span::styled(
+            " ▲ ",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+        Clickable::new(arrow, MENU_SCROLL_UP).render(
+            f,
+            arrow_area,
+            &mut click_state.borrow_mut(),
+        );
+    }
+    if can_scroll_down && inner.height > 0 && inner.width > 0 {
+        let arrow_area = Rect::new(
+            inner.x + inner.width - 3,
+            inner.y + inner.height - 1,
+            3,
+            1,
+        );
+        let arrow = Paragraph::new(Span::styled(
+            " ▼ ",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+        Clickable::new(arrow, MENU_SCROLL_DOWN).render(
+            f,
+            arrow_area,
+            &mut click_state.borrow_mut(),
+        );
     }
 
     // Footer
