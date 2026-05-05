@@ -125,6 +125,47 @@ mod tests {
         );
     }
 
+    /// Each higher Tier should produce more cash than the one below it
+    /// at the same wall-clock time.  This is the *headline* reason a
+    /// player would spend money on CPU upgrades.
+    #[test]
+    fn tier_ordering_holds_at_30min() {
+        let seed = 0xC1A5_5EED;
+        let span = 1800; // 30 minutes
+        let cps = [60, 1800];
+        eprintln!("\n=== Tier 1 ===");
+        let s1 = run(seed, AiTier::Random, 1, span, &cps);
+        eprintln!("\n=== Tier 2 ===");
+        let s2 = run(seed, AiTier::Greedy, 1, span, &cps);
+        eprintln!("\n=== Tier 3 ===");
+        let s3 = run(seed, AiTier::RoadPlanner, 1, span, &cps);
+        eprintln!("\n=== Tier 4 (Balanced) ===");
+        let s4 = run(seed, AiTier::DemandAware, 1, span, &cps);
+
+        let c1 = s1.last().unwrap().cash;
+        let c2 = s2.last().unwrap().cash;
+        let c3 = s3.last().unwrap().cash;
+        let c4 = s4.last().unwrap().cash;
+        eprintln!(
+            "\n[30min cash] T1=${} T2=${} T3=${} T4=${}",
+            c1, c2, c3, c4
+        );
+
+        assert!(c2 > c1, "T2 should beat T1 ({} vs {})", c2, c1);
+        assert!(
+            c3 >= c2,
+            "T3 should be >= T2 (road-aware placement) ({} vs {})",
+            c3,
+            c2
+        );
+        assert!(
+            c4 >= c3,
+            "T4 should be >= T3 (demand-aware on top of roads) ({} vs {})",
+            c4,
+            c3
+        );
+    }
+
     /// Tier 2 should outperform Tier 1 — adjacency placement means roads
     /// and shops cluster, so income kicks in earlier.
     #[test]
