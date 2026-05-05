@@ -245,13 +245,15 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
         Color::Cyan,
     );
 
-    // Hire worker
-    let hire_cost: i64 = 100 * (1i64 << (state.workers - 1));
-    let hire_label = format!("[W] 作業員雇用 (${})", hire_cost);
-    let hire_color = if state.cash >= hire_cost {
-        Color::White
-    } else {
-        Color::DarkGray
+    // Hire worker — None means MAX_WORKERS reached or overflow guard hit
+    let hire_cost = logic::hire_worker_cost(state.workers);
+    let (hire_label, hire_color) = match hire_cost {
+        Some(c) if state.cash >= c => (
+            format!("[W] 作業員雇用 (${})", c),
+            Color::White,
+        ),
+        Some(c) => (format!("[W] 作業員雇用 (${})", c), Color::DarkGray),
+        None => ("[W] 作業員MAX到達".to_string(), Color::DarkGray),
     };
     let p = Paragraph::new(Span::styled(hire_label, Style::default().fg(hire_color)));
     Clickable::new(p, ACT_HIRE_WORKER).render(f, rows[3], &mut cs);

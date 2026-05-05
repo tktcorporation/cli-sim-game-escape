@@ -10,6 +10,11 @@ pub const GRID_H: usize = 12;
 
 pub const TICKS_PER_SEC: u32 = 10;
 
+/// Hard cap on parallel workers.  Doubling cost (`100 << (workers - 1)`)
+/// stays comfortably within i64 well below this limit; the cap also keeps
+/// gameplay bounded.
+pub const MAX_WORKERS: u32 = 8;
+
 /// What occupies a single map cell.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tile {

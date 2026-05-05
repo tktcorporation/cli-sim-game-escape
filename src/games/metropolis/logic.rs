@@ -204,9 +204,30 @@ pub fn upgrade_ai(city: &mut City) -> bool {
     true
 }
 
-/// Hire one more worker.  Cost grows with current count.
+/// Cost of hiring the next worker (i.e. promoting `workers` from N to N+1).
+///
+/// Returns `None` when the worker cap (`MAX_WORKERS`) is already reached or
+/// the doubling cost would overflow `i64`.  Callers must treat `None` as
+/// "this action is currently unavailable" rather than free.
+///
+/// The original `100 * (1 << (workers - 1))` form was unsafe in release
+/// builds: corrupted state with `workers >= 64` would silently wrap to
+/// zero/negative cost (Codex P2).  `checked_shl` returns `None` cleanly
+/// for any out-of-range shift, so we propagate the failure instead of
+/// computing a bogus price.
+pub fn hire_worker_cost(workers: u32) -> Option<i64> {
+    if workers == 0 || workers >= MAX_WORKERS {
+        return None;
+    }
+    100i64.checked_shl(workers - 1)
+}
+
+/// Hire one more worker.  Cost doubles per current count, capped at
+/// `MAX_WORKERS`.
 pub fn hire_worker(city: &mut City) -> bool {
-    let cost: i64 = 100 * (1 << (city.workers - 1));
+    let Some(cost) = hire_worker_cost(city.workers) else {
+        return false;
+    };
     if city.cash < cost {
         return false;
     }
@@ -280,5 +301,41 @@ mod tests {
         city.cash = 5; // less than any building
         assert!(!start_construction(&mut city, 0, 0, Building::House));
         assert_eq!(city.cash, 5);
+    }
+
+    #[test]
+    fn hire_worker_cost_doubles_per_step() {
+        assert_eq!(hire_worker_cost(1), Some(100));
+        assert_eq!(hire_worker_cost(2), Some(200));
+        assert_eq!(hire_worker_cost(3), Some(400));
+        assert_eq!(hire_worker_cost(7), Some(6_400));
+    }
+
+    /// Reaching the cap returns None (no further hire) — but doesn't panic.
+    #[test]
+    fn hire_worker_cost_caps_at_max() {
+        assert_eq!(hire_worker_cost(MAX_WORKERS), None);
+        assert_eq!(hire_worker_cost(MAX_WORKERS + 1), None);
+    }
+
+    /// Pathological state values must not panic or wrap.  Codex P2 (#93):
+    /// `100 * (1 << (workers - 1))` would UB-shift at workers >= 65.
+    #[test]
+    fn hire_worker_cost_handles_pathological_input() {
+        // workers == 0 is meaningless (we always start at 1) — should be None
+        assert_eq!(hire_worker_cost(0), None);
+        // Far above any reasonable game state — clamps via MAX_WORKERS gate
+        assert_eq!(hire_worker_cost(1_000), None);
+        assert_eq!(hire_worker_cost(u32::MAX), None);
+    }
+
+    #[test]
+    fn hire_worker_blocks_at_max() {
+        let mut city = City::new();
+        city.cash = 1_000_000;
+        city.workers = MAX_WORKERS;
+        assert!(!hire_worker(&mut city));
+        assert_eq!(city.workers, MAX_WORKERS);
+        assert_eq!(city.cash, 1_000_000);
     }
 }
