@@ -10,7 +10,7 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
-use crate::widgets::{ClickableList, TabBar};
+use crate::widgets::{ClickableList, ScrollableTab, TabBar};
 
 use super::super::actions::*;
 use super::super::characters::CharacterId;
@@ -313,39 +313,75 @@ pub(super) fn render_hub_cards(state: &CafeState, f: &mut Frame, area: Rect, cli
     } else {
         cl.push(Line::from(Span::styled(" ✓ デイリードロー済み", Style::default().fg(Color::DarkGray))));
     }
-    if state.card_state.gems >= GACHA_SINGLE_COST {
-        cl.push_clickable(Line::from(Span::styled(
-            format!(" ▶ ガチャ単発 (💎{})", GACHA_SINGLE_COST),
-            Style::default().fg(Color::Cyan),
-        )), CARD_GACHA_SINGLE);
-    }
-    if state.card_state.gems >= GACHA_TEN_COST {
-        cl.push_clickable(Line::from(Span::styled(
-            format!(" ▶ ガチャ10連 (💎{})", GACHA_TEN_COST),
-            Style::default().fg(Color::Cyan),
-        )), CARD_GACHA_TEN);
-    }
+    // 単発/10連 はガチャの「主要操作」なので、💎 不足でも **常に表示**して
+    // 存在を見せる。手前の click handler が在庫チェックするので、グレー
+    // 行をタップしても safe (`try_gacha_*` が `gems >= cost` を再検証)。
+    push_gacha_button(&mut cl, " ▶ ガチャ単発", GACHA_SINGLE_COST, state.card_state.gems, CARD_GACHA_SINGLE);
+    push_gacha_button(&mut cl, " ▶ ガチャ10連", GACHA_TEN_COST, state.card_state.gems, CARD_GACHA_TEN);
     cl.push(Line::from(""));
 
     // Card list ( ▶ ★★★ 名前 Lv.10 形式 — 最長 ~28 セルなので 32 列 narrow に収まる)
-    for (i, owned) in state.card_state.cards.iter().enumerate().take(15) {
+    //
+    // 「直近結果」をプレイヤーが見つけられる必要があるため、所持枚数が
+    // CARDS_VISIBLE を超えても**末尾から CARDS_VISIBLE 枚**を表示する。
+    // 古いカードは ID 範囲を圧迫させないため非表示 (action ID は
+    // CARD_EQUIP_BASE..+CARDS_VISIBLE に固定し、display 位置 → cards index
+    // の解決は click handler 側で `total - CARDS_VISIBLE + offset` で行う)。
+    let cards = &state.card_state.cards;
+    let total = cards.len();
+    let start = total.saturating_sub(CARDS_VISIBLE);
+    for (offset, owned) in cards[start..].iter().enumerate() {
+        let actual_idx = start + offset;
         if let Some(def) = card_def(owned.card_id) {
-            let equipped = state.card_state.equipped_card == Some(i);
+            let equipped = state.card_state.equipped_card == Some(actual_idx);
             let marker = if equipped { "▶" } else { " " };
             cl.push_clickable(Line::from(vec![
                 Span::styled(format!(" {marker} "), Style::default().fg(Color::Yellow)),
                 Span::styled(format!("{} ", def.rarity.label()), Style::default().fg(Color::Magenta)),
                 Span::styled(def.name, Style::default().fg(Color::White)),
                 Span::styled(format!(" Lv.{}", owned.level), Style::default().fg(Color::Cyan)),
-            ]), CARD_EQUIP_BASE + i as u16);
+            ]), CARD_EQUIP_BASE + offset as u16);
         }
     }
 
+    // 強化タブ (abyss) と同じ ScrollableTab primitive を使用。block + content
+    // + ▲▼ tap 列 + スクロール clamp が 1 つの widget 呼び出しに集約される。
     let borders = if is_narrow { Borders::TOP | Borders::BOTTOM } else { Borders::ALL };
-    let block = Block::default().borders(borders).border_style(Style::default().fg(Color::Magenta)).title(" カード ");
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Magenta))
+        .title(" カード ");
     {
         let mut cs = click_state.borrow_mut();
-        cl.render(f, area, block, &mut cs, false, 0);
+        ScrollableTab::new(cl, &state.cards_scroll, CARD_SCROLL_UP, CARD_SCROLL_DOWN)
+            .block(block)
+            .arrow_color(Color::LightMagenta)
+            .render(f, area, &mut cs);
+    }
+}
+
+/// 💎 が足りているなら clickable で cyan、足りなければ非 clickable で
+/// DarkGray + `(💎不足)` 注記を出す。「ボタンが消えた」と user が混乱する
+/// のを避けるため、affordable 状態に関わらず必ず 1 行を消費する。
+fn push_gacha_button<'a>(
+    cl: &mut ClickableList<'a>,
+    label: &'a str,
+    cost: u32,
+    gems: u32,
+    action_id: u16,
+) {
+    let affordable = gems >= cost;
+    let line_text = format!("{label} (💎{cost})");
+    if affordable {
+        cl.push_clickable(
+            Line::from(Span::styled(line_text, Style::default().fg(Color::Cyan))),
+            action_id,
+        );
+    } else {
+        cl.push(Line::from(vec![
+            Span::styled(line_text, Style::default().fg(Color::DarkGray)),
+            Span::styled(" (💎不足)", Style::default().fg(Color::DarkGray)),
+        ]));
     }
 }
 
@@ -557,6 +593,149 @@ mod tests {
             ratzilla::ratatui::text::Line::from(line_bonus).width() <= 32,
             "fortune bonus line overflows 32 cells"
         );
+    }
+
+    /// モバイル相当の縦が短いバッファ (32×20) ではコンテンツがエリアより
+    /// 長くなるので ▲▼ スクロール列が登録され、初期スクロール 0 では ▲ は
+    /// 出ない (= scroll==0 のとき up は無反応) 一方で ▼ は登録されること。
+    /// 「ガチャ画面がモバイルで潰れる」回帰防止の最低条件。
+    #[test]
+    fn hub_cards_scrolls_when_overflow_on_mobile() {
+        let mut state = CafeState::new();
+        state.phase = super::super::super::state::GamePhase::Hub;
+        state.hub_tab = HubTab::Cards;
+        state.card_state.gems = 5000;
+        // 15 枚分カードを所持してリスト溢れを発生させる
+        for id in 1..=15 {
+            state.card_state.cards.push(OwnedCard {
+                card_id: id,
+                level: 1,
+                rank_ups: 0,
+                duplicates: 0,
+            });
+        }
+
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(32, 20)).unwrap();
+        terminal
+            .draw(|f| render_hub(&state, f, f.area(), &cs))
+            .unwrap();
+
+        // 初期 scroll=0 → ▼ ボタンのみ表示・登録される
+        let mut found_down = false;
+        let mut found_up = false;
+        {
+            let cs = cs.borrow();
+            for y in 0..20 {
+                for x in 0..32 {
+                    match cs.hit_test(x, y) {
+                        Some(CARD_SCROLL_DOWN) => found_down = true,
+                        Some(CARD_SCROLL_UP) => found_up = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(found_down, "CARD_SCROLL_DOWN must be reachable when content overflows on 32×20");
+        assert!(!found_up, "CARD_SCROLL_UP must NOT register at scroll=0");
+
+        // スクロール後 (scroll>0) は ▲ も登場すること
+        state.cards_scroll.set(5);
+        let cs2 = Rc::new(RefCell::new(ClickState::new()));
+        terminal
+            .draw(|f| render_hub(&state, f, f.area(), &cs2))
+            .unwrap();
+        let cs2 = cs2.borrow();
+        let mut found_up_after = false;
+        for y in 0..20 {
+            for x in 0..32 {
+                if cs2.hit_test(x, y) == Some(CARD_SCROLL_UP) {
+                    found_up_after = true;
+                }
+            }
+        }
+        assert!(found_up_after, "CARD_SCROLL_UP must register once user scrolled past row 0");
+    }
+
+    /// 32×40 (= 既存テスト幅) のように余裕がある場合はスクロール列を出さない
+    /// — これが回帰すると本来クリックできていたカード行の右端が ▲▼ で
+    /// 潰されるので、ガード必須。
+    #[test]
+    fn hub_cards_does_not_show_scroll_when_content_fits() {
+        let mut state = CafeState::new();
+        state.phase = super::super::super::state::GamePhase::Hub;
+        state.hub_tab = HubTab::Cards;
+        state.card_state.gems = 5000;
+
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(32, 40)).unwrap();
+        terminal
+            .draw(|f| render_hub(&state, f, f.area(), &cs))
+            .unwrap();
+        let cs = cs.borrow();
+        for y in 0..40 {
+            for x in 0..32 {
+                let id = cs.hit_test(x, y);
+                assert_ne!(id, Some(CARD_SCROLL_UP), "scroll col leaked at 32×40");
+                assert_ne!(id, Some(CARD_SCROLL_DOWN), "scroll col leaked at 32×40");
+            }
+        }
+    }
+
+    /// 所持カードが CARDS_VISIBLE (15) 枚を超えた時、表示は **最新 15 枚** に
+    /// 限定される。古いカード (オフセット 0) はリストから消え、最新 (オフセット
+    /// total-1) は登録される。「ガチャを引いた直後の新カードが見えない」回帰防止。
+    #[test]
+    fn hub_cards_shows_latest_window_when_over_visible_cap() {
+        let mut state = CafeState::new();
+        state.phase = super::super::super::state::GamePhase::Hub;
+        state.hub_tab = HubTab::Cards;
+        state.card_state.gems = 5000;
+        // 20 枚 push (CARDS_VISIBLE=15 を超過)
+        for id in 1..=20 {
+            state.card_state.cards.push(OwnedCard {
+                card_id: id,
+                level: 1,
+                rank_ups: 0,
+                duplicates: 0,
+            });
+        }
+
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(32, 60)).unwrap();
+        terminal
+            .draw(|f| render_hub(&state, f, f.area(), &cs))
+            .unwrap();
+
+        let cs = cs.borrow();
+        // 表示行は 15 個 — display offset 0..14 の action ID が登録される。
+        // CARD_EQUIP_BASE+0 = 最古の表示カード (= cards[5])
+        // CARD_EQUIP_BASE+14 = 最新カード (= cards[19])
+        let mut found = std::collections::HashSet::new();
+        for y in 0..60 {
+            for x in 0..32 {
+                if let Some(id) = cs.hit_test(x, y) {
+                    if (CARD_EQUIP_BASE..CARD_EQUIP_BASE + 15).contains(&id) {
+                        found.insert(id - CARD_EQUIP_BASE);
+                    }
+                }
+            }
+        }
+        assert!(
+            found.contains(&14),
+            "newest card (display offset 14) must be displayed/clickable"
+        );
+        // CARDS_VISIBLE+ は出ない (offset 15 以降の ID は登録されない)
+        for y in 0..60 {
+            for x in 0..32 {
+                if let Some(id) = cs.hit_test(x, y) {
+                    assert!(
+                        id < CARD_EQUIP_BASE + 15 || id >= CARD_BACK,
+                        "no card row with display offset >= CARDS_VISIBLE expected (got id={id})"
+                    );
+                }
+            }
+        }
     }
 
     /// MAX 状態 (tier 5) のラベルでも 32 列に収まることを確認。

@@ -10,14 +10,18 @@
 //! - [`ClickableList`] — Vertical list with per-row click targets.
 //! - [`ClickableGrid`] — 2D grid with per-cell click targets.
 //! - [`Clickable`] — Wrap any [`Widget`] with a single full-area click target.
+//! - [`ScrollableTab`] — `ClickableList` + bordered block + auto ▲▼ tap column,
+//!   with the scroll position auto-clamped against per-frame content height.
 //!
 //! These builders are the **only** sanctioned way to register click targets.
 //! Direct calls to `ClickState::add_click_target` / `add_row_target` are
 //! banned by clippy (see `clippy.toml`).
 #![allow(clippy::disallowed_methods)]
 
-use ratzilla::ratatui::layout::Rect;
-use ratzilla::ratatui::style::{Color, Style};
+use std::cell::Cell;
+
+use ratzilla::ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::{Block, Paragraph, Widget, Wrap};
 use ratzilla::ratatui::Frame;
@@ -476,6 +480,218 @@ impl<W: Widget> Clickable<W> {
     }
 }
 
+// ── ScrollableTab ─────────────────────────────────────────────
+
+/// A bordered tab body that wraps a [`ClickableList`] and adds a right-edge
+/// ▲▼ tap column for vertical scrolling on small screens.
+///
+/// # Why this primitive exists
+///
+/// Both Abyss (強化/魂/設定) and Café (カード) have tabs whose content can
+/// exceed the viewport on mobile. Each one used to inline the same "border
+/// block + content area + scroll column + scroll-position clamp" boilerplate.
+/// This primitive consolidates the pattern so the two stay in lock-step:
+///
+/// - `block` is rendered onto `area` (caller controls borders/title/color).
+/// - The block's inner area is split horizontally into content + a 1-col
+///   scroll column (the scroll column is omitted only if `inner.width <= 1`).
+/// - The list is rendered into the content area, scrolled by the value
+///   currently held in `scroll_state`. The value is **clamped against the
+///   freshly-computed content height** and written back, so resizing the
+///   window or shrinking the list never leaves the view stuck past the end.
+/// - ▲ / ▼ tap targets are drawn into the scroll column. Each tap target
+///   spans HALF the column height (not just the single ▲/▼ glyph) so it's
+///   reachable with a fingertip.
+///
+/// # Example
+/// ```ignore
+/// ScrollableTab::new(cl, &state.cards_scroll, CARD_SCROLL_UP, CARD_SCROLL_DOWN)
+///     .block(Block::default().borders(Borders::ALL).title(" カード "))
+///     .arrow_color(Color::LightMagenta)
+///     .render(f, area, &mut cs);
+/// ```
+pub struct ScrollableTab<'a> {
+    list: ClickableList<'a>,
+    block: Block<'a>,
+    wrap: bool,
+    scroll_state: &'a Cell<u16>,
+    scroll_up_id: u16,
+    scroll_down_id: u16,
+    arrow_color: Color,
+}
+
+impl<'a> ScrollableTab<'a> {
+    /// Create a new scrollable tab.
+    ///
+    /// `scroll_state` is borrowed (interior mutability via `Cell<u16>`) so
+    /// `Game::render(&self, ...)` can update the clamped scroll position
+    /// without needing `&mut Self`.
+    pub fn new(
+        list: ClickableList<'a>,
+        scroll_state: &'a Cell<u16>,
+        scroll_up_id: u16,
+        scroll_down_id: u16,
+    ) -> Self {
+        Self {
+            list,
+            block: Block::default(),
+            wrap: false,
+            scroll_state,
+            scroll_up_id,
+            scroll_down_id,
+            arrow_color: Color::LightCyan,
+        }
+    }
+
+    pub fn block(mut self, b: Block<'a>) -> Self {
+        self.block = b;
+        self
+    }
+
+    /// Enable line wrapping. When false (default) one logical line maps to
+    /// one visual row; with wrap, long lines may consume multiple rows and
+    /// the scroll/clamp math accounts for wrap-expanded heights.
+    /// Currently kept ready for the abyss migration that uses `wrap=narrow`.
+    #[allow(dead_code)]
+    pub fn wrap(mut self, w: bool) -> Self {
+        self.wrap = w;
+        self
+    }
+
+    pub fn arrow_color(mut self, c: Color) -> Self {
+        self.arrow_color = c;
+        self
+    }
+
+    /// Render the block, the list (scrolled), and the ▲▼ tap column.
+    /// Click targets for the list rows are added inside `ClickableList::render`;
+    /// the scroll arrows are added on top via `Clickable`.
+    pub fn render(self, f: &mut Frame, area: Rect, cs: &mut ClickState) {
+        let ScrollableTab {
+            list,
+            block,
+            wrap,
+            scroll_state,
+            scroll_up_id,
+            scroll_down_id,
+            arrow_color,
+        } = self;
+
+        let inner = block.inner(area);
+
+        // Reserve the scroll column **only when overflow is actually
+        // present**. Always-reserving wastes 1 column of horizontal space
+        // and clips lines that were authored to fit the full inner.width
+        // (per Codex review #82). When content fits, callers get the full
+        // inner width and no dead right-edge tap surface.
+        //
+        // Note: `wrap=false` callers (the common case) have a line count
+        // independent of width, so the pre-split overflow check is exact.
+        // For `wrap=true` callers the post-split width is narrower, which
+        // can wrap a few more rows than the pre-split estimate suggests —
+        // worst case the last row gets clipped one cell short of the
+        // arrow, which is acceptable degradation vs. always-reserving.
+        let pre_content_h = if wrap {
+            list.visual_height(inner.width)
+        } else {
+            list.lines().len().min(u16::MAX as usize) as u16
+        };
+        let needs_scroll = pre_content_h > inner.height;
+        let (content_area, scroll_col) = if needs_scroll {
+            split_for_scroll(inner)
+        } else {
+            (inner, None)
+        };
+
+        let content_h = if wrap {
+            list.visual_height(content_area.width)
+        } else {
+            // wrap=false: line count is width-independent, reuse pre-check.
+            pre_content_h
+        };
+        let max_scroll = content_h.saturating_sub(content_area.height);
+        let scroll = scroll_state.get().min(max_scroll);
+        scroll_state.set(scroll);
+
+        f.render_widget(block, area);
+        list.render(f, content_area, Block::default(), cs, wrap, scroll);
+        if let Some(sc) = scroll_col {
+            render_scroll_indicators(
+                f,
+                sc,
+                ScrollIndicatorState { scroll, max_scroll },
+                cs,
+                ScrollIndicatorIds {
+                    up: scroll_up_id,
+                    down: scroll_down_id,
+                    color: arrow_color,
+                },
+            );
+        }
+    }
+}
+
+#[derive(Copy, Clone)]
+struct ScrollIndicatorState {
+    scroll: u16,
+    max_scroll: u16,
+}
+
+#[derive(Copy, Clone)]
+struct ScrollIndicatorIds {
+    up: u16,
+    down: u16,
+    color: Color,
+}
+
+/// Split a rect into "content (rest)" + "1-col scroll bar (right edge)".
+/// Returns `(content, None)` if the input is too narrow (≤ 1 col) — that
+/// preserves the entire row for content rather than rendering a useless
+/// scroll bar that eats the only column.
+fn split_for_scroll(inner: Rect) -> (Rect, Option<Rect>) {
+    if inner.width <= 1 {
+        return (inner, None);
+    }
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(inner);
+    (chunks[0], Some(chunks[1]))
+}
+
+/// Draw ▲ on the upper half and ▼ on the lower half of `area`. Each glyph
+/// is drawn at the visual edge but the **tap target spans the full half** —
+/// 1-cell-wide tap targets are unreachable on touch devices.
+fn render_scroll_indicators(
+    f: &mut Frame,
+    area: Rect,
+    state: ScrollIndicatorState,
+    cs: &mut ClickState,
+    ids: ScrollIndicatorIds,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let half = area.height / 2;
+    let style = Style::default().fg(ids.color).add_modifier(Modifier::BOLD);
+
+    if half > 0 && state.scroll > 0 {
+        let up_rect = Rect::new(area.x, area.y, area.width, half);
+        let para = Paragraph::new(Line::from(Span::styled("▲", style)));
+        Clickable::new(para, ids.up).render(f, up_rect, cs);
+    }
+    if state.scroll < state.max_scroll && area.height > half {
+        let down_h = area.height - half;
+        let down_rect = Rect::new(area.x, area.y + half, area.width, down_h);
+        let mut lines: Vec<Line> = (0..down_h.saturating_sub(1))
+            .map(|_| Line::from(""))
+            .collect();
+        lines.push(Line::from(Span::styled("▼", style)));
+        let para = Paragraph::new(lines);
+        Clickable::new(para, ids.down).render(f, down_rect, cs);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -807,5 +1023,89 @@ mod tests {
         assert_eq!(cs.hit_test(2, 5), Some(2));
         // Outside the overlay → background
         assert_eq!(cs.hit_test(20, 5), Some(1));
+    }
+
+    // ── ScrollableTab tests ────────────────────────────────────
+
+    /// Codex review #82: when content fits, ScrollableTab must NOT reserve
+    /// the right-edge scroll column. Otherwise full-width-authored lines
+    /// (e.g. cafe Cards 32-cell line designs) clip the last cell. The
+    /// clickable list row span equals the full inner.width on no overflow.
+    #[test]
+    fn scrollable_tab_uses_full_width_when_no_overflow() {
+        use ratzilla::ratatui::backend::TestBackend;
+        use ratzilla::ratatui::widgets::Borders;
+        use ratzilla::ratatui::Terminal;
+
+        let scroll = Cell::new(0u16);
+        let mut terminal = Terminal::new(TestBackend::new(32, 20)).unwrap();
+        let mut cs = ClickState::new();
+        cs.terminal_cols = 32;
+        cs.terminal_rows = 20;
+
+        terminal
+            .draw(|f| {
+                let mut cl = ClickableList::new();
+                // 3 行 — height 20 buffer に楽勝で収まる → no overflow
+                cl.push_clickable(Line::from("row 0"), 100);
+                cl.push_clickable(Line::from("row 1"), 101);
+                cl.push_clickable(Line::from("row 2"), 102);
+                ScrollableTab::new(cl, &scroll, 200, 201)
+                    .block(Block::default().borders(Borders::ALL))
+                    .render(f, f.area(), &mut cs);
+            })
+            .unwrap();
+
+        // 行 0 (border の内側 = y=1) の右端 (x=30, 31 の Borders::ALL 内側) が
+        // **clickable list の row 0 (action_id=100)** にヒットすべき。
+        // もし scroll col が常時 reserve されていると、x=30 が dead column になり
+        // hit_test が None または別 ID を返すはず。
+        let inner_right = 30; // border ALL → x=1..30 が inner、x=30 = inner.width-1
+        assert_eq!(
+            cs.hit_test(inner_right, 1),
+            Some(100),
+            "no-overflow case must give clickable list the full inner width \
+             (right-edge cell {inner_right} should belong to row 0, not a dead scroll col)"
+        );
+    }
+
+    /// 対偶: overflow ありなら scroll 列が登録されて右端が ▼ になる。
+    #[test]
+    fn scrollable_tab_reserves_scroll_col_when_overflow() {
+        use ratzilla::ratatui::backend::TestBackend;
+        use ratzilla::ratatui::widgets::Borders;
+        use ratzilla::ratatui::Terminal;
+
+        let scroll = Cell::new(0u16);
+        let mut terminal = Terminal::new(TestBackend::new(32, 6)).unwrap();
+        let mut cs = ClickState::new();
+        cs.terminal_cols = 32;
+        cs.terminal_rows = 6;
+
+        terminal
+            .draw(|f| {
+                let mut cl = ClickableList::new();
+                // 20 行 — buffer 6 行 (border 引いて inner=4) を超える → overflow
+                for i in 0..20 {
+                    cl.push_clickable(Line::from(format!("row {i}")), 100 + i as u16);
+                }
+                ScrollableTab::new(cl, &scroll, 200, 201)
+                    .block(Block::default().borders(Borders::ALL))
+                    .render(f, f.area(), &mut cs);
+            })
+            .unwrap();
+
+        // 右端 (x=30, inner の最終列) が scroll-down (action_id=201) になるはず
+        let inner_right = 30;
+        let mut found_down = false;
+        for y in 1..5 {
+            if cs.hit_test(inner_right, y) == Some(201) {
+                found_down = true;
+            }
+        }
+        assert!(
+            found_down,
+            "overflow case must register ▼ scroll target on the right-edge column"
+        );
     }
 }

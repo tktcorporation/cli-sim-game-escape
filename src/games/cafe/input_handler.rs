@@ -9,6 +9,9 @@ use super::save;
 use super::social_sys::{self, MissionType, BUSINESS_DAY_COST};
 use super::state::{CafeState, GamePhase, HubTab};
 
+/// `CARDS_VISIBLE` の u16 化版 — `Range<u16>` で contains に使うため。
+const CARDS_VISIBLE_U16: u16 = CARDS_VISIBLE as u16;
+
 // ── Keyboard ──────────────────────────────────────────────
 
 pub fn handle_key(state: &mut CafeState, ch: char) -> bool {
@@ -23,11 +26,13 @@ pub fn handle_key(state: &mut CafeState, ch: char) -> bool {
             _ => false,
         },
         GamePhase::Hub => match ch {
-            '1' => { state.hub_tab = HubTab::Home; true }
-            '2' => { state.hub_tab = HubTab::Characters; true }
-            '3' => { state.hub_tab = HubTab::Cards; true }
-            '4' => { state.hub_tab = HubTab::Produce; true }
-            '5' => { state.hub_tab = HubTab::Missions; true }
+            '1' => { switch_hub_tab(state, HubTab::Home); true }
+            '2' => { switch_hub_tab(state, HubTab::Characters); true }
+            '3' => { switch_hub_tab(state, HubTab::Cards); true }
+            '4' => { switch_hub_tab(state, HubTab::Produce); true }
+            '5' => { switch_hub_tab(state, HubTab::Missions); true }
+            'j' if state.hub_tab == HubTab::Cards => { scroll_cards(state, SCROLL_STEP as i32); true }
+            'k' if state.hub_tab == HubTab::Cards => { scroll_cards(state, -(SCROLL_STEP as i32)); true }
             's' => {
                 if let Some(ch_num) = logic::next_available_chapter(state) {
                     logic::start_chapter(state, ch_num);
@@ -92,6 +97,8 @@ pub fn handle_key(state: &mut CafeState, ch: char) -> bool {
         GamePhase::CardScreen => match ch {
             'd' => try_daily_draw(state),
             'g' => try_gacha_single(state),
+            'j' => { scroll_cards(state, SCROLL_STEP as i32); true }
+            'k' => { scroll_cards(state, -(SCROLL_STEP as i32)); true }
             'q' => { state.phase = GamePhase::Hub; true }
             _ => false,
         },
@@ -100,6 +107,8 @@ pub fn handle_key(state: &mut CafeState, ch: char) -> bool {
                 let ids = card_ids.clone();
                 handle_gacha_result_ok(state, &ids)
             }
+            'j' => { scroll_gacha_result(state, SCROLL_STEP as i32); true }
+            'k' => { scroll_gacha_result(state, -(SCROLL_STEP as i32)); true }
             _ => false,
         },
         // ── Produce ──────────────────────────────────
@@ -164,11 +173,13 @@ pub fn handle_click(state: &mut CafeState, id: u16) -> bool {
             false
         }
         GamePhase::Hub => match id {
-            TAB_HOME => { state.hub_tab = HubTab::Home; true }
-            TAB_CHARACTERS => { state.hub_tab = HubTab::Characters; true }
-            TAB_CARDS => { state.hub_tab = HubTab::Cards; true }
-            TAB_PRODUCE => { state.hub_tab = HubTab::Produce; true }
-            TAB_MISSIONS => { state.hub_tab = HubTab::Missions; true }
+            TAB_HOME => { switch_hub_tab(state, HubTab::Home); true }
+            TAB_CHARACTERS => { switch_hub_tab(state, HubTab::Characters); true }
+            TAB_CARDS => { switch_hub_tab(state, HubTab::Cards); true }
+            TAB_PRODUCE => { switch_hub_tab(state, HubTab::Produce); true }
+            TAB_MISSIONS => { switch_hub_tab(state, HubTab::Missions); true }
+            CARD_SCROLL_UP => { scroll_cards(state, -(SCROLL_STEP as i32)); true }
+            CARD_SCROLL_DOWN => { scroll_cards(state, SCROLL_STEP as i32); true }
             HUB_STORY => {
                 if let Some(ch_num) = logic::next_available_chapter(state) {
                     logic::start_chapter(state, ch_num);
@@ -246,16 +257,11 @@ pub fn handle_click(state: &mut CafeState, id: u16) -> bool {
             CARD_DAILY_DRAW => try_daily_draw(state),
             CARD_GACHA_SINGLE => try_gacha_single(state),
             CARD_GACHA_TEN => try_gacha_ten(state),
+            CARD_SCROLL_UP => { scroll_cards(state, -(SCROLL_STEP as i32)); true }
+            CARD_SCROLL_DOWN => { scroll_cards(state, SCROLL_STEP as i32); true }
             CARD_BACK => { state.phase = GamePhase::Hub; true }
-            id if (CARD_EQUIP_BASE..CARD_EQUIP_BASE + 20).contains(&id) => {
-                let idx = (id - CARD_EQUIP_BASE) as usize;
-                if idx < state.card_state.cards.len() {
-                    state.card_state.equipped_card = Some(idx);
-                    save::save_game(state);
-                    true
-                } else {
-                    false
-                }
+            id if (CARD_EQUIP_BASE..CARD_EQUIP_BASE + CARDS_VISIBLE_U16).contains(&id) => {
+                equip_card_by_display_offset(state, (id - CARD_EQUIP_BASE) as usize)
             }
             _ => false,
         },
@@ -263,6 +269,14 @@ pub fn handle_click(state: &mut CafeState, id: u16) -> bool {
             if id == GACHA_RESULT_OK {
                 let ids = card_ids.clone();
                 return handle_gacha_result_ok(state, &ids);
+            }
+            if id == GACHA_RESULT_SCROLL_UP {
+                scroll_gacha_result(state, -(SCROLL_STEP as i32));
+                return true;
+            }
+            if id == GACHA_RESULT_SCROLL_DOWN {
+                scroll_gacha_result(state, SCROLL_STEP as i32);
+                return true;
             }
             false
         }
@@ -312,6 +326,51 @@ pub fn handle_click(state: &mut CafeState, id: u16) -> bool {
 }
 
 // ── Helpers ───────────────────────────────────────────────
+
+/// Tap or arrow-key step for the Cards-tab scroll. Same magnitude as the
+/// Abyss tab (`SCROLL_STEP = 3`) — the upper bound is clamped at render time
+/// so saturating-add is safe here.
+const SCROLL_STEP: u16 = 3;
+
+/// Switch the active hub tab. Resets `cards_scroll` so re-entering Cards
+/// starts at the top instead of stranding the user mid-list.
+fn switch_hub_tab(state: &mut CafeState, tab: HubTab) {
+    state.hub_tab = tab;
+    state.cards_scroll.set(0);
+}
+
+/// Apply a signed delta to `cards_scroll`. Lower bound is 0; upper bound is
+/// clamped against actual content height in `render_hub_cards`.
+fn scroll_cards(state: &mut CafeState, delta: i32) {
+    let cur = state.cards_scroll.get() as i32;
+    let next = (cur + delta).max(0) as u16;
+    state.cards_scroll.set(next);
+}
+
+/// Same shape as `scroll_cards` but for the GachaResult screen — clamping
+/// against `max_scroll` happens in `render_gacha_result` since the line
+/// count grows per anim frame.
+fn scroll_gacha_result(state: &mut CafeState, delta: i32) {
+    let cur = state.gacha_result_scroll.get() as i32;
+    let next = (cur + delta).max(0) as u16;
+    state.gacha_result_scroll.set(next);
+}
+
+/// Resolve a Cards-tab display row (0..CARDS_VISIBLE) back to the actual
+/// `cards` vec index. Renderer shows the **last** `CARDS_VISIBLE` cards so
+/// recently-pulled cards are reachable; this inverse mapping is the
+/// counterpart and is the single place that knows the policy.
+fn equip_card_by_display_offset(state: &mut CafeState, offset: usize) -> bool {
+    let total = state.card_state.cards.len();
+    let start = total.saturating_sub(CARDS_VISIBLE);
+    let actual_idx = start + offset;
+    if actual_idx >= total {
+        return false;
+    }
+    state.card_state.equipped_card = Some(actual_idx);
+    save::save_game(state);
+    true
+}
 
 fn try_run_business(state: &mut CafeState) -> bool {
     let now = social_sys::now_ms();
@@ -375,6 +434,7 @@ fn try_gacha_ten(state: &mut CafeState) -> bool {
 /// Transition into `GachaResult` and arm the reveal animation.
 fn enter_gacha_result(state: &mut CafeState, card_ids: Vec<u32>) {
     state.gacha_anim_frame = 0;
+    state.gacha_result_scroll.set(0);
     state.phase = GamePhase::GachaResult { card_ids };
 }
 
@@ -391,6 +451,59 @@ fn handle_gacha_result_ok(state: &mut CafeState, card_ids: &[u32]) -> bool {
         state.phase = GamePhase::CardScreen;
         save::save_game(state);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::gacha::state::OwnedCard;
+
+    fn push_dummy_cards(state: &mut CafeState, n: u32) {
+        for id in 1..=n {
+            state.card_state.cards.push(OwnedCard {
+                card_id: id,
+                level: 1,
+                rank_ups: 0,
+                duplicates: 0,
+            });
+        }
+    }
+
+    /// 所持枚数 > CARDS_VISIBLE の時、display offset 14 のクリックは
+    /// 最新カード (= 末尾) を装備する。レンダラの「最新 15 枚を表示」
+    /// 仕様と一貫してないと、正しいカードが装備されない回帰の検出。
+    #[test]
+    fn equip_by_display_offset_resolves_to_latest_card() {
+        let mut state = CafeState::new();
+        push_dummy_cards(&mut state, 20);
+        // display offset 14 = 最新表示行 → cards[19]
+        let ok = equip_card_by_display_offset(&mut state, 14);
+        assert!(ok);
+        assert_eq!(state.card_state.equipped_card, Some(19));
+    }
+
+    /// 所持 <= CARDS_VISIBLE では display offset = 元 index と一致 (start=0)。
+    /// 既存セーブとの後方互換性を保証する条件。
+    #[test]
+    fn equip_by_display_offset_matches_index_when_under_cap() {
+        let mut state = CafeState::new();
+        push_dummy_cards(&mut state, 5);
+        let ok = equip_card_by_display_offset(&mut state, 3);
+        assert!(ok);
+        assert_eq!(state.card_state.equipped_card, Some(3));
+    }
+
+    /// 表示行外の display offset は何もしない (range 外 ID は struct
+    /// match で弾かれるが、念のため helper レベルでも安全に)。
+    #[test]
+    fn equip_by_display_offset_returns_false_when_out_of_range() {
+        let mut state = CafeState::new();
+        push_dummy_cards(&mut state, 5);
+        // 5 枚しか無いのに offset 10 を要求 → start=0+10=10 > 5
+        let ok = equip_card_by_display_offset(&mut state, 10);
+        assert!(!ok);
+        assert_eq!(state.card_state.equipped_card, None);
     }
 }
 
