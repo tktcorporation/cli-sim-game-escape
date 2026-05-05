@@ -33,6 +33,9 @@ pub const RESULT_OK: u16 = 150;
 pub const CARD_DAILY_DRAW: u16 = 160;
 pub const CARD_GACHA_SINGLE: u16 = 161;
 pub const CARD_GACHA_TEN: u16 = 162;
+/// Cards タブのスクロール (▲) — モバイルでガチャ画面が縦に溢れる時の操作。
+pub const CARD_SCROLL_UP: u16 = 163;
+pub const CARD_SCROLL_DOWN: u16 = 164;
 pub const CARD_EQUIP_BASE: u16 = 170; // +0..19
 pub const CARD_BACK: u16 = 199;
 

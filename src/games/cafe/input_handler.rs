@@ -23,11 +23,13 @@ pub fn handle_key(state: &mut CafeState, ch: char) -> bool {
             _ => false,
         },
         GamePhase::Hub => match ch {
-            '1' => { state.hub_tab = HubTab::Home; true }
-            '2' => { state.hub_tab = HubTab::Characters; true }
-            '3' => { state.hub_tab = HubTab::Cards; true }
-            '4' => { state.hub_tab = HubTab::Produce; true }
-            '5' => { state.hub_tab = HubTab::Missions; true }
+            '1' => { switch_hub_tab(state, HubTab::Home); true }
+            '2' => { switch_hub_tab(state, HubTab::Characters); true }
+            '3' => { switch_hub_tab(state, HubTab::Cards); true }
+            '4' => { switch_hub_tab(state, HubTab::Produce); true }
+            '5' => { switch_hub_tab(state, HubTab::Missions); true }
+            'j' if state.hub_tab == HubTab::Cards => { scroll_cards(state, SCROLL_STEP as i32); true }
+            'k' if state.hub_tab == HubTab::Cards => { scroll_cards(state, -(SCROLL_STEP as i32)); true }
             's' => {
                 if let Some(ch_num) = logic::next_available_chapter(state) {
                     logic::start_chapter(state, ch_num);
@@ -92,6 +94,8 @@ pub fn handle_key(state: &mut CafeState, ch: char) -> bool {
         GamePhase::CardScreen => match ch {
             'd' => try_daily_draw(state),
             'g' => try_gacha_single(state),
+            'j' => { scroll_cards(state, SCROLL_STEP as i32); true }
+            'k' => { scroll_cards(state, -(SCROLL_STEP as i32)); true }
             'q' => { state.phase = GamePhase::Hub; true }
             _ => false,
         },
@@ -164,11 +168,13 @@ pub fn handle_click(state: &mut CafeState, id: u16) -> bool {
             false
         }
         GamePhase::Hub => match id {
-            TAB_HOME => { state.hub_tab = HubTab::Home; true }
-            TAB_CHARACTERS => { state.hub_tab = HubTab::Characters; true }
-            TAB_CARDS => { state.hub_tab = HubTab::Cards; true }
-            TAB_PRODUCE => { state.hub_tab = HubTab::Produce; true }
-            TAB_MISSIONS => { state.hub_tab = HubTab::Missions; true }
+            TAB_HOME => { switch_hub_tab(state, HubTab::Home); true }
+            TAB_CHARACTERS => { switch_hub_tab(state, HubTab::Characters); true }
+            TAB_CARDS => { switch_hub_tab(state, HubTab::Cards); true }
+            TAB_PRODUCE => { switch_hub_tab(state, HubTab::Produce); true }
+            TAB_MISSIONS => { switch_hub_tab(state, HubTab::Missions); true }
+            CARD_SCROLL_UP => { scroll_cards(state, -(SCROLL_STEP as i32)); true }
+            CARD_SCROLL_DOWN => { scroll_cards(state, SCROLL_STEP as i32); true }
             HUB_STORY => {
                 if let Some(ch_num) = logic::next_available_chapter(state) {
                     logic::start_chapter(state, ch_num);
@@ -246,6 +252,8 @@ pub fn handle_click(state: &mut CafeState, id: u16) -> bool {
             CARD_DAILY_DRAW => try_daily_draw(state),
             CARD_GACHA_SINGLE => try_gacha_single(state),
             CARD_GACHA_TEN => try_gacha_ten(state),
+            CARD_SCROLL_UP => { scroll_cards(state, -(SCROLL_STEP as i32)); true }
+            CARD_SCROLL_DOWN => { scroll_cards(state, SCROLL_STEP as i32); true }
             CARD_BACK => { state.phase = GamePhase::Hub; true }
             id if (CARD_EQUIP_BASE..CARD_EQUIP_BASE + 20).contains(&id) => {
                 let idx = (id - CARD_EQUIP_BASE) as usize;
@@ -312,6 +320,26 @@ pub fn handle_click(state: &mut CafeState, id: u16) -> bool {
 }
 
 // ── Helpers ───────────────────────────────────────────────
+
+/// Tap or arrow-key step for the Cards-tab scroll. Same magnitude as the
+/// Abyss tab (`SCROLL_STEP = 3`) — the upper bound is clamped at render time
+/// so saturating-add is safe here.
+const SCROLL_STEP: u16 = 3;
+
+/// Switch the active hub tab. Resets `cards_scroll` so re-entering Cards
+/// starts at the top instead of stranding the user mid-list.
+fn switch_hub_tab(state: &mut CafeState, tab: HubTab) {
+    state.hub_tab = tab;
+    state.cards_scroll.set(0);
+}
+
+/// Apply a signed delta to `cards_scroll`. Lower bound is 0; upper bound is
+/// clamped against actual content height in `render_hub_cards`.
+fn scroll_cards(state: &mut CafeState, delta: i32) {
+    let cur = state.cards_scroll.get() as i32;
+    let next = (cur + delta).max(0) as u16;
+    state.cards_scroll.set(next);
+}
 
 fn try_run_business(state: &mut CafeState) -> bool {
     let now = social_sys::now_ms();

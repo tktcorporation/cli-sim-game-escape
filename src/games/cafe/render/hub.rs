@@ -10,7 +10,7 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
-use crate::widgets::{ClickableList, TabBar};
+use crate::widgets::{Clickable, ClickableList, TabBar};
 
 use super::super::actions::*;
 use super::super::characters::CharacterId;
@@ -343,9 +343,73 @@ pub(super) fn render_hub_cards(state: &CafeState, f: &mut Frame, area: Rect, cli
 
     let borders = if is_narrow { Borders::TOP | Borders::BOTTOM } else { Borders::ALL };
     let block = Block::default().borders(borders).border_style(Style::default().fg(Color::Magenta)).title(" カード ");
+
+    // Inner area determines whether we need a scroll column. We split the
+    // *inner* (post-border) area horizontally, then re-render the block
+    // ourselves so block + content + scroll col stay co-located on the same
+    // `<pre>` grid (no overlay div, per CLAUDE.md).
+    let inner = block.inner(area);
+    let total_lines = cl.len() as u16;
+    let needs_scroll = total_lines > inner.height;
+
+    let (content_area, scroll_col) = if needs_scroll && inner.width >= 2 {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(inner);
+        (cols[0], Some(cols[1]))
+    } else {
+        (inner, None)
+    };
+
+    // Clamp scroll against the freshly-computed max so resizing the window
+    // never leaves the view stuck past the end of the list.
+    let max_scroll = total_lines.saturating_sub(content_area.height);
+    let scroll = state.cards_scroll.get().min(max_scroll);
+    state.cards_scroll.set(scroll);
+
+    f.render_widget(block, area);
     {
         let mut cs = click_state.borrow_mut();
-        cl.render(f, area, block, &mut cs, false, 0);
+        cl.render(f, content_area, Block::default(), &mut cs, false, scroll);
+        if let Some(sc) = scroll_col {
+            render_cards_scroll_indicators(f, sc, scroll, max_scroll, &mut cs);
+        }
+    }
+}
+
+/// Right-edge ▲▼ tap column for the Cards tab. Mirrors the abyss pattern:
+/// each half of the column is a full-area `Clickable`, so even on touch the
+/// button is reachable without pixel-perfect aim.
+fn render_cards_scroll_indicators(
+    f: &mut Frame,
+    area: Rect,
+    scroll: u16,
+    max_scroll: u16,
+    cs: &mut ClickState,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let half = area.height / 2;
+    let style = Style::default()
+        .fg(Color::LightMagenta)
+        .add_modifier(Modifier::BOLD);
+
+    if half > 0 && scroll > 0 {
+        let up_rect = Rect::new(area.x, area.y, area.width, half);
+        let para = Paragraph::new(Line::from(Span::styled("▲", style)));
+        Clickable::new(para, CARD_SCROLL_UP).render(f, up_rect, cs);
+    }
+    if scroll < max_scroll && area.height > half {
+        let down_h = area.height - half;
+        let down_rect = Rect::new(area.x, area.y + half, area.width, down_h);
+        let mut lines: Vec<Line> = (0..down_h.saturating_sub(1))
+            .map(|_| Line::from(""))
+            .collect();
+        lines.push(Line::from(Span::styled("▼", style)));
+        let para = Paragraph::new(lines);
+        Clickable::new(para, CARD_SCROLL_DOWN).render(f, down_rect, cs);
     }
 }
 
@@ -557,6 +621,93 @@ mod tests {
             ratzilla::ratatui::text::Line::from(line_bonus).width() <= 32,
             "fortune bonus line overflows 32 cells"
         );
+    }
+
+    /// モバイル相当の縦が短いバッファ (32×20) ではコンテンツがエリアより
+    /// 長くなるので ▲▼ スクロール列が登録され、初期スクロール 0 では ▲ は
+    /// 出ない (= scroll==0 のとき up は無反応) 一方で ▼ は登録されること。
+    /// 「ガチャ画面がモバイルで潰れる」回帰防止の最低条件。
+    #[test]
+    fn hub_cards_scrolls_when_overflow_on_mobile() {
+        let mut state = CafeState::new();
+        state.phase = super::super::super::state::GamePhase::Hub;
+        state.hub_tab = HubTab::Cards;
+        state.card_state.gems = 5000;
+        // 15 枚分カードを所持してリスト溢れを発生させる
+        for id in 1..=15 {
+            state.card_state.cards.push(OwnedCard {
+                card_id: id,
+                level: 1,
+                rank_ups: 0,
+                duplicates: 0,
+            });
+        }
+
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(32, 20)).unwrap();
+        terminal
+            .draw(|f| render_hub(&state, f, f.area(), &cs))
+            .unwrap();
+
+        // 初期 scroll=0 → ▼ ボタンのみ表示・登録される
+        let mut found_down = false;
+        let mut found_up = false;
+        {
+            let cs = cs.borrow();
+            for y in 0..20 {
+                for x in 0..32 {
+                    match cs.hit_test(x, y) {
+                        Some(CARD_SCROLL_DOWN) => found_down = true,
+                        Some(CARD_SCROLL_UP) => found_up = true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(found_down, "CARD_SCROLL_DOWN must be reachable when content overflows on 32×20");
+        assert!(!found_up, "CARD_SCROLL_UP must NOT register at scroll=0");
+
+        // スクロール後 (scroll>0) は ▲ も登場すること
+        state.cards_scroll.set(5);
+        let cs2 = Rc::new(RefCell::new(ClickState::new()));
+        terminal
+            .draw(|f| render_hub(&state, f, f.area(), &cs2))
+            .unwrap();
+        let cs2 = cs2.borrow();
+        let mut found_up_after = false;
+        for y in 0..20 {
+            for x in 0..32 {
+                if cs2.hit_test(x, y) == Some(CARD_SCROLL_UP) {
+                    found_up_after = true;
+                }
+            }
+        }
+        assert!(found_up_after, "CARD_SCROLL_UP must register once user scrolled past row 0");
+    }
+
+    /// 32×40 (= 既存テスト幅) のように余裕がある場合はスクロール列を出さない
+    /// — これが回帰すると本来クリックできていたカード行の右端が ▲▼ で
+    /// 潰されるので、ガード必須。
+    #[test]
+    fn hub_cards_does_not_show_scroll_when_content_fits() {
+        let mut state = CafeState::new();
+        state.phase = super::super::super::state::GamePhase::Hub;
+        state.hub_tab = HubTab::Cards;
+        state.card_state.gems = 5000;
+
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(32, 40)).unwrap();
+        terminal
+            .draw(|f| render_hub(&state, f, f.area(), &cs))
+            .unwrap();
+        let cs = cs.borrow();
+        for y in 0..40 {
+            for x in 0..32 {
+                let id = cs.hit_test(x, y);
+                assert_ne!(id, Some(CARD_SCROLL_UP), "scroll col leaked at 32×40");
+                assert_ne!(id, Some(CARD_SCROLL_DOWN), "scroll col leaked at 32×40");
+            }
+        }
     }
 
     /// MAX 状態 (tier 5) のラベルでも 32 列に収まることを確認。

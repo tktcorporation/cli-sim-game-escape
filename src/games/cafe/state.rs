@@ -8,6 +8,7 @@
 //! - Produce mode state
 //! - Memory equipment
 
+use std::cell::Cell;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -224,6 +225,10 @@ pub struct CafeState {
     /// entering `GachaResult`, advanced once per `tick`. Drives the staged
     /// reveal in `render/gacha.rs`.
     pub gacha_anim_frame: u32,
+    /// Vertical scroll offset (visual rows) for the Cards tab in the hub.
+    /// `Cell` because `Game::render` takes `&self` and the renderer needs to
+    /// clamp the value against the freshly-computed content height.
+    pub cards_scroll: Cell<u16>,
 }
 
 impl CafeState {
@@ -274,6 +279,7 @@ impl CafeState {
             today_business_runs: 0,
             hub_tab: HubTab::Home,
             gacha_anim_frame: 0,
+            cards_scroll: Cell::new(0),
         }
     }
 
