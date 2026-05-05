@@ -143,9 +143,14 @@ fn apply_save(state: &mut AbyssState, save: &GameSave) {
         *slot = match save.equipped.get(lane_i).copied() {
             Some(idx) if idx >= 0 => {
                 let id = EquipmentId::from_index(idx as usize);
-                // 装備が存在し、かつ所持済みのときだけ装着を復元する
-                // (途中でテーブルが縮んだ・所持を失った等の異常からのフェイルセーフ)。
-                id.filter(|id| state.owned_equipment[id.index()])
+                // 装備が存在し、所持済みで、かつ **その lane に属する** ときだけ装着を復元する。
+                // lane consistency チェックが無いと、不正/旧形式の save で同一 EquipmentId が
+                // 複数 lane スロットに入ってしまい `equipment_bonus()` が同じ装備を多重加算する
+                // (Codex review #87 P2 の回帰防止)。SSOT は EquipmentId::lane() なので、
+                // ここで「lane 番号と装備の本来の lane が一致」を再検証する。
+                id.filter(|id| {
+                    state.owned_equipment[id.index()] && id.lane().index() == lane_i
+                })
             }
             _ => None,
         };
@@ -397,6 +402,67 @@ mod tests {
         apply_save(&mut restored, &loaded.game);
         // 「BronzeSword 装着中」のフラグだったが所持していないので装着なしになる。
         assert!(restored.equipped.iter().all(|s| s.is_none()));
+    }
+
+    /// **lane mismatch** な装着スロット (例: 防具 lane に武器の id が入った save) は弾く。
+    /// Codex review #87 P2 回帰防止: lane 一致チェックがないと、不正/旧形式の save で
+    /// 同じ装備が複数 lane に重複装着され、`equipment_bonus()` が二重加算で
+    /// 戦闘ステを腐らせる可能性がある。所持はしているがその id は本来 Weapon lane 用、
+    /// という攻撃的な save を投げて Armor / Accessory スロットが None に正されることを保証。
+    #[test]
+    fn lane_mismatch_in_save_is_rejected() {
+        // BronzeSword (Weapon lane の id=0) を Armor lane (idx 1) と Accessory lane (idx 2)
+        // に置いた save。owned はすべて true なので「所持」チェックは通過する。
+        let json = r#"{
+            "version": 3,
+            "game": {
+                "owned_equipment": [true, false, false, false, true, false, false, false, true, false, false, false],
+                "equipment_levels": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "equipped": [0, 0, 0],
+                "soul_perks": [0, 0, 0, 0],
+                "souls": 0,
+                "gold": 0,
+                "floor": 1,
+                "max_floor": 1,
+                "kills_on_floor": 0,
+                "run_kills": 0,
+                "run_gold_earned": 0,
+                "hero_hp": 50,
+                "combat_focus": 0,
+                "floor_kind": 0,
+                "auto_descend": true,
+                "tab": 0,
+                "keys": 0,
+                "pulls_since_epic": 0,
+                "total_pulls": 0,
+                "deepest_floor_ever": 1,
+                "total_kills": 0,
+                "deaths": 0,
+                "total_ticks": 0,
+                "rng_state": 1
+            }
+        }"#;
+        let loaded: SaveData = serde_json::from_str(json).unwrap();
+        let mut restored = AbyssState::new();
+        apply_save(&mut restored, &loaded.game);
+
+        // Weapon lane (idx 0) は BronzeSword の本来の lane なので OK。
+        assert_eq!(
+            restored.equipped[EquipmentLane::Weapon.index()],
+            Some(EquipmentId::BronzeSword),
+            "BronzeSword は Weapon lane に正しく装着されるべき"
+        );
+        // Armor / Accessory lane に入っていた BronzeSword は弾かれて None になるべき。
+        assert_eq!(
+            restored.equipped[EquipmentLane::Armor.index()],
+            None,
+            "lane mismatch (Weapon の装備が Armor lane) は弾かれるべき"
+        );
+        assert_eq!(
+            restored.equipped[EquipmentLane::Accessory.index()],
+            None,
+            "lane mismatch (Weapon の装備が Accessory lane) は弾かれるべき"
+        );
     }
 
     /// 部分的なフィールドのみ持つ JSON でも default で補完される。

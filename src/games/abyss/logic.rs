@@ -355,15 +355,21 @@ pub fn buy_equipment(state: &mut AbyssState, id: EquipmentId) -> bool {
     let label = def.effect_label;
     let lane = id.lane();
 
-    // 装備が変わると max_hp も変わる。「装備購入で max HP が増えた分だけ
-    // 現 HP も底上げ」を before/after 差分で正しく実装する (低 HP からの
-    // 装備変更で over-heal しないように、また max を超えないようにする)。
+    // 装備が変わると max_hp も変わる。max が増えた / 減った両方向に hero_hp を追従させる:
+    //   - 増えた場合: delta だけ底上げ (低 HP からの装備変更で over-heal しないが、現 HP は増加分上がる)
+    //   - 減った場合: hero_hp を新 max にクランプ (旧 max で生き残ってた hero_hp の取り残しを防ぐ)
+    // `equip_item` と同じ分岐にすることで「装備変更時の HP 追従」を 1 つの責務として
+    // 統一する (片方だけ修正されてバグる事故を防ぐ目的での明示的対称構造)。
     let max_before = state.hero_max_hp();
     state.owned_equipment[id.index()] = true;
     state.equipped[lane.index()] = Some(id);
     let max_after = state.hero_max_hp();
-    let delta = max_after.saturating_sub(max_before);
-    state.hero_hp = state.hero_hp.saturating_add(delta).min(max_after);
+    if max_after > max_before {
+        let delta = max_after - max_before;
+        state.hero_hp = state.hero_hp.saturating_add(delta).min(max_after);
+    } else {
+        state.hero_hp = state.hero_hp.min(max_after);
+    }
 
     state.add_log(format!("✦ 装備購入: {} ({}) → 装着", name, label));
     true
@@ -778,6 +784,48 @@ mod tests {
         let delta = max_after - max_before;
         assert!(s.hero_hp <= 1 + delta);
         assert!(s.hero_hp <= max_after);
+    }
+
+    /// 装備購入で max_hp が **下がる** ケースでも hero_hp が新 max にクランプされること。
+    /// Codex review #87 P2 の回帰防止: カスタム config で同 lane の上位装備を弱体化させ、
+    /// 自動装着で max が減ったとき `hero_hp > max` の取り残しが起きないことを保証する。
+    /// `equip_item` と同じ「max 増減両方向で hero_hp を追従」スタイルの不変条件。
+    #[test]
+    fn buy_equipment_clamps_hp_when_new_gear_lowers_max() {
+        use crate::games::abyss::state::EquipmentBonus;
+
+        // 上位 (SteelArmor) を意図的に空 bonus にして、LeatherArmor 装着時より max が下がる状況を作る。
+        let mut cfg = BalanceConfig::default();
+        let steel_idx = EquipmentId::SteelArmor.index();
+        cfg.equipment[steel_idx].base_bonus = EquipmentBonus::default();
+        cfg.equipment[steel_idx].per_level_bonus = EquipmentBonus::default();
+
+        let mut s = AbyssState::with_config(cfg);
+        s.gold = 1_000_000_000;
+
+        // LeatherArmor を買って装着 → 装備込みで max が上がる。
+        assert!(buy_equipment(&mut s, EquipmentId::LeatherArmor));
+        let max_with_leather = s.hero_max_hp();
+        s.hero_hp = max_with_leather; // 満タン
+
+        // SteelArmor を買うと auto-equip で Armor lane が置換され、空 bonus なので max が下がる。
+        assert!(buy_equipment(&mut s, EquipmentId::SteelArmor));
+        let max_with_steel = s.hero_max_hp();
+
+        // テスト前提: max が実際に下がる装備変更が起きていること。
+        assert!(
+            max_with_steel < max_with_leather,
+            "test setup: SteelArmor (空 bonus) は LeatherArmor より max が低いはず ({} >= {})",
+            max_with_steel,
+            max_with_leather
+        );
+        // 不変条件: max が下がっても hero_hp は新 max を超えない。
+        assert!(
+            s.hero_hp <= max_with_steel,
+            "hero_hp ({}) は新 max ({}) を超えてはならない",
+            s.hero_hp,
+            max_with_steel
+        );
     }
 
     #[test]
