@@ -1028,9 +1028,11 @@ mod tests {
 
     #[test]
     fn buffs_tick_down() {
-        let mut b = PlayerBuffs::default();
-        b.shield_turns = 3;
-        b.shield_value = 8;
+        let mut b = PlayerBuffs {
+            shield_turns: 3,
+            shield_value: 8,
+            ..Default::default()
+        };
         assert_eq!(b.def_bonus(), 8);
         b.tick_down();
         b.tick_down();

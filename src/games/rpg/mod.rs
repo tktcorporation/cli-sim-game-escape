@@ -12,6 +12,8 @@ pub mod logic;
 pub mod lore;
 pub mod render;
 pub mod state;
+#[cfg(test)]
+pub mod simulator;
 
 use std::cell::RefCell;
 use std::rc::Rc;
