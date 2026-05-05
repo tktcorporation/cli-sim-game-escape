@@ -27,8 +27,12 @@ pub fn decide(city: &mut City) -> AiAction {
 /// Tier 1 — Random Bot.
 ///
 /// Intentionally dumb: picks a random empty cell and a random building.
-/// The only safety net is "can I actually afford it?"; without that the
-/// simulator showed money draining to zero before any income started.
+/// Two safety nets:
+///   1. "can I actually afford it?" — drops Idle when broke.
+///   2. *savings protection*: with ~$2/sec income, cheap Roads ($10)
+///      will drain funds before a House ($40) can ever be afforded.
+///      Without this guard, the simulator observed "1 hour, 5 houses,
+///      283 roads, grid full".  With this guard the AI saves up.
 ///
 /// Distribution is biased 60% House / 25% Road / 15% Shop so the player
 /// usually sees a population grow before shops appear, even though the
@@ -44,8 +48,24 @@ fn tier1_random(city: &mut City) -> AiAction {
         Building::Shop
     };
 
-    // Affordability gate (the *one* thing even the dumbest AI knows).
+    // Affordability gate.
     if city.cash < kind.cost() {
+        return AiAction::Idle;
+    }
+
+    // Savings protection: skip cheap Road/Shop rolls until we can also
+    // afford a House.  Houses are the income source, so this prevents
+    // the cheap-build death spiral.
+    if !matches!(kind, Building::House) && city.cash < Building::House.cost() {
+        return AiAction::Idle;
+    }
+
+    // No-customer guard: don't build a Shop with fewer than 3 houses
+    // standing.  Without this, an unlucky early Shop roll can starve
+    // the city of houses *and* leave the shop inactive (no customer
+    // base in range), triggering an income==0 stall.  Even the dumbest
+    // AI gets this one piece of "common sense".
+    if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 {
         return AiAction::Idle;
     }
 
@@ -77,6 +97,16 @@ fn tier2_greedy(city: &mut City) -> AiAction {
     };
 
     if city.cash < kind.cost() {
+        return AiAction::Idle;
+    }
+
+    // Same savings + customer-base protections as Tier 1 — Tier 2 is
+    // smarter about *where* it places things, not about *what economy*
+    // to build.
+    if !matches!(kind, Building::House) && city.cash < Building::House.cost() {
+        return AiAction::Idle;
+    }
+    if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 {
         return AiAction::Idle;
     }
 

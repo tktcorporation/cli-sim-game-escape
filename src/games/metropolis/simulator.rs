@@ -165,24 +165,63 @@ mod tests {
         );
     }
 
-    // ─────────────────────────────────────────────────────────────────
-    // TODO (player input): is_game_progressing
-    //
-    // We need a *single* function that answers "given this snapshot, is
-    // the game still moving forward?".  Use this in any future test that
-    // asks "did we stall out?".
-    //
-    // Define it in a way that makes sense for a 1-hour Tier-1 run:
-    //   - If you set the bar too high, even Tier-1 fails (game unwinnable).
-    //   - If you set it too low, real stalls slip through.
-    //
-    // See `tier1_random_makes_progress_in_one_hour` above for the kind of
-    // numbers a 1-hour Tier-1 run actually produces.
-    // ─────────────────────────────────────────────────────────────────
-    #[allow(dead_code)]
-    fn is_game_progressing(_s: &Snapshot) -> bool {
-        // TODO: implement.  Suggested shape:
-        //   s.buildings_built >= ??? && s.income_per_sec > 0 && s.cash > ???
-        unimplemented!("define progression criteria — see TODO above");
+    /// Is the game *still progressing* at this snapshot?
+    ///
+    /// Time-gated thresholds so we can call this on any snapshot from
+    /// 60s onward.  Each rule reflects an observation from the post-fix
+    /// Tier 1 run:
+    ///   - 60s   : at least one building has finished (anything!)
+    ///   - 5min  : income has started flowing (≥ $1/s)
+    ///   - 30min : the city is actually a city (≥ 10 buildings, ≥ $5/s)
+    ///   - 60min : the player can afford the Tier 2 upgrade ($500),
+    ///     counting future income from the next minute too.
+    ///
+    /// Tighter bars would make Tier 1 unwinnable; looser bars would let
+    /// "5 houses forever" stalls slip through undetected.
+    fn is_game_progressing(s: &Snapshot) -> bool {
+        let mins = s.sec / 60;
+        if mins >= 1 && s.buildings_built < 1 {
+            return false;
+        }
+        if mins >= 5 && s.income_per_sec < 1 {
+            return false;
+        }
+        if mins >= 30 && (s.buildings_built < 10 || s.income_per_sec < 5) {
+            return false;
+        }
+        if mins >= 60 && s.cash + s.income_per_sec * 60 < 500 {
+            return false;
+        }
+        true
+    }
+
+    /// Run Tier 1 across many seeds and assert *every* snapshot keeps
+    /// the game progressing.  This is the headline guarantee: no matter
+    /// the dice rolls, the dumbest AI never traps the player.
+    #[test]
+    fn tier1_never_stalls_across_seeds() {
+        let seeds: [u64; 8] = [
+            0xC1A5_5EED,
+            0xDEAD_BEEF,
+            42,
+            1,
+            0xFEED_FACE,
+            0x1234_5678,
+            0xBEEF_CAFE,
+            0xAAAA_BBBB,
+        ];
+        let checkpoints = [60, 300, 1800, 3600];
+        for seed in seeds {
+            let snaps = run(seed, AiTier::Random, 1, 3600, &checkpoints);
+            for s in &snaps {
+                assert!(
+                    is_game_progressing(s),
+                    "Tier 1 stalled at seed=0x{:X} t={}s: {:?}",
+                    seed,
+                    s.sec,
+                    s
+                );
+            }
+        }
     }
 }

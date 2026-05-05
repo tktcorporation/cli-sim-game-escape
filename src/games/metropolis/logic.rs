@@ -109,9 +109,12 @@ fn accrue_income(city: &mut City) {
 pub fn compute_income_per_sec(city: &City) -> i64 {
     let mut income: i64 = 0;
 
-    // Houses → flat residential tax (1 per 2 houses ≈ pop * 0.1).
+    // Houses → flat residential tax.  We use ceiling division so that
+    // even 1 house produces $1/sec; otherwise an unlucky early game
+    // can leave the city with 1 house and income==0 (death spiral —
+    // the simulator catches this on seed=0xDEADBEEF without this).
     let houses = city.count_built(Building::House) as i64;
-    income += houses / 2;
+    income += (houses + 1) / 2;
 
     // Shops → check connectivity + customer base.
     for y in 0..GRID_H {
@@ -206,9 +209,14 @@ mod tests {
     fn finished_houses_earn_residential_tax() {
         let mut city = City::new();
         city.set_tile(0, 0, Tile::Built(Building::House));
-        city.set_tile(1, 0, Tile::Built(Building::House));
-        // 2 houses → 1 cash/sec (2/2)
+        // 1 house → 1 cash/sec (ceil(1/2) — survival floor, no stall)
         assert_eq!(compute_income_per_sec(&city), 1);
+        city.set_tile(1, 0, Tile::Built(Building::House));
+        // 2 houses → still 1 cash/sec (ceil(2/2))
+        assert_eq!(compute_income_per_sec(&city), 1);
+        city.set_tile(2, 0, Tile::Built(Building::House));
+        // 3 houses → 2 cash/sec (ceil(3/2))
+        assert_eq!(compute_income_per_sec(&city), 2);
     }
 
     #[test]
@@ -216,7 +224,8 @@ mod tests {
         let mut city = City::new();
         city.set_tile(5, 5, Tile::Built(Building::Shop));
         city.set_tile(5, 6, Tile::Built(Building::House));
-        assert_eq!(compute_income_per_sec(&city), 0);
+        // Shop is inactive (no road neighbor) → only the house's $1 counts.
+        assert_eq!(compute_income_per_sec(&city), 1);
     }
 
     #[test]
@@ -225,8 +234,8 @@ mod tests {
         city.set_tile(5, 5, Tile::Built(Building::Shop));
         city.set_tile(5, 4, Tile::Built(Building::Road));
         city.set_tile(5, 6, Tile::Built(Building::House));
-        // Shop ($2) + 1 house / 2 (= 0) = 2
-        assert_eq!(compute_income_per_sec(&city), 2);
+        // Shop ($2) + 1 house ceil(1/2)=1 → $3
+        assert_eq!(compute_income_per_sec(&city), 3);
     }
 
     #[test]
