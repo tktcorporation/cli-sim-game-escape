@@ -53,7 +53,7 @@ pub(super) fn render_gacha_result(
             Constraint::Length(1), // OK / skip button
         ])
         .split(inner);
-    let cards_area = chunks[0];
+    let card_outer = chunks[0];
     let ok_area = chunks[1];
 
     let mut lines: Vec<Line> = Vec::new();
@@ -99,7 +99,58 @@ pub(super) fn render_gacha_result(
             )));
         }
     }
-    f.render_widget(Paragraph::new(lines), cards_area);
+    // Decide if a scroll column is needed and split the cards area
+    // accordingly. The total line count includes the header + (anticipation
+    // body | revealed cards + "あと N 枚" hint) so it tracks per-frame growth.
+    let total_lines = lines.len() as u16;
+    let needs_scroll = total_lines > card_outer.height;
+    let (cards_area, scroll_col) = if needs_scroll && card_outer.width >= 2 {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(1)])
+            .split(card_outer);
+        (cols[0], Some(cols[1]))
+    } else {
+        (card_outer, None)
+    };
+
+    // Scroll selection:
+    // - Anticipation phase (revealed == 0): pin scroll=0 so the header
+    //   ("✦ 召喚中 ✦") and skip-hint stay visible. Earlier auto-track logic
+    //   computed a positive scroll here, which on tiny mobile heights pushed
+    //   the header off-screen and the player saw a blank screen.
+    // - Reveal phase (revealed >= 1): keep the **latest** card pinned at the
+    //   bottom of the viewport so newly-revealed cards are never hidden by
+    //   overflow on a short screen.
+    // - Complete: respect the player's manual scroll, clamped each frame in
+    //   case content size shrunk on resize.
+    let max_scroll = total_lines.saturating_sub(cards_area.height);
+    let scroll = if complete {
+        state.gacha_result_scroll.get().min(max_scroll)
+    } else if revealed == 0 {
+        0
+    } else {
+        // Lines: 0=header, 1=blank, 2=card1, ..., 1+N=cardN.
+        // Show last_card_line at the bottom row (height-1) → scroll = last_card_line - (height-1).
+        let last_card_line = 1u16 + revealed as u16;
+        let view_h = cards_area.height.max(1);
+        last_card_line
+            .saturating_sub(view_h - 1)
+            .min(max_scroll)
+    };
+    state.gacha_result_scroll.set(scroll);
+
+    f.render_widget(Paragraph::new(lines).scroll((scroll, 0)), cards_area);
+
+    // ▲▼ scroll affordances. Mirror the Cards-tab pattern: full-half tap
+    // areas for fat-finger reach. Hidden during anim so the auto-tracker
+    // doesn't fight player taps.
+    if let Some(sc) = scroll_col {
+        let mut cs = click_state.borrow_mut();
+        if complete {
+            render_gacha_scroll_indicators(f, sc, scroll, max_scroll, &mut cs);
+        }
+    }
 
     // OK button: doubles as a "skip" affordance during the reveal so users
     // never have to wait, and as the dismiss button afterwards. The widget
@@ -113,6 +164,39 @@ pub(super) fn render_gacha_result(
     {
         let mut cs = click_state.borrow_mut();
         Clickable::new(ok_para, GACHA_RESULT_OK).render(f, ok_area, &mut cs);
+    }
+}
+
+/// 10連の結果がモバイルの縦に収まらない時の ▲▼ 列。Cards タブと同じ
+/// 「上半分=▲・下半分=▼ のフル領域 Clickable」パターンで指の太さを許容する。
+fn render_gacha_scroll_indicators(
+    f: &mut Frame,
+    area: Rect,
+    scroll: u16,
+    max_scroll: u16,
+    cs: &mut ClickState,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let half = area.height / 2;
+    let style = Style::default()
+        .fg(Color::LightYellow)
+        .add_modifier(Modifier::BOLD);
+    if half > 0 && scroll > 0 {
+        let up_rect = Rect::new(area.x, area.y, area.width, half);
+        let para = Paragraph::new(Line::from(Span::styled("▲", style)));
+        Clickable::new(para, GACHA_RESULT_SCROLL_UP).render(f, up_rect, cs);
+    }
+    if scroll < max_scroll && area.height > half {
+        let down_h = area.height - half;
+        let down_rect = Rect::new(area.x, area.y + half, area.width, down_h);
+        let mut lines: Vec<Line> = (0..down_h.saturating_sub(1))
+            .map(|_| Line::from(""))
+            .collect();
+        lines.push(Line::from(Span::styled("▼", style)));
+        let para = Paragraph::new(lines);
+        Clickable::new(para, GACHA_RESULT_SCROLL_DOWN).render(f, down_rect, cs);
     }
 }
 
@@ -287,6 +371,105 @@ mod tests {
             }
         }
         assert!(found, "skip-button must be clickable during anticipation phase");
+    }
+
+    /// narrow + 縦の短いモバイル端末 (32×10) では 10連の後半が
+    /// 単純 clip では見えなくなるが、▼ スクロール列が登録され、▲▼ で
+    /// 全カードが reachable であることを確認。
+    /// 「直近結果が見えない」の回帰防止。
+    #[test]
+    fn gacha_result_scrollable_on_short_mobile() {
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(32, 10)).unwrap();
+        let card_ids: Vec<u32> = vec![20, 21, 22, 23, 24, 10, 11, 12, 13, 14];
+        let state = revealed_state(&card_ids);
+        terminal
+            .draw(|f| render_gacha_result(&state, f, f.area(), &cs, &card_ids))
+            .unwrap();
+        let cs = cs.borrow();
+        // OK 必須 + ▼ も登録される (アニメ完了後 scroll=0 で上端 → ▼ は出る)
+        let mut found_ok = false;
+        let mut found_down = false;
+        let mut found_up = false;
+        for y in 0..10 {
+            for x in 0..32 {
+                match cs.hit_test(x, y) {
+                    Some(GACHA_RESULT_OK) => found_ok = true,
+                    Some(GACHA_RESULT_SCROLL_DOWN) => found_down = true,
+                    Some(GACHA_RESULT_SCROLL_UP) => found_up = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(found_ok, "OK must remain pinned on 32×10");
+        assert!(
+            found_down,
+            "▼ scroll must register when 10連 result overflows on 32×10"
+        );
+        assert!(!found_up, "▲ must NOT register when scroll==0 (top of list)");
+    }
+
+    /// 旧 auto-scroll は revealed=0 (anticipation) で `scroll = 2 - height`
+    /// を計算し、tiny 画面で header を画面外に押し出して「何も見えない」
+    /// 症状を引き起こしていた。anticipation 中は scroll=0 固定で header
+    /// (✦ 召喚中 ✦) が必ず可視であることを検証する回帰テスト。
+    #[test]
+    fn gacha_result_pins_header_during_anticipation_on_tiny_screen() {
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        // 32x6 — anticipation の 5 行 (header + empty + 3 行) すら入らない極小
+        let mut terminal = Terminal::new(TestBackend::new(32, 6)).unwrap();
+        let card_ids: Vec<u32> = vec![20, 21, 22, 23, 24, 10, 11, 12, 13, 14];
+        let mut state = CafeState::new();
+        state.gacha_anim_frame = 0; // = anticipation phase
+        terminal
+            .draw(|f| render_gacha_result(&state, f, f.area(), &cs, &card_ids))
+            .unwrap();
+        // anticipation 中は scroll=0 が強制されること
+        assert_eq!(
+            state.gacha_result_scroll.get(),
+            0,
+            "scroll must stay 0 during anticipation so header stays visible"
+        );
+    }
+
+    /// アニメーション中は ▲▼ ボタンを出さない (auto-scroll とユーザー操作の
+    /// 競合を避けるため) が、auto-scroll により最新カードが必ず可視範囲に
+    /// 入る。直近の reveal が見えないという主訴の回帰防止。
+    #[test]
+    fn gacha_result_auto_scrolls_to_latest_during_anim() {
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(32, 10)).unwrap();
+        let card_ids: Vec<u32> = vec![20, 21, 22, 23, 24, 10, 11, 12, 13, 14];
+        let mut state = CafeState::new();
+        // 6 枚目が revealed されたフレーム — 確実に overflow する条件
+        state.gacha_anim_frame = gacha::GACHA_ANIM_ANTICIPATION_FRAMES + 6;
+
+        terminal
+            .draw(|f| render_gacha_result(&state, f, f.area(), &cs, &card_ids))
+            .unwrap();
+        // auto-scroll が走ったので scroll は 0 より大きい (最新カードが下に
+        // 押し出されている時、スクロールが進んで最新が可視範囲に入る)
+        let scroll = state.gacha_result_scroll.get();
+        assert!(
+            scroll > 0,
+            "auto-scroll must advance during anim when content overflows (got scroll={scroll})"
+        );
+
+        // アニメ中は ▲▼ ボタンは出さない (auto-scroll 専属)
+        let cs = cs.borrow();
+        let mut has_arrow = false;
+        for y in 0..10 {
+            for x in 0..32 {
+                let id = cs.hit_test(x, y);
+                if id == Some(GACHA_RESULT_SCROLL_UP) || id == Some(GACHA_RESULT_SCROLL_DOWN) {
+                    has_arrow = true;
+                }
+            }
+        }
+        assert!(
+            !has_arrow,
+            "scroll arrows should be hidden during reveal anim"
+        );
     }
 
     /// narrow 10連 — 1 行/カード圧縮で 32x24 buffer (mobile portrait の

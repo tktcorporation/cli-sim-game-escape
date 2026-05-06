@@ -1,13 +1,13 @@
 //! 深淵潜行 (Abyss Idle) — 自動戦闘でフロアを潜っていく放置型ローグ。
 //!
 //! コアループ:
-//!   1. 勇者が現フロアの敵と自動戦闘
+//!   1. 勇者が現フロアの敵と自動戦闘 (装着中の装備が英雄ステを決める)
 //!   2. 雑魚 8 体を倒すとボス出現 → 撃破で次フロアへ
-//!   3. gold で永続強化、魂で死亡しても残るバフを購入
-//!   4. 死亡すると B1F に戻されるが、強化はそのまま残る
+//!   3. gold で **装備購入** (lane の前装備が prereq) と **装着中装備の強化**
+//!   4. 死亡すると B1F に戻されるが、装備・強化レベル・魂は永続
 //!
-//! 戦略性: 自動潜行 ON で深く潜るほどリスクとリターンが増す。
-//! OFF にすれば現フロアで安定して周回し gold を稼げる。
+//! 戦略性: 「次の lane 装備を買う」「いま装着中の装備を強化する」「他の lane に
+//! 投資する」のジレンマで gold を割り振っていく。
 
 pub mod actions;
 pub mod config;
@@ -26,14 +26,11 @@ use std::rc::Rc;
 
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
-// tachyonfx::Duration は wasm feature 有効時に独自型 (milliseconds: u32)。
-// `wasm` と `std-duration` は排他なので std::time::Duration ではなくこちらを使う。
 use tachyonfx::Duration;
 
 use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
-/// performance.now() の薄いラッパ。失敗時 (headless 等) は None を返す。
 fn now_ms() -> Option<f64> {
     web_sys::window().and_then(|w| w.performance()).map(|p| p.now())
 }
@@ -41,52 +38,38 @@ fn now_ms() -> Option<f64> {
 use actions::*;
 use effects::AbyssEffects;
 use policy::PlayerAction;
-use state::{AbyssState, EquipmentId, SoulPerk, Tab, TabGroup, UpgradeKind, EQUIPMENT_COUNT};
+use state::{AbyssState, EquipmentId, EquipmentLane, SoulPerk, Tab, TabGroup, EQUIPMENT_COUNT};
 
 pub struct AbyssGame {
     pub state: AbyssState,
-    /// 演出マネージャ。render 内で効果を push し、process_effects で適用する。
-    /// `Game::render(&self, ...)` が immutable なので RefCell 必須。
     effects: RefCell<AbyssEffects>,
-    /// 前フレームの state スナップショット (差分検知用)。
-    /// Copy 可能なフィールドだけ保持する軽量スナップショット。
     prev: Cell<PrevSnapshot>,
-    /// 前回 render 時の wall-clock (ms)。effect の elapsed 計算に使う。
     last_render_ms: Cell<f64>,
-    /// 定期オートセーブまでの残り tick 数 (イベントセーブ発火時にもリセットされる)。
     save_countdown: u32,
 }
 
 /// この PlayerAction を適用したらセーブを発火させるか。
-/// SetTab / Scroll は純粋な UI 状態なので除外し、書き込みノイズを抑える。
 fn is_save_worthy(action: PlayerAction) -> bool {
     matches!(
         action,
-        PlayerAction::BuyUpgrade(_)
+        PlayerAction::BuyEquipment(_)
+            | PlayerAction::EquipItem(_)
+            | PlayerAction::EnhanceEquipment(_)
             | PlayerAction::BuySoulPerk(_)
-            | PlayerAction::BuyEquipment(_)
             | PlayerAction::GachaPull(_)
             | PlayerAction::Retreat
             | PlayerAction::ToggleAutoDescend
     )
 }
 
-/// effect トリガ判定用の軽量 state スナップショット。Copy なフィールドだけ。
-///
-/// 「rising edge を検知したい」フィールドはここに入れる。フィールド型は state 側と
-/// 完全一致させる必要はなく、判定に必要な最小限 (例: bool, u32) で OK。
 #[derive(Clone, Copy, Default)]
 struct PrevSnapshot {
     floor: u32,
     enemy_hurt_flash: u32,
     hero_hurt_flash: u32,
     enemy_is_boss: bool,
-    /// last_enemy_damage の (amount, is_crit) 部分だけ抜いた指紋。
-    /// life_ticks は毎 tick 減るので含めない (含めると毎フレーム edge が立ってしまう)。
     last_enemy_dmg: Option<(u64, bool)>,
-    /// gacha の累計引き回数。増えた瞬間に「新規ガチャが回った」と判定する。
     gacha_total_pulls: u64,
-    /// 解放済み装備数 (新装備が増えた瞬間に演出をトリガ)。
     owned_equipment_count: u32,
 }
 
@@ -110,8 +93,6 @@ impl AbyssGame {
         }
     }
 
-    /// 現在 state から PrevSnapshot を作る。new() と detect_transitions の末尾の
-    /// 両方で使う共通ヘルパ。新フィールドを足したらここにも追加するだけで済む。
     fn snapshot(s: &AbyssState) -> PrevSnapshot {
         PrevSnapshot {
             floor: s.floor,
@@ -124,49 +105,34 @@ impl AbyssGame {
         }
     }
 
-    /// state の差分を見て、対応する効果を effects に push する。
-    /// render の冒頭 (widget 描画前) に呼ぶ。
-    ///
-    /// ### 拡張ポイント
-    /// 新しい演出を増やす時はこのメソッドに `if prev.X != state.X { effects.push_Y() }`
-    /// を追加するだけ。state 自体や logic.rs を触る必要はない。
     fn detect_transitions(&self, area: Rect) {
         let prev = self.prev.get();
         let mut effects = self.effects.borrow_mut();
         let layout = render::compute_layout(area);
         let s = &self.state;
 
-        // ── 階層遷移 (floor の増減で別演出) ──
         if s.floor > prev.floor {
             effects.push_descend(area);
         } else if s.floor < prev.floor {
             effects.push_ascend_or_death(area);
         }
 
-        // ── 敵被弾 (enemy_hurt_flash の rising edge 0 → N) ──
         if prev.enemy_hurt_flash == 0 && s.enemy_hurt_flash > 0 {
             effects.push_enemy_hit(layout.enemy_panel);
         }
 
-        // ── 勇者被弾 (hero_hurt_flash の rising edge) ──
         if prev.hero_hurt_flash == 0 && s.hero_hurt_flash > 0 {
             effects.push_hero_hit(layout.hero_panel);
         }
 
-        // ── ボス出現 (current_enemy.is_boss が false → true) ──
         if !prev.enemy_is_boss && s.current_enemy.is_boss {
             effects.push_boss_appearance(layout.combat);
         }
 
-        // ── ボス撃破 ──
-        // 「is_boss が true → false」だけでは撤退/死亡でも発火してしまう
-        // (retreat / on_hero_died はどちらも非ボス敵を即座に再生成する)。
-        // 真の撃破は floor が +1 されている時だけなので、それで gate する。
         if prev.enemy_is_boss && !s.current_enemy.is_boss && s.floor > prev.floor {
             effects.push_boss_defeated(layout.enemy_panel);
         }
 
-        // ── クリティカル (新しい damage event で is_crit=true) ──
         let cur_dmg = s.last_enemy_damage.map(|(a, _, c)| (a, c));
         if cur_dmg != prev.last_enemy_dmg {
             if let Some((_, true)) = cur_dmg {
@@ -174,8 +140,6 @@ impl AbyssGame {
             }
         }
 
-        // ── ガチャ Legendary (新規ガチャで Legendary が含まれた) ──
-        // by_tier[3] = Legendary 等級の当選数
         if s.total_pulls > prev.gacha_total_pulls {
             if let Some(g) = &s.last_gacha {
                 if g.by_tier[3] > 0 {
@@ -184,17 +148,14 @@ impl AbyssGame {
             }
         }
 
-        // ── 装備解放 (所持数が増えた瞬間、タブが Shop なら body 内で演出) ──
         let cur_owned = s.owned_equipment.iter().filter(|b| **b).count() as u32;
         if cur_owned > prev.owned_equipment_count {
             effects.push_equipment_unlock(layout.body);
         }
 
-        // 次の snapshot に更新
         self.prev.set(Self::snapshot(s));
     }
 
-    /// 前回 render からの経過時間を計算する。初回は 0。
     fn compute_elapsed(&self) -> Duration {
         let now = now_ms().unwrap_or(0.0);
         let prev = self.last_render_ms.get();
@@ -202,9 +163,6 @@ impl AbyssGame {
         if prev == 0.0 {
             Duration::ZERO
         } else {
-            // tab backgrounded 等で巨大な値になった場合は 100ms に clamp。
-            // NaN ガード: now / prev が NaN だと比較・clamp が NaN を返し、
-            // `as u32` で 0 → effect が永久停止するので明示的に弾く。
             let delta_ms = (now - prev).clamp(0.0, 100.0);
             if !delta_ms.is_finite() {
                 return Duration::ZERO;
@@ -213,12 +171,9 @@ impl AbyssGame {
         }
     }
 
-    /// クリック ID を `PlayerAction` に変換する。シミュレータ Policy も同じ
-    /// `PlayerAction` を返すので、本体・sim どちらも `logic::apply_action`
-    /// 1 本道で処理される (動作の乖離はここで構造的に防ぐ)。
     fn click_to_action(&self, action_id: u16) -> Option<PlayerAction> {
         match action_id {
-            // ── サブタブ直接切替 (グループ内サブタブバー由来) ──
+            // ── サブタブ直接切替 ──
             TAB_UPGRADES => Some(PlayerAction::SetTab(Tab::Upgrades)),
             TAB_ROADMAP => Some(PlayerAction::SetTab(Tab::Roadmap)),
             TAB_STATS => Some(PlayerAction::SetTab(Tab::Stats)),
@@ -226,9 +181,7 @@ impl AbyssGame {
             TAB_SETTINGS => Some(PlayerAction::SetTab(Tab::Settings)),
             TAB_SHOP => Some(PlayerAction::SetTab(Tab::Shop)),
             TAB_SOULS => Some(PlayerAction::SetTab(Tab::Souls)),
-            // ── トップグループ切替 (メインメニュー由来): default_tab に飛ぶ ──
-            // ただし「同じグループ内に既に居る」場合はサブタブを保持する
-            // (例: 強化サブタブを開いた状態で [育成] を再タップしても強化のまま)。
+            // ── トップグループ切替 ──
             TAB_GROUP_GROWTH => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Growth))),
             TAB_GROUP_INFO => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Info))),
             TAB_GROUP_GACHA => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Gacha))),
@@ -239,10 +192,6 @@ impl AbyssGame {
             GACHA_PULL_10 => Some(PlayerAction::GachaPull(10)),
             SCROLL_UP => Some(PlayerAction::ScrollUp),
             SCROLL_DOWN => Some(PlayerAction::ScrollDown),
-            id if (BUY_UPGRADE_BASE..BUY_UPGRADE_BASE + 7).contains(&id) => {
-                let idx = (id - BUY_UPGRADE_BASE) as usize;
-                UpgradeKind::from_index(idx).map(PlayerAction::BuyUpgrade)
-            }
             id if (BUY_SOUL_PERK_BASE..BUY_SOUL_PERK_BASE + 4).contains(&id) => {
                 let idx = (id - BUY_SOUL_PERK_BASE) as usize;
                 SoulPerk::from_index(idx).map(PlayerAction::BuySoulPerk)
@@ -253,13 +202,22 @@ impl AbyssGame {
                 let idx = (id - BUY_EQUIPMENT_BASE) as usize;
                 EquipmentId::from_index(idx).map(PlayerAction::BuyEquipment)
             }
+            id if (EQUIP_ITEM_BASE..EQUIP_ITEM_BASE + EQUIPMENT_COUNT as u16)
+                .contains(&id) =>
+            {
+                let idx = (id - EQUIP_ITEM_BASE) as usize;
+                EquipmentId::from_index(idx).map(PlayerAction::EquipItem)
+            }
+            id if (ENHANCE_EQUIPMENT_BASE..ENHANCE_EQUIPMENT_BASE + EQUIPMENT_COUNT as u16)
+                .contains(&id) =>
+            {
+                let idx = (id - ENHANCE_EQUIPMENT_BASE) as usize;
+                EquipmentId::from_index(idx).map(PlayerAction::EnhanceEquipment)
+            }
             _ => None,
         }
     }
 
-    /// グループタブをタップした時に飛ぶ Tab を返す:
-    /// 現在タブが既に同グループ内なら現状維持 (サブタブ位置を破壊しない)、
-    /// 別グループからの遷移なら group の `default_tab()`。
     fn preserve_or_default(&self, group: TabGroup) -> Tab {
         if TabGroup::from_tab(self.state.tab) == group {
             self.state.tab
@@ -268,9 +226,6 @@ impl AbyssGame {
         }
     }
 
-    /// localStorage に書き込み、定期セーブのカウントダウンをリセットする。
-    /// イベントセーブと時間セーブを同じ経路に通すことで、両方が短時間に
-    /// 重複発火するのを防ぐ。
     fn flush_save(&mut self) {
         #[cfg(target_arch = "wasm32")]
         save::save_game(&self.state);
@@ -279,30 +234,30 @@ impl AbyssGame {
 
     fn key_to_action(&self, ch: char) -> Option<PlayerAction> {
         match ch {
-            // タブグループ切替 (メインメニュー 4 つに対応)。
-            // 旧 5 タブ時代の `{`|`}`~`\` はそれぞれ単独タブを直接指していたが、
-            // グループ階層化後は最初の 4 個 (`{`|`}`~) を 4 グループにマップする。
-            // `\` (旧 Settings) は廃止し、設定は `~` 隣の touch regex 範囲外
-            // に追い出さず `~` 統合先を持たないため、touch では menu→group click のみ。
+            // タブグループ切替。
             '{' => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Growth))),
             '|' => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Info))),
             '}' => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Gacha))),
             '~' => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Settings))),
             'a' | 'A' => Some(PlayerAction::ToggleAutoDescend),
             'p' | 'P' => Some(PlayerAction::Retreat),
-            // 強化サブタブ: 1-7 で各強化購入。
-            '1'..='7' if matches!(self.state.tab, Tab::Upgrades) => {
-                let idx = (ch as u8 - b'1') as usize;
-                UpgradeKind::from_index(idx).map(PlayerAction::BuyUpgrade)
+            // 強化サブタブ: 1=武器 / 2=防具 / 3=装飾 lane の装着中装備を強化。
+            // 「装着中の 3 装備しか強化できない」設計なので、数字キーは lane 番号に対応する。
+            '1'..='3' if matches!(self.state.tab, Tab::Upgrades) => {
+                let lane = match ch {
+                    '1' => EquipmentLane::Weapon,
+                    '2' => EquipmentLane::Armor,
+                    '3' => EquipmentLane::Accessory,
+                    _ => unreachable!(),
+                };
+                self.state.equipped_at(lane).map(PlayerAction::EnhanceEquipment)
             }
-            // 魂サブタブ: 1-4 で各魂パーク購入 (強化サブタブの慣習を踏襲)。
+            // 魂サブタブ: 1-4 で各魂パーク購入。
             '1'..='4' if matches!(self.state.tab, Tab::Souls) => {
                 let idx = (ch as u8 - b'1') as usize;
                 SoulPerk::from_index(idx).map(PlayerAction::BuySoulPerk)
             }
-            // 旧 `Q/W/E/R` (Tab::Upgrades 内で魂購入) は魂サブタブ独立後も互換維持として
-            // **魂サブタブ内でのみ** 反応させる。小文字 `q` は main.rs の back-to-menu
-            // と衝突するため大文字のみ受ける (Codex review #78 参照)。
+            // 旧 Q/W/E/R 互換 (魂サブタブ内のみ)。
             'Q' | 'W' | 'E' | 'R' if matches!(self.state.tab, Tab::Souls) => {
                 let idx = match ch {
                     'Q' => 0,
@@ -315,9 +270,6 @@ impl AbyssGame {
             }
             's' | 'S' if matches!(self.state.tab, Tab::Gacha) => Some(PlayerAction::GachaPull(1)),
             'x' | 'X' if matches!(self.state.tab, Tab::Gacha) => Some(PlayerAction::GachaPull(10)),
-            // タブ本体スクロール。タブ非依存で動作 (どのタブでも上下できる)。
-            // main.rs:362-366 で矢印キー → h/j/k/l に既に map されているため
-            // ↑/↓ も自動的に動く。h/l は abyss では未使用なので競合なし。
             'j' | 'J' => Some(PlayerAction::ScrollDown),
             'k' | 'K' => Some(PlayerAction::ScrollUp),
             _ => None,
@@ -352,10 +304,7 @@ impl Game for AbyssGame {
         let prev_deaths = self.state.deaths;
         logic::tick(&mut self.state, delta_ticks);
 
-        // tick 内発生の進捗節目: 階層クリア (floor++) と死亡 (deaths++)。
         let event_save = self.state.floor != prev_floor || self.state.deaths != prev_deaths;
-        // 保険の定期セーブ: ミルストーンが起きない長時間プレイ
-        // (auto_descend OFF で同フロア周回 etc) でも進捗を落とさないため。
         self.save_countdown = self.save_countdown.saturating_sub(delta_ticks);
         let timer_save = self.save_countdown == 0;
 
@@ -365,13 +314,8 @@ impl Game for AbyssGame {
     }
 
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
-        // 1. state 差分を見て新規 effect を push (area が必要なので render 内で行う)
         self.detect_transitions(area);
-
-        // 2. 通常の widget 描画
         render::render(&self.state, f, area, click_state);
-
-        // 3. 描画後の Buffer に effect を post-process として適用
         let elapsed = self.compute_elapsed();
         self.effects
             .borrow_mut()
@@ -384,7 +328,6 @@ mod tests {
     use super::*;
     use crate::input::ClickScope;
 
-    /// Build a `Click` event scoped to this game.
     fn click(id: u16) -> InputEvent {
         InputEvent::Click(ClickScope::Game(GameChoice::Abyss), id)
     }
@@ -397,7 +340,6 @@ mod tests {
 
     #[test]
     fn click_subtab_switch() {
-        // サブタブ ID 直接クリック (グループ内サブタブバー由来)。
         let mut g = AbyssGame::new();
         g.handle_input(&click(TAB_ROADMAP));
         assert_eq!(g.state.tab, Tab::Roadmap);
@@ -411,51 +353,70 @@ mod tests {
 
     #[test]
     fn click_top_group_goes_to_default_tab() {
-        // 別グループから [育成] グループタブをクリック → 育成 default = Upgrades
         let mut g = AbyssGame::new();
         g.state.tab = Tab::Roadmap;
         g.handle_input(&click(TAB_GROUP_GROWTH));
         assert_eq!(g.state.tab, Tab::Upgrades);
-        // [情報] グループ → Roadmap が default
         g.handle_input(&click(TAB_GROUP_INFO));
         assert_eq!(g.state.tab, Tab::Roadmap);
     }
 
     #[test]
     fn click_top_group_preserves_subtab_when_already_inside() {
-        // 既に育成グループ内 (Tab::Souls) で [育成] を再タップ → サブタブ位置を保持
         let mut g = AbyssGame::new();
         g.state.tab = Tab::Souls;
         g.handle_input(&click(TAB_GROUP_GROWTH));
+        assert_eq!(g.state.tab, Tab::Souls);
+    }
+
+    /// 装備購入クリックで gold 消費 + 自動装着。
+    #[test]
+    fn click_buy_equipment_purchases_and_equips() {
+        let mut g = AbyssGame::new();
+        g.state.gold = 1_000_000;
+        let click_id = BUY_EQUIPMENT_BASE + EquipmentId::BronzeSword.index() as u16;
+        g.handle_input(&click(click_id));
+        assert!(g.state.owned_equipment[EquipmentId::BronzeSword.index()]);
         assert_eq!(
-            g.state.tab,
-            Tab::Souls,
-            "同グループ内ならサブタブを破壊しない"
+            g.state.equipped[EquipmentLane::Weapon.index()],
+            Some(EquipmentId::BronzeSword)
         );
     }
 
+    /// 強化クリックで Lv が上がる。
     #[test]
-    fn key_buy_upgrade_only_in_upgrades_tab() {
+    fn click_enhance_equipment_raises_level() {
         let mut g = AbyssGame::new();
-        g.state.gold = 1000;
-        // タブ Roadmap なら反応しない
-        g.state.tab = Tab::Roadmap;
-        g.handle_input(&InputEvent::Key('1'));
-        assert_eq!(g.state.upgrades[UpgradeKind::Sword.index()], 0);
-        // タブ Upgrades なら買える
-        g.state.tab = Tab::Upgrades;
-        g.handle_input(&InputEvent::Key('1'));
-        assert_eq!(g.state.upgrades[UpgradeKind::Sword.index()], 1);
+        g.state.gold = 1_000_000;
+        // 銅剣を買って装着。
+        g.handle_input(&click(BUY_EQUIPMENT_BASE + EquipmentId::BronzeSword.index() as u16));
+        let click_id = ENHANCE_EQUIPMENT_BASE + EquipmentId::BronzeSword.index() as u16;
+        g.handle_input(&click(click_id));
+        assert_eq!(g.state.equipment_levels[EquipmentId::BronzeSword.index()], 1);
     }
 
+    /// 強化サブタブで '1' は装着中の武器を強化する。
     #[test]
-    fn click_buy_upgrade_works_regardless_of_tab() {
+    fn key_1_in_upgrades_tab_enhances_equipped_weapon() {
         let mut g = AbyssGame::new();
-        g.state.gold = 1000;
-        // タブが Roadmap でもクリックなら反応
-        g.state.tab = Tab::Roadmap;
-        g.handle_input(&click(BUY_UPGRADE_BASE));
-        assert_eq!(g.state.upgrades[UpgradeKind::Sword.index()], 1);
+        g.state.gold = 1_000_000;
+        // 銅剣を買って装着 (Weapon lane に入る)。
+        g.handle_input(&click(BUY_EQUIPMENT_BASE + EquipmentId::BronzeSword.index() as u16));
+        // Upgrades タブで '1' → Weapon の装着中装備 (BronzeSword) を強化。
+        g.state.tab = Tab::Upgrades;
+        g.handle_input(&InputEvent::Key('1'));
+        assert_eq!(g.state.equipment_levels[EquipmentId::BronzeSword.index()], 1);
+    }
+
+    /// 装着していない lane で数字キーを押しても何も起きない (no-op)。
+    #[test]
+    fn key_1_no_op_when_lane_empty() {
+        let mut g = AbyssGame::new();
+        g.state.gold = 1_000_000;
+        g.state.tab = Tab::Upgrades;
+        let consumed = g.handle_input(&InputEvent::Key('1'));
+        // Weapon lane 装着なしなので Action 生成 → None で消費されない。
+        assert!(!consumed);
     }
 
     #[test]
@@ -468,15 +429,11 @@ mod tests {
 
     #[test]
     fn buy_soul_perk_via_key_on_souls_tab() {
-        // 魂強化購入は Tab::Souls (魂サブタブ) 内でのみ反応する。
-        // 大文字 Q/W/E/R は旧 Tab::Upgrades 統合時代の互換キーとして残してあり、
-        // 新規ユーザー向けには 1-4 のショートカットも併設している。
         let mut g = AbyssGame::new();
         g.state.tab = Tab::Souls;
         g.state.souls = 100;
         g.handle_input(&InputEvent::Key('Q'));
         assert_eq!(g.state.soul_perks[SoulPerk::Might.index()], 1);
-        // 1-4 ショートカット (強化サブタブの 1-7 と慣習統一)。
         g.handle_input(&InputEvent::Key('2'));
         assert_eq!(g.state.soul_perks[SoulPerk::Endurance.index()], 1);
     }
@@ -488,30 +445,18 @@ mod tests {
         g.state.tab = Tab::Upgrades;
         g.state.souls = 999;
         let consumed = g.handle_input(&InputEvent::Key('Q'));
-        assert!(!consumed, "Q on Upgrades tab should not trigger soul purchase");
+        assert!(!consumed);
         assert_eq!(g.state.soul_perks[SoulPerk::Might.index()], 0);
     }
 
-    /// 小文字 `q` は main.rs の back-to-menu キー (Esc 同等)。Upgrades タブ
-    /// 統合 (#78) の前は 'q' を魂購入に bind していたが、デフォルトタブが
-    /// Upgrades になった現在は q をゲーム側で消費すると最も滞在時間の長い
-    /// 画面でメニュー戻りが効かなくなる。Codex P1 レビューで指摘されたバグ
-    /// の回帰防止: **`q` は handle_input() で消費されない (= false が返る)**。
+    /// 小文字 `q` は handle_input で消費されない (= main.rs のメニュー戻りキーが効く)。
     #[test]
     fn lowercase_q_does_not_consume_input_on_upgrades_tab() {
         let mut g = AbyssGame::new();
         g.state.tab = Tab::Upgrades;
-        g.state.souls = 999_999; // 購入余地あっても q を bind してはいけない。
+        g.state.souls = 999_999;
         let consumed = g.handle_input(&InputEvent::Key('q'));
-        assert!(
-            !consumed,
-            "小文字 'q' を消費するとメニュー戻りが効かなくなる"
-        );
-        assert_eq!(
-            g.state.soul_perks[SoulPerk::Might.index()],
-            0,
-            "小文字 'q' で誤って魂パークが買われてはいけない"
-        );
+        assert!(!consumed);
     }
 
     #[test]
@@ -532,33 +477,33 @@ mod tests {
     #[test]
     fn timer_save_fires_after_autosave_interval() {
         let mut g = AbyssGame::new();
-        // 初期状態では満タン。
         assert_eq!(g.save_countdown, save::AUTOSAVE_INTERVAL);
-        // インターバル分まで進めると 0 に到達 → tick 内で flush されてリセット。
         g.tick(save::AUTOSAVE_INTERVAL);
         assert_eq!(g.save_countdown, save::AUTOSAVE_INTERVAL);
     }
 
+    /// 装備購入はイベントセーブ発火 → タイマー満タンに戻る。
     #[test]
     fn event_save_resets_timer_to_avoid_double_write() {
         let mut g = AbyssGame::new();
-        g.state.gold = 10_000;
-        // タイマーを少しだけ進めた状態にする (中途半端な残り時間)。
+        g.state.gold = 1_000_000;
         g.tick(100);
         assert_eq!(g.save_countdown, save::AUTOSAVE_INTERVAL - 100);
-        // upgrade 購入 = イベントセーブ発火 → タイマーは満タンに戻るべき。
-        g.handle_input(&InputEvent::Key('1')); // タブが Upgrades なら Sword を購入
+        g.handle_input(&click(BUY_EQUIPMENT_BASE + EquipmentId::BronzeSword.index() as u16));
         assert_eq!(g.save_countdown, save::AUTOSAVE_INTERVAL);
     }
 
     #[test]
     fn save_worthy_actions_classified_correctly() {
-        assert!(is_save_worthy(PlayerAction::BuyUpgrade(UpgradeKind::Sword)));
+        assert!(is_save_worthy(PlayerAction::BuyEquipment(EquipmentId::BronzeSword)));
+        assert!(is_save_worthy(PlayerAction::EquipItem(EquipmentId::BronzeSword)));
+        assert!(is_save_worthy(PlayerAction::EnhanceEquipment(EquipmentId::BronzeSword)));
         assert!(is_save_worthy(PlayerAction::BuySoulPerk(SoulPerk::Might)));
         assert!(is_save_worthy(PlayerAction::GachaPull(1)));
         assert!(is_save_worthy(PlayerAction::Retreat));
         assert!(is_save_worthy(PlayerAction::ToggleAutoDescend));
-        // SetTab は UI 状態のみ変化させるためセーブを発火しない。
+        // SetTab はセーブ非発火 (UI のみ)。
         assert!(!is_save_worthy(PlayerAction::SetTab(Tab::Roadmap)));
+        assert!(!is_save_worthy(PlayerAction::ScrollUp));
     }
 }

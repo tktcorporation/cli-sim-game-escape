@@ -33,11 +33,21 @@ pub const RESULT_OK: u16 = 150;
 pub const CARD_DAILY_DRAW: u16 = 160;
 pub const CARD_GACHA_SINGLE: u16 = 161;
 pub const CARD_GACHA_TEN: u16 = 162;
-pub const CARD_EQUIP_BASE: u16 = 170; // +0..19
+/// Cards タブのスクロール (▲) — モバイルでガチャ画面が縦に溢れる時の操作。
+pub const CARD_SCROLL_UP: u16 = 163;
+pub const CARD_SCROLL_DOWN: u16 = 164;
+/// 表示するカード行の最大数。所持枚数がこれを超えても最新 N 枚のみ。
+/// `CARD_EQUIP_BASE..CARD_EQUIP_BASE + CARDS_VISIBLE` の ID レンジに対応。
+/// 増やす時は CARD_BACK (199) との衝突を避けて action ID を再配分すること。
+pub const CARDS_VISIBLE: usize = 15;
+pub const CARD_EQUIP_BASE: u16 = 170; // +0..(CARDS_VISIBLE-1)
 pub const CARD_BACK: u16 = 199;
 
 // ── Gacha result ──────────────────────────────────────────
 pub const GACHA_RESULT_OK: u16 = 200;
+/// 10連の結果がモバイルの縦に収まらない時、▲▼ で上下スクロール。
+pub const GACHA_RESULT_SCROLL_UP: u16 = 201;
+pub const GACHA_RESULT_SCROLL_DOWN: u16 = 202;
 
 // ── Character detail ──────────────────────────────────────
 pub const DETAIL_EPISODE_BASE: u16 = 210; // +0..9

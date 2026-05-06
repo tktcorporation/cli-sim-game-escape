@@ -28,9 +28,10 @@ pub const MENU_SELECT_RPG: u16 = 4;
 pub const MENU_SELECT_CAFE: u16 = 5;
 pub const MENU_SELECT_ABYSS: u16 = 6;
 pub const MENU_SELECT_GODFIELD: u16 = 7;
-pub const MENU_SELECT_SETTINGS: u16 = 8;
-pub const MENU_SCROLL_UP: u16 = 9;
-pub const MENU_SCROLL_DOWN: u16 = 10;
+pub const MENU_SELECT_METROPOLIS: u16 = 8;
+pub const MENU_SELECT_SETTINGS: u16 = 9;
+pub const MENU_SCROLL_UP: u16 = 10;
+pub const MENU_SCROLL_DOWN: u16 = 11;
 pub const BACK_TO_MENU: u16 = 65535;
 
 // ── Settings action IDs ─────────────────────────────────────────
@@ -253,6 +254,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 InputEvent::Key('7') | InputEvent::Click(_, MENU_SELECT_GODFIELD) => {
                     Some(GameChoice::Godfield)
                 }
+                InputEvent::Key('8') | InputEvent::Click(_, MENU_SELECT_METROPOLIS) => {
+                    Some(GameChoice::Metropolis)
+                }
                 _ => None,
             };
             if let Some(choice) = choice {
@@ -260,7 +264,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 *state = AppState::Playing { game };
             } else if matches!(
                 event,
-                InputEvent::Key('8') | InputEvent::Click(_, MENU_SELECT_SETTINGS)
+                InputEvent::Key('9') | InputEvent::Click(_, MENU_SELECT_SETTINGS)
             ) {
                 *state = AppState::Settings {
                     confirm_reset: None,
@@ -598,6 +602,21 @@ fn render_menu(
         "    4人で戦うターン制カードバトルロイヤル",
         Style::default().fg(Color::DarkGray),
     )), MENU_SELECT_GODFIELD);
+
+    cl.push(Line::from(""));
+    cl.push_clickable(Line::from(vec![
+        Span::styled(
+            " ▶ ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("Idle Metropolis", Style::default().fg(Color::White)),
+    ]), MENU_SELECT_METROPOLIS);
+    cl.push_clickable(Line::from(Span::styled(
+        "    AIが街を建てるのを眺める放置シティビルダー",
+        Style::default().fg(Color::DarkGray),
+    )), MENU_SELECT_METROPOLIS);
 
     cl.push(Line::from(""));
     cl.push_clickable(Line::from(vec![

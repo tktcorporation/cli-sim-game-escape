@@ -5,26 +5,30 @@
 //! 同じ `logic::apply_action` を通す。これにより本体・sim の動作は構造的に
 //! 一致する (DI のキモ)。
 
-use super::state::{EquipmentId, SoulPerk, Tab, UpgradeKind};
+use super::state::{EquipmentId, SoulPerk, Tab};
 
 /// プレイヤー (または AI Policy) が起こせる行動。tick とは独立して適用される。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayerAction {
-    BuyUpgrade(UpgradeKind),
-    BuySoulPerk(SoulPerk),
-    /// 装備を 1 個解放する (gold + 強化 Lv + 前装備の条件を全部満たす場合のみ成功)。
-    /// 解放したら永続装備、付け替え無し。
+    /// 装備を 1 個購入する (gold + 前装備の prerequisite を満たすときのみ成功)。
+    /// 購入直後は **そのまま自動装着** する (空スロットなら即座に、埋まっていれば置換)。
+    /// 購入だけしても装着しない idle UX を避けるための明示的な「購入で装着」。
     BuyEquipment(EquipmentId),
+    /// 既に所持している装備を装着する (lane の現スロットを置換)。
+    /// 装着切替は無料、いつでも変えられる。
+    EquipItem(EquipmentId),
+    /// 指定装備を 1 段階強化する (gold で支払う)。所持していなくても良い ─
+    /// が、**所持していない装備を強化する意味は薄い** ので UI 側でフィルタする。
+    EnhanceEquipment(EquipmentId),
+    /// 魂強化を 1 段階購入する。
+    BuySoulPerk(SoulPerk),
     ToggleAutoDescend,
     Retreat,
     SetTab(Tab),
-    /// ガチャを `count` 回引く (鍵が足りなければ引ける分だけ)。
+    /// ガチャを `count` 回引く。
     GachaPull(u32),
-    /// タブ本体を上方向にスクロール。
-    ///
-    /// **UI only**: simulator policy は絶対に生成しない (純粋に表示位置の制御で
-    /// ゲーム進行に影響しないため)。ベンチマーク的にも UI action はゼロにする。
+    /// タブ本体を上方向にスクロール。**UI only**。
     ScrollUp,
-    /// タブ本体を下方向にスクロール。同上、UI only。
+    /// タブ本体を下方向にスクロール。**UI only**。
     ScrollDown,
 }
