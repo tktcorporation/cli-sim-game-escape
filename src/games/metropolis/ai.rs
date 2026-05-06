@@ -271,28 +271,32 @@ fn tier3_road_planner(city: &mut City) -> AiAction {
 /// AND a house within Manhattan-3).  This is the difference that lets
 /// Tier 4 reliably outproduce Tier 3 even with the same building counts.
 ///
-/// Per-strategy roll weights (House% / Road% / Workshop% / Shop%):
-///   - Growth   →  70 / 20 / 0  / 10  (population first; Workshop に興味なし)
-///   - Tech     →  35 / 50 / 0  / 15  (road network first; Workshop 不採用)
-///   - Income   →  30 / 22 / 13 / 35  (cash first, lots of shops + workshops)
+/// 重み・速度ボーナス・収入ペナルティはすべて `logic::strategy_info` に
+/// 集約されている (Single Source of Truth)。ここではそのプロファイルを
+/// 読んで weighted roll するだけ。
 ///
 /// **Workshop は Income 戦略の独自要素** — Tier 4 の Income プレイヤーが
 /// Shop 一択ではなく「Workshop で Apartment 化を促し、その上に Shop を載せる」
-/// 経済チェーン構築を試みる、というキャラ付け。Growth/Tech は旧来の重みを
-/// 維持して戦略特化を保つ (simulator::tier4_strategies_specialize の不変条件)。
+/// 経済チェーン構築を試みる、というキャラ付け。Growth/Tech は Workshop を
+/// 取らずシンプルさを維持 (simulator::tier4_strategies_specialize の不変条件)。
 fn tier4_demand_aware(city: &mut City) -> AiAction {
-    let (house_pct, road_pct, workshop_pct) = match city.strategy {
-        Strategy::Growth => (70, 20, 0),
-        Strategy::Tech => (35, 50, 0),
-        Strategy::Income => (30, 22, 13),
-    };
+    let info = super::logic::strategy_info(city.strategy);
+    // 重みの合計は 100 を厳守 (テストで保証)。
+    debug_assert_eq!(
+        info.house_pct + info.road_pct + info.workshop_pct + info.shop_pct,
+        100,
+        "strategy weights must sum to 100"
+    );
 
     let roll = (city.next_rand() % 100) as u32;
-    let kind = if roll < house_pct {
+    let h = info.house_pct;
+    let hr = h + info.road_pct;
+    let hrw = hr + info.workshop_pct;
+    let kind = if roll < h {
         Building::House
-    } else if roll < house_pct + road_pct {
+    } else if roll < hr {
         Building::Road
-    } else if roll < house_pct + road_pct + workshop_pct {
+    } else if roll < hrw {
         Building::Workshop
     } else {
         Building::Shop

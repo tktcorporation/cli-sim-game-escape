@@ -1154,7 +1154,101 @@ fn render_status(state: &City, f: &mut Frame, area: Rect) {
         ),
     ]));
 
+    // 区切り + Strategy 内訳パネル。
+    // 「マネージャーが今 CPU に何をやらせているか」を可視化することで、
+    // ボタンを切り替えた時の効果が即座に見える。
+    lines.push(Line::from(""));
+    lines.extend(strategy_status_lines(state));
+
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// 現在の Strategy の内訳を表示する 4 行ブロック。
+///   行1: ラベル + 速度/収入修正
+///   行2: 建物別の roll 確率
+///   行3: 建物別の確率を 1 行のバーで描画 (H██ R▓▓ W░ S██)
+///   行4: タグライン (1 行説明)
+fn strategy_status_lines(state: &City) -> Vec<Line<'static>> {
+    let info = logic::strategy_info(state.strategy);
+    let mut out: Vec<Line> = Vec::new();
+
+    // 行1: 戦略ラベル + 副作用。
+    let mut head = vec![
+        Span::styled("STRAT ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            info.label.to_string(),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+    ];
+    if info.speed_bonus_pct != 0 {
+        head.push(Span::styled(
+            format!("  建設{:+}%", info.speed_bonus_pct),
+            Style::default().fg(Color::LightGreen),
+        ));
+    }
+    if info.income_penalty_pct != 0 {
+        head.push(Span::styled(
+            format!("  収入{:+}%", info.income_penalty_pct),
+            Style::default().fg(Color::LightRed),
+        ));
+    }
+    out.push(Line::from(head));
+
+    // 行2: 建物別重みの数値。
+    out.push(Line::from(vec![
+        Span::styled(
+            format!(" 家{:>2}% ", info.house_pct),
+            Style::default().fg(Color::Green),
+        ),
+        Span::styled(
+            format!("道{:>2}% ", info.road_pct),
+            Style::default().fg(Color::Gray),
+        ),
+        Span::styled(
+            format!("工{:>2}% ", info.workshop_pct),
+            Style::default().fg(Color::LightRed),
+        ),
+        Span::styled(
+            format!("店{:>2}%", info.shop_pct),
+            Style::default().fg(Color::Yellow),
+        ),
+    ]));
+
+    // 行3: 重みを横バーで可視化。色付きの ▰ で 100% を 20 セルに展開。
+    out.push(Line::from(strategy_weight_bar(&info)));
+
+    // 行4: 1 行の意図説明 (タグライン)。
+    out.push(Line::from(vec![Span::styled(
+        format!(" {}", info.tagline),
+        Style::default().fg(Color::DarkGray),
+    )]));
+
+    out
+}
+
+/// 建物別重みをカラフルな 1 行バーに変換。合計 20 セル幅。
+/// 各 Strategy の特性が塊として見えるので、切り替え時に即印象が変わる。
+fn strategy_weight_bar(info: &logic::StrategyInfo) -> Vec<Span<'static>> {
+    const BAR_WIDTH: u32 = 20;
+    let segs: [(u32, Color); 4] = [
+        (info.house_pct, Color::Green),
+        (info.road_pct, Color::Gray),
+        (info.workshop_pct, Color::LightRed),
+        (info.shop_pct, Color::Yellow),
+    ];
+    let mut spans: Vec<Span> = vec![Span::raw(" ")];
+    for (pct, color) in segs {
+        // 整数除算: 0% は 0 セル、99% は 19 セル。表示の都合で 1% 以上なら最低 1 セル
+        // 出したいが、合計が 20 を超えないよう四捨五入は避ける。
+        let cells = pct * BAR_WIDTH / 100;
+        if cells > 0 {
+            spans.push(Span::styled(
+                "▰".repeat(cells as usize),
+                Style::default().fg(color),
+            ));
+        }
+    }
+    spans
 }
 
 fn worker_bar_spans(state: &City, _max_width: u16) -> Vec<Span<'static>> {
@@ -1198,14 +1292,18 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
     // タブの外側 Block が既に枠を提供するため、ここでは中身のみ。
     let inner_area = area;
 
+    // 行構成: [GRW][CSH][TEC] の 3 ボタン → 現在選択中のタグライン 1 行 →
+    // 雇用 → AI Upgrade。タグラインを 1 行だけにすることで、Manager パネルの
+    // 縦圧迫を避けつつ「選んだ戦略の意図」が常に画面に出るようにする。
     let rows = Layout::default()
         .direction(LayoutDir::Vertical)
         .constraints([
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(1), // [GRW]
+            Constraint::Length(1), // [CSH]
+            Constraint::Length(1), // [TEC]
+            Constraint::Length(1), // 選択中タグライン
+            Constraint::Length(1), // 雇用
+            Constraint::Length(1), // AI 進化
             Constraint::Min(0),
         ])
         .split(inner_area);
@@ -1240,6 +1338,31 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
         Color::Cyan,
     );
 
+    // 選択中 Strategy のタグライン (1 行)。
+    let info = logic::strategy_info(state.strategy);
+    let mut tag_spans = vec![
+        Span::styled(" → ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            info.tagline.to_string(),
+            Style::default().fg(Color::White),
+        ),
+    ];
+    if info.speed_bonus_pct != 0 || info.income_penalty_pct != 0 {
+        let mut suffix = String::from(" (");
+        if info.speed_bonus_pct != 0 {
+            suffix.push_str(&format!("建設{:+}%", info.speed_bonus_pct));
+        }
+        if info.speed_bonus_pct != 0 && info.income_penalty_pct != 0 {
+            suffix.push('/');
+        }
+        if info.income_penalty_pct != 0 {
+            suffix.push_str(&format!("収入{:+}%", info.income_penalty_pct));
+        }
+        suffix.push(')');
+        tag_spans.push(Span::styled(suffix, Style::default().fg(Color::DarkGray)));
+    }
+    f.render_widget(Paragraph::new(Line::from(tag_spans)), rows[3]);
+
     let hire_cost = logic::hire_worker_cost(state.workers);
     let (hire_label, hire_color) = match hire_cost {
         Some(c) if state.cash >= c => (format!("[W] ▰ 作業員雇用 (${})", c), Color::White),
@@ -1247,7 +1370,7 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
         None => ("[W] ▰ 作業員MAX到達".to_string(), Color::DarkGray),
     };
     let p = Paragraph::new(Span::styled(hire_label, Style::default().fg(hire_color)));
-    Clickable::new(p, ACT_HIRE_WORKER).render(f, rows[3], &mut cs);
+    Clickable::new(p, ACT_HIRE_WORKER).render(f, rows[4], &mut cs);
 
     if let Some(next) = state.ai_tier.next() {
         let color = if state.cash >= next.upgrade_cost() {
@@ -1262,13 +1385,13 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
             next.upgrade_cost()
         );
         let p = Paragraph::new(Span::styled(label, Style::default().fg(color)));
-        Clickable::new(p, ACT_UPGRADE_AI).render(f, rows[4], &mut cs);
+        Clickable::new(p, ACT_UPGRADE_AI).render(f, rows[5], &mut cs);
     } else {
         let p = Paragraph::new(Span::styled(
             "[U] [IV] CPU最大Tier到達",
             Style::default().fg(Color::DarkGray),
         ));
-        f.render_widget(p, rows[4]);
+        f.render_widget(p, rows[5]);
     }
 }
 
@@ -1390,6 +1513,74 @@ mod tests {
                 registered
             );
         }
+    }
+
+    /// Status タブに切り替えると Strategy のタグラインが画面に出る。
+    /// 「マネージャーが今 CPU に何をやらせているか」が UI で読める保証。
+    #[test]
+    fn status_tab_shows_strategy_tagline() {
+        let mut city = City::new();
+        city.panel_tab = PanelTab::Status;
+        city.strategy = Strategy::Tech;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        terminal
+            .draw(|f| {
+                render(&city, f, Rect::new(0, 0, 100, 30), &cs);
+            })
+            .unwrap();
+        // TestBackend は double-width 文字を 2 セルに分割して 2 セル目を
+        // 空白で埋めるため、`concat` 上は "技 術 投 資" のように現れる。
+        // 比較前に空白を全て落として「文字の出現」だけをチェックする。
+        let concat = screen_compact(&terminal);
+        assert!(
+            concat.contains("技術投資"),
+            "Status tab should display the strategy label; compacted screen:\n{}",
+            concat
+        );
+    }
+
+    /// Manager タブには現在選択中 Strategy のタグラインが矢印付きで出る。
+    #[test]
+    fn manager_tab_shows_selected_strategy_tagline() {
+        let mut city = City::new();
+        city.panel_tab = PanelTab::Manager;
+        city.strategy = Strategy::Income;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        terminal
+            .draw(|f| {
+                render(&city, f, Rect::new(0, 0, 100, 30), &cs);
+            })
+            .unwrap();
+        // タグラインの先頭 (「工房と店舗」) が出ていれば OK。
+        // 末尾は wide layout の右パネル (~32 cells) で折れるため。
+        let concat = screen_compact(&terminal);
+        assert!(
+            concat.contains("工房と店舗"),
+            "Manager tab should display the Income tagline beginning; compacted screen:\n{}",
+            concat
+        );
+    }
+
+    /// テスト用: TestBackend のバッファを「空白を抜いた」文字列にして返す。
+    /// ratzilla の TestBackend は double-width 文字を 2 セルに分割し、
+    /// 2 セル目を空白で埋めるため、そのまま concat すると "技 術" になる。
+    /// 検索系 assert では空白を抜いてから比較する。
+    fn screen_compact(
+        terminal: &Terminal<TestBackend>,
+    ) -> String {
+        let buffer = terminal.backend().buffer().clone();
+        let mut s = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let sym = buffer.cell((x, y)).unwrap().symbol();
+                if sym != " " {
+                    s.push_str(sym);
+                }
+            }
+        }
+        s
     }
 
     /// 80 col ターミナル (典型的な PC) では narrow layout が選ばれる。

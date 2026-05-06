@@ -91,15 +91,100 @@ fn drive_ai(city: &mut City) {
     }
 }
 
-/// Tech 戦略時の建設速度ブースト。20% 短縮 → ticks * 4 / 5。
-/// `state.strategy` の唯一の "副作用" であり、副作用の集約点として `logic.rs`
-/// に置く (state/render は読取専用)。
+/// Tech 戦略時の建設速度ブースト。`strategy_info` 経由で取得することで
+/// 「Strategy 副作用の唯一の集約点」を maintain。state/render は読取専用。
 fn build_ticks_for(city: &City, kind: Building) -> u32 {
     let base = kind.build_ticks();
-    if matches!(city.strategy, Strategy::Tech) {
-        (base as u64 * 4).div_ceil(5) as u32 // ceil-div で 0 化を防ぐ
-    } else {
-        base
+    let bonus = strategy_info(city.strategy).speed_bonus_pct;
+    if bonus == 0 {
+        return base;
+    }
+    // bonus = +20 (建設時間 -20%) → factor 80/100。
+    // bonus = -10 (建設時間 +10%) → factor 110/100。
+    let factor_num = (100 - bonus).max(10) as u64; // 下限 10 で安全側
+    (base as u64 * factor_num).div_ceil(100) as u32
+}
+
+// ── Strategy metadata (Single Source of Truth) ─────────────
+//
+// Strategy の意味 (重み・速度ボーナス・収入ペナルティ・説明文・思考動詞) を
+// 1 か所に集約。AI (ai.rs)・状態タブ・マネージャータブ・イベントログ・
+// 建設速度補正 (build_ticks_for) はすべてここを参照する。
+
+/// Strategy の全方位プロファイル。AI の重みも player への説明文も同居。
+#[derive(Clone, Copy, Debug)]
+pub struct StrategyInfo {
+    /// 短いラベル ("成長重視" など)。
+    pub label: &'static str,
+    /// 1 行の意図説明。Manager タブのボタン下にこのまま出す。
+    pub tagline: &'static str,
+    /// AI が建物種別を引く時の重み (合計 100 を厳守)。
+    pub house_pct: u32,
+    pub road_pct: u32,
+    pub workshop_pct: u32,
+    pub shop_pct: u32,
+    /// 建設速度ボーナス (%)。+20 = 建設 20% 短縮、-10 = 10% 延長。
+    pub speed_bonus_pct: i32,
+    /// 収入ペナルティ (%)。-20 = 収入 20% 減、0 = 通常。
+    pub income_penalty_pct: i32,
+}
+
+/// 各戦略のプロファイル。重みは tier4_demand_aware と一致させる
+/// (ai.rs はこの構造体を直接読む)。
+pub fn strategy_info(s: Strategy) -> StrategyInfo {
+    match s {
+        Strategy::Growth => StrategyInfo {
+            label: "成長重視",
+            tagline: "人口を伸ばし街のティア進化を急ぐ",
+            house_pct: 70,
+            road_pct: 20,
+            workshop_pct: 0,
+            shop_pct: 10,
+            speed_bonus_pct: 0,
+            income_penalty_pct: 0,
+        },
+        Strategy::Income => StrategyInfo {
+            label: "収入重視",
+            tagline: "工房と店舗で経済を回し現金を稼ぐ",
+            house_pct: 30,
+            road_pct: 22,
+            workshop_pct: 13,
+            shop_pct: 35,
+            speed_bonus_pct: 0,
+            income_penalty_pct: 0,
+        },
+        Strategy::Tech => StrategyInfo {
+            label: "技術投資",
+            tagline: "道路網を急拡大 (建設+20% / 収入-20%)",
+            house_pct: 35,
+            road_pct: 50,
+            workshop_pct: 0,
+            shop_pct: 15,
+            speed_bonus_pct: 20,
+            income_penalty_pct: -20,
+        },
+    }
+}
+
+/// AI のイベントログに出す「思考動詞」を Strategy × Building で返す。
+/// マネージャー視点で「CPU が今この戦略でこの建物を建てた → だからこういう
+/// 意図」を体感できるようにする。
+pub fn strategy_thought_verb(s: Strategy, kind: Building) -> &'static str {
+    match (s, kind) {
+        (Strategy::Growth, Building::House) => "住宅地を拡張",
+        (Strategy::Growth, Building::Road) => "生活道路を整備",
+        (Strategy::Growth, Building::Shop) => "近所の店舗を出店",
+        (Strategy::Growth, Building::Workshop) => "近隣の工房を整備",
+
+        (Strategy::Income, Building::House) => "労働者用住宅を建設",
+        (Strategy::Income, Building::Road) => "商業道路を整備",
+        (Strategy::Income, Building::Shop) => "商業地を育てる",
+        (Strategy::Income, Building::Workshop) => "工房で雇用を創出",
+
+        (Strategy::Tech, Building::House) => "ベッドタウンを増設",
+        (Strategy::Tech, Building::Road) => "道路網を伸ばす",
+        (Strategy::Tech, Building::Shop) => "幹線沿いに出店",
+        (Strategy::Tech, Building::Workshop) => "工業地区を試験設置",
     }
 }
 
@@ -129,13 +214,27 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
         ticks_remaining: ticks,
     };
     city.buildings_started += 1;
-    city.push_event(format!(
-        "▷ {} ({},{}) 着工 -${}",
-        building_name(kind),
-        x,
-        y,
-        cost
-    ));
+    // Tier 4 (DemandAware) のみ Strategy に基づく動詞を表示。
+    // 低 Tier は戦略を読まない設計なので、汎用の「着工」を出す方が誠実。
+    // この差自体が「上位 AI ほど目的を持って動いている」演出にもなる。
+    if matches!(city.ai_tier, AiTier::DemandAware) {
+        city.push_event(format!(
+            "▷ {} ({},{}) — {} -${}",
+            building_name(kind),
+            x,
+            y,
+            strategy_thought_verb(city.strategy, kind),
+            cost
+        ));
+    } else {
+        city.push_event(format!(
+            "▷ {} ({},{}) 着工 -${}",
+            building_name(kind),
+            x,
+            y,
+            cost
+        ));
+    }
     true
 }
 
@@ -214,10 +313,12 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
         }
     }
 
-    // Tech 戦略の収入ペナルティ: -20% (整数で *4/5)。
+    // Strategy の収入ペナルティ (Tech は -20% 等)。
     // 0 化の死スパイラルを避けるため `1` を下限に。
-    if matches!(city.strategy, Strategy::Tech) && income > 0 {
-        income = ((income * 4) / 5).max(1);
+    let penalty = strategy_info(city.strategy).income_penalty_pct;
+    if penalty < 0 && income > 0 {
+        let factor = (100 + penalty).max(10) as i64; // -20 → 80。下限 10。
+        income = ((income * factor) / 100).max(1);
     }
     income
 }

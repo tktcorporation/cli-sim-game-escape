@@ -89,18 +89,15 @@ impl Game for MetropolisGame {
 
         match action_id {
             ACT_STRATEGY_GROWTH => {
-                self.state.strategy = Strategy::Growth;
-                self.state.push_event("📈 戦略: 成長重視".to_string());
+                set_strategy(&mut self.state, Strategy::Growth, "📈");
                 true
             }
             ACT_STRATEGY_INCOME => {
-                self.state.strategy = Strategy::Income;
-                self.state.push_event("💰 戦略: 収入重視".to_string());
+                set_strategy(&mut self.state, Strategy::Income, "💰");
                 true
             }
             ACT_STRATEGY_TECH => {
-                self.state.strategy = Strategy::Tech;
-                self.state.push_event("⚙ 戦略: 技術投資 (建設+20% / 収入-20%)".to_string());
+                set_strategy(&mut self.state, Strategy::Tech, "⚙");
                 true
             }
             ACT_HIRE_WORKER => logic::hire_worker(&mut self.state),
@@ -132,6 +129,25 @@ impl Game for MetropolisGame {
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
         render::render(&self.state, f, area, click_state);
     }
+}
+
+/// Strategy 切替時の共通処理。`logic::strategy_info` を引いて
+/// 「ラベル + 副作用 (建設速度・収入修正)」を 1 行のイベントログにまとめる。
+/// 切替時に「何が変わったか」が即座にログに見えるようにするのが目的。
+fn set_strategy(city: &mut City, s: Strategy, icon: &str) {
+    city.strategy = s;
+    let info = logic::strategy_info(s);
+    let mut suffix = String::new();
+    if info.speed_bonus_pct != 0 {
+        suffix.push_str(&format!(" / 建設{:+}%", info.speed_bonus_pct));
+    }
+    if info.income_penalty_pct != 0 {
+        suffix.push_str(&format!(" / 収入{:+}%", info.income_penalty_pct));
+    }
+    city.push_event(format!(
+        "{} 戦略: {} — {}{}",
+        icon, info.label, info.tagline, suffix
+    ));
 }
 
 #[cfg(test)]
