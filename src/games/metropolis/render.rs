@@ -34,20 +34,33 @@ use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
-use crate::input::{is_narrow_layout, ClickState};
-use crate::widgets::Clickable;
+use crate::input::ClickState;
+use crate::widgets::{Clickable, TabBar};
 
 use super::logic;
 use super::state::{
-    AiTier, Building, City, Strategy, Tile, GRID_H, GRID_W, PAYOUT_FLASH_TICKS,
+    city_tier_for, next_tier_threshold, AiTier, Building, City, CityTier, PanelTab, Strategy,
+    Tile, GRID_H, GRID_W, PAYOUT_FLASH_TICKS,
 };
+use super::terrain::Terrain;
 use super::{
-    ACT_HIRE_WORKER, ACT_STRATEGY_BALANCED, ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME,
-    ACT_UPGRADE_AI,
+    ACT_HIRE_WORKER, ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH,
+    ACT_TAB_EVENTS, ACT_TAB_MANAGER, ACT_TAB_STATUS, ACT_TAB_WORLD, ACT_UPGRADE_AI,
 };
 
+/// Wide layout が必要とする最小幅。
+/// 2-wide grid (32*2 + 2 = 66) + tab panel min (24) = 90 col。
+/// グローバルの `is_narrow_layout(w < 60)` よりも厳しいしきい値で、
+/// 60-89 col の中間幅 (80×N の典型 PC ターミナル含む) で右パネルが
+/// 潰れる回帰を防ぐ。Codex review #96 r3192962003 の指摘を反映。
+const METROPOLIS_WIDE_MIN_WIDTH: u16 = 90;
+
+fn metropolis_is_narrow(width: u16) -> bool {
+    width < METROPOLIS_WIDE_MIN_WIDTH
+}
+
 pub fn render(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
-    if is_narrow_layout(area.width) {
+    if metropolis_is_narrow(area.width) {
         render_narrow(state, f, area, click_state);
     } else {
         render_wide(state, f, area, click_state);
@@ -57,7 +70,7 @@ pub fn render(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<
 // ── Wide layout ─────────────────────────────────────────────
 
 fn render_wide(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
-    // 上にバナー、下に左右2カラム。
+    // 上にバナー、下に左右 2 カラム (グリッド | タブパネル)。
     let v = Layout::default()
         .direction(LayoutDir::Vertical)
         .constraints([Constraint::Length(4), Constraint::Min(0)])
@@ -68,23 +81,11 @@ fn render_wide(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCell
     let grid_w = GRID_W as u16 * 2 + 2; // 2-wide cells + borders
     let h = Layout::default()
         .direction(LayoutDir::Horizontal)
-        .constraints([Constraint::Length(grid_w), Constraint::Min(20)])
+        .constraints([Constraint::Length(grid_w), Constraint::Min(24)])
         .split(v[1]);
 
     render_grid(state, f, h[0], 2);
-
-    let right = Layout::default()
-        .direction(LayoutDir::Vertical)
-        .constraints([
-            Constraint::Length(7),  // status
-            Constraint::Length(10), // buttons
-            Constraint::Min(4),     // log
-        ])
-        .split(h[1]);
-
-    render_status(state, f, right[0]);
-    render_buttons(state, f, right[1], click_state);
-    render_log(state, f, right[2]);
+    render_tab_panel(state, f, h[1], click_state);
 }
 
 // ── Narrow layout (<60 cols) ────────────────────────────────
@@ -95,16 +96,12 @@ fn render_narrow(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCe
         .constraints([
             Constraint::Length(4),                 // banner
             Constraint::Length(GRID_H as u16 + 2), // grid 1-wide
-            Constraint::Length(7),                 // status
-            Constraint::Length(10),                // buttons
-            Constraint::Min(4),                    // log
+            Constraint::Min(8),                    // tab panel
         ])
         .split(area);
     render_banner(state, f, chunks[0], true);
     render_grid(state, f, chunks[1], 1);
-    render_status(state, f, chunks[2]);
-    render_buttons(state, f, chunks[3], click_state);
-    render_log(state, f, chunks[4]);
+    render_tab_panel(state, f, chunks[2], click_state);
 }
 
 // ── Banner: sky + skyline + dynamic title ───────────────────
@@ -113,7 +110,7 @@ fn render_banner(state: &City, f: &mut Frame, area: Rect, narrow: bool) {
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
-        .border_style(Style::default().fg(banner_border_color(state.tick)))
+        .border_style(Style::default().fg(banner_border_color(state)))
         .title(banner_title(state, narrow));
     let inner = block.inner(area);
     f.render_widget(&block, area);
@@ -130,9 +127,16 @@ fn render_banner(state: &City, f: &mut Frame, area: Rect, narrow: bool) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn banner_border_color(tick: u64) -> Color {
-    // 数秒に1度だけ色を切替えるごく弱いパルス。
-    if (tick / 10).is_multiple_of(2) {
+fn banner_border_color(state: &City) -> Color {
+    // ティア進化フラッシュ中は全体を金色に。
+    if state.tick < state.tier_flash_until {
+        // 6 tick (0.6s) 周期で金/明黄を交互させ、目に止まる。
+        if (state.tick / 3).is_multiple_of(2) {
+            Color::LightYellow
+        } else {
+            Color::Yellow
+        }
+    } else if (state.tick / 10).is_multiple_of(2) {
         Color::Cyan
     } else {
         Color::LightCyan
@@ -143,14 +147,24 @@ fn banner_title(state: &City, narrow: bool) -> String {
     let cpu = ai_tier_icon(state.ai_tier);
     let strat = strategy_tag(state.strategy);
     let busy = state.active_constructions();
+    let pop = state.population();
+    let tier = city_tier_for(pop);
+    let tier_progress = tier_progress_label(tier, pop);
     if narrow {
         format!(
-            " ▙▟ METROPOLIS  {}  {}  WK {}/{} ",
-            cpu, strat, busy, state.workers
+            " ▙▟ {}  {}  {}  WK {}/{} ",
+            tier.jp(),
+            cpu,
+            strat,
+            busy,
+            state.workers
         )
     } else {
         format!(
-            " ▙▟ IDLE  METROPOLIS  ── CPU {} {} ── STRAT {} {} ── WORK {}/{} ── ",
+            " ▙▟ {} ({}) {}  ── CPU {} {} ── STRAT {} {} ── WK {}/{} ── ",
+            tier.name(),
+            tier.jp(),
+            tier_progress,
             cpu,
             state.ai_tier.name(),
             strat,
@@ -158,6 +172,13 @@ fn banner_title(state: &City, narrow: bool) -> String {
             busy,
             state.workers,
         )
+    }
+}
+
+fn tier_progress_label(t: CityTier, pop: u32) -> String {
+    match next_tier_threshold(t) {
+        Some(target) => format!("pop {}/{}", pop, target),
+        None => format!("pop {} ★MAX", pop),
     }
 }
 
@@ -176,7 +197,7 @@ fn strategy_tag(s: Strategy) -> &'static str {
     match s {
         Strategy::Growth => "[GRW]",
         Strategy::Income => "[CSH]",
-        Strategy::Balanced => "[BAL]",
+        Strategy::Tech => "[TEC]",
     }
 }
 
@@ -326,11 +347,7 @@ fn tile_span_1(
         }
     }
     match tile {
-        Tile::Empty => {
-            let phase = (x + y).is_multiple_of(2);
-            let g = if phase { "·" } else { " " };
-            Span::styled(g.to_string(), Style::default().fg(Color::DarkGray))
-        }
+        Tile::Empty => terrain_span_1(state.terrain_at(x, y), x, y, tick),
         Tile::Construction {
             target,
             ticks_remaining,
@@ -362,14 +379,21 @@ fn tile_span_1(
         Tile::Built(Building::House) => {
             let bright = !(tick / 10).is_multiple_of(4);
             let m = if bright { Modifier::BOLD } else { Modifier::empty() };
+            let ch = match logic::house_level(state, x, y) {
+                logic::HouseLevel::Low => 'h',
+                logic::HouseLevel::Mid => 'H',
+                logic::HouseLevel::High => '▮',
+            };
             Span::styled(
-                "H".to_string(),
+                ch.to_string(),
                 Style::default().fg(Color::Green).add_modifier(m),
             )
         }
         Tile::Built(Building::Shop) => {
-            let active = logic::shop_is_active(state, x, y);
-            if active {
+            let level = logic::shop_level(state, x, y);
+            if matches!(level, logic::ShopLevel::Idle) {
+                Span::styled("s".to_string(), Style::default().fg(Color::DarkGray))
+            } else {
                 let style = if payout {
                     Style::default()
                         .fg(Color::Black)
@@ -378,11 +402,19 @@ fn tile_span_1(
                 } else {
                     let bright = (tick / 4).is_multiple_of(2);
                     let m = if bright { Modifier::BOLD } else { Modifier::empty() };
-                    Style::default().fg(Color::Yellow).add_modifier(m)
+                    let color = match level {
+                        logic::ShopLevel::Premium => Color::LightYellow,
+                        logic::ShopLevel::Busy => Color::Yellow,
+                        _ => Color::Yellow,
+                    };
+                    Style::default().fg(color).add_modifier(m)
                 };
-                Span::styled("S".to_string(), style)
-            } else {
-                Span::styled("S".to_string(), Style::default().fg(Color::DarkGray))
+                let ch = match level {
+                    logic::ShopLevel::Premium => '★',
+                    logic::ShopLevel::Busy => 'S',
+                    _ => 's',
+                };
+                Span::styled(ch.to_string(), style)
             }
         }
     }
@@ -419,15 +451,7 @@ fn tile_spans_2(
         }
     }
     match tile {
-        Tile::Empty => {
-            // 軽い「地面」のテクスチャ。チェッカーパターンで薄いドット。
-            let phase = (x + y).is_multiple_of(2);
-            let g = if phase { "· " } else { "  " };
-            vec![Span::styled(
-                g.to_string(),
-                Style::default().fg(Color::DarkGray),
-            )]
-        }
+        Tile::Empty => terrain_spans_2(state.terrain_at(x, y), x, y, tick),
         Tile::Construction {
             target,
             ticks_remaining,
@@ -479,17 +503,32 @@ fn tile_spans_2(
             Style::default().fg(Color::Gray),
         )],
         Tile::Built(Building::House) => {
-            // 「灯り」の演出: 周期で BOLD と通常を切替えて生活感を出す。
+            // 密度レベルでグリフが変わる。低層 ▟▙ → 中層 ▛▜ → 高層 ██。
             let bright = !(tick / 10).is_multiple_of(4);
             let m = if bright { Modifier::BOLD } else { Modifier::empty() };
+            let glyph = match logic::house_level(state, x, y) {
+                logic::HouseLevel::Low => "▟▙",
+                logic::HouseLevel::Mid => "▛▜",
+                logic::HouseLevel::High => "██",
+            };
+            // 高層は LightGreen に明るくして「育った」感を強調。
+            let color = match logic::house_level(state, x, y) {
+                logic::HouseLevel::High => Color::LightGreen,
+                _ => Color::Green,
+            };
             vec![Span::styled(
-                "▟▙".to_string(),
-                Style::default().fg(Color::Green).add_modifier(m),
+                glyph.to_string(),
+                Style::default().fg(color).add_modifier(m),
             )]
         }
         Tile::Built(Building::Shop) => {
-            let active = logic::shop_is_active(state, x, y);
-            if active {
+            let level = logic::shop_level(state, x, y);
+            if matches!(level, logic::ShopLevel::Idle) {
+                vec![Span::styled(
+                    "$$".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                )]
+            } else {
                 let style = if payout {
                     Style::default()
                         .fg(Color::Black)
@@ -498,14 +537,18 @@ fn tile_spans_2(
                 } else {
                     let bright = (tick / 4).is_multiple_of(2);
                     let m = if bright { Modifier::BOLD } else { Modifier::DIM };
-                    Style::default().fg(Color::Yellow).add_modifier(m)
+                    let color = match level {
+                        logic::ShopLevel::Premium => Color::LightYellow,
+                        _ => Color::Yellow,
+                    };
+                    Style::default().fg(color).add_modifier(m)
                 };
-                vec![Span::styled("$$".to_string(), style)]
-            } else {
-                vec![Span::styled(
-                    "$$".to_string(),
-                    Style::default().fg(Color::DarkGray),
-                )]
+                let glyph = match level {
+                    logic::ShopLevel::Premium => "★$",
+                    logic::ShopLevel::Busy => "$$",
+                    _ => "$·",
+                };
+                vec![Span::styled(glyph.to_string(), style)]
             }
         }
     }
@@ -535,6 +578,212 @@ fn built_2wide_glyph(b: Building) -> &'static str {
     }
 }
 
+// ── Terrain rendering ───────────────────────────────────────
+//
+// Empty セル上に地形を描画する。Forest と Water は時間でゆらぎ、
+// 「生きているマップ」感を出す。
+
+fn terrain_span_1(t: Terrain, x: usize, y: usize, tick: u64) -> Span<'static> {
+    match t {
+        Terrain::Plain => {
+            let phase = (x + y).is_multiple_of(2);
+            let g = if phase { "·" } else { " " };
+            Span::styled(g.to_string(), Style::default().fg(Color::DarkGray))
+        }
+        Terrain::Forest => {
+            // 微かに揺らぐ緑 (光合成)。
+            let sway = ((tick / 8) as usize + x + y).is_multiple_of(3);
+            let g = if sway { "♣" } else { "♠" };
+            Span::styled(g.to_string(), Style::default().fg(Color::Green))
+        }
+        Terrain::Water => {
+            // 水面のさざ波 (3 フレーム周期)。
+            let wave = ((tick / 4) as usize + x + y) % 3;
+            let g = match wave {
+                0 => "~",
+                1 => "≈",
+                _ => "˜",
+            };
+            Span::styled(g.to_string(), Style::default().fg(Color::Blue))
+        }
+        Terrain::Wasteland => Span::styled(
+            ":".to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::DIM),
+        ),
+    }
+}
+
+fn terrain_spans_2(t: Terrain, x: usize, y: usize, tick: u64) -> Vec<Span<'static>> {
+    match t {
+        Terrain::Plain => {
+            let phase = (x + y).is_multiple_of(2);
+            let g = if phase { "· " } else { "  " };
+            vec![Span::styled(
+                g.to_string(),
+                Style::default().fg(Color::DarkGray),
+            )]
+        }
+        Terrain::Forest => {
+            let sway = ((tick / 8) as usize + x + y).is_multiple_of(3);
+            let g = if sway { "♣♣" } else { "♠♣" };
+            vec![Span::styled(g.to_string(), Style::default().fg(Color::Green))]
+        }
+        Terrain::Water => {
+            let wave = ((tick / 4) as usize + x + y) % 3;
+            let g = match wave {
+                0 => "~~",
+                1 => "≈≈",
+                _ => "~≈",
+            };
+            vec![Span::styled(g.to_string(), Style::default().fg(Color::Blue))]
+        }
+        Terrain::Wasteland => vec![Span::styled(
+            "::".to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::DIM),
+        )],
+    }
+}
+
+// ── Tab panel (right pane) ──────────────────────────────────
+//
+// 上に `TabBar`、下に現在タブの内容を描画する。
+// `TabBar` は widgets primitive で、自動でクリック対象を登録するため
+// disallowed_methods 規約に違反しない。
+
+fn render_tab_panel(
+    state: &City,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let outer = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Line::from(format!(
+            " {} ",
+            state.panel_tab.label()
+        )));
+    let inner = outer.inner(area);
+    f.render_widget(&outer, area);
+
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let v = Layout::default()
+        .direction(LayoutDir::Vertical)
+        .constraints([Constraint::Length(1), Constraint::Min(0)])
+        .split(inner);
+
+    // タブバー (1 行)。狭幅でも収まるよう区切りは "│" のみ、ラベルは短く。
+    {
+        let mut cs = click_state.borrow_mut();
+        let bar = TabBar::new("│")
+            .tab(
+                format!("1 {}", PanelTab::Status.label()),
+                tab_style(state.panel_tab == PanelTab::Status),
+                ACT_TAB_STATUS,
+            )
+            .tab(
+                format!("2 {}", PanelTab::Manager.label()),
+                tab_style(state.panel_tab == PanelTab::Manager),
+                ACT_TAB_MANAGER,
+            )
+            .tab(
+                format!("3 {}", PanelTab::Events.label()),
+                tab_style(state.panel_tab == PanelTab::Events),
+                ACT_TAB_EVENTS,
+            )
+            .tab(
+                format!("4 {}", PanelTab::World.label()),
+                tab_style(state.panel_tab == PanelTab::World),
+                ACT_TAB_WORLD,
+            );
+        bar.render(f, v[0], &mut cs);
+    }
+
+    // 内容。
+    match state.panel_tab {
+        PanelTab::Status => render_status(state, f, v[1]),
+        PanelTab::Manager => render_buttons(state, f, v[1], click_state),
+        PanelTab::Events => render_log(state, f, v[1]),
+        PanelTab::World => render_world(state, f, v[1]),
+    }
+}
+
+fn tab_style(active: bool) -> Style {
+    if active {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
+}
+
+// ── World tab (seed + terrain summary) ──────────────────────
+//
+// シード値と地形比率を表示。「マイクラ感」を演出する場所で、後で
+// 「シード入力 → リジェネ」も加えやすいようここに集約。
+
+fn render_world(state: &City, f: &mut Frame, area: Rect) {
+    let mut counts = [0u32; 4];
+    for row in &state.terrain {
+        for t in row {
+            match t {
+                Terrain::Plain => counts[0] += 1,
+                Terrain::Forest => counts[1] += 1,
+                Terrain::Water => counts[2] += 1,
+                Terrain::Wasteland => counts[3] += 1,
+            }
+        }
+    }
+    let total = (GRID_W * GRID_H).max(1) as u32;
+    let pct = |c: u32| (c * 100) / total;
+
+    let lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled("SEED ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("0x{:016X}", state.world_seed),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Plain     ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:>3}%", pct(counts[0])), Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("Forest ♣  ", Style::default().fg(Color::Green)),
+            Span::styled(format!("{:>3}%", pct(counts[1])), Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("Water  ~  ", Style::default().fg(Color::Blue)),
+            Span::styled(format!("{:>3}%", pct(counts[2])), Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("Waste  :  ", Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{:>3}%", pct(counts[3])), Style::default().fg(Color::White)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "湖は建設不可。森/荒地は建てられる。",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+
+    f.render_widget(Paragraph::new(lines), area);
+}
+
 // ── Status panel ────────────────────────────────────────────
 
 /// CASH 行の収入ハイライトを点灯すべきか?
@@ -549,13 +798,8 @@ fn is_payout_flash_active(state: &City) -> bool {
 }
 
 fn render_status(state: &City, f: &mut Frame, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Status ");
-    let inner = block.inner(area);
-    f.render_widget(&block, area);
+    // タブの外側 Block が既に枠を提供するため、ここでは描画のみ。
+    let inner = area;
 
     let income = logic::compute_income_per_sec(state);
     let pop = state.population();
@@ -669,13 +913,8 @@ fn worker_bar_spans(state: &City, _max_width: u16) -> Vec<Span<'static>> {
 // ── Manager panel (buttons) ─────────────────────────────────
 
 fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
-    let inner = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .title(" Manager ")
-        .border_style(Style::default().fg(Color::Magenta));
-    f.render_widget(&inner, area);
-    let inner_area = inner.inner(area);
+    // タブの外側 Block が既に枠を提供するため、ここでは中身のみ。
+    let inner_area = area;
 
     let rows = Layout::default()
         .direction(LayoutDir::Vertical)
@@ -713,9 +952,9 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
         f,
         rows[2],
         &mut cs,
-        ACT_STRATEGY_BALANCED,
-        "[B] [BAL] バランス",
-        state.strategy == Strategy::Balanced,
+        ACT_STRATEGY_TECH,
+        "[T] [TEC] 技術投資",
+        state.strategy == Strategy::Tech,
         Color::Cyan,
     );
 
@@ -774,45 +1013,36 @@ fn button_row(
 // ── AI activity log ─────────────────────────────────────────
 
 fn render_log(state: &City, f: &mut Frame, area: Rect) {
-    // AI が「考えている」ことを示すスピナー。block-quad characters。
+    // タブの外側 Block が既に枠を提供するため、タイトル風の 1 行を内側に。
     let spinner_chars = ['◐', '◓', '◑', '◒'];
     let spinner = spinner_chars[((state.tick / 2) % spinner_chars.len() as u64) as usize];
-    let title = format!(" {} AI {} Activity ", spinner, ai_tier_icon(state.ai_tier));
+    let header = format!("{} AI {} 履歴", spinner, ai_tier_icon(state.ai_tier));
 
-    let lines: Vec<Line> = state
-        .events
-        .iter()
-        .enumerate()
-        .map(|(i, e)| {
-            // 一番新しいイベント (i==0) は明るく表示して目を引く。
-            let style = if i == 0 {
-                Style::default()
-                    .fg(Color::LightCyan)
-                    .add_modifier(Modifier::BOLD)
-            } else if i == 1 {
-                Style::default().fg(Color::White)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
-            Line::from(Span::styled(e.clone(), style))
-        })
-        .collect();
+    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+        header,
+        Style::default().fg(Color::Magenta),
+    ))];
+    for (i, e) in state.events.iter().enumerate() {
+        let style = if i == 0 {
+            Style::default()
+                .fg(Color::LightCyan)
+                .add_modifier(Modifier::BOLD)
+        } else if i == 1 {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        lines.push(Line::from(Span::styled(e.clone(), style)));
+    }
 
-    let p = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .title(title)
-            .border_style(Style::default().fg(Color::DarkGray)),
-    );
-    f.render_widget(p, area);
+    f.render_widget(Paragraph::new(lines), area);
 }
 
 fn strategy_label(s: Strategy) -> &'static str {
     match s {
         Strategy::Growth => "成長",
         Strategy::Income => "収入",
-        Strategy::Balanced => "バランス",
+        Strategy::Tech => "技術",
     }
 }
 
@@ -825,11 +1055,11 @@ mod tests {
     #[test]
     fn render_does_not_panic_on_empty_city() {
         let city = City::new();
-        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         let cs = Rc::new(RefCell::new(ClickState::new()));
         terminal
             .draw(|f| {
-                render(&city, f, Rect::new(0, 0, 80, 30), &cs);
+                render(&city, f, Rect::new(0, 0, 100, 30), &cs);
             })
             .unwrap();
     }
@@ -848,21 +1078,28 @@ mod tests {
 
     #[test]
     fn manager_buttons_register_click_targets() {
+        // 既定で Manager タブが選ばれているので、戦略ボタンは出るはず。
         let city = City::new();
-        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        // 32×16 = 2-wide で 66 col 必要。ターミナルもそれに合わせる。
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         let cs = Rc::new(RefCell::new(ClickState::new()));
         terminal
             .draw(|f| {
-                render(&city, f, Rect::new(0, 0, 80, 30), &cs);
+                render(&city, f, Rect::new(0, 0, 100, 30), &cs);
             })
             .unwrap();
         let registered: Vec<u16> = cs.borrow().targets.iter().map(|t| t.action_id).collect();
         for id in [
             ACT_STRATEGY_GROWTH,
             ACT_STRATEGY_INCOME,
-            ACT_STRATEGY_BALANCED,
+            ACT_STRATEGY_TECH,
             ACT_HIRE_WORKER,
             ACT_UPGRADE_AI,
+            // タブバーも常に登録される。
+            ACT_TAB_STATUS,
+            ACT_TAB_MANAGER,
+            ACT_TAB_EVENTS,
+            ACT_TAB_WORLD,
         ] {
             assert!(
                 registered.contains(&id),
@@ -873,12 +1110,47 @@ mod tests {
         }
     }
 
+    /// 80 col ターミナル (典型的な PC) では narrow layout が選ばれる。
+    /// グリッド拡張 (24→32) で wide が ~90 col 必要になったため、80 col は
+    /// narrow に振らないと右パネルが潰れる (Codex P2 review #96)。
+    #[test]
+    fn eighty_col_uses_narrow_layout() {
+        assert!(metropolis_is_narrow(60));
+        assert!(metropolis_is_narrow(80));
+        assert!(metropolis_is_narrow(89));
+        assert!(!metropolis_is_narrow(90));
+        assert!(!metropolis_is_narrow(120));
+    }
+
+    /// 80×30 のような中間幅でもパニックしない (narrow path で描画される)。
+    #[test]
+    fn render_does_not_panic_on_80col_intermediate() {
+        let city = City::new();
+        let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        terminal
+            .draw(|f| {
+                render(&city, f, Rect::new(0, 0, 80, 40), &cs);
+            })
+            .unwrap();
+        // タブのクリック対象が登録されていることも確認 (右パネルが潰れていない)。
+        let registered: Vec<u16> = cs.borrow().targets.iter().map(|t| t.action_id).collect();
+        for id in [ACT_TAB_STATUS, ACT_TAB_MANAGER, ACT_TAB_EVENTS, ACT_TAB_WORLD] {
+            assert!(
+                registered.contains(&id),
+                "tab action {} missing on 80-col layout: targets={:?}",
+                id,
+                registered
+            );
+        }
+    }
+
     /// 都市グリッドが画面幅の半分以上を占めること (wide layout)。
     #[test]
     fn wide_layout_grid_occupies_majority_of_width() {
-        // grid = 24*2 + 2 = 50. With area width 80 → 50/80 = 62.5% >= 50%.
+        // grid = 32*2 + 2 = 66. With area width 100 → 66/100 = 66% ≥ 50%.
         let grid_w = GRID_W as u16 * 2 + 2;
-        let area_w = 80u16;
+        let area_w = 100u16;
         assert!(
             grid_w * 2 >= area_w,
             "grid_w {} * 2 must be >= area_w {} for >50% coverage",
@@ -921,11 +1193,11 @@ mod tests {
         // 仮想的にタイルを完成させてフラッシュをセット。
         city.set_tile(3, 3, Tile::Built(Building::House));
         city.completion_flash_until[3][3] = city.tick + 10;
-        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         let cs = Rc::new(RefCell::new(ClickState::new()));
         terminal
             .draw(|f| {
-                render(&city, f, Rect::new(0, 0, 80, 30), &cs);
+                render(&city, f, Rect::new(0, 0, 100, 30), &cs);
             })
             .unwrap();
     }

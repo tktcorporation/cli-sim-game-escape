@@ -72,12 +72,13 @@ fn tier1_random(city: &mut City) -> AiAction {
         return AiAction::Idle;
     }
 
-    // Try up to 30 random cells; if none are empty, idle this tick.
+    // Try up to 30 random cells; if none are empty + buildable, idle.
+    // Tier 1 はあえて愚直: 水セルに当たっても "haha 投げる" 回数で済ませる。
     for _ in 0..30 {
         let r = city.next_rand();
         let x = (r as usize) % GRID_W;
         let y = ((r >> 32) as usize) % GRID_H;
-        if matches!(city.tile(x, y), Tile::Empty) {
+        if matches!(city.tile(x, y), Tile::Empty) && city.terrain_at(x, y).buildable() {
             return AiAction::Build { x, y, kind };
         }
     }
@@ -114,10 +115,14 @@ fn tier2_greedy(city: &mut City) -> AiAction {
     }
 
     // Collect candidate empties adjacent to a built/under-construction tile.
+    // 地形が建設不可 (Water) のセルは候補外。
     let mut candidates: Vec<(usize, usize)> = Vec::new();
     for y in 0..GRID_H {
         for x in 0..GRID_W {
             if !matches!(city.tile(x, y), Tile::Empty) {
+                continue;
+            }
+            if !city.terrain_at(x, y).buildable() {
                 continue;
             }
             if has_built_neighbor(city, x, y) {
@@ -157,6 +162,9 @@ fn is_empty_next_to_road(city: &City, x: usize, y: usize) -> bool {
     if !matches!(city.tile(x, y), Tile::Empty) {
         return false;
     }
+    if !city.terrain_at(x, y).buildable() {
+        return false;
+    }
     for (dx, dy) in DIRS4 {
         let nx = x as i32 + dx;
         let ny = y as i32 + dy;
@@ -179,6 +187,9 @@ fn is_empty_next_to_road(city: &City, x: usize, y: usize) -> bool {
 /// for "extend the road grid here so future buildings can connect".
 fn is_empty_next_to_building(city: &City, x: usize, y: usize) -> bool {
     if !matches!(city.tile(x, y), Tile::Empty) {
+        return false;
+    }
+    if !city.terrain_at(x, y).buildable() {
         return false;
     }
     for (dx, dy) in DIRS4 {
@@ -262,12 +273,12 @@ fn tier3_road_planner(city: &mut City) -> AiAction {
 ///
 /// Per-strategy roll weights (House% / Road% / Shop%):
 ///   - Growth   →  70 / 20 / 10  (population first)
-///   - Balanced →  50 / 30 / 20  (matches Tier 3, but smarter placement)
+///   - Tech     →  35 / 50 / 15  (road network first; expansion-heavy)
 ///   - Income   →  35 / 25 / 40  (cash first, lots of shops)
 fn tier4_demand_aware(city: &mut City) -> AiAction {
     let (house_pct, road_pct) = match city.strategy {
         Strategy::Growth => (70, 20),
-        Strategy::Balanced => (50, 30),
+        Strategy::Tech => (35, 50),
         Strategy::Income => (35, 25),
     };
 
@@ -320,6 +331,9 @@ fn tier4_demand_aware(city: &mut City) -> AiAction {
 /// income from tick 1 (road neighbour AND a House within Manhattan-3).
 fn would_shop_activate_here(city: &City, sx: usize, sy: usize) -> bool {
     if !matches!(city.tile(sx, sy), Tile::Empty) {
+        return false;
+    }
+    if !city.terrain_at(sx, sy).buildable() {
         return false;
     }
     // Road neighbour required.

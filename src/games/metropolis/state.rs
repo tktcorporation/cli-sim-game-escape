@@ -5,8 +5,8 @@
 //! purpose, so we need a balance simulator (see `simulator.rs`) to confirm
 //! the game is still progressing.
 
-pub const GRID_W: usize = 24;
-pub const GRID_H: usize = 12;
+pub const GRID_W: usize = 32;
+pub const GRID_H: usize = 16;
 
 pub const TICKS_PER_SEC: u32 = 10;
 
@@ -61,13 +61,103 @@ impl Building {
 
 }
 
+/// 街の発展段階。人口で自動的に判定される (純関数)。
+///
+/// ティア進化はバナー表示と完成イベントログの主要な「自慢ポイント」。
+/// プレイヤーが「次の段階まで pop X」を意識する見出しになる。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CityTier {
+    Village,
+    Town,
+    City,
+    Metropolis,
+}
+
+impl CityTier {
+    pub fn name(self) -> &'static str {
+        match self {
+            CityTier::Village => "Village",
+            CityTier::Town => "Town",
+            CityTier::City => "City",
+            CityTier::Metropolis => "Metropolis",
+        }
+    }
+    pub fn jp(self) -> &'static str {
+        match self {
+            CityTier::Village => "村",
+            CityTier::Town => "町",
+            CityTier::City => "市",
+            CityTier::Metropolis => "大都市",
+        }
+    }
+}
+
+/// 人口からティアを決定する純関数。
+///
+/// **TODO (バランス調整ポイント)**: 各閾値を確定する。これは
+/// ゲーム体験を直接決める重要な数値で、シミュレーター結果から逆算する
+/// と良い。30 分で T4 が pop ~600 に達するため、目安として:
+///
+///   - Village → Town:  ~50 pop  (序盤、最初の店舗が回り始める頃)
+///   - Town → City:     ~250 pop (中盤、複数の住宅クラスター)
+///   - City → Metropolis: ~600 pop (終盤、Tier 4 AI で十分到達可能)
+///
+/// 数字を変える時は、シミュレーターの 30min ベンチを実行して
+/// 「ちょうど終盤直前で Metropolis に到達するか」を確認すること。
+pub fn city_tier_for(population: u32) -> CityTier {
+    if population >= 600 {
+        CityTier::Metropolis
+    } else if population >= 250 {
+        CityTier::City
+    } else if population >= 50 {
+        CityTier::Town
+    } else {
+        CityTier::Village
+    }
+}
+
+/// 次のティアまでの必要人口 (None = 既に Metropolis)。
+pub fn next_tier_threshold(t: CityTier) -> Option<u32> {
+    match t {
+        CityTier::Village => Some(50),
+        CityTier::Town => Some(250),
+        CityTier::City => Some(600),
+        CityTier::Metropolis => None,
+    }
+}
+
+/// 右パネルのタブ。Status / Manager / Events / World が初期セット。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelTab {
+    Status,
+    Manager,
+    Events,
+    World,
+}
+
+impl PanelTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            PanelTab::Status => "状態",
+            PanelTab::Manager => "操作",
+            PanelTab::Events => "履歴",
+            PanelTab::World => "世界",
+        }
+    }
+}
+
 /// Player's strategic preference.  Drives how Tier-2+ AI weights its choices;
 /// Tier-1 ignores this field.
+///
+/// `Tech` は短期収入を犠牲にして建設速度と (将来の) 研究ポイントを稼ぐ路線。
+/// `Balanced` は「中間値で意思決定が薄まる」ため削除し、3 択全てに明確な
+/// トレードオフを持たせる方針 (Plan #1)。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Strategy {
-    Growth,   // prefer Houses
-    Income,   // prefer Shops
-    Balanced, // mix
+    Growth, // prefer Houses
+    Income, // prefer Shops
+    /// Tech: 建設速度 +20% / 収入 -20%。AI は道路を優先し展開を重視。
+    Tech,
 }
 
 /// CPU intelligence tier.  Higher = smarter placement decisions.
@@ -116,12 +206,28 @@ impl AiTier {
 /// Whole-city snapshot.  Everything the simulator needs to step forward.
 pub struct City {
     pub grid: Vec<Vec<Tile>>,
+    /// Background terrain layer, generated once from the seed.
+    /// 建物が建っても下に残るため、Water 隣接ボーナスなど将来の拡張に使える。
+    pub terrain: super::terrain::TerrainLayer,
+    /// 地形生成に使ったシード値 (UI で見せる、リセット時の再現用)。
+    /// バナーに表示する予定 (CityTier 実装と一緒に使う)。
+    #[allow(dead_code)]
+    pub world_seed: u64,
     pub cash: i64,
     pub tick: u64,
 
     /// AI brain in use.
     pub ai_tier: AiTier,
     pub strategy: Strategy,
+
+    /// 現在表示中の右パネルタブ。
+    pub panel_tab: PanelTab,
+
+    /// 直近 tick で観測したティア。次 tick で計算したティアと比較して、
+    /// 進化したらフラッシュ + イベントログを発火。
+    pub last_observed_tier: CityTier,
+    /// ティア進化フラッシュが消える tick。`tick < value` の間バナーを光らせる。
+    pub tier_flash_until: u64,
 
     /// Build queue: how many parallel constructions the AI can run.
     /// (Each Construction tile already counts toward this limit.)
@@ -158,6 +264,9 @@ pub const COMPLETION_FLASH_TICKS: u64 = 15;
 /// 店舗が給料発生時に光るtick数 (0.6秒)。
 pub const PAYOUT_FLASH_TICKS: u64 = 6;
 
+/// ティア進化時のバナー全体フラッシュ tick 数 (3 秒)。
+pub const TIER_FLASH_TICKS: u64 = 30;
+
 impl City {
     pub fn new() -> Self {
         Self::with_seed(0xC1A5_5EED)
@@ -172,12 +281,18 @@ impl City {
             completion_flash_until.push(vec![0u64; GRID_W]);
             payout_flash_until.push(vec![0u64; GRID_W]);
         }
+        let terrain = super::terrain::generate(seed);
         Self {
             grid,
+            terrain,
+            world_seed: seed,
             cash: 200, // enough seed money for 5 houses or a shop
             tick: 0,
             ai_tier: AiTier::Random,
-            strategy: Strategy::Balanced,
+            strategy: Strategy::Growth,
+            panel_tab: PanelTab::Manager,
+            last_observed_tier: CityTier::Village,
+            tier_flash_until: 0,
             workers: 1,
             rng_state: seed,
             buildings_started: 0,
@@ -260,6 +375,15 @@ impl City {
     /// Population from finished houses.  Each House holds 5.
     pub fn population(&self) -> u32 {
         self.count_built(Building::House) * 5
+    }
+
+    /// Convenience: 指定セルの地形。境界外は Plain 扱い。
+    pub fn terrain_at(&self, x: usize, y: usize) -> super::terrain::Terrain {
+        if x >= GRID_W || y >= GRID_H {
+            super::terrain::Terrain::Plain
+        } else {
+            self.terrain[y][x]
+        }
     }
 }
 

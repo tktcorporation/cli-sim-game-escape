@@ -65,7 +65,10 @@ mod tests {
         total_seconds: u32,
         report_at: &[u32],
     ) -> Vec<Snapshot> {
-        run_with_strategy(seed, tier, Strategy::Balanced, workers, total_seconds, report_at)
+        // 旧仕様の Balanced は廃止。Tier 階差は cash で評価したいので、
+        // shop を最も多く建てる Income をベンチ基準にする。Growth だと
+        // 70/20/10 (Tier 4) で店舗が少なくなり、tier 階差が薄まる。
+        run_with_strategy(seed, tier, Strategy::Income, workers, total_seconds, report_at)
     }
 
     fn run_with_strategy(
@@ -137,37 +140,48 @@ mod tests {
         );
     }
 
-    /// Tier 4 strategies should specialize: Income → most cash,
-    /// Growth → biggest population, Balanced in the middle.
-    /// This is the *gameplay reason* the strategy buttons exist.
+    /// Tier 4 strategies should specialize:
+    ///   - Income → 最も現金が稼げる
+    ///   - Growth → 最も人口が伸びる
+    ///   - Tech   → 道路網が広く、建設総数が多い (展開重視)
+    ///
+    /// 戦略ボタンの「意味」を担保する回帰テスト。
     #[test]
     fn tier4_strategies_specialize() {
         let seed = 0xC1A5_5EED;
         let span = 1800;
         let cps = [1800];
         let inc = run_with_strategy(seed, AiTier::DemandAware, Strategy::Income, 1, span, &cps);
-        let bal = run_with_strategy(seed, AiTier::DemandAware, Strategy::Balanced, 1, span, &cps);
+        let tec = run_with_strategy(seed, AiTier::DemandAware, Strategy::Tech, 1, span, &cps);
         let gro = run_with_strategy(seed, AiTier::DemandAware, Strategy::Growth, 1, span, &cps);
 
         let inc_final = inc.last().unwrap();
-        let bal_final = bal.last().unwrap();
+        let tec_final = tec.last().unwrap();
         let gro_final = gro.last().unwrap();
         eprintln!(
-            "[T4 strategy 30min] Income: cash=${} pop={}  Balanced: cash=${} pop={}  Growth: cash=${} pop={}",
+            "[T4 strategy 30min] Income: cash=${} pop={}  Tech: cash=${} pop={} roads={}  Growth: cash=${} pop={}",
             inc_final.cash, inc_final.population,
-            bal_final.cash, bal_final.population,
+            tec_final.cash, tec_final.population, tec_final.roads,
             gro_final.cash, gro_final.population,
         );
 
-        // Income earns the most.
+        // Income は現金 1 位。
         assert!(
-            inc_final.cash >= bal_final.cash,
-            "Income should beat Balanced in cash"
+            inc_final.cash >= tec_final.cash,
+            "Income should beat Tech in cash"
         );
-        // Growth grows the largest population.
+        // Growth は人口 1 位。
         assert!(
-            gro_final.population >= bal_final.population,
-            "Growth should beat Balanced in population"
+            gro_final.population >= tec_final.population,
+            "Growth should beat Tech in population"
+        );
+        // Tech は道路網が太い (Income/Growth より roads が多い)。
+        assert!(
+            tec_final.roads >= inc_final.roads && tec_final.roads >= gro_final.roads,
+            "Tech should have the largest road network: Tech={} Income={} Growth={}",
+            tec_final.roads,
+            inc_final.roads,
+            gro_final.roads,
         );
     }
 
@@ -185,7 +199,7 @@ mod tests {
         let s2 = run(seed, AiTier::Greedy, 1, span, &cps);
         eprintln!("\n=== Tier 3 ===");
         let s3 = run(seed, AiTier::RoadPlanner, 1, span, &cps);
-        eprintln!("\n=== Tier 4 (Balanced) ===");
+        eprintln!("\n=== Tier 4 (Growth baseline) ===");
         let s4 = run(seed, AiTier::DemandAware, 1, span, &cps);
 
         let c1 = s1.last().unwrap().cash;
