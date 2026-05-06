@@ -59,10 +59,10 @@ pub enum Building {
     /// 道路接続不要 — 緑地として独立配置可能。
     Park,
     /// **開拓機材** — 隣接する Rock セルの整地を可能にする特殊建物。
-    /// プレイヤーが手動で配置する想定 (AI は手を出さない)。
-    /// 高価 ($600)、長時間建設 (300 ticks = 30 sec)。
+    /// `auto_strategy_actions` が戦略ごとの周期で自動派遣する (Phase A
+    /// 完全自動化)。プレイヤーは戦略選択でしか派遣ペースを変えられない。
+    /// 高価 ($600)、長時間建設 (600 ticks = 60 sec)。
     /// 一度設置すると周囲 4-近傍の Rock を順次破砕できるようになる。
-    /// 撤去コストは「中央からの距離 × 100」(外側ほど高い)。
     Outpost,
 }
 
@@ -269,10 +269,18 @@ pub struct City {
     /// ティア進化フラッシュが消える tick。`tick < value` の間バナーを光らせる。
     pub tier_flash_until: u64,
 
-    /// 撤去モード。ON にするとグリッドの全 Built セルがクリック可能になり、
-    /// クリックで建物を撤去 (cost = 50 + d² * 5)。
-    /// transient な UI 状態なので save には含めない (= ロード後は OFF)。
-    pub demolish_mode: bool,
+    /// 直近で `auto_strategy_actions` が成功裏に Outpost を派遣した tick。
+    /// `tick - this >= period` のクールダウン判定に使う。0 = 未着手。
+    /// 永続化対象 (戦略の自動運用ペースをロード後も保つ)。
+    pub last_outpost_dispatch_tick: u64,
+    /// 直近で `auto_strategy_actions` が自動撤去を成功させた tick。
+    /// 0 = 未着手。永続化対象。
+    pub last_auto_demolish_tick: u64,
+    /// Outpost が累計で何回自動派遣されたか (= `dispatch_outpost` 成功回数)。
+    /// 各 Outpost は Rock を解禁し尽くすと役目を終え auto_demolish の対象に
+    /// なるため、`count_built(Outpost)` だけでは生涯派遣数が分からない。
+    /// 戦略の挙動 (どのくらい拡張に投資したか) を測る統計用。永続化対象。
+    pub outposts_dispatched_total: u64,
 
     /// Build queue: how many parallel constructions the AI can run.
     /// (Each Construction tile already counts toward this limit.)
@@ -338,7 +346,9 @@ impl City {
             panel_tab: PanelTab::Manager,
             last_observed_tier: CityTier::Village,
             tier_flash_until: 0,
-            demolish_mode: false,
+            last_outpost_dispatch_tick: 0,
+            last_auto_demolish_tick: 0,
+            outposts_dispatched_total: 0,
             workers: 1,
             rng_state: seed,
             buildings_started: 0,

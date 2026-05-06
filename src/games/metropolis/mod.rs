@@ -34,6 +34,11 @@ use state::{City, PanelTab, Strategy};
 //
 // These are click/key actions on the manager panel.  Keep them stable —
 // they're persisted through Click events keyed by `ClickScope::Game(...)`.
+//
+// Phase A (撤去・開拓の完全自動化) で ID 7/8/9 (旧 DISPATCH_OUTPOST /
+// TOGGLE_DEMOLISH / AUTO_DEMOLISH) と DEMOLISH_CELL_BASE (1000+) を撤去。
+// 戦略を選んだ後の挙動はすべて `logic::auto_strategy_actions` が tick から
+// 自動実行する。プレイヤー操作は戦略 / 雇用 / CPU 進化 / タブだけ。
 pub const ACT_STRATEGY_GROWTH: u16 = 1;
 pub const ACT_STRATEGY_INCOME: u16 = 2;
 /// 旧 `ACT_STRATEGY_BALANCED` の枠を流用。Tech 戦略 (建設速度 +20% / 収入 -20%)。
@@ -44,21 +49,6 @@ pub const ACT_UPGRADE_AI: u16 = 5;
 /// Eco 戦略 (建設 -10% / 収入 +5% / Forest を切らない)。
 /// 既存 ID 1-5 と重複しないよう新しい番号を取得。
 pub const ACT_STRATEGY_ECO: u16 = 6;
-/// 開拓機材を派遣 (= AI に Outpost を 1 基置かせる)。
-/// 高コスト ($600) で 60 sec の長時間建設、市域拡張の戦略行動。
-pub const ACT_DISPATCH_OUTPOST: u16 = 7;
-/// 撤去モードのトグル。ON にするとグリッドの全 Built セルがクリック可能に。
-pub const ACT_TOGGLE_DEMOLISH: u16 = 8;
-/// AI に撤去判断を一任する。手動撤去モードと並列で利用可。
-pub const ACT_AUTO_DEMOLISH: u16 = 9;
-
-/// グリッドセルクリック (撤去モード時のみ反応) のアクション ID 基準値。
-///
-/// `(y, x)` に対して `DEMOLISH_CELL_BASE + y * GRID_W + x` を割り当てる。
-/// 32 * 16 = 512 セルなので、1000..=1511 の範囲を占有。タブ ID (10-13) や
-/// その他のシングルトンアクションと重複しない。`ClickableGrid::decode` を
-/// 使ってデコード。
-pub const DEMOLISH_CELL_BASE: u16 = 1000;
 
 // タブ切替アクション (10-13 を予約; 戦略の隣だが衝突しない)。
 pub const ACT_TAB_STATUS: u16 = 10;
@@ -74,6 +64,10 @@ pub struct MetropolisGame {
 
 impl MetropolisGame {
     pub fn new() -> Self {
+        // wasm ビルドでは下の `let state = { ... }` で shadow するため
+        // 外側の `mut` が unused 扱いになる。non-wasm ブランチが
+        // `state.push_event` で `mut` を要求するので、warning は許容。
+        #[allow(unused_mut)]
         let mut state = City::new();
 
         // WASM ビルド時のみ localStorage からロードを試みる。
@@ -122,9 +116,6 @@ impl Game for MetropolisGame {
                 'e' | 'E' => ACT_STRATEGY_ECO,
                 'w' | 'W' => ACT_HIRE_WORKER,
                 'u' | 'U' => ACT_UPGRADE_AI,
-                'o' | 'O' => ACT_DISPATCH_OUTPOST,
-                'd' | 'D' => ACT_TOGGLE_DEMOLISH,
-                'x' | 'X' => ACT_AUTO_DEMOLISH,
                 '1' => ACT_TAB_STATUS,
                 '2' => ACT_TAB_MANAGER,
                 '3' => ACT_TAB_EVENTS,
@@ -132,21 +123,6 @@ impl Game for MetropolisGame {
                 _ => return false,
             },
         };
-
-        // 撤去モード時のセルクリックを最優先で処理 (DEMOLISH_CELL_BASE..)。
-        // demolish_mode が OFF の時に来た場合は無視 (普通は来ない)。
-        if action_id >= DEMOLISH_CELL_BASE {
-            if !self.state.demolish_mode {
-                return false;
-            }
-            let offset = (action_id - DEMOLISH_CELL_BASE) as usize;
-            if offset >= state::GRID_W * state::GRID_H {
-                return false;
-            }
-            let x = offset % state::GRID_W;
-            let y = offset / state::GRID_W;
-            return logic::demolish_at(&mut self.state, x, y);
-        }
 
         match action_id {
             ACT_STRATEGY_GROWTH => {
@@ -167,18 +143,6 @@ impl Game for MetropolisGame {
             }
             ACT_HIRE_WORKER => logic::hire_worker(&mut self.state),
             ACT_UPGRADE_AI => logic::upgrade_ai(&mut self.state),
-            ACT_DISPATCH_OUTPOST => logic::dispatch_outpost(&mut self.state),
-            ACT_TOGGLE_DEMOLISH => {
-                self.state.demolish_mode = !self.state.demolish_mode;
-                let msg = if self.state.demolish_mode {
-                    "🗑 撤去モード ON — Built セルをクリックで撤去"
-                } else {
-                    "✓ 撤去モード OFF"
-                };
-                self.state.push_event(msg.to_string());
-                true
-            }
-            ACT_AUTO_DEMOLISH => logic::auto_demolish(&mut self.state),
             ACT_TAB_STATUS => {
                 self.state.panel_tab = PanelTab::Status;
                 true
@@ -282,65 +246,24 @@ mod tests {
         assert_eq!(g.state.tick, before + 50);
     }
 
-    /// 'D' キーで撤去モードがトグルする。
+    /// 戦略を切り替えただけで `auto_strategy_actions` が tick から発火し、
+    /// 撤去・開拓を自動で進める (= 旧 `[D]` `[O]` `[X]` ボタン廃止後の保証)。
     #[test]
-    fn d_key_toggles_demolish_mode() {
+    fn auto_strategy_actions_run_without_manual_buttons() {
+        use state::{Building, Tile, GRID_H, GRID_W};
         let mut g = MetropolisGame::new();
-        assert!(!g.state.demolish_mode);
-        assert!(g.handle_input(&InputEvent::Key('d')));
-        assert!(g.state.demolish_mode);
-        assert!(g.handle_input(&InputEvent::Key('D')));
-        assert!(!g.state.demolish_mode);
-    }
-
-    /// 撤去モード ON でセルクリックすると撤去される。
-    #[test]
-    fn demolish_cell_click_removes_building() {
-        use state::{Building, Tile, GRID_W};
-        let mut g = MetropolisGame::new();
-        g.state.cash = 10_000;
-        g.state.demolish_mode = true;
-        let cx = 16;
-        let cy = 8;
-        g.state.set_tile(cx, cy, Tile::Built(Building::House));
-        // Click action ID for (cx, cy) = DEMOLISH_CELL_BASE + cy * GRID_W + cx
-        let action = DEMOLISH_CELL_BASE + (cy as u16) * (GRID_W as u16) + (cx as u16);
-        let consumed = g.handle_input(&click(action));
-        assert!(consumed);
-        assert!(matches!(g.state.tile(cx, cy), Tile::Empty));
-    }
-
-    /// 'X' キーで AI 撤去判断が発火する (候補があれば成功、無ければ false 返し)。
-    #[test]
-    fn x_key_triggers_auto_demolish() {
-        use state::{Building, Tile, GRID_W, GRID_H};
-        let mut g = MetropolisGame::new();
-        g.state.cash = 10_000;
+        // 大量の現金と中央に inactive Shop を置く: 自動撤去のターゲット。
+        g.state.cash = 50_000;
+        g.state.workers = 4;
+        g.state.strategy = Strategy::Income; // 撤去頻度の高い戦略
         let cx = GRID_W / 2;
         let cy = GRID_H / 2;
-        // inactive Shop を中央に置く。
         g.state.set_tile(cx, cy, Tile::Built(Building::Shop));
-        assert!(g.handle_input(&InputEvent::Key('x')));
-        assert!(matches!(g.state.tile(cx, cy), Tile::Empty));
-    }
-
-    /// 撤去モード OFF 時のセルクリックは無視される。
-    #[test]
-    fn demolish_cell_click_ignored_when_off() {
-        use state::{Building, Tile, GRID_W};
-        let mut g = MetropolisGame::new();
-        g.state.cash = 10_000;
-        g.state.demolish_mode = false;
-        let cx = 16;
-        let cy = 8;
-        g.state.set_tile(cx, cy, Tile::Built(Building::House));
-        let action = DEMOLISH_CELL_BASE + (cy as u16) * (GRID_W as u16) + (cx as u16);
-        let consumed = g.handle_input(&click(action));
-        assert!(!consumed);
-        // House は残ったまま。
-        assert!(matches!(
-            g.state.tile(cx, cy),
-            Tile::Built(Building::House)
-        ));
+        // Income の auto_demolish_period_ticks = 450。500 tick 進めれば 1 回は発火。
+        g.tick(500);
+        assert!(
+            matches!(g.state.tile(cx, cy), Tile::Empty),
+            "auto_demolish should have removed the inactive Shop"
+        );
     }
 }

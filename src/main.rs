@@ -63,6 +63,7 @@ const SETTINGS_RESET_CAREER: u16 = 11;
 const SETTINGS_CONFIRM_YES: u16 = 12;
 const SETTINGS_CONFIRM_NO: u16 = 13;
 const SETTINGS_RESET_ABYSS: u16 = 14;
+const SETTINGS_RESET_METROPOLIS: u16 = 15;
 
 /// Use `elementFromPoint` to find which grid cell was clicked.
 ///
@@ -351,6 +352,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     InputEvent::Key('3') | InputEvent::Click(_, SETTINGS_RESET_ABYSS) => {
                         *confirm_reset = Some(GameChoice::Abyss);
                     }
+                    InputEvent::Key('4') | InputEvent::Click(_, SETTINGS_RESET_METROPOLIS) => {
+                        *confirm_reset = Some(GameChoice::Metropolis);
+                    }
                     InputEvent::Key('q') | InputEvent::Click(_, BACK_TO_MENU) => {
                         *state = AppState::Menu { scroll: 0, selected: 0 };
                     }
@@ -379,6 +383,7 @@ fn perform_reset(game: &GameChoice) {
         GameChoice::Cookie => games::cookie::save::delete_save(),
         GameChoice::Career => games::career::save::delete_save(),
         GameChoice::Abyss => games::abyss::save::delete_save(),
+        GameChoice::Metropolis => games::metropolis::save::delete_save(),
         _ => {}
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -793,6 +798,18 @@ fn render_settings_main(
     );
 
     cl.push(Line::from(""));
+
+    // Idle Metropolis
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
+            Span::styled("Idle Metropolis", Style::default().fg(Color::White)),
+            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
+        ]),
+        SETTINGS_RESET_METROPOLIS,
+    );
+
+    cl.push(Line::from(""));
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
         " ※ Tiny Factory / Dungeon Dive は",
@@ -825,6 +842,7 @@ fn render_confirm_dialog(
         GameChoice::Career => "Career Simulator",
         GameChoice::Cafe => "廃墟カフェ復興記",
         GameChoice::Abyss => "深淵潜行",
+        GameChoice::Metropolis => "Idle Metropolis",
         _ => "Unknown",
     };
 

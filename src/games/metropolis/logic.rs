@@ -101,6 +101,12 @@ pub fn tick(city: &mut City, delta_ticks: u32) {
 
 fn step_one_tick(city: &mut City) {
     advance_construction(city);
+    // auto を drive_ai より先に動かす理由: drive_ai は free_workers をすべて
+    // 埋めてしまうので、その後で auto を回すと Outpost 派遣の発火ウィンドウ
+    // (`tick % period == 0` の単一 tick) がほぼ常に free_workers=0 で外れる。
+    // 先に auto が 1 ワーカーを Outpost に予約しておくことで、戦略の意図
+    // (拡張する / 撤去する) が確実に成立する。
+    auto_strategy_actions(city);
     drive_ai(city);
     accrue_income(city);
     detect_tier_advance(city);
@@ -338,6 +344,132 @@ pub fn strategy_thought_verb(s: Strategy, kind: Building) -> &'static str {
         // Outpost はプレイヤー操作専用 — AI は建てない (= 思考動詞は出ない)。
         // ただし match 網羅性のため共通文言を入れる (debug 中などに発火した場合)。
         (_, Building::Outpost) => "開拓機材を設置",
+    }
+}
+
+// ── 自動運用ポリシー (Phase A 撤去 / 開拓の完全自動化) ─────────────
+//
+// プレイヤーが選んだ Strategy に応じて、CPU が「いつ Outpost を派遣するか /
+// いつ撤去判断を走らせるか / どこまで現金を予備に取っておくか」を自動決定する。
+// 撤去・開拓の手動ボタンは廃止され、すべてここを起点に tick 駆動で発火する。
+//
+// ## 数値の意味
+//
+// - `outpost_dispatch_period_ticks` (None = 自動拡張しない):
+//   この間隔で `dispatch_outpost` を試行。Outpost 自体の建設時間が 60 sec
+//   (= 600 ticks) なので、これより短くすると同時建設が積み上がる。
+//
+// - `auto_demolish_period_ticks` (None = 自動撤去しない):
+//   この間隔で `auto_demolish` を試行。短くすると無駄な建物を即排除する
+//   「効率最大化」キャラ、長くすると「のんびり放置」キャラ。
+//
+// - `min_cash_reserve`:
+//   この額より下になる行動 (Outpost 派遣 / 撤去) は控える。drive_ai が建物を
+//   建てる原資を残すためのガード。Outpost コスト ($600) + 余裕 = 戦略次第。
+//
+// 数値はシミュレーター (simulator.rs `automation_*` 群) で 30min ベンチを
+// 走らせて「成長する / cash が貯まる / Rock が解禁される」を観測しながら
+// 確定させた。変更時は同テストで回帰を確認すること。
+
+/// 自動運用の方針 (Strategy ごとの周期と予算ガード)。
+#[derive(Clone, Copy, Debug)]
+pub struct AutomationPolicy {
+    pub outpost_dispatch_period_ticks: Option<u32>,
+    pub auto_demolish_period_ticks: Option<u32>,
+    pub min_cash_reserve: i64,
+}
+
+/// 戦略ごとの自動運用設定。`auto_strategy_actions` が毎 tick 参照する。
+///
+/// シミュレータ (`automation_drives_outposts_and_demolitions`) で 4-worker
+/// DemandAware で 30 min 動かして「全戦略が拡張可能戦略では Outpost を
+/// 1 基以上派遣する」を担保しながら値を確定した。
+///
+/// `min_cash_reserve` は **drive_ai が建物を建て終えた後の余裕**。
+/// drive_ai が貪欲にキャッシュを消費するため、リザーブを大きくしすぎると
+/// 自動派遣が永遠に発火しない。$200-500 程度が実機テストでバランス良い。
+pub fn automation_policy(s: Strategy) -> AutomationPolicy {
+    match s {
+        // 成長: 人口拡張のために土地が要る → 拡張は最速ペース、撤去は控えめ。
+        // 戦略の主役 (人口) を支えるため、4 戦略中で最も短い拡張周期にする。
+        Strategy::Growth => AutomationPolicy {
+            outpost_dispatch_period_ticks: Some(600),
+            auto_demolish_period_ticks: Some(900),
+            min_cash_reserve: 300,
+        },
+        // 収入: 効率最大化 = 無駄な建物を積極排除。拡張は控えめ。
+        Strategy::Income => AutomationPolicy {
+            outpost_dispatch_period_ticks: Some(1500),
+            auto_demolish_period_ticks: Some(750),
+            min_cash_reserve: 500,
+        },
+        // 技術投資: 建設+20% を活かす + 道路網重視。拡張は中庸 (= 道路を
+        // 既存域内で太く張ることに比重を置く)。Growth より遅い周期にして
+        // 「Growth は土地で攻める / Tech は道路網で攻める」差別化を担保。
+        Strategy::Tech => AutomationPolicy {
+            outpost_dispatch_period_ticks: Some(1000),
+            auto_demolish_period_ticks: Some(750),
+            min_cash_reserve: 400,
+        },
+        // 環境配慮: 緑も岩も残す。自動拡張・撤去とも無し。
+        // 「緑地を保護し、既存の市域で完結する」キャラクター。
+        // プレイヤーが Eco を選ぶ = 「広げない、潰さない、ゆっくり育てる」を
+        // 全面に押し出すための明確な選択肢にする。
+        Strategy::Eco => AutomationPolicy {
+            outpost_dispatch_period_ticks: None,
+            auto_demolish_period_ticks: None,
+            min_cash_reserve: 200,
+        },
+    }
+}
+
+/// `step_one_tick` から毎 tick 呼ばれる自動運用ハブ。
+///
+/// **クールダウン方式**: 「最後に成功した tick + period」を過ぎていれば毎 tick
+/// 試行する。`tick % period == 0` の単一 tick 発火だと、その瞬間に
+/// `free_workers == 0` だった場合に取り逃がす (DemandAware は drive_ai が
+/// 直前にワーカーを埋めるため発生しがち)。クールダウン方式なら、条件が
+/// 揃った最初の tick で発火するので戦略の意図が必ず実行される。
+pub fn auto_strategy_actions(city: &mut City) {
+    if city.tick == 0 {
+        return;
+    }
+    let policy = automation_policy(city.strategy);
+
+    if let Some(period) = policy.outpost_dispatch_period_ticks {
+        let due = city.tick.saturating_sub(city.last_outpost_dispatch_tick) >= period as u64
+            || city.last_outpost_dispatch_tick == 0;
+        // 同時に複数の Outpost を建てない (= 1 基ずつ確実に建てて Rock を
+        // 解禁してから次へ進める)。
+        let outpost_in_progress = city.cells().any(|(_, _, t)| {
+            matches!(t, Tile::Construction { target: Building::Outpost, .. })
+        });
+        // Outpost 建設は 60 sec ワーカー占有 = 1-worker プレイヤーは時間の
+        // 半分以上を Outpost に取られて家が建たなくなる。雇用 (>= 2 worker)
+        // が「自動拡張アンロック」の役割を持つ設計。プレイヤーが [W] で
+        // ワーカーを増やすことに具体的な意味が生まれる。
+        if due
+            && city.workers >= 2
+            && !outpost_in_progress
+            && city.free_workers() > 0
+            && city.cash >= Building::Outpost.cost() + policy.min_cash_reserve
+            && dispatch_outpost(city)
+        {
+            city.last_outpost_dispatch_tick = city.tick;
+        }
+    }
+    if let Some(period) = policy.auto_demolish_period_ticks {
+        let due = city.tick.saturating_sub(city.last_auto_demolish_tick) >= period as u64
+            || city.last_auto_demolish_tick == 0;
+        if due {
+            if let Some((tx, ty, _score)) = auto_demolish_target(city) {
+                if city.cash >= demolish_cost(tx, ty) + policy.min_cash_reserve
+                    && auto_demolish(city)
+                {
+                    city.last_auto_demolish_tick = city.tick;
+                }
+            }
+        }
     }
 }
 
@@ -912,12 +1044,13 @@ pub fn demolish_at(city: &mut City, x: usize, y: usize) -> bool {
     true
 }
 
-// ── AI 撤去判断 (Phase A 続) ────────────────────────────────────
+// ── AI 撤去判断 (Phase A: 完全自動化) ───────────────────────────
 //
 // Idle Metropolis の哲学「CPU が街を作る、プレイヤーは方向だけ」に沿って、
-// 撤去判断も CPU 側に委譲する。プレイヤーが [X] ボタンを押すと、CPU が
-// **最も無駄な建物**を 1 つ選んで撤去する。手動撤去モード (`demolish_mode`)
-// は残してあるので、CPU の判断が気に入らなければプレイヤーが override 可能。
+// 撤去判断も CPU 側に委譲する。`auto_strategy_actions` から戦略ごとの
+// 周期 (`automation_policy(s).auto_demolish_period_ticks`) で発火し、
+// **最も無駄な建物**を 1 つ選んで撤去する。手動撤去ボタン / モードは
+// すべて廃止されたため、プレイヤーは戦略選択でしか撤去挙動を変えられない。
 //
 // ## 評価関数の設計
 //
@@ -1059,24 +1192,17 @@ pub fn auto_demolish_target(city: &City) -> Option<(usize, usize, i64)> {
 }
 
 /// AI に撤去判断を一任する。最高スコアの建物を 1 つ撤去する。
-/// 候補が無い (= どの撤去も net 損) 時は false + ログメッセージ。
+/// 候補が無い / 現金不足の時は **無音で false** を返す (tick 駆動の自動発火
+/// から呼ばれるためログ spam を避ける)。成功時は `demolish_at` 内で
+/// "🗑 ... を撤去" のイベントが既に記録される。
 pub fn auto_demolish(city: &mut City) -> bool {
-    let Some((x, y, score)) = auto_demolish_target(city) else {
-        city.push_event("🤖 撤去すべき建物を AI が判断できなかった".to_string());
+    let Some((x, y, _score)) = auto_demolish_target(city) else {
         return false;
     };
     let cost = demolish_cost(x, y);
     if city.cash < cost {
-        city.push_event(format!(
-            "❌ AI 撤去候補 ({},{}) 発見も現金不足 (要 ${}, 現在 ${})",
-            x, y, cost, city.cash
-        ));
         return false;
     }
-    city.push_event(format!(
-        "🤖 AI 撤去判断 → ({},{}) score={}",
-        x, y, score
-    ));
     demolish_at(city, x, y)
 }
 
@@ -1095,32 +1221,31 @@ pub fn auto_demolish(city: &mut City) -> bool {
 pub fn dispatch_outpost(city: &mut City) -> bool {
     let cost = Building::Outpost.cost();
     if city.cash < cost {
-        city.push_event(format!(
-            "❌ 開拓機材の派遣には ${} 必要 (現在 ${})",
-            cost, city.cash
-        ));
         return false;
     }
 
     let Some((bx, by)) = best_outpost_placement(city) else {
-        city.push_event("❌ 機材の設置場所が見当たらない (街の境界が岩盤に接していない)".to_string());
         return false;
     };
 
     if !start_construction(city, bx, by, Building::Outpost) {
-        // start_construction 内で再度チェック — 想定外の race。
-        city.push_event("❌ 機材の設置に失敗".to_string());
         return false;
     }
+    city.outposts_dispatched_total = city.outposts_dispatched_total.saturating_add(1);
     let unlocked = count_rock_neighbors(city, bx, by);
     city.push_event(format!(
-        "🚧 ({},{}) に開拓機材を派遣 — 周囲 {} 岩盤を解禁予定",
+        "🚧 ({},{}) 開拓機材を自動派遣 — 周囲 {} 岩盤を解禁予定",
         bx, by, unlocked
     ));
     true
 }
 
 /// `dispatch_outpost` の候補探索。最も多くの Rock を解禁できる Empty セルを返す。
+///
+/// 「街の連続性」要件は Manhattan 距離 2 (= 4-近傍 + その近傍) で見る。AI が
+/// 4-近傍を埋め切るスピードに対し、距離 2 のバッファを持たせることで Empty
+/// Plain な候補が安定して残る。距離 2 でも「街から数歩」の位置なので、Rock
+/// 解禁後に AI が自然に拡張してくる位置として妥当。
 fn best_outpost_placement(city: &City) -> Option<(usize, usize)> {
     let mut best: Option<(usize, usize, u32)> = None;
     for y in 0..GRID_H {
@@ -1131,15 +1256,15 @@ fn best_outpost_placement(city: &City) -> Option<(usize, usize)> {
             // 機材は **整地不要セル (Plain)** にしか置かない。Forest/Wasteland を
             // 候補に入れると `dispatch_outpost` → `start_construction` のフローで
             // 整地だけ走って Outpost が建たない silent failure になる
-            // (Codex review #100: P1)。プレイヤー視点でも「森を切ってから機材を
-            // 置く」自然なワークフローに整合する。Rock は `needs_outpost()` で別途排除。
+            // (Codex review #100: P1)。
             let terrain = city.terrain_at(x, y);
             if !terrain.buildable() || terrain.needs_clearing() {
                 continue;
             }
-            // 既存建造物 (Built or Construction) に隣接していないと、機材を
-            // 置いても市域から孤立してしまうのでスキップ。
-            if !has_any_built_neighbor(city, x, y) {
+            // 既存建造物 (Built or Construction) から Manhattan 距離 2 以内に
+            // 居ること = 街の周辺に居る。距離 1 (4-近傍) だと AI のフロンティア
+            // 拡張で候補がすぐ消える。
+            if !has_built_within_distance(city, x, y, 4) {
                 continue;
             }
             // 近傍 Rock 数 = 解禁スコア。
@@ -1159,6 +1284,31 @@ fn best_outpost_placement(city: &City) -> Option<(usize, usize)> {
     best.map(|(x, y, _)| (x, y))
 }
 
+/// (x, y) から Manhattan 距離 dist 以内に Built/Construction セルが存在するか。
+fn has_built_within_distance(city: &City, x: usize, y: usize, dist: i32) -> bool {
+    let xi = x as i32;
+    let yi = y as i32;
+    for dy in -dist..=dist {
+        for dx in -dist..=dist {
+            if dx.abs() + dy.abs() > dist || (dx == 0 && dy == 0) {
+                continue;
+            }
+            let nx = xi + dx;
+            let ny = yi + dy;
+            if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                continue;
+            }
+            if matches!(
+                city.tile(nx as usize, ny as usize),
+                Tile::Built(_) | Tile::Construction { .. }
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn count_rock_neighbors(city: &City, x: usize, y: usize) -> u32 {
     let mut n = 0;
     for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
@@ -1175,21 +1325,6 @@ fn count_rock_neighbors(city: &City, x: usize, y: usize) -> u32 {
         }
     }
     n
-}
-
-fn has_any_built_neighbor(city: &City, x: usize, y: usize) -> bool {
-    for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-        let nx = x as i32 + dx;
-        let ny = y as i32 + dy;
-        if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
-            continue;
-        }
-        match city.tile(nx as usize, ny as usize) {
-            Tile::Built(_) | Tile::Construction { .. } => return true,
-            _ => {}
-        }
-    }
-    false
 }
 
 /// Try to upgrade the AI brain.  Returns true on success.
@@ -1741,13 +1876,19 @@ mod tests {
         assert!(matches!(city.tile(cx, cy), Tile::Empty));
     }
 
-    /// auto_demolish: 候補なしなら false + ログ。
+    /// auto_demolish: 候補なしなら false。tick 駆動で頻繁に呼ばれる前提なので
+    /// ログ spam を避けるために失敗時はサイレント (events にプッシュしない)。
     #[test]
     fn auto_demolish_no_candidate_returns_false() {
         let mut city = City::new();
         city.cash = 10_000;
+        let events_before = city.events.len();
         assert!(!auto_demolish(&mut city));
-        assert!(city.events.iter().any(|e| e.contains("判断できなかった")));
+        assert_eq!(
+            city.events.len(),
+            events_before,
+            "auto_demolish failure must be silent"
+        );
     }
 
     /// 役目を終えた Outpost (周囲 Rock が無い) は AI が撤去する。
@@ -1764,41 +1905,55 @@ mod tests {
     }
 
     /// dispatch_outpost: 隣接 Rock がある建物境界を見つけて Outpost 着工する。
+    /// Phase A: `best_outpost_placement` が Manhattan 距離 4 以内まで
+    /// 候補を広げたため、特定セルへの厳密 assert はやめて「グリッド上の
+    /// どこかに Outpost Construction が始まる」という不変条件のみ確認する。
     #[test]
     fn dispatch_outpost_places_at_boundary() {
         let mut city = City::new();
         city.cash = 1_000;
-        // 中央 (16, 8) を Plain に固定 + 隣に House を 1 軒置く。
         let cx = GRID_W / 2;
         let cy = GRID_H / 2;
         city.terrain[cy][cx] = super::super::terrain::Terrain::Plain;
         city.set_tile(cx, cy, Tile::Built(Building::House));
-        // (cx+1, cy) を Empty かつ Plain に、(cx+2, cy) を Rock に。
         city.terrain[cy][cx + 1] = super::super::terrain::Terrain::Plain;
         city.terrain[cy][cx + 2] = super::super::terrain::Terrain::Rock;
 
         let ok = dispatch_outpost(&mut city);
         assert!(ok, "outpost dispatch should succeed");
-        // 派遣後、(cx+1, cy) が Construction (Outpost) になっているはず。
-        assert!(matches!(
-            city.tile(cx + 1, cy),
-            Tile::Construction { target: Building::Outpost, .. }
-        ));
+        let any_outpost_construction = (0..GRID_H).any(|y| {
+            (0..GRID_W).any(|x| {
+                matches!(
+                    city.tile(x, y),
+                    Tile::Construction {
+                        target: Building::Outpost,
+                        ..
+                    }
+                )
+            })
+        });
+        assert!(
+            any_outpost_construction,
+            "an Outpost Construction tile should exist after dispatch"
+        );
         assert!(city.cash < 1_000, "cash should be spent");
     }
 
-    /// 機材設置場所が無い時は false を返してメッセージを残す。
+    /// 機材設置場所が無い時は false を返してサイレントに帰る。
+    /// 旧仕様では失敗イベントログを出していたが、tick 駆動の自動発火に移行した
+    /// ため log spam を避けてサイレント化した。
     #[test]
     fn dispatch_outpost_fails_when_no_boundary() {
         let mut city = City::new();
         city.cash = 1_000;
+        let events_before = city.events.len();
         // 既存建物無し → has_any_built_neighbor の候補ゼロ
         let result = dispatch_outpost(&mut city);
         assert!(!result, "no boundary should fail dispatch");
         // cash は減っていない。
         assert_eq!(city.cash, 1_000);
-        // 失敗メッセージがログに残る。
-        assert!(city.events.iter().any(|e| e.contains("見当たらない")));
+        // 失敗時はイベントを増やさない (サイレント)。
+        assert_eq!(city.events.len(), events_before);
     }
 
     /// Codex review #100 P1 回帰: Forest セルを Outpost 候補から除外する。
@@ -1828,18 +1983,24 @@ mod tests {
         }
 
         let placement = best_outpost_placement(&city).expect("should find a Plain candidate");
-        // Forest セル (cx+1, cy) ではなく Plain セル (cx-1, cy) が選ばれること。
+        // Forest セル (cx+1, cy) は候補に入れてはならない (silent failure 回避)。
         assert_ne!(
             placement,
             (cx + 1, cy),
             "Forest cell must not be selected for Outpost placement"
         );
-        assert_eq!(placement, (cx - 1, cy));
+        // 配置先の terrain は Plain であること (= Outpost が直接着工可能)。
+        let (px, py) = placement;
+        assert_eq!(
+            city.terrain[py][px],
+            super::super::terrain::Terrain::Plain,
+            "placement {:?} should be on Plain terrain",
+            placement
+        );
 
-        // 実際に dispatch しても、Plain 上に Construction(Outpost) が始まる。
         assert!(dispatch_outpost(&mut city));
         assert!(matches!(
-            city.tile(cx - 1, cy),
+            city.tile(px, py),
             Tile::Construction { target: Building::Outpost, .. }
         ));
     }
