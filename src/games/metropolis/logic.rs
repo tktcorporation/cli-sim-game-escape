@@ -1128,10 +1128,13 @@ fn best_outpost_placement(city: &City) -> Option<(usize, usize)> {
             if !matches!(city.tile(x, y), Tile::Empty) {
                 continue;
             }
-            // 機材自身は Plain/Forest/Wasteland 上に置く (Rock の上には置けない
-            // — Rock を破砕するには既に隣接機材が必要、というブートストラップ
-            // を解くのは「中央コアの境界」しか候補にならない設計)。
-            if !city.terrain_at(x, y).buildable() || city.terrain_at(x, y).needs_outpost() {
+            // 機材は **整地不要セル (Plain)** にしか置かない。Forest/Wasteland を
+            // 候補に入れると `dispatch_outpost` → `start_construction` のフローで
+            // 整地だけ走って Outpost が建たない silent failure になる
+            // (Codex review #100: P1)。プレイヤー視点でも「森を切ってから機材を
+            // 置く」自然なワークフローに整合する。Rock は `needs_outpost()` で別途排除。
+            let terrain = city.terrain_at(x, y);
+            if !terrain.buildable() || terrain.needs_clearing() {
                 continue;
             }
             // 既存建造物 (Built or Construction) に隣接していないと、機材を
@@ -1796,6 +1799,49 @@ mod tests {
         assert_eq!(city.cash, 1_000);
         // 失敗メッセージがログに残る。
         assert!(city.events.iter().any(|e| e.contains("見当たらない")));
+    }
+
+    /// Codex review #100 P1 回帰: Forest セルを Outpost 候補から除外する。
+    ///
+    /// 以前は Forest/Wasteland も候補に入っていたため、`start_construction` が
+    /// 整地ブランチに入って $15 だけ消費し Outpost を建てない silent failure が
+    /// 発生していた。修正後は Forest 隣接でも Plain 候補があればそちらを選ぶ。
+    #[test]
+    fn dispatch_outpost_skips_forest_candidates() {
+        let mut city = City::new();
+        city.cash = 10_000;
+        let cx = GRID_W / 2;
+        let cy = GRID_H / 2;
+        // 中央 House → 隣 Plain (左) と隣 Forest (右) を候補に。両側に Rock を配置。
+        city.terrain[cy][cx] = super::super::terrain::Terrain::Plain;
+        city.set_tile(cx, cy, Tile::Built(Building::House));
+        // 左: Plain + 隣 Rock
+        city.terrain[cy][cx - 1] = super::super::terrain::Terrain::Plain;
+        city.terrain[cy][cx - 2] = super::super::terrain::Terrain::Rock;
+        // 右: Forest + 隣 Rock (旧バグでは候補になっていた)
+        city.terrain[cy][cx + 1] = super::super::terrain::Terrain::Forest;
+        city.terrain[cy][cx + 2] = super::super::terrain::Terrain::Rock;
+        // Forest 上には更に Rock を増やしてスコアを上げ、旧バグで Forest が
+        // 優先されることを再現しやすくする。
+        if cy + 1 < GRID_H {
+            city.terrain[cy + 1][cx + 1] = super::super::terrain::Terrain::Rock;
+        }
+
+        let placement = best_outpost_placement(&city).expect("should find a Plain candidate");
+        // Forest セル (cx+1, cy) ではなく Plain セル (cx-1, cy) が選ばれること。
+        assert_ne!(
+            placement,
+            (cx + 1, cy),
+            "Forest cell must not be selected for Outpost placement"
+        );
+        assert_eq!(placement, (cx - 1, cy));
+
+        // 実際に dispatch しても、Plain 上に Construction(Outpost) が始まる。
+        assert!(dispatch_outpost(&mut city));
+        assert!(matches!(
+            city.tile(cx - 1, cy),
+            Tile::Construction { target: Building::Outpost, .. }
+        ));
     }
 
     /// Rock セルは隣接 Outpost が無いと start_construction が false を返す。
