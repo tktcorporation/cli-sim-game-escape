@@ -523,6 +523,23 @@ pub enum CellType {
     Idol,
     Peddler,
     MonsterEgg,
+    // ── Overworld (village) tiles ──
+    /// 村の出口 → ダンジョン B1F へ降りる
+    DungeonEntrance,
+    /// 武器屋 (Shop overlay を開く)
+    ShopTile,
+    /// 依頼掲示板 (QuestBoard overlay を開く)
+    QuestBoardTile,
+    /// 宿屋 (10G で全回復するイベント)
+    InnTile,
+    /// 村の祭壇 (PrayMenu overlay を開く)
+    ShrineTile,
+    /// 受付嬢 NPC — 初回会話で薬草+パン+50G を渡す
+    ReceptionNpc,
+    /// 武具屋の親父 NPC — 初回会話で木の剣+旅人の服を渡す
+    BlacksmithNpc,
+    /// 広場の村人 (フレーバー会話のみ)
+    VillagerNpc,
 }
 
 #[derive(Clone, Debug)]
@@ -588,6 +605,9 @@ pub struct DungeonMap {
     pub last_dir: Facing,
     pub rooms: Vec<Room>,
     pub monsters: Vec<Monster>,
+    /// 村マップの場合は true。霧なし、敵ターンなし、満腹度減少なし、
+    /// イベントは消費されず再訪問可能（ショップや NPC を何度でも利用できる）。
+    pub is_overworld: bool,
 }
 
 impl DungeonMap {
@@ -610,6 +630,8 @@ impl DungeonMap {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FloorTheme {
+    /// 村の地上マップ（floor_num = 0）
+    Village,
     MossyRuins,
     Underground,
     AncientTemple,
@@ -645,6 +667,23 @@ pub enum EventAction {
     AscendStairs,
     ReturnToTown,
     Continue,
+    // ── Overworld actions ──
+    /// 村のダンジョン入口から B1F へ降りる
+    EnterDungeon,
+    /// 武器屋 — Shop overlay を開く
+    OpenShop,
+    /// 掲示板 — QuestBoard overlay を開く
+    OpenQuestBoardOverlay,
+    /// 宿屋に泊まる (10G で全回復)
+    RestAtInn,
+    /// 祭壇 — PrayMenu overlay を開く
+    OpenShrineOverlay,
+    /// 受付嬢に話しかける (初回は薬草+パン+50G)
+    TalkReception,
+    /// 武具屋の親父に話しかける (初回は木の剣+旅人の服)
+    TalkBlacksmith,
+    /// 広場の村人に話しかける (フレーバーのみ)
+    TalkVillager,
     // ── Issue #90: new event actions ──
     /// Help up the fallen adventurer — chance the body was a mimic.
     ReviveAdventurer,
@@ -743,8 +782,9 @@ impl Quest {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Scene {
-    Intro(u8),
-    Town,
+    /// 村の地上マップ。起動直後はここから始まる。
+    /// マップ自体は `DungeonMap` を共有するが `is_overworld == true`。
+    Overworld,
     /// Single dungeon scene — events are popups overlaid on the explore
     /// view, not a separate scene transition. See issue #89.
     DungeonExplore,
@@ -891,6 +931,12 @@ pub struct RpgState {
     /// Reset to 0 on every scene/overlay/event transition so the cursor
     /// never points past the new menu's choice list.
     pub cursor: usize,
+
+    /// 受付嬢に話したことがあるか。初回はチュートリアル＋初期物資配布、
+    /// 2回目以降はフレーバー会話のみ。
+    pub met_reception: bool,
+    /// 武具屋に話したことがあるか。初回は初期装備配布、以降はフレーバー。
+    pub met_blacksmith: bool,
 }
 
 pub const SATIETY_MAX_DEFAULT: u32 = 1000;
@@ -912,7 +958,7 @@ impl RpgState {
 
     pub fn new() -> Self {
         let stats = level_stats(1);
-        Self {
+        let mut s = Self {
             level: 1,
             exp: 0,
             hp: stats.max_hp,
@@ -929,7 +975,7 @@ impl RpgState {
             dungeon: None,
             max_floor_reached: 0,
             total_clears: 0,
-            scene: Scene::Intro(0),
+            scene: Scene::Overworld,
             overlay: None,
             scene_text: Vec::new(),
             active_event: None,
@@ -951,7 +997,12 @@ impl RpgState {
             buffs: PlayerBuffs::default(),
             turn_count: 0,
             cursor: 0,
-        }
+            met_reception: false,
+            met_blacksmith: false,
+        };
+        // Load the village map so the player spawns on the overworld.
+        s.dungeon = Some(super::overworld_map::generate_overworld());
+        s
     }
 
     pub fn add_log(&mut self, text: &str) {
@@ -1064,13 +1115,17 @@ mod tests {
         assert_eq!(s.level, 1);
         assert_eq!(s.hp, 50);
         assert_eq!(s.gold, 0);
-        assert_eq!(s.scene, Scene::Intro(0));
+        assert_eq!(s.scene, Scene::Overworld);
         assert!(s.overlay.is_none());
         assert!(!s.game_cleared);
         assert_eq!(s.satiety, SATIETY_MAX_DEFAULT);
         assert_eq!(s.faith, 0);
         assert!(s.active_quest.is_none());
         assert!(s.pet.is_none());
+        assert!(s.dungeon.is_some(), "village map loaded at start");
+        assert!(s.dungeon.as_ref().unwrap().is_overworld);
+        assert!(!s.met_reception);
+        assert!(!s.met_blacksmith);
     }
 
     #[test]
@@ -1214,6 +1269,7 @@ mod tests {
                 x: 2, y: 2, hp: 12, max_hp: 12,
                 awake: false, charging: false,
             }],
+            is_overworld: false,
         };
         assert_eq!(map.monster_at(2, 2), Some(0));
         assert_eq!(map.monster_at(0, 0), None);

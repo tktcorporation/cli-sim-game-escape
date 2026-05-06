@@ -60,6 +60,7 @@ pub fn compute_visibility(map: &DungeonMap) -> HashSet<(usize, usize)> {
 fn theme_colors(theme: FloorTheme) -> (Color, Color) {
     // (wall_color, floor_dot_color)
     match theme {
+        FloorTheme::Village => (Color::Rgb(140, 100, 60), Color::Rgb(60, 80, 50)),
         FloorTheme::MossyRuins => (Color::Rgb(100, 130, 100), Color::Rgb(40, 55, 40)),
         FloorTheme::Underground => (Color::Rgb(100, 100, 140), Color::Rgb(40, 40, 55)),
         FloorTheme::AncientTemple => (Color::Rgb(150, 125, 80), Color::Rgb(55, 45, 30)),
@@ -189,6 +190,19 @@ pub fn render_map_2d(
 
 /// Map cell type to display string (2 chars wide) and color.
 fn cell_marker(cell: &super::state::MapCell) -> (String, Color) {
+    // Overworld tiles never get marked done — they always render as their
+    // facility glyph regardless of `event_done`.
+    match cell.cell_type {
+        CellType::DungeonEntrance => return ("\u{25bc} ".to_string(), Color::Red),
+        CellType::ShopTile => return ("$ ".to_string(), Color::Yellow),
+        CellType::QuestBoardTile => return ("\u{2691} ".to_string(), Color::Yellow),
+        CellType::InnTile => return ("\u{2302} ".to_string(), Color::Cyan),
+        CellType::ShrineTile => return ("\u{2734} ".to_string(), Color::Magenta),
+        CellType::ReceptionNpc => return ("R ".to_string(), Color::Green),
+        CellType::BlacksmithNpc => return ("B ".to_string(), Color::Rgb(220, 160, 80)),
+        CellType::VillagerNpc => return ("v ".to_string(), Color::White),
+        _ => {}
+    }
     if !cell.event_done {
         match cell.cell_type {
             CellType::Entrance => ("\u{25c7} ".to_string(), Color::Green),
@@ -206,6 +220,15 @@ fn cell_marker(cell: &super::state::MapCell) -> (String, Color) {
             CellType::Idol => ("\u{2734} ".to_string(), Color::Yellow),
             CellType::Peddler => ("$ ".to_string(), Color::Yellow),
             CellType::MonsterEgg => ("\u{25cf} ".to_string(), Color::Magenta),
+            // Overworld branches handled above; unreachable here.
+            CellType::DungeonEntrance
+            | CellType::ShopTile
+            | CellType::QuestBoardTile
+            | CellType::InnTile
+            | CellType::ShrineTile
+            | CellType::ReceptionNpc
+            | CellType::BlacksmithNpc
+            | CellType::VillagerNpc => ("\u{00b7} ".to_string(), Color::Reset),
         }
     } else {
         match cell.cell_type {

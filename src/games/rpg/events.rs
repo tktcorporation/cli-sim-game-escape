@@ -41,6 +41,17 @@ pub fn generate_event(
         CellType::Idol => Some(idol_event(theme)),
         CellType::Peddler => Some(peddler_event(rng_seed)),
         CellType::MonsterEgg => Some(monster_egg_event(rng_seed)),
+        // Overworld tiles are dispatched separately because their event
+        // content depends on RpgState (e.g. "first time meeting" flag).
+        // See `logic::generate_overworld_event`.
+        CellType::DungeonEntrance
+        | CellType::ShopTile
+        | CellType::QuestBoardTile
+        | CellType::InnTile
+        | CellType::ShrineTile
+        | CellType::ReceptionNpc
+        | CellType::BlacksmithNpc
+        | CellType::VillagerNpc => None,
     }
 }
 
@@ -69,7 +80,7 @@ fn fruit_tree_event(theme: FloorTheme) -> DungeonEvent {
         FloorTheme::Underground => "地下水脈の傍に奇妙な果樹が育っている。",
         FloorTheme::AncientTemple => "祭壇の脇に古い果樹が残されている。",
         FloorTheme::VolcanicDepths => "熱気の中、紅い実をつけた樹が立っている。",
-        FloorTheme::DemonCastle => "歪な果実をつけた黒い樹がある。",
+        FloorTheme::Village | FloorTheme::DemonCastle => "歪な果実をつけた黒い樹がある。",
     };
     DungeonEvent {
         description: vec![desc.into()],
@@ -87,7 +98,7 @@ fn well_event(theme: FloorTheme) -> DungeonEvent {
         FloorTheme::Underground => "地下水を汲み上げる井戸が残っている。",
         FloorTheme::AncientTemple => "聖域の井戸。水面が淡く輝く。",
         FloorTheme::VolcanicDepths => "熱湯ではない不思議な冷水井戸。",
-        FloorTheme::DemonCastle => "底が見えぬ漆黒の井戸…",
+        FloorTheme::Village | FloorTheme::DemonCastle => "底が見えぬ漆黒の井戸…",
     };
     DungeonEvent {
         description: vec![desc.into(), "水を飲むのは賭けだ。".into()],
@@ -106,7 +117,7 @@ fn idol_event(theme: FloorTheme) -> DungeonEvent {
         FloorTheme::Underground => "地下に佇む朽ちかけた神像。",
         FloorTheme::AncientTemple => "黄金に光る荘厳な神像。",
         FloorTheme::VolcanicDepths => "炎で焦げた神像が残されている。",
-        FloorTheme::DemonCastle => "禍々しい彫像。これは…神か？",
+        FloorTheme::Village | FloorTheme::DemonCastle => "禍々しい彫像。これは…神か？",
     };
     DungeonEvent {
         description: vec![desc.into()],
@@ -164,7 +175,7 @@ fn treasure_event(floor: u32, theme: FloorTheme, rng_seed: &mut u64) -> DungeonE
         FloorTheme::Underground => "地下水に半分沈んだ宝箱がある。",
         FloorTheme::AncientTemple => "祭壇の上に装飾された箱が置かれている。",
         FloorTheme::VolcanicDepths => "溶岩の縁に耐熱の箱が残されている。",
-        FloorTheme::DemonCastle => "禍々しい紋章が刻まれた箱がある。",
+        FloorTheme::Village | FloorTheme::DemonCastle => "禍々しい紋章が刻まれた箱がある。",
     };
 
     let search_hint = if floor >= 4 { "調べる (罠を確認)" } else { "慎重に調べる" };
@@ -191,7 +202,7 @@ fn trap_event(floor: u32, theme: FloorTheme, rng_seed: &mut u64) -> DungeonEvent
         FloorTheme::Underground => "通路の床が不自然に光っている。",
         FloorTheme::AncientTemple => "床に複雑な紋様が描かれている。",
         FloorTheme::VolcanicDepths => "足元から微かな振動を感じる。",
-        FloorTheme::DemonCastle => "魔法陣のような痕跡が床に残る。",
+        FloorTheme::Village | FloorTheme::DemonCastle => "魔法陣のような痕跡が床に残る。",
     };
 
     let _ = floor;
@@ -212,7 +223,7 @@ fn spring_event(theme: FloorTheme) -> DungeonEvent {
         FloorTheme::Underground => "地底湖の端に清水が流れている。",
         FloorTheme::AncientTemple => "聖なる泉が淡い光を放っている。",
         FloorTheme::VolcanicDepths => "溶岩の中に不思議な冷泉がある。",
-        FloorTheme::DemonCastle => "闇の中に癒しの力を持つ泉が。",
+        FloorTheme::Village | FloorTheme::DemonCastle => "闇の中に癒しの力を持つ泉が。",
     };
 
     DungeonEvent {

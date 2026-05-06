@@ -10,6 +10,7 @@ pub mod dungeon_view;
 pub mod events;
 pub mod logic;
 pub mod lore;
+pub mod overworld_map;
 pub mod render;
 pub mod state;
 #[cfg(test)]
@@ -63,14 +64,15 @@ impl Game for RpgGame {
 // ── Input Handling ──────────────────────────────────────────
 
 /// Whether the current scene/overlay treats the arrow keys as cursor
-/// navigation. In dungeon explore (with no popup or overlay), arrows are
-/// player movement instead.
+/// navigation. In dungeon explore / overworld (with no popup or overlay),
+/// arrows are player movement instead.
 fn arrows_navigate_cursor(state: &RpgState) -> bool {
     if state.overlay.is_some() {
         return true;
     }
-    matches!(state.scene, Scene::Town | Scene::Intro(_) | Scene::GameClear)
-        || (state.scene == Scene::DungeonExplore && state.active_event.is_some())
+    matches!(state.scene, Scene::GameClear)
+        || (matches!(state.scene, Scene::DungeonExplore | Scene::Overworld)
+            && state.active_event.is_some())
 }
 
 fn handle_key(state: &mut RpgState, ch: char) -> bool {
@@ -101,9 +103,7 @@ fn handle_key(state: &mut RpgState, ch: char) -> bool {
     }
 
     match state.scene {
-        Scene::Intro(_) => handle_intro_key(state, ch),
-        Scene::Town => handle_town_key(state, ch),
-        Scene::DungeonExplore => {
+        Scene::Overworld | Scene::DungeonExplore => {
             // When an event popup is active, route input there first.
             if state.active_event.is_some() {
                 handle_dungeon_event_key(state, ch)
@@ -121,9 +121,7 @@ fn handle_click(state: &mut RpgState, id: u16) -> bool {
     }
 
     match state.scene {
-        Scene::Intro(_) => handle_intro_click(state, id),
-        Scene::Town => handle_town_click(state, id),
-        Scene::DungeonExplore => {
+        Scene::Overworld | Scene::DungeonExplore => {
             if state.active_event.is_some() {
                 handle_dungeon_event_click(state, id)
             } else {
@@ -134,67 +132,7 @@ fn handle_click(state: &mut RpgState, id: u16) -> bool {
     }
 }
 
-// ── Intro ──────────────────────────────────────────────────
-
-fn handle_intro_key(state: &mut RpgState, ch: char) -> bool {
-    match ch {
-        '1' | '2' | ' ' => {
-            logic::advance_intro(state);
-            true
-        }
-        _ => false,
-    }
-}
-
-fn handle_intro_click(state: &mut RpgState, id: u16) -> bool {
-    if (CHOICE_BASE..CHOICE_BASE + 5).contains(&id) {
-        logic::advance_intro(state);
-        return true;
-    }
-    false
-}
-
-// ── Town ───────────────────────────────────────────────────
-
-fn handle_town_key(state: &mut RpgState, ch: char) -> bool {
-    // Number keys still work as direct shortcuts (backward compat for PC
-    // keyboard users), but the canonical UX is arrow + A button.
-    let choice_index = match ch {
-        '1' => Some(0),
-        '2' => Some(1),
-        '3' => Some(2),
-        '4' => Some(3),
-        '5' => Some(4),
-        _ => None,
-    };
-    if let Some(idx) = choice_index {
-        return logic::execute_town_choice(state, idx);
-    }
-
-    match ch {
-        // A button — confirm cursor's town choice.
-        ' ' | 'A' | 'a' => logic::execute_town_choice(state, state.cursor),
-        'I' | 'i' => {
-            state.open_overlay(Overlay::Inventory);
-            true
-        }
-        'S' | 's' => {
-            state.open_overlay(Overlay::Status);
-            true
-        }
-        _ => false,
-    }
-}
-
-fn handle_town_click(state: &mut RpgState, id: u16) -> bool {
-    if (CHOICE_BASE..CHOICE_BASE + 10).contains(&id) {
-        let index = (id - CHOICE_BASE) as usize;
-        return logic::execute_town_choice(state, index);
-    }
-    handle_overlay_open_click(state, id)
-}
-
-// ── Dungeon Explore ───────────────────────────────────────
+// ── Dungeon Explore / Overworld ────────────────────────────
 
 fn handle_dungeon_explore_key(state: &mut RpgState, ch: char) -> bool {
     match ch {
@@ -229,12 +167,16 @@ fn handle_dungeon_explore_key(state: &mut RpgState, ch: char) -> bool {
 ///   the cursor unification — now respects whichever option the player
 ///   has highlighted with arrow keys),
 /// adjacent enemy → open skill menu,
-/// otherwise → wait one turn.
+/// otherwise → wait one turn (or no-op in overworld).
 fn trigger_a_button(state: &mut RpgState) -> bool {
     if state.active_event.is_some() {
         return logic::resolve_event_choice(state, state.cursor);
     }
     if let Some(map) = &state.dungeon {
+        // Overworld: no monsters, no waiting — A on an empty tile does nothing.
+        if map.is_overworld {
+            return false;
+        }
         let px = map.player_x as i32;
         let py = map.player_y as i32;
         if map
@@ -548,34 +490,35 @@ mod tests {
         InputEvent::Click(ClickScope::Game(GameChoice::Rpg), id)
     }
 
-    #[test]
-    fn intro_sequence() {
-        let mut g = make_game();
-        assert_eq!(g.state.scene, Scene::Intro(0));
-        g.handle_input(&InputEvent::Key('1'));
-        assert_eq!(g.state.scene, Scene::Intro(1));
-        g.handle_input(&InputEvent::Key('1'));
-        assert_eq!(g.state.scene, Scene::Town);
-        assert!(g.state.weapon().is_some());
+    /// Helper: skip the village walk, jump straight into B1F.
+    fn into_dungeon(g: &mut RpgGame) {
+        logic::enter_dungeon(&mut g.state, 1);
     }
 
     #[test]
-    fn town_enter_dungeon() {
+    fn starts_in_overworld_with_village_loaded() {
+        let g = make_game();
+        assert_eq!(g.state.scene, Scene::Overworld);
+        let map = g.state.dungeon.as_ref().unwrap();
+        assert!(map.is_overworld);
+        assert_eq!(map.floor_num, 0);
+        assert!(g.state.weapon().is_none(), "no starter weapon until NPC");
+    }
+
+    #[test]
+    fn enter_dungeon_jumps_to_b1f() {
         let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        assert_eq!(g.state.scene, Scene::Town);
-        g.handle_input(&InputEvent::Key('1'));
+        into_dungeon(&mut g);
         assert_eq!(g.state.scene, Scene::DungeonExplore);
-        assert!(g.state.dungeon.is_some());
+        let map = g.state.dungeon.as_ref().unwrap();
+        assert!(!map.is_overworld);
+        assert_eq!(map.floor_num, 1);
     }
 
     #[test]
     fn dungeon_wasd_movement() {
         let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
+        into_dungeon(&mut g);
         assert_eq!(g.state.scene, Scene::DungeonExplore);
         g.handle_input(&InputEvent::Key('W'));
         g.handle_input(&InputEvent::Key('D'));
@@ -584,21 +527,18 @@ mod tests {
     }
 
     #[test]
-    fn dungeon_retreat_via_logic() {
+    fn retreat_returns_to_overworld() {
         let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
+        into_dungeon(&mut g);
         logic::retreat_to_town(&mut g.state);
-        assert_eq!(g.state.scene, Scene::Town);
-        assert!(g.state.dungeon.is_none());
+        assert_eq!(g.state.scene, Scene::Overworld);
+        let map = g.state.dungeon.as_ref().unwrap();
+        assert!(map.is_overworld);
     }
 
     #[test]
-    fn overlay_open_close() {
+    fn overlay_open_close_in_overworld() {
         let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
         g.handle_input(&InputEvent::Key('I'));
         assert_eq!(g.state.overlay, Some(Overlay::Inventory));
         g.handle_input(&InputEvent::Key('0'));
@@ -608,75 +548,39 @@ mod tests {
     #[test]
     fn skill_overlay_opens_in_dungeon() {
         let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        assert_eq!(g.state.scene, Scene::DungeonExplore);
+        into_dungeon(&mut g);
         g.handle_input(&InputEvent::Key('Z'));
         assert_eq!(g.state.overlay, Some(Overlay::SkillMenu));
     }
 
     #[test]
-    fn quest_board_opens() {
-        let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        // Town menu: 1=enter, 2=shop, 3=quests
-        g.handle_input(&InputEvent::Key('3'));
-        assert_eq!(g.state.overlay, Some(Overlay::QuestBoard));
-    }
-
-    #[test]
-    fn pray_menu_opens() {
-        let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('4'));
-        assert_eq!(g.state.overlay, Some(Overlay::PrayMenu));
-    }
-
-    #[test]
-    fn click_intro() {
-        let mut g = make_game();
-        g.handle_input(&click(CHOICE_BASE));
-        assert_eq!(g.state.scene, Scene::Intro(1));
-    }
-
-    #[test]
-    fn click_town_choice() {
-        let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        let result = g.handle_input(&click(CHOICE_BASE));
-        assert!(result);
-    }
-
-    #[test]
     fn a_button_waits_when_no_event_no_enemy() {
         let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        assert_eq!(g.state.scene, Scene::DungeonExplore);
-        // Clear all monsters so A button just waits.
+        into_dungeon(&mut g);
         g.state.dungeon.as_mut().unwrap().monsters.clear();
         let turns_before = g.state.turn_count;
         g.handle_input(&click(AB_A_BUTTON));
-        // Wait consumes a turn → turn_count increments.
         assert_eq!(g.state.turn_count, turns_before + 1);
+        assert!(g.state.overlay.is_none());
+    }
+
+    #[test]
+    fn a_button_does_nothing_in_overworld_without_event() {
+        let mut g = make_game();
+        let turns_before = g.state.turn_count;
+        g.handle_input(&click(AB_A_BUTTON));
+        // No event under foot, no monsters, no time tick in village.
+        assert_eq!(g.state.turn_count, turns_before);
         assert!(g.state.overlay.is_none());
     }
 
     #[test]
     fn a_button_opens_skill_when_enemy_adjacent() {
         let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
+        into_dungeon(&mut g);
         let map = g.state.dungeon.as_mut().unwrap();
         let px = map.player_x;
         let py = map.player_y;
-        // Place a slime adjacent to the player.
         for &dir in &[
             state::Facing::North,
             state::Facing::East,
@@ -703,9 +607,7 @@ mod tests {
     #[test]
     fn b_button_opens_unified_menu() {
         let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
+        into_dungeon(&mut g);
         g.handle_input(&click(AB_B_BUTTON));
         assert_eq!(g.state.overlay, Some(Overlay::Inventory));
     }
@@ -727,10 +629,8 @@ mod tests {
         // Codex P1 (#95): a failed buy (insufficient gold) must NOT consume
         // the peddler tile, so the player can pick a different choice.
         let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        g.state.gold = 0; // can't afford anything
+        into_dungeon(&mut g);
+        g.state.gold = 0;
         g.state.active_event = Some(state::DungeonEvent {
             description: vec!["peddler".into()],
             choices: vec![state::EventChoice {
@@ -738,8 +638,6 @@ mod tests {
                 action: state::EventAction::PeddlerBuyHerb,
             }],
         });
-        // Force the player tile cell_type = Peddler with event_done=false so
-        // resolve_event matches and we can assert it stays unresolved.
         let map = g.state.dungeon.as_mut().unwrap();
         let (px, py) = (map.player_x, map.player_y);
         map.grid[py][px].cell_type = state::CellType::Peddler;
@@ -756,12 +654,8 @@ mod tests {
 
     #[test]
     fn dungeon_event_stays_in_explore_scene() {
-        // Issue #89: events become popups; the scene must not switch.
         let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        // Manually trigger an event by injecting it.
+        into_dungeon(&mut g);
         g.state.active_event = Some(state::DungeonEvent {
             description: vec!["test".into()],
             choices: vec![state::EventChoice {
@@ -771,43 +665,14 @@ mod tests {
         });
         assert_eq!(g.state.scene, Scene::DungeonExplore);
         g.handle_input(&click(AB_A_BUTTON));
-        // After resolving, scene is still DungeonExplore, event cleared.
         assert_eq!(g.state.scene, Scene::DungeonExplore);
         assert!(g.state.active_event.is_none());
     }
 
     #[test]
-    fn arrow_keys_navigate_cursor_in_town() {
-        // Arrow + A unification: arrows move cursor; A confirms selection.
-        let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        assert_eq!(g.state.scene, Scene::Town);
-        assert_eq!(g.state.cursor, 0);
-
-        g.handle_input(&InputEvent::Key('j')); // down
-        assert_eq!(g.state.cursor, 1);
-        g.handle_input(&InputEvent::Key('j'));
-        assert_eq!(g.state.cursor, 2);
-        g.handle_input(&InputEvent::Key('k')); // up
-        assert_eq!(g.state.cursor, 1);
-
-        // A button confirms cursor (idx 1 = ショップ → opens Shop overlay).
-        g.handle_input(&InputEvent::Key(' '));
-        assert_eq!(g.state.overlay, Some(Overlay::Shop));
-        assert_eq!(g.state.cursor, 0, "cursor resets when overlay opens");
-    }
-
-    #[test]
     fn arrow_keys_navigate_event_popup() {
-        // Cursor should walk through event choices and A picks the
-        // highlighted one — replacing the old "A always picks index 0"
-        // behavior so the player has agency.
         let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        // Inject a 3-choice event, pick the middle one.
+        into_dungeon(&mut g);
         g.state.active_event = Some(state::DungeonEvent {
             description: vec!["x".into()],
             choices: vec![
@@ -819,29 +684,13 @@ mod tests {
         g.state.cursor = 0;
         g.handle_input(&InputEvent::Key('j'));
         assert_eq!(g.state.cursor, 1);
-        // A on cursor=1 → resolves choice 1 (and clears event).
         g.handle_input(&InputEvent::Key(' '));
         assert!(g.state.active_event.is_none());
     }
 
     #[test]
-    fn cursor_wraps_around_in_menu() {
-        // Wrapping is intentional — small lists feel snappier when ↑ from
-        // the top jumps to the bottom rather than getting stuck.
-        let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
-        g.state.cursor = 0;
-        g.handle_input(&InputEvent::Key('k')); // up at 0 → wraps to last
-        let last = logic::cursor_count(&g.state) - 1;
-        assert_eq!(g.state.cursor, last);
-    }
-
-    #[test]
     fn b_button_closes_overlay_from_keyboard() {
         let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
         g.state.overlay = Some(Overlay::Inventory);
         g.handle_input(&InputEvent::Key('b'));
         assert!(g.state.overlay.is_none());
@@ -850,11 +699,79 @@ mod tests {
     #[test]
     fn shop_overlay_buy() {
         let mut g = make_game();
-        g.handle_input(&InputEvent::Key('1'));
-        g.handle_input(&InputEvent::Key('1'));
         g.state.overlay = Some(Overlay::Shop);
         g.state.gold = 200;
         g.handle_input(&InputEvent::Key('1'));
         assert!(g.state.gold < 200);
+    }
+
+    // ── Overworld-specific tests ─────────────────────────────
+
+    #[test]
+    fn reception_npc_first_visit_grants_starter_supplies() {
+        let mut g = make_game();
+        // Inject the reception event and resolve choice 0 (accept).
+        g.state.active_event = logic::generate_overworld_event(
+            &g.state,
+            state::CellType::ReceptionNpc,
+        );
+        assert!(g.state.active_event.is_some());
+        let resolved = logic::resolve_event_choice(&mut g.state, 0);
+        assert!(resolved);
+        assert!(g.state.met_reception);
+        assert_eq!(g.state.gold, 50);
+        assert!(g.state.inventory.iter().any(|i| i.kind == state::ItemKind::Herb));
+    }
+
+    #[test]
+    fn blacksmith_npc_first_visit_grants_starter_equipment() {
+        let mut g = make_game();
+        g.state.active_event = logic::generate_overworld_event(
+            &g.state,
+            state::CellType::BlacksmithNpc,
+        );
+        let resolved = logic::resolve_event_choice(&mut g.state, 0);
+        assert!(resolved);
+        assert!(g.state.met_blacksmith);
+        assert!(g.state.weapon().is_some());
+        assert!(g.state.armor().is_some());
+    }
+
+    #[test]
+    fn dungeon_entrance_event_descends() {
+        let mut g = make_game();
+        g.state.active_event = logic::generate_overworld_event(
+            &g.state,
+            state::CellType::DungeonEntrance,
+        );
+        let resolved = logic::resolve_event_choice(&mut g.state, 0);
+        assert!(resolved);
+        assert_eq!(g.state.scene, Scene::DungeonExplore);
+        assert_eq!(g.state.dungeon.as_ref().unwrap().floor_num, 1);
+    }
+
+    #[test]
+    fn shop_tile_event_opens_shop_overlay() {
+        let mut g = make_game();
+        g.state.active_event = logic::generate_overworld_event(
+            &g.state,
+            state::CellType::ShopTile,
+        );
+        logic::resolve_event_choice(&mut g.state, 0);
+        assert_eq!(g.state.overlay, Some(Overlay::Shop));
+    }
+
+    #[test]
+    fn inn_tile_costs_gold_and_heals() {
+        let mut g = make_game();
+        g.state.gold = 50;
+        g.state.hp = 1;
+        g.state.active_event = logic::generate_overworld_event(
+            &g.state,
+            state::CellType::InnTile,
+        );
+        logic::resolve_event_choice(&mut g.state, 0);
+        assert_eq!(g.state.gold, 40);
+        assert_eq!(g.state.hp, g.state.effective_max_hp());
     }
 }
