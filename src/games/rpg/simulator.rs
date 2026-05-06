@@ -615,31 +615,36 @@ impl Simulator {
                 return "clear";
             }
 
-            // Track starvation
-            if self.state.satiety == 0 && self.state.dungeon.is_some() && !hp_check_starvation_warned {
+            // Track starvation (dungeon-floor only — village has no satiety drain).
+            let in_dungeon_floor = self
+                .state
+                .dungeon
+                .as_ref()
+                .map(|m| !m.is_overworld)
+                .unwrap_or(false);
+            if self.state.satiety == 0 && in_dungeon_floor && !hp_check_starvation_warned {
                 hp_check_starvation_warned = true;
             }
 
             let action = self.policy.choose(&self.state);
-            let prev_dungeon = self.state.dungeon.is_some();
+            // Codex P1 (#98): `dungeon.is_some()` is now always true because
+            // the village also lives in a `DungeonMap`. To detect "run ended",
+            // we need "was on a dungeon floor before this action". Otherwise
+            // every overworld action (opening shop / quest board) would count
+            // as a retreat and bail out of the run before it even starts.
+            let prev_in_dungeon_floor = in_dungeon_floor;
             self.apply_action(action);
             run_actions += 1;
             self.metrics.total_actions += 1;
 
-            // Detect transition: was in dungeon, now back in the village.
-            // (`dungeon` is always Some now that the overworld also lives in
-            // a `DungeonMap`, so we check is_overworld instead.)
+            // Transition: was on a dungeon floor, now back in the village.
             let now_overworld = self
                 .state
                 .dungeon
                 .as_ref()
                 .map(|m| m.is_overworld)
                 .unwrap_or(false);
-            let was_in_dungeon = prev_dungeon
-                && !now_overworld
-                && self.state.scene == Scene::DungeonExplore;
-            let _ = was_in_dungeon;
-            if prev_dungeon && now_overworld && self.state.scene == Scene::Overworld {
+            if prev_in_dungeon_floor && now_overworld && self.state.scene == Scene::Overworld {
                 let last_log = self.state.log.last().cloned().unwrap_or_default();
                 if last_log.starts_with("力尽きた") {
                     self.metrics.deaths_in_dungeon += 1;
