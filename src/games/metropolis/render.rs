@@ -34,7 +34,7 @@ use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
-use crate::input::{is_narrow_layout, ClickState};
+use crate::input::ClickState;
 use crate::widgets::{Clickable, TabBar};
 
 use super::logic;
@@ -48,8 +48,19 @@ use super::{
     ACT_TAB_EVENTS, ACT_TAB_MANAGER, ACT_TAB_STATUS, ACT_TAB_WORLD, ACT_UPGRADE_AI,
 };
 
+/// Wide layout が必要とする最小幅。
+/// 2-wide grid (32*2 + 2 = 66) + tab panel min (24) = 90 col。
+/// グローバルの `is_narrow_layout(w < 60)` よりも厳しいしきい値で、
+/// 60-89 col の中間幅 (80×N の典型 PC ターミナル含む) で右パネルが
+/// 潰れる回帰を防ぐ。Codex review #96 r3192962003 の指摘を反映。
+const METROPOLIS_WIDE_MIN_WIDTH: u16 = 90;
+
+fn metropolis_is_narrow(width: u16) -> bool {
+    width < METROPOLIS_WIDE_MIN_WIDTH
+}
+
 pub fn render(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
-    if is_narrow_layout(area.width) {
+    if metropolis_is_narrow(area.width) {
         render_narrow(state, f, area, click_state);
     } else {
         render_wide(state, f, area, click_state);
@@ -1093,6 +1104,41 @@ mod tests {
             assert!(
                 registered.contains(&id),
                 "action {} missing from targets {:?}",
+                id,
+                registered
+            );
+        }
+    }
+
+    /// 80 col ターミナル (典型的な PC) では narrow layout が選ばれる。
+    /// グリッド拡張 (24→32) で wide が ~90 col 必要になったため、80 col は
+    /// narrow に振らないと右パネルが潰れる (Codex P2 review #96)。
+    #[test]
+    fn eighty_col_uses_narrow_layout() {
+        assert!(metropolis_is_narrow(60));
+        assert!(metropolis_is_narrow(80));
+        assert!(metropolis_is_narrow(89));
+        assert!(!metropolis_is_narrow(90));
+        assert!(!metropolis_is_narrow(120));
+    }
+
+    /// 80×30 のような中間幅でもパニックしない (narrow path で描画される)。
+    #[test]
+    fn render_does_not_panic_on_80col_intermediate() {
+        let city = City::new();
+        let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        terminal
+            .draw(|f| {
+                render(&city, f, Rect::new(0, 0, 80, 40), &cs);
+            })
+            .unwrap();
+        // タブのクリック対象が登録されていることも確認 (右パネルが潰れていない)。
+        let registered: Vec<u16> = cs.borrow().targets.iter().map(|t| t.action_id).collect();
+        for id in [ACT_TAB_STATUS, ACT_TAB_MANAGER, ACT_TAB_EVENTS, ACT_TAB_WORLD] {
+            assert!(
+                registered.contains(&id),
+                "tab action {} missing on 80-col layout: targets={:?}",
                 id,
                 registered
             );
