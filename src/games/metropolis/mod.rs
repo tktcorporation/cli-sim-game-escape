@@ -44,6 +44,9 @@ pub const ACT_UPGRADE_AI: u16 = 5;
 /// Eco 戦略 (建設 -10% / 収入 +5% / Forest を切らない)。
 /// 既存 ID 1-5 と重複しないよう新しい番号を取得。
 pub const ACT_STRATEGY_ECO: u16 = 6;
+/// 開拓機材を派遣 (= AI に Outpost を 1 基置かせる)。
+/// 高コスト ($600) で 30 sec の長時間建設、市域拡張の戦略行動。
+pub const ACT_DISPATCH_OUTPOST: u16 = 7;
 
 // タブ切替アクション (10-13 を予約; 戦略の隣だが衝突しない)。
 pub const ACT_TAB_STATUS: u16 = 10;
@@ -107,6 +110,7 @@ impl Game for MetropolisGame {
                 'e' | 'E' => ACT_STRATEGY_ECO,
                 'w' | 'W' => ACT_HIRE_WORKER,
                 'u' | 'U' => ACT_UPGRADE_AI,
+                'o' | 'O' => ACT_DISPATCH_OUTPOST,
                 '1' => ACT_TAB_STATUS,
                 '2' => ACT_TAB_MANAGER,
                 '3' => ACT_TAB_EVENTS,
@@ -134,6 +138,7 @@ impl Game for MetropolisGame {
             }
             ACT_HIRE_WORKER => logic::hire_worker(&mut self.state),
             ACT_UPGRADE_AI => logic::upgrade_ai(&mut self.state),
+            ACT_DISPATCH_OUTPOST => logic::dispatch_outpost(&mut self.state),
             ACT_TAB_STATUS => {
                 self.state.panel_tab = PanelTab::Status;
                 true

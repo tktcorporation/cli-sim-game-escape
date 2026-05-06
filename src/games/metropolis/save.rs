@@ -61,11 +61,14 @@ mod codes {
     pub const BUILDING_HOUSE: u8 = 1;
     pub const BUILDING_WORKSHOP: u8 = 2;
     pub const BUILDING_SHOP: u8 = 3;
+    pub const BUILDING_PARK: u8 = 4;
+    pub const BUILDING_OUTPOST: u8 = 5;
 
     pub const TERRAIN_PLAIN: u8 = 0;
     pub const TERRAIN_FOREST: u8 = 1;
     pub const TERRAIN_WATER: u8 = 2;
     pub const TERRAIN_WASTELAND: u8 = 3;
+    pub const TERRAIN_ROCK: u8 = 4;
 
     pub const STRATEGY_GROWTH: u8 = 0;
     pub const STRATEGY_INCOME: u8 = 1;
@@ -98,6 +101,8 @@ fn building_to_u8(b: Building) -> u8 {
         Building::House => BUILDING_HOUSE,
         Building::Workshop => BUILDING_WORKSHOP,
         Building::Shop => BUILDING_SHOP,
+        Building::Park => BUILDING_PARK,
+        Building::Outpost => BUILDING_OUTPOST,
     }
 }
 
@@ -108,6 +113,8 @@ fn building_from_u8(v: u8) -> Option<Building> {
         BUILDING_HOUSE => Some(Building::House),
         BUILDING_WORKSHOP => Some(Building::Workshop),
         BUILDING_SHOP => Some(Building::Shop),
+        BUILDING_PARK => Some(Building::Park),
+        BUILDING_OUTPOST => Some(Building::Outpost),
         _ => None,
     }
 }
@@ -119,6 +126,7 @@ fn terrain_to_u8(t: Terrain) -> u8 {
         Terrain::Forest => TERRAIN_FOREST,
         Terrain::Water => TERRAIN_WATER,
         Terrain::Wasteland => TERRAIN_WASTELAND,
+        Terrain::Rock => TERRAIN_ROCK,
     }
 }
 
@@ -128,6 +136,7 @@ fn terrain_from_u8(v: u8) -> Terrain {
         TERRAIN_FOREST => Terrain::Forest,
         TERRAIN_WATER => Terrain::Water,
         TERRAIN_WASTELAND => Terrain::Wasteland,
+        TERRAIN_ROCK => Terrain::Rock,
         // 不正値は安全な Plain にフォールバック (ロード破損対策)。
         _ => Terrain::Plain,
     }

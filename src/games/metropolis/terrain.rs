@@ -28,35 +28,52 @@ pub enum Terrain {
     Water,
     /// 荒地 — 建設可能。コスト ↓ / 視覚的にひび割れ (将来は収入 -)。
     Wasteland,
+    /// 岩盤 — 中央エリア外で支配的に出現する硬い地表。
+    /// **隣接マスに開拓機材 (Building::Outpost) が無いと整地できない。**
+    /// 整地時間も Forest の 3 倍、コストは 5 倍以上。
+    Rock,
 }
 
 impl Terrain {
-    /// 建物がここに建てられるか。Water だけが false。
+    /// 建物がここに建てられるか。Water だけが false (Rock は整地後に建設可)。
     pub fn buildable(self) -> bool {
         !matches!(self, Terrain::Water)
     }
 
-    /// この地形は着工前に整地が必要か。Plain は不要、Forest/Wasteland は要整地、
+    /// この地形は着工前に整地が必要か。Plain は不要、Forest/Wasteland/Rock は要整地、
     /// Water は buildable=false なので整地以前の問題。
     pub fn needs_clearing(self) -> bool {
-        matches!(self, Terrain::Forest | Terrain::Wasteland)
+        matches!(
+            self,
+            Terrain::Forest | Terrain::Wasteland | Terrain::Rock
+        )
     }
 
-    /// 整地に必要な tick 数。Wasteland (荒地) は短く、Forest (伐採) は長め。
+    /// この地形の整地に「開拓機材 (Outpost) の隣接」が必要か。
+    /// Rock のみ true。それ以外の Forest/Wasteland は普通の作業員だけで整地できる。
+    /// 機材ゲートは Phase A の中核ルール: 「市域拡張は機材を植えて進める」。
+    pub fn needs_outpost(self) -> bool {
+        matches!(self, Terrain::Rock)
+    }
+
+    /// 整地に必要な tick 数。Wasteland (荒地) は短く、Forest (伐採) は長め、
+    /// Rock (岩盤破砕) は最も長い (Forest の 3 倍 = 180 ticks = 18 sec)。
     /// `0` = 整地不要 (既に Plain)。
     pub fn clearing_ticks(self) -> u32 {
         match self {
             Terrain::Wasteland => 30,    // 3 sec — 表土を均すだけ
             Terrain::Forest => 60,       // 6 sec — 木を切り倒す
+            Terrain::Rock => 180,        // 18 sec — 岩盤破砕
             Terrain::Plain | Terrain::Water => 0,
         }
     }
 
-    /// 整地コスト (cash)。Wasteland は安く、Forest は高い (人手がかかる)。
+    /// 整地コスト (cash)。Wasteland は安く、Forest は中、Rock は高い。
     pub fn clearing_cost(self) -> i64 {
         match self {
             Terrain::Wasteland => 5,
             Terrain::Forest => 15,
+            Terrain::Rock => 80, // 高めだが、機材コストが本体
             Terrain::Plain | Terrain::Water => 0,
         }
     }
@@ -65,7 +82,19 @@ impl Terrain {
 /// 地形レイヤー。`generate(seed)` で初期化。
 pub type TerrainLayer = Vec<Vec<Terrain>>;
 
+/// 中央コア半径 (この半径内は Rock がほぼ生成されない)。
+/// プレイヤーが「初期エリア」として最初に開発する範囲。
+pub const CORE_RADIUS: u32 = 5;
+
 /// Seed から決定論的に地形を生成。
+///
+/// ## 生成パイプライン
+///
+/// 1. Forest CA (中央エリア限定)
+/// 2. Lake BFS (中央エリア限定 — 外側に湖があると拡張で詰まるため)
+/// 3. Wasteland 散布
+/// 4. **Rock 上書き**: 中央から Manhattan 距離 d を見て、`p(d)` の確率で
+///    Rock に書き換える。境界に高密度の岩壁を作り、外側に薄く分布する。
 pub fn generate(seed: u64) -> TerrainLayer {
     let mut rng = SmallRng::new(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
 
@@ -87,7 +116,63 @@ pub fn generate(seed: u64) -> TerrainLayer {
         }
     }
     sprinkle_wasteland(&mut layer, &mut rng);
+
+    // Phase 4: Rock 上書き — 中央から離れるほど高確率で Rock に。
+    sprinkle_rock(&mut layer, &mut rng);
     layer
+}
+
+/// 中央 (GRID_W/2, GRID_H/2) からの Manhattan 距離。
+fn distance_from_center(x: usize, y: usize) -> u32 {
+    let cx = (GRID_W / 2) as i32;
+    let cy = (GRID_H / 2) as i32;
+    let dx = (x as i32 - cx).abs();
+    let dy = (y as i32 - cy).abs();
+    (dx + dy) as u32
+}
+
+/// 距離 d での Rock 出現確率 (0..=100)。
+///
+/// バランス設計:
+///   - d ≤ CORE_RADIUS (5): 0% — 中央コアは岩無し。
+///   - d = 6: 30%   ← 境界の壁感を出す入り口
+///   - d = 7: 60%
+///   - d = 8: 80%
+///   - d = 9: 90%   ← 「外側 9 割岩」(ユーザー仕様)
+///   - d ≥ 10: 95%  ← 端は岩が支配的、たまに森/湖が出る
+///
+/// 「岩盤の壁」と「その先のまばら岩 + 通常植生」の両方を
+/// 1 つの関数で表現する。閾値は調整可。
+pub fn rock_probability_at(distance: u32) -> u32 {
+    match distance {
+        0..=CORE_RADIUS => 0,
+        6 => 30,
+        7 => 60,
+        8 => 80,
+        9 => 90,
+        _ => 95,
+    }
+}
+
+#[allow(clippy::needless_range_loop)]
+fn sprinkle_rock(layer: &mut TerrainLayer, rng: &mut SmallRng) {
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            let d = distance_from_center(x, y);
+            let p = rock_probability_at(d);
+            if p == 0 {
+                continue;
+            }
+            // Water は Rock で上書きしない (湖の上に岩盤は不自然)。
+            // それ以外は p% で Rock に変換 — Forest/Wasteland も岩で隠れる。
+            if matches!(layer[y][x], Terrain::Water) {
+                continue;
+            }
+            if rng.next_pct() < p {
+                layer[y][x] = Terrain::Rock;
+            }
+        }
+    }
 }
 
 /// 32-bit splitmix 風 — 軽量で予測可能、コードが短い。
@@ -273,11 +358,11 @@ mod tests {
         assert_ne!(a, b);
     }
 
-    /// 4 種すべてが平均的に出現する (極端な seed では取れないので、
+    /// 5 種すべてが平均的に出現する (極端な seed では取れないので、
     /// 16 種のシードを試して合算する)。
     #[test]
     fn all_terrains_appear_across_seeds() {
-        let mut counts = [0usize; 4];
+        let mut counts = [0usize; 5];
         for s in 0..16u64 {
             let layer = generate(s.wrapping_mul(0xABCD_1234));
             for row in &layer {
@@ -287,6 +372,7 @@ mod tests {
                         Terrain::Forest => counts[1] += 1,
                         Terrain::Water => counts[2] += 1,
                         Terrain::Wasteland => counts[3] += 1,
+                        Terrain::Rock => counts[4] += 1,
                     }
                 }
             }
@@ -296,12 +382,102 @@ mod tests {
         }
     }
 
-    /// Buildable は Water 以外すべて。
+    /// Buildable は Water 以外すべて (Rock は整地後に建つ前提で buildable=true)。
     #[test]
     fn water_is_only_unbuildable() {
         assert!(!Terrain::Water.buildable());
         assert!(Terrain::Plain.buildable());
         assert!(Terrain::Forest.buildable());
         assert!(Terrain::Wasteland.buildable());
+        assert!(Terrain::Rock.buildable());
+    }
+
+    /// Rock は機材必須 (Outpost 隣接無しでは整地不可)。
+    /// 他の地形は機材不要。
+    #[test]
+    fn only_rock_needs_outpost() {
+        assert!(Terrain::Rock.needs_outpost());
+        assert!(!Terrain::Plain.needs_outpost());
+        assert!(!Terrain::Forest.needs_outpost());
+        assert!(!Terrain::Wasteland.needs_outpost());
+        assert!(!Terrain::Water.needs_outpost());
+    }
+
+    /// 中央コア (Manhattan 距離 ≤ 5) には Rock が出ない。
+    #[test]
+    fn rock_does_not_appear_in_core() {
+        for s in 0..8u64 {
+            let layer = generate(s.wrapping_mul(0xA5A5));
+            for y in 0..GRID_H {
+                for x in 0..GRID_W {
+                    let d = ((x as i32 - (GRID_W / 2) as i32).abs()
+                        + (y as i32 - (GRID_H / 2) as i32).abs())
+                        as u32;
+                    if d <= CORE_RADIUS {
+                        assert_ne!(
+                            layer[y][x],
+                            Terrain::Rock,
+                            "Rock at ({},{}) within core radius (seed={})",
+                            x,
+                            y,
+                            s
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// 境界 (Manhattan 距離 ≥ 9) では Rock が高密度 (8 シードの平均で 80% 以上)。
+    /// rebels-in-the-sky 的な「壁の存在感」を保証する。
+    #[test]
+    fn rock_is_dense_at_boundary() {
+        let mut total = 0;
+        let mut rocks = 0;
+        for s in 0..8u64 {
+            let layer = generate(s.wrapping_mul(0xCAFE));
+            for y in 0..GRID_H {
+                for x in 0..GRID_W {
+                    let d = ((x as i32 - (GRID_W / 2) as i32).abs()
+                        + (y as i32 - (GRID_H / 2) as i32).abs())
+                        as u32;
+                    if d >= 9 {
+                        total += 1;
+                        if matches!(layer[y][x], Terrain::Rock) {
+                            rocks += 1;
+                        }
+                    }
+                }
+            }
+        }
+        let pct = rocks * 100 / total.max(1);
+        assert!(
+            pct >= 80,
+            "boundary should be ≥80% rock; got {}%",
+            pct
+        );
+    }
+
+    /// 同じ seed なら Rock 配置も再現する (deterministic)。
+    #[test]
+    fn rock_generation_is_deterministic() {
+        let a = generate(0xC1A5_5EED);
+        let b = generate(0xC1A5_5EED);
+        for y in 0..GRID_H {
+            for x in 0..GRID_W {
+                assert_eq!(a[y][x], b[y][x]);
+            }
+        }
+    }
+
+    /// rock_probability_at の単調性: 距離が増えると Rock 確率は減らない。
+    #[test]
+    fn rock_probability_is_monotone() {
+        let mut prev = 0u32;
+        for d in 0..15 {
+            let p = rock_probability_at(d);
+            assert!(p >= prev, "rock prob decreased at d={}: {} < {}", d, p, prev);
+            prev = p;
+        }
     }
 }
