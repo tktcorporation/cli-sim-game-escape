@@ -26,7 +26,7 @@ use super::state::{
 };
 
 #[cfg(any(target_arch = "wasm32", test))]
-use super::terrain::{Terrain, TerrainLayer};
+use super::terrain::Terrain;
 
 /// セーブデータのフォーマットバージョン。フィールド追加で +1。
 ///
@@ -586,9 +586,8 @@ pub fn load_game(state: &mut City) -> bool {
     true
 }
 
-/// セーブデータを削除する (デバッグ / リセット用フックの素地)。
+/// セーブデータを削除する。設定画面の「データをリセット」から呼ばれる。
 #[cfg(target_arch = "wasm32")]
-#[allow(dead_code)] // 将来の reset ボタンが使う予定
 pub fn delete_save() {
     if let Some(storage) = get_storage() {
         let _ = storage.remove_item(STORAGE_KEY);

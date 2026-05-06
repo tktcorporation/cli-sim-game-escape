@@ -64,6 +64,10 @@ pub struct MetropolisGame {
 
 impl MetropolisGame {
     pub fn new() -> Self {
+        // wasm ビルドでは下の `let state = { ... }` で shadow するため
+        // 外側の `mut` が unused 扱いになる。non-wasm ブランチが
+        // `state.push_event` で `mut` を要求するので、warning は許容。
+        #[allow(unused_mut)]
         let mut state = City::new();
 
         // WASM ビルド時のみ localStorage からロードを試みる。
