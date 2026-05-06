@@ -14,6 +14,7 @@
 pub mod ai;
 pub mod logic;
 pub mod render;
+pub mod save;
 pub mod simulator;
 pub mod state;
 pub mod terrain;
@@ -40,6 +41,9 @@ pub const ACT_STRATEGY_INCOME: u16 = 2;
 pub const ACT_STRATEGY_TECH: u16 = 3;
 pub const ACT_HIRE_WORKER: u16 = 4;
 pub const ACT_UPGRADE_AI: u16 = 5;
+/// Eco 戦略 (建設 -10% / 収入 +5% / Forest を切らない)。
+/// 既存 ID 1-5 と重複しないよう新しい番号を取得。
+pub const ACT_STRATEGY_ECO: u16 = 6;
 
 // タブ切替アクション (10-13 を予約; 戦略の隣だが衝突しない)。
 pub const ACT_TAB_STATUS: u16 = 10;
@@ -49,13 +53,36 @@ pub const ACT_TAB_WORLD: u16 = 13;
 
 pub struct MetropolisGame {
     pub state: City,
+    /// オートセーブまでの残り tick 数。`save::AUTOSAVE_INTERVAL` から減算。
+    save_countdown: u32,
 }
 
 impl MetropolisGame {
     pub fn new() -> Self {
         let mut state = City::new();
-        state.push_event("🏙 都市建設を開始しました".to_string());
-        Self { state }
+
+        // WASM ビルド時のみ localStorage からロードを試みる。
+        // ロード成功時はセーブ復元メッセージを events に出して、ユーザーに
+        // 「進捗が引き継がれた」ことを伝える。
+        #[cfg(target_arch = "wasm32")]
+        let state = {
+            let mut s = state;
+            if save::load_game(&mut s) {
+                s.push_event("💾 セーブデータをロードしました".to_string());
+            } else {
+                s.push_event("🏙 都市建設を開始しました".to_string());
+            }
+            s
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            state.push_event("🏙 都市建設を開始しました".to_string());
+        }
+
+        Self {
+            state,
+            save_countdown: save::AUTOSAVE_INTERVAL,
+        }
     }
 }
 
@@ -77,6 +104,7 @@ impl Game for MetropolisGame {
                 'g' | 'G' => ACT_STRATEGY_GROWTH,
                 'i' | 'I' => ACT_STRATEGY_INCOME,
                 't' | 'T' => ACT_STRATEGY_TECH,
+                'e' | 'E' => ACT_STRATEGY_ECO,
                 'w' | 'W' => ACT_HIRE_WORKER,
                 'u' | 'U' => ACT_UPGRADE_AI,
                 '1' => ACT_TAB_STATUS,
@@ -89,18 +117,19 @@ impl Game for MetropolisGame {
 
         match action_id {
             ACT_STRATEGY_GROWTH => {
-                self.state.strategy = Strategy::Growth;
-                self.state.push_event("📈 戦略: 成長重視".to_string());
+                set_strategy(&mut self.state, Strategy::Growth, "📈");
                 true
             }
             ACT_STRATEGY_INCOME => {
-                self.state.strategy = Strategy::Income;
-                self.state.push_event("💰 戦略: 収入重視".to_string());
+                set_strategy(&mut self.state, Strategy::Income, "💰");
                 true
             }
             ACT_STRATEGY_TECH => {
-                self.state.strategy = Strategy::Tech;
-                self.state.push_event("⚙ 戦略: 技術投資 (建設+20% / 収入-20%)".to_string());
+                set_strategy(&mut self.state, Strategy::Tech, "⚙");
+                true
+            }
+            ACT_STRATEGY_ECO => {
+                set_strategy(&mut self.state, Strategy::Eco, "🌳");
                 true
             }
             ACT_HIRE_WORKER => logic::hire_worker(&mut self.state),
@@ -127,11 +156,40 @@ impl Game for MetropolisGame {
 
     fn tick(&mut self, delta_ticks: u32) {
         logic::tick(&mut self.state, delta_ticks);
+
+        // オートセーブ。カウンタ更新自体は常に実行 (フィールドが
+        // dead_code にならないよう)、実際の保存は WASM 環境のみ。
+        // 30 秒間隔 (= 300 ticks) は cookie/save と揃えている。
+        self.save_countdown = self.save_countdown.saturating_sub(delta_ticks);
+        if self.save_countdown == 0 {
+            #[cfg(target_arch = "wasm32")]
+            save::save_game(&self.state);
+            self.save_countdown = save::AUTOSAVE_INTERVAL;
+        }
     }
 
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
         render::render(&self.state, f, area, click_state);
     }
+}
+
+/// Strategy 切替時の共通処理。`logic::strategy_info` を引いて
+/// 「ラベル + 副作用 (建設速度・収入修正)」を 1 行のイベントログにまとめる。
+/// 切替時に「何が変わったか」が即座にログに見えるようにするのが目的。
+fn set_strategy(city: &mut City, s: Strategy, icon: &str) {
+    city.strategy = s;
+    let info = logic::strategy_info(s);
+    let mut suffix = String::new();
+    if info.speed_bonus_pct != 0 {
+        suffix.push_str(&format!(" / 建設{:+}%", info.speed_bonus_pct));
+    }
+    if info.income_penalty_pct != 0 {
+        suffix.push_str(&format!(" / 収入{:+}%", info.income_penalty_pct));
+    }
+    city.push_event(format!(
+        "{} 戦略: {} — {}{}",
+        icon, info.label, info.tagline, suffix
+    ));
 }
 
 #[cfg(test)]

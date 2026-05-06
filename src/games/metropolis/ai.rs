@@ -218,14 +218,31 @@ fn is_empty_next_to_building(city: &City, x: usize, y: usize) -> bool {
 ///   - On total dry spell (e.g., turn 1 with no roads), falls back to
 ///     Tier 2 placement so the city can still bootstrap.
 ///
-/// The expected outcome: shops activate sooner because they tend to
-/// land beside an actual road, instead of needing the random Tier-2
-/// placement to stumble onto a road neighbour.
+/// **Strategy も「軽く」読む** (Tier 4 との階層差):
+/// Tier 3 は Workshop を建てない (= 経済チェーンは Tier 4 専用) が、
+/// House/Road/Shop の中で Strategy 寄りに `±10%` 揺らす。プレイヤーが
+/// $5,000 で Tier 3 にアップグレードした時に「戦略ボタンが効く」実感が
+/// 出る程度の弱い反映で、Tier 4 ($50,000) との価値差は維持する。
 fn tier3_road_planner(city: &mut City) -> AiAction {
+    // ベース 50/30/20 (House/Road/Shop) を Strategy で「気持ち程度」偏らせる。
+    // Workshop は Tier 3 では建てない (= 0%) ので、Strategy::Income の
+    // workshop 重みは無視。
+    //
+    // ±2% という非常に弱い反映: simulator::tier_ordering_holds_at_30min が
+    // T3 < T4 を要求しているため、T3 が Strategy を強く読むと T4 を上回る。
+    // 「ボタンを押した時にイベントログ + Status タブには変化が出るが、
+    //  AI の挙動はほぼ変わらない」程度に留め、Tier 4 ($50,000) との価値差を
+    //  保つ。±0 は寂しいので「気持ちだけ」反映。
+    let info = super::logic::strategy_info(city.strategy);
+    let house_pct = (50 + (info.house_pct as i32 - 35).clamp(-2, 2)).max(20) as u32;
+    let road_pct = (30 + (info.road_pct as i32 - 30).clamp(-2, 2)).max(15) as u32;
+    let shop_pct = 100u32.saturating_sub(house_pct + road_pct).max(5);
+    let house_pct = 100 - road_pct - shop_pct; // 合計 100 を厳守
+
     let roll = (city.next_rand() % 100) as u32;
-    let kind = if roll < 50 {
+    let kind = if roll < house_pct {
         Building::House
-    } else if roll < 80 {
+    } else if roll < house_pct + road_pct {
         Building::Road
     } else {
         Building::Shop
@@ -243,7 +260,7 @@ fn tier3_road_planner(city: &mut City) -> AiAction {
 
     let candidates: Vec<(usize, usize)> = match kind {
         // Buildings prefer to live next to roads.
-        Building::House | Building::Shop => (0..GRID_H)
+        Building::House | Building::Shop | Building::Workshop => (0..GRID_H)
             .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
             .filter(|(x, y)| is_empty_next_to_road(city, *x, *y))
             .collect(),
@@ -271,22 +288,33 @@ fn tier3_road_planner(city: &mut City) -> AiAction {
 /// AND a house within Manhattan-3).  This is the difference that lets
 /// Tier 4 reliably outproduce Tier 3 even with the same building counts.
 ///
-/// Per-strategy roll weights (House% / Road% / Shop%):
-///   - Growth   →  70 / 20 / 10  (population first)
-///   - Tech     →  35 / 50 / 15  (road network first; expansion-heavy)
-///   - Income   →  35 / 25 / 40  (cash first, lots of shops)
+/// 重み・速度ボーナス・収入ペナルティはすべて `logic::strategy_info` に
+/// 集約されている (Single Source of Truth)。ここではそのプロファイルを
+/// 読んで weighted roll するだけ。
+///
+/// **Workshop は Income 戦略の独自要素** — Tier 4 の Income プレイヤーが
+/// Shop 一択ではなく「Workshop で Apartment 化を促し、その上に Shop を載せる」
+/// 経済チェーン構築を試みる、というキャラ付け。Growth/Tech は Workshop を
+/// 取らずシンプルさを維持 (simulator::tier4_strategies_specialize の不変条件)。
 fn tier4_demand_aware(city: &mut City) -> AiAction {
-    let (house_pct, road_pct) = match city.strategy {
-        Strategy::Growth => (70, 20),
-        Strategy::Tech => (35, 50),
-        Strategy::Income => (35, 25),
-    };
+    let info = super::logic::strategy_info(city.strategy);
+    // 重みの合計は 100 を厳守 (テストで保証)。
+    debug_assert_eq!(
+        info.house_pct + info.road_pct + info.workshop_pct + info.shop_pct,
+        100,
+        "strategy weights must sum to 100"
+    );
 
     let roll = (city.next_rand() % 100) as u32;
-    let kind = if roll < house_pct {
+    let h = info.house_pct;
+    let hr = h + info.road_pct;
+    let hrw = hr + info.workshop_pct;
+    let kind = if roll < h {
         Building::House
-    } else if roll < house_pct + road_pct {
+    } else if roll < hr {
         Building::Road
+    } else if roll < hrw {
+        Building::Workshop
     } else {
         Building::Shop
     };
@@ -297,25 +325,58 @@ fn tier4_demand_aware(city: &mut City) -> AiAction {
     if !matches!(kind, Building::House) && city.cash < Building::House.cost() {
         return AiAction::Idle;
     }
+    // Workshop / Shop は労働力 / 顧客となる House が最低限必要。
     if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 {
+        return AiAction::Idle;
+    }
+    if matches!(kind, Building::Workshop) && city.count_built(Building::House) < 2 {
         return AiAction::Idle;
     }
 
     // Smartest placement: a shop only goes where it will earn from
     // turn 1 (road-adjacent + customer base in range).  Houses prefer
     // road-adjacent; roads prefer next-to-buildings.
+    // Workshop は隣接 House と Road が両方必要なので、その条件を
+    // 直接フィルタする (= 即時稼働する場所だけに置く)。
+    //
+    // Tier 4 の「smart さ」: Shop/Workshop は **即時稼働** が条件なので
+    // 要整地セルを避ける (`would_*_activate_here` 内で needs_clearing チェック)。
+    // House/Road は要整地セルでも置く — 置かないと候補枯渇で idle が増えるし、
+    // 整地後に有用な土地が得られるので長期的にはプラス。
+    //
+    // **Eco 戦略のみ Forest を絶対回避** する (Wasteland は OK)。
+    // 「森を残す」のが Eco の核心。AI 側で実装することで、戦略を変えると
+    // 即座に挙動が変わる演出になる。
+    let avoid_forest = matches!(city.strategy, super::state::Strategy::Eco);
+    let forest_ok = |c: &City, x: usize, y: usize| -> bool {
+        if !avoid_forest {
+            return true;
+        }
+        !matches!(
+            c.terrain_at(x, y),
+            super::terrain::Terrain::Forest
+        )
+    };
     let candidates: Vec<(usize, usize)> = match kind {
         Building::Shop => (0..GRID_H)
             .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
-            .filter(|(x, y)| would_shop_activate_here(city, *x, *y))
+            .filter(|(x, y)| would_shop_activate_here(city, *x, *y) && forest_ok(city, *x, *y))
+            .collect(),
+        Building::Workshop => (0..GRID_H)
+            .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
+            .filter(|(x, y)| {
+                would_workshop_activate_here(city, *x, *y) && forest_ok(city, *x, *y)
+            })
             .collect(),
         Building::House => (0..GRID_H)
             .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
-            .filter(|(x, y)| is_empty_next_to_road(city, *x, *y))
+            .filter(|(x, y)| is_empty_next_to_road(city, *x, *y) && forest_ok(city, *x, *y))
             .collect(),
         Building::Road => (0..GRID_H)
             .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
-            .filter(|(x, y)| is_empty_next_to_building(city, *x, *y))
+            .filter(|(x, y)| {
+                is_empty_next_to_building(city, *x, *y) && forest_ok(city, *x, *y)
+            })
             .collect(),
     };
 
@@ -327,6 +388,42 @@ fn tier4_demand_aware(city: &mut City) -> AiAction {
     AiAction::Build { x, y, kind }
 }
 
+/// True iff placing a Workshop at (x, y) right now would have it earning
+/// income from tick 1 (隣接 House (労働力) AND 隣接 Road が両方必要)。
+///
+/// Tier 4 はさらに「整地不要 = Plain」セルだけを候補にして、整地で worker
+/// を浪費しないように振る舞う (= smart AI らしさ)。
+fn would_workshop_activate_here(city: &City, wx: usize, wy: usize) -> bool {
+    if !matches!(city.tile(wx, wy), Tile::Empty) {
+        return false;
+    }
+    if !city.terrain_at(wx, wy).buildable() {
+        return false;
+    }
+    // Tier 4 は要整地セルを避ける (整地+建設で worker 2 倍消費は非効率)。
+    if city.terrain_at(wx, wy).needs_clearing() {
+        return false;
+    }
+    let mut has_road = false;
+    let mut has_house = false;
+    for (dx, dy) in DIRS4 {
+        let nx = wx as i32 + dx;
+        let ny = wy as i32 + dy;
+        if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+            continue;
+        }
+        match city.tile(nx as usize, ny as usize) {
+            Tile::Built(Building::Road) => has_road = true,
+            Tile::Built(Building::House) => has_house = true,
+            _ => {}
+        }
+        if has_road && has_house {
+            return true;
+        }
+    }
+    has_road && has_house
+}
+
 /// True iff placing a Shop at (x, y) right now would have it earning
 /// income from tick 1 (road neighbour AND a House within Manhattan-3).
 fn would_shop_activate_here(city: &City, sx: usize, sy: usize) -> bool {
@@ -334,6 +431,10 @@ fn would_shop_activate_here(city: &City, sx: usize, sy: usize) -> bool {
         return false;
     }
     if !city.terrain_at(sx, sy).buildable() {
+        return false;
+    }
+    // Tier 4 は要整地セルを避ける (would_workshop_activate_here と同じ理由)。
+    if city.terrain_at(sx, sy).needs_clearing() {
         return false;
     }
     // Road neighbour required.

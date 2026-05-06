@@ -35,27 +35,48 @@ fn detect_tier_advance(city: &mut City) {
     }
 }
 
-/// Decrement every Construction tile; promote to Built when finished.
+/// Decrement every Construction / Clearing tile; promote them when finished.
+///
+/// Clearing 完了時は地形を Plain に書き換え、タイルを Empty に戻す
+/// (=「整地済み」を地形レイヤーに永続化する設計)。これで撤去機能が
+/// 将来入っても、整地済みエリアは再露出しても Plain のままになる。
 fn advance_construction(city: &mut City) {
     let mut completions: Vec<(usize, usize, Building)> = Vec::new();
+    let mut clearings: Vec<(usize, usize)> = Vec::new();
     for y in 0..GRID_H {
         for x in 0..GRID_W {
             let tile = &mut city.grid[y][x];
-            if let Tile::Construction {
-                target,
-                ticks_remaining,
-            } = tile
-            {
-                if *ticks_remaining <= 1 {
-                    let kind = *target;
-                    *tile = Tile::Built(kind);
-                    city.buildings_finished += 1;
-                    completions.push((x, y, kind));
-                } else {
-                    *ticks_remaining -= 1;
+            match tile {
+                Tile::Construction {
+                    target,
+                    ticks_remaining,
+                } => {
+                    if *ticks_remaining <= 1 {
+                        let kind = *target;
+                        *tile = Tile::Built(kind);
+                        city.buildings_finished += 1;
+                        completions.push((x, y, kind));
+                    } else {
+                        *ticks_remaining -= 1;
+                    }
                 }
+                Tile::Clearing { ticks_remaining } => {
+                    if *ticks_remaining <= 1 {
+                        *tile = Tile::Empty;
+                        clearings.push((x, y));
+                    } else {
+                        *ticks_remaining -= 1;
+                    }
+                }
+                _ => {}
             }
         }
+    }
+    // 整地完了: 地形を Plain に書き換え、軽いログを出す。
+    for (x, y) in clearings {
+        city.terrain[y][x] = super::terrain::Terrain::Plain;
+        city.completion_flash_until[y][x] = city.tick + COMPLETION_FLASH_TICKS;
+        city.push_event(format!("⛏ ({},{}) 整地完了", x, y));
     }
     for (x, y, kind) in completions {
         city.completion_flash_until[y][x] = city.tick + COMPLETION_FLASH_TICKS;
@@ -67,7 +88,18 @@ fn building_name(b: Building) -> &'static str {
     match b {
         Building::Road => "道路",
         Building::House => "住宅",
+        Building::Workshop => "工房",
         Building::Shop => "店舗",
+    }
+}
+
+fn terrain_name(t: super::terrain::Terrain) -> &'static str {
+    use super::terrain::Terrain::*;
+    match t {
+        Plain => "平地",
+        Forest => "森",
+        Wasteland => "荒地",
+        Water => "湖",
     }
 }
 
@@ -90,15 +122,117 @@ fn drive_ai(city: &mut City) {
     }
 }
 
-/// Tech 戦略時の建設速度ブースト。20% 短縮 → ticks * 4 / 5。
-/// `state.strategy` の唯一の "副作用" であり、副作用の集約点として `logic.rs`
-/// に置く (state/render は読取専用)。
+/// Tech 戦略時の建設速度ブースト。`strategy_info` 経由で取得することで
+/// 「Strategy 副作用の唯一の集約点」を maintain。state/render は読取専用。
 fn build_ticks_for(city: &City, kind: Building) -> u32 {
     let base = kind.build_ticks();
-    if matches!(city.strategy, Strategy::Tech) {
-        (base as u64 * 4).div_ceil(5) as u32 // ceil-div で 0 化を防ぐ
-    } else {
-        base
+    let bonus = strategy_info(city.strategy).speed_bonus_pct;
+    if bonus == 0 {
+        return base;
+    }
+    // bonus = +20 (建設時間 -20%) → factor 80/100。
+    // bonus = -10 (建設時間 +10%) → factor 110/100。
+    let factor_num = (100 - bonus).max(10) as u64; // 下限 10 で安全側
+    (base as u64 * factor_num).div_ceil(100) as u32
+}
+
+// ── Strategy metadata (Single Source of Truth) ─────────────
+//
+// Strategy の意味 (重み・速度ボーナス・収入ペナルティ・説明文・思考動詞) を
+// 1 か所に集約。AI (ai.rs)・状態タブ・マネージャータブ・イベントログ・
+// 建設速度補正 (build_ticks_for) はすべてここを参照する。
+
+/// Strategy の全方位プロファイル。AI の重みも player への説明文も同居。
+#[derive(Clone, Copy, Debug)]
+pub struct StrategyInfo {
+    /// 短いラベル ("成長重視" など)。
+    pub label: &'static str,
+    /// 1 行の意図説明。Manager タブのボタン下にこのまま出す。
+    pub tagline: &'static str,
+    /// AI が建物種別を引く時の重み (合計 100 を厳守)。
+    pub house_pct: u32,
+    pub road_pct: u32,
+    pub workshop_pct: u32,
+    pub shop_pct: u32,
+    /// 建設速度ボーナス (%)。+20 = 建設 20% 短縮、-10 = 10% 延長。
+    pub speed_bonus_pct: i32,
+    /// 収入ペナルティ (%)。-20 = 収入 20% 減、0 = 通常。
+    pub income_penalty_pct: i32,
+}
+
+/// 各戦略のプロファイル。重みは tier4_demand_aware と一致させる
+/// (ai.rs はこの構造体を直接読む)。
+pub fn strategy_info(s: Strategy) -> StrategyInfo {
+    match s {
+        Strategy::Growth => StrategyInfo {
+            label: "成長重視",
+            tagline: "人口を伸ばし街のティア進化を急ぐ",
+            house_pct: 70,
+            road_pct: 20,
+            workshop_pct: 0,
+            shop_pct: 10,
+            speed_bonus_pct: 0,
+            income_penalty_pct: 0,
+        },
+        Strategy::Income => StrategyInfo {
+            label: "収入重視",
+            tagline: "工房と店舗で経済を回し現金を稼ぐ",
+            house_pct: 30,
+            road_pct: 22,
+            workshop_pct: 13,
+            shop_pct: 35,
+            speed_bonus_pct: 0,
+            income_penalty_pct: 0,
+        },
+        Strategy::Tech => StrategyInfo {
+            label: "技術投資",
+            tagline: "道路網を急拡大 (建設+20% / 収入-20%)",
+            house_pct: 35,
+            road_pct: 50,
+            workshop_pct: 0,
+            shop_pct: 15,
+            speed_bonus_pct: 20,
+            income_penalty_pct: -20,
+        },
+        Strategy::Eco => StrategyInfo {
+            label: "環境配慮",
+            tagline: "森を残し丁寧に育てる (建設-10% / 収入+5%)",
+            house_pct: 45,
+            road_pct: 25,
+            workshop_pct: 0,
+            shop_pct: 30,
+            // 副作用は「ゆっくり育てる」を表現する負の建設速度と僅かな収入ボーナス。
+            // ボーナスは正の `income_penalty_pct = +5` として扱う (関数側で 100+5)。
+            speed_bonus_pct: -10,
+            income_penalty_pct: 5,
+        },
+    }
+}
+
+/// AI のイベントログに出す「思考動詞」を Strategy × Building で返す。
+/// マネージャー視点で「CPU が今この戦略でこの建物を建てた → だからこういう
+/// 意図」を体感できるようにする。
+pub fn strategy_thought_verb(s: Strategy, kind: Building) -> &'static str {
+    match (s, kind) {
+        (Strategy::Growth, Building::House) => "住宅地を拡張",
+        (Strategy::Growth, Building::Road) => "生活道路を整備",
+        (Strategy::Growth, Building::Shop) => "近所の店舗を出店",
+        (Strategy::Growth, Building::Workshop) => "近隣の工房を整備",
+
+        (Strategy::Income, Building::House) => "労働者用住宅を建設",
+        (Strategy::Income, Building::Road) => "商業道路を整備",
+        (Strategy::Income, Building::Shop) => "商業地を育てる",
+        (Strategy::Income, Building::Workshop) => "工房で雇用を創出",
+
+        (Strategy::Tech, Building::House) => "ベッドタウンを増設",
+        (Strategy::Tech, Building::Road) => "道路網を伸ばす",
+        (Strategy::Tech, Building::Shop) => "幹線沿いに出店",
+        (Strategy::Tech, Building::Workshop) => "工業地区を試験設置",
+
+        (Strategy::Eco, Building::House) => "緑に囲まれた住宅を整備",
+        (Strategy::Eco, Building::Road) => "並木道を敷設",
+        (Strategy::Eco, Building::Shop) => "地域密着の店舗を出店",
+        (Strategy::Eco, Building::Workshop) => "森に配慮した工房を整備",
     }
 }
 
@@ -116,6 +250,29 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
     if !city.terrain_at(x, y).buildable() {
         return false;
     }
+    // 要整地の地形 (Forest/Wasteland) はまず整地工程を発生させる。
+    // 整地中は Tile::Clearing になり worker を 1 占有する。完了後は Empty に
+    // 戻り、AI が次の tick で改めて建物を建てに来る (= 関数を 2 回通る)。
+    let terrain = city.terrain_at(x, y);
+    if terrain.needs_clearing() {
+        let clearing_cost = terrain.clearing_cost();
+        if city.cash < clearing_cost {
+            return false;
+        }
+        city.cash -= clearing_cost;
+        city.cash_spent_total += clearing_cost;
+        city.grid[y][x] = Tile::Clearing {
+            ticks_remaining: terrain.clearing_ticks(),
+        };
+        city.push_event(format!(
+            "⛏ ({},{}) 整地着工 ({}) -${}",
+            x,
+            y,
+            terrain_name(terrain),
+            clearing_cost
+        ));
+        return true;
+    }
     let cost = kind.cost();
     if city.cash < cost {
         return false;
@@ -128,13 +285,27 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
         ticks_remaining: ticks,
     };
     city.buildings_started += 1;
-    city.push_event(format!(
-        "▷ {} ({},{}) 着工 -${}",
-        building_name(kind),
-        x,
-        y,
-        cost
-    ));
+    // Tier 4 (DemandAware) のみ Strategy に基づく動詞を表示。
+    // 低 Tier は戦略を読まない設計なので、汎用の「着工」を出す方が誠実。
+    // この差自体が「上位 AI ほど目的を持って動いている」演出にもなる。
+    if matches!(city.ai_tier, AiTier::DemandAware) {
+        city.push_event(format!(
+            "▷ {} ({},{}) — {} -${}",
+            building_name(kind),
+            x,
+            y,
+            strategy_thought_verb(city.strategy, kind),
+            cost
+        ));
+    } else {
+        city.push_event(format!(
+            "▷ {} ({},{}) 着工 -${}",
+            building_name(kind),
+            x,
+            y,
+            cost
+        ));
+    }
     true
 }
 
@@ -180,8 +351,27 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
     // even 1 house produces $1/sec; otherwise an unlucky early game
     // can leave the city with 1 house and income==0 (death spiral —
     // the simulator catches this on seed=0xDEADBEEF without this).
+    //
+    // 設計判断: HouseTier は描画レイヤーで「街が育つ感」を表現する派生値として
+    // 使い、収入計算には反映しない。理由:
+    //   - 戦略の特化 (simulator::tier4_strategies_specialize) を保つには
+    //     人口×Tier 比例の収入は Tech 戦略に有利すぎる (Tech は道路+人口優位)
+    //   - 経済発展感は次フェーズの Workshop / Shop チェーン拡張で実現する
+    //     方が分業として綺麗 (Phase A continuation, DESIGN.md §5)
     let houses = city.count_built(Building::House) as i64;
     income += (houses + 1) / 2;
+
+    // Workshops → 労働力 (隣接 House) + Road 接続が必要。$1/s。
+    // House より早期に建てられる「最初の職場」として、戦略の幅を増やす。
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            if matches!(city.tile(x, y), Tile::Built(Building::Workshop))
+                && workshop_is_active(city, x, y)
+            {
+                income += 1;
+            }
+        }
+    }
 
     // Shops → check connectivity + customer base.
     for y in 0..GRID_H {
@@ -194,10 +384,13 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
         }
     }
 
-    // Tech 戦略の収入ペナルティ: -20% (整数で *4/5)。
+    // Strategy の収入修正 (Tech は -20%、Eco は +5% 等)。
     // 0 化の死スパイラルを避けるため `1` を下限に。
-    if matches!(city.strategy, Strategy::Tech) && income > 0 {
-        income = ((income * 4) / 5).max(1);
+    // `income_penalty_pct` という名前だが正値も扱う (Eco の +5% など)。
+    let modifier = strategy_info(city.strategy).income_penalty_pct;
+    if modifier != 0 && income > 0 {
+        let factor = (100 + modifier).max(10) as i64; // -20 → 80、+5 → 105。下限 10。
+        income = ((income * factor) / 100).max(1);
     }
     income
 }
@@ -241,6 +434,137 @@ pub enum HouseLevel {
     High,
 }
 
+// ── House evolution (DESIGN.md §2.3, §4) ────────────────────
+//
+// 「街が育つ感」の核となるルール群。すべて純関数で、state を増やさず
+// 周囲のセルだけ見て派生値を計算する。Pure Logic Pattern。
+
+/// 住宅の経済段階。Cottage → Apartment → Highrise と育つ。
+///
+/// `HouseLevel` (隣接 House 数による低/中/高層の見た目) とは別軸:
+/// こちらは「経済が回って住宅が高層化する」段階で、Workshop / Shop / Road の
+/// 充実度から決まる (DESIGN.md §2.3)。両者は最終的に統合する可能性があるが、
+/// 一旦は別概念として並置し、render で組み合わせる。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HouseTier {
+    Cottage,   // 基本の住宅。インフラ未整備。
+    Apartment, // 中層。Road + Workshop が近い。
+    Highrise,  // 高層。Road + Workshop + Shop が揃った成熟ゾーン。
+}
+
+/// `house_tier_for` が見る周囲の充実度サマリ。
+///
+/// House 一軒分の周辺をスキャンして集計したもの。フィールドの意味:
+/// - `n_road_adj`: 4-近傍にある Road タイル数 (0..=4)。0 だと未接続。
+/// - `n_workshop_within_5`: Manhattan 距離 5 以内の Workshop 数。
+///   現状 Workshop 建物は未実装なので常に 0。実装後に効いてくる。
+/// - `n_shop_within_5`: Manhattan 距離 5 以内の Shop 数。
+/// - `n_house_within_3`: Manhattan 距離 3 以内の House 数 (自身は除く)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HouseNeighborhood {
+    pub n_road_adj: u32,
+    pub n_workshop_within_5: u32,
+    pub n_shop_within_5: u32,
+    pub n_house_within_3: u32,
+}
+
+/// 周囲をスキャンして `HouseNeighborhood` を組み立てる。
+///
+/// この関数は機械的な集計のみを担当する (純関数 / 副作用なし)。
+/// 「どの数値で Tier を決めるか」というゲームデザイン判断は
+/// `house_tier_for` 側に閉じる。
+pub fn gather_house_neighborhood(city: &City, x: usize, y: usize) -> HouseNeighborhood {
+    let mut n_road_adj = 0u32;
+    for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+            continue;
+        }
+        if matches!(
+            city.tile(nx as usize, ny as usize),
+            Tile::Built(Building::Road)
+        ) {
+            n_road_adj += 1;
+        }
+    }
+
+    let mut n_shop_within_5 = 0u32;
+    let mut n_workshop_within_5 = 0u32;
+    let mut n_house_within_3 = 0u32;
+    for cy in 0..GRID_H {
+        for cx in 0..GRID_W {
+            let dx = (cx as i32 - x as i32).abs();
+            let dy = (cy as i32 - y as i32).abs();
+            let manhattan = (dx + dy) as u32;
+            match city.tile(cx, cy) {
+                Tile::Built(Building::Shop) if manhattan <= 5 => n_shop_within_5 += 1,
+                Tile::Built(Building::Workshop) if manhattan <= 5 => n_workshop_within_5 += 1,
+                Tile::Built(Building::House) if manhattan <= 3 && (cx, cy) != (x, y) => {
+                    n_house_within_3 += 1
+                }
+                _ => {}
+            }
+        }
+    }
+
+    HouseNeighborhood {
+        n_road_adj,
+        n_workshop_within_5,
+        n_shop_within_5,
+        n_house_within_3,
+    }
+}
+
+/// House の経済段階を決定する純関数。**★ ゲーム体験の核**
+///
+/// この関数の中身が「街がどう育つか」を直接決める。詳細な設計指針は
+/// `DESIGN.md §4.1` を参照。簡潔に言うと:
+///
+/// - Cottage は無条件 (デフォルト)
+/// - Apartment は「インフラが届いている」感を出す条件にしたい
+/// - Highrise は「商工業が回っている」感を出す条件にしたい
+///
+/// プレイヤーが街を眺めて「あ、ここは Apartment になりかけてる、Shop を
+/// もう一つ近くに置けば育ちそう」と気付ける形が理想。
+///
+/// **TODO (User contribution)**: この関数を実装してください (5〜10 行)。
+/// 現状の `todo!()` は呼び出されると panic するため、未統合の今は問題ない
+/// ですが、render / income に組み込む際に必須になります。
+///
+/// テストは `tests::house_tier_for_*` を参照 — 期待する大まかな挙動を
+/// アサートしているので、書いた式で `cargo test -p metropolis` が通れば OK。
+///
+/// **採用方針**: 多段ゲート方式 (DESIGN.md §4.1)。
+///   - Cottage  : 既定。インフラ未到達 or 商業未到達。
+///   - Apartment: Road 接続 + 経済刺激 (Workshop/Shop) が近い。
+///   - Highrise : Road 2 本以上 + 経済の厚み ≥ 2 + 周囲 House ≥ 3。
+///
+/// `economic_density = n_workshop_within_5 + n_shop_within_5` を派生値として
+/// 一段噛ませる。Workshop 未実装の現在は Shop だけで Highrise に到達でき、
+/// Workshop 実装後は両方が寄与する設計 (career Tier 進化と同じ「複数経路」思想)。
+///
+/// **シムシティ的な性質**: 「家を固めて道路を引いただけ」では Apartment にならず、
+/// **商業 (Shop / Workshop) が近くで動いて初めて街区がリッチ化する**。
+/// この条件があるため、Tech 戦略 (道路重視) が単独で住宅を高層化することはなく、
+/// 戦略の特化が崩れない (simulator::tier4_strategies_specialize の不変条件)。
+pub fn house_tier_for(stats: HouseNeighborhood) -> HouseTier {
+    let economic_density = stats.n_workshop_within_5 + stats.n_shop_within_5;
+
+    // Highrise: 商工業が回っている成熟ゾーン。
+    if stats.n_road_adj >= 2 && economic_density >= 2 && stats.n_house_within_3 >= 3 {
+        return HouseTier::Highrise;
+    }
+
+    // Apartment: 商業が来ている街区。Road + 経済施設 (Shop/Workshop) が必須。
+    if stats.n_road_adj >= 1 && economic_density >= 1 {
+        return HouseTier::Apartment;
+    }
+
+    HouseTier::Cottage
+}
+
+
 /// 店舗の段階レベル — 隣接アクティブ House 数 + 道路接続で評価。
 /// 賑わいの可視化用。アクティブで Mid 以上の住宅が近いとプレミアム。
 pub fn shop_level(city: &City, x: usize, y: usize) -> ShopLevel {
@@ -273,6 +597,13 @@ pub enum ShopLevel {
     Basic,   // 道路はあるが客は少ない
     Busy,    // 標準的な賑わい
     Premium, // 大繁盛 (★付き表示)
+}
+
+/// Workshop は隣接 House (労働力) と Road 接続の両方が必要。
+/// Shop と違って距離は隣接のみ — 「働き手は徒歩圏内から来る」感を出す。
+pub(super) fn workshop_is_active(city: &City, wx: usize, wy: usize) -> bool {
+    has_neighbor_kind(city, wx, wy, Building::Road)
+        && has_neighbor_kind(city, wx, wy, Building::House)
 }
 
 /// A shop earns money if it has a road neighbor *and* a house within
@@ -368,6 +699,51 @@ pub fn hire_worker(city: &mut City) -> bool {
 mod tests {
     use super::*;
 
+    // ── House evolution rule (DESIGN.md §4) ────────────────
+    //
+    // user contribution が満たすべき大まかな性質をテストで明文化。
+    // 中の数字は「正解」というより「方向性」のチェック。書いたルールで
+    // 全部通ればまず妥当。
+
+    fn nbh(n_road: u32, n_workshop: u32, n_shop: u32, n_house: u32) -> HouseNeighborhood {
+        HouseNeighborhood {
+            n_road_adj: n_road,
+            n_workshop_within_5: n_workshop,
+            n_shop_within_5: n_shop,
+            n_house_within_3: n_house,
+        }
+    }
+
+    /// 完全孤立した House は Cottage のまま。
+    /// (#[ignore] を外してから実装すると、書いた式で通るか確認できる)
+    #[test]
+    fn isolated_house_is_cottage() {
+        assert_eq!(house_tier_for(nbh(0, 0, 0, 0)), HouseTier::Cottage);
+    }
+
+    /// インフラだけ届いている (Road あり、Shop / Workshop ゼロ) は
+    /// Highrise にはならない — 「商業が回っていない」ため。
+    #[test]
+    fn road_only_does_not_reach_highrise() {
+        assert_ne!(house_tier_for(nbh(2, 0, 0, 1)), HouseTier::Highrise);
+    }
+
+    /// Road + Workshop + Shop が揃い周囲に House もいる豊かなゾーンは
+    /// Highrise に到達する。
+    #[test]
+    fn full_economy_reaches_highrise() {
+        assert_eq!(house_tier_for(nbh(2, 2, 2, 4)), HouseTier::Highrise);
+    }
+
+    /// 単調性: 「条件が悪くなって Tier が上がる」のは想定外。
+    /// 引数の各成分を増やしても Tier は下がらない (>= で良い)。
+    #[test]
+    fn tier_is_monotone() {
+        let lo = house_tier_for(nbh(1, 0, 0, 1));
+        let hi = house_tier_for(nbh(2, 1, 1, 3));
+        assert!(hi >= lo, "richer neighborhood should not produce a worse tier");
+    }
+
     #[test]
     fn empty_city_earns_nothing() {
         let city = City::new();
@@ -397,6 +773,87 @@ mod tests {
         assert_eq!(compute_income_per_sec(&city), 1);
     }
 
+    /// Workshop は隣接 House と Road が両方必要。片方だけでは inactive。
+    #[test]
+    fn workshop_needs_road_and_house_neighbors() {
+        let mut city = City::new();
+        // (5,5) に Workshop。隣接 Road のみ → inactive。
+        city.set_tile(5, 5, Tile::Built(Building::Workshop));
+        city.set_tile(5, 4, Tile::Built(Building::Road));
+        // House (5,6) は Road 隣接 0 なので Cottage = $1。
+        // Workshop は House 隣接無しで inactive → $0。
+        assert_eq!(compute_income_per_sec(&city), 0);
+
+        // 隣接 House を追加 → Workshop activate。
+        city.set_tile(5, 6, Tile::Built(Building::House));
+        // House (5,6): n_road_adj=0, Cottage = $1
+        // Workshop: active → $1
+        // Total: $2
+        assert_eq!(compute_income_per_sec(&city), 2);
+    }
+
+    /// 要整地の地形 (Forest) に建てようとすると、まず整地工程が起きる。
+    /// 整地完了後に terrain が Plain に書き換わる。
+    #[test]
+    fn forest_triggers_clearing_then_plain() {
+        let mut city = City::new();
+        city.cash = 1000;
+        // (5,5) を強制的に Forest に。
+        city.terrain[5][5] = super::super::terrain::Terrain::Forest;
+        let ok = start_construction(&mut city, 5, 5, Building::House);
+        assert!(ok, "start_construction should succeed (triggers clearing)");
+        // 直後は Clearing タイル。
+        assert!(matches!(city.tile(5, 5), Tile::Clearing { .. }));
+        // 整地時間 (Forest = 60 ticks) を進めると Empty に戻り terrain が Plain に。
+        tick(&mut city, 60);
+        assert!(matches!(city.tile(5, 5), Tile::Empty));
+        assert_eq!(
+            city.terrain_at(5, 5),
+            super::super::terrain::Terrain::Plain,
+            "clearing should overwrite terrain to Plain"
+        );
+    }
+
+    /// Eco 戦略は collection-time builder of Forest avoidance。
+    /// strategy_info の `speed_bonus_pct` が負、`income_penalty_pct` が正。
+    #[test]
+    fn eco_strategy_has_negative_speed_and_positive_income() {
+        let info = strategy_info(Strategy::Eco);
+        assert!(info.speed_bonus_pct < 0, "Eco builds slower");
+        assert!(info.income_penalty_pct > 0, "Eco earns slightly more");
+    }
+
+    /// Eco 戦略時、Tech と同じく定数倍が income に効く。+5% で 1 軒 → 1$/s が
+    /// 維持される (床保護)。
+    #[test]
+    fn eco_income_bonus_does_not_break_floor() {
+        let mut city = City::new();
+        city.strategy = Strategy::Eco;
+        city.set_tile(0, 0, Tile::Built(Building::House));
+        // (1+1)/2 = 1, +5% = 1.05 → floor で 1。床保護で 1 を下回らない。
+        assert!(compute_income_per_sec(&city) >= 1);
+    }
+
+    /// Wasteland の整地は Forest より速く安い (terrain.rs のバランスに合う)。
+    #[test]
+    fn wasteland_clearing_is_cheaper_and_faster() {
+        use super::super::terrain::Terrain;
+        assert!(Terrain::Wasteland.clearing_ticks() < Terrain::Forest.clearing_ticks());
+        assert!(Terrain::Wasteland.clearing_cost() < Terrain::Forest.clearing_cost());
+    }
+
+    /// Workshop が近くにあると House は Apartment になる (Workshop が経済刺激源)。
+    #[test]
+    fn workshop_promotes_nearby_house_to_apartment() {
+        let mut city = City::new();
+        city.set_tile(1, 1, Tile::Built(Building::House));
+        city.set_tile(0, 1, Tile::Built(Building::Road));
+        // Workshop at (3,1): Manhattan distance 2 from (1,1)。
+        city.set_tile(3, 1, Tile::Built(Building::Workshop));
+        let tier = house_tier_for(gather_house_neighborhood(&city, 1, 1));
+        assert_eq!(tier, HouseTier::Apartment);
+    }
+
     #[test]
     fn shop_with_road_and_house_earns() {
         let mut city = City::new();
@@ -405,6 +862,30 @@ mod tests {
         city.set_tile(5, 6, Tile::Built(Building::House));
         // Shop ($2) + 1 house ceil(1/2)=1 → $3
         assert_eq!(compute_income_per_sec(&city), 3);
+    }
+
+    /// HouseTier は描画専用 — gather → tier_for で派生値が取れる。
+    /// 道路接続 + Shop が距離 5 以内なら Apartment になる (描画切替の根拠)。
+    #[test]
+    fn house_with_road_and_shop_renders_as_apartment() {
+        let mut city = City::new();
+        city.set_tile(1, 1, Tile::Built(Building::House));
+        city.set_tile(0, 1, Tile::Built(Building::Road));
+        city.set_tile(3, 1, Tile::Built(Building::Shop));
+        let tier = house_tier_for(gather_house_neighborhood(&city, 1, 1));
+        assert_eq!(tier, HouseTier::Apartment);
+    }
+
+    /// 道路 + 周囲 House だけでは Cottage のまま (商業が来ないとリッチ化しない)。
+    #[test]
+    fn road_and_houses_alone_stays_cottage_visually() {
+        let mut city = City::new();
+        city.set_tile(1, 1, Tile::Built(Building::House));
+        city.set_tile(0, 1, Tile::Built(Building::Road));
+        city.set_tile(2, 1, Tile::Built(Building::House));
+        city.set_tile(1, 2, Tile::Built(Building::House));
+        let tier = house_tier_for(gather_house_neighborhood(&city, 1, 1));
+        assert_eq!(tier, HouseTier::Cottage);
     }
 
     #[test]

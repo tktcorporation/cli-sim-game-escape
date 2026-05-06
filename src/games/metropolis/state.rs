@@ -19,6 +19,10 @@ pub const MAX_WORKERS: u32 = 8;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tile {
     Empty,
+    /// 整地中。Wasteland / Forest の地形を Plain 化する工程。
+    /// 完了すると下層の `terrain` が Plain に書き換わり、再び Empty タイルに戻る。
+    /// 続けて何を建てるかは AI が次の tick で決める設計 (= 建物自由度を保つ)。
+    Clearing { ticks_remaining: u32 },
     /// Construction in progress: target building, ticks remaining.
     Construction {
         target: Building,
@@ -27,14 +31,21 @@ pub enum Tile {
     Built(Building),
 }
 
-/// Buildings the AI can place.  Kept small for the MVP — three types is
-/// enough to express the "houses feed shops feed cash" loop.
+/// Buildings the AI can place.
+///
+/// **経済チェーン**: Road (インフラ) → House (人口) → Workshop (生産) →
+/// Shop (販売)。Workshop は House と Shop の中間層として機能し、隣接
+/// House の住民を雇って稼ぐ。Workshop が近くにあると House は Apartment に
+/// 育つ (`logic::house_tier_for` の判定で `n_workshop_within_5` が寄与)。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Building {
     /// Connector: enables shops to be supplied.
     Road,
     /// Adds population.
     House,
+    /// 工房。隣接 House (労働力) と Road 接続が必要。Shop より早期に開けて
+    /// 「家 → 職場」の経済段階を担当する。
+    Workshop,
     /// Generates cash, but only if it has at least one road neighbor AND
     /// at least one house within Manhattan distance 3 (a "customer base").
     Shop,
@@ -42,10 +53,14 @@ pub enum Building {
 
 impl Building {
     /// One-time build cost in cash.
+    ///
+    /// バランス: Workshop は Shop より安く ($100 vs $150) 早期に開ける。
+    /// Workshop ⇒ Shop の順番で街区が育つ自然な流れになる。
     pub fn cost(self) -> i64 {
         match self {
             Building::Road => 10,
             Building::House => 40,
+            Building::Workshop => 100,
             Building::Shop => 150,
         }
     }
@@ -53,9 +68,10 @@ impl Building {
     /// Ticks needed to finish construction.
     pub fn build_ticks(self) -> u32 {
         match self {
-            Building::Road => 30,    // 3 sec
-            Building::House => 100,  // 10 sec
-            Building::Shop => 200,   // 20 sec
+            Building::Road => 30,        // 3 sec
+            Building::House => 100,      // 10 sec
+            Building::Workshop => 150,   // 15 sec — Shop より少し短い
+            Building::Shop => 200,       // 20 sec
         }
     }
 
@@ -150,7 +166,8 @@ impl PanelTab {
 /// Tier-1 ignores this field.
 ///
 /// `Tech` は短期収入を犠牲にして建設速度と (将来の) 研究ポイントを稼ぐ路線。
-/// `Balanced` は「中間値で意思決定が薄まる」ため削除し、3 択全てに明確な
+/// `Eco` は森を残し荒地だけ整地する「環境配慮」型 — 整地メカニクスと組み合わせ。
+/// `Balanced` は「中間値で意思決定が薄まる」ため削除し、各択に明確な
 /// トレードオフを持たせる方針 (Plan #1)。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Strategy {
@@ -158,6 +175,9 @@ pub enum Strategy {
     Income, // prefer Shops
     /// Tech: 建設速度 +20% / 収入 -20%。AI は道路を優先し展開を重視。
     Tech,
+    /// Eco: 森を切らない (Forest 整地を AI が回避)。建設速度 -10% / 収入 +5%。
+    /// 「ゆっくり丁寧に育てる」自然と共存する街づくり。
+    Eco,
 }
 
 /// CPU intelligence tier.  Higher = smarter placement decisions.
