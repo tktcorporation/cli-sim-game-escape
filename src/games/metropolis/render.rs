@@ -35,7 +35,7 @@ use ratzilla::ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::ClickState;
-use crate::widgets::{Clickable, TabBar};
+use crate::widgets::{Clickable, ClickableGrid, TabBar};
 
 use super::logic;
 use super::state::{
@@ -44,9 +44,9 @@ use super::state::{
 };
 use super::terrain::Terrain;
 use super::{
-    ACT_HIRE_WORKER, ACT_STRATEGY_ECO, ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME,
-    ACT_STRATEGY_TECH, ACT_TAB_EVENTS, ACT_TAB_MANAGER, ACT_TAB_STATUS, ACT_TAB_WORLD,
-    ACT_UPGRADE_AI,
+    ACT_AUTO_DEMOLISH, ACT_DISPATCH_OUTPOST, ACT_HIRE_WORKER, ACT_STRATEGY_ECO,
+    ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH, ACT_TAB_EVENTS, ACT_TAB_MANAGER,
+    ACT_TAB_STATUS, ACT_TAB_WORLD, ACT_TOGGLE_DEMOLISH, ACT_UPGRADE_AI, DEMOLISH_CELL_BASE,
 };
 
 /// Wide layout が必要とする最小幅。
@@ -85,7 +85,7 @@ fn render_wide(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCell
         .constraints([Constraint::Length(grid_w), Constraint::Min(24)])
         .split(v[1]);
 
-    render_grid(state, f, h[0], 2);
+    render_grid(state, f, h[0], 2, click_state);
     render_tab_panel(state, f, h[1], click_state);
 }
 
@@ -101,7 +101,7 @@ fn render_narrow(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCe
         ])
         .split(area);
     render_banner(state, f, chunks[0], true);
-    render_grid(state, f, chunks[1], 1);
+    render_grid(state, f, chunks[1], 1, click_state);
     render_tab_panel(state, f, chunks[2], click_state);
 }
 
@@ -208,15 +208,18 @@ fn strategy_tag(s: Strategy) -> &'static str {
 }
 
 /// 太陽 / 月 が水平に往復する 1 行 + 固定位置の星。
-/// サイクル = `width * 2 * 30` ticks。
+///
+/// `logic::day_phase` と同期: Day 中は太陽 ◉ が左→右へ、Night 中は月 ◯ が
+/// 左→右へ。Dusk は次の天体が右端付近に固定 (沈みかけ/昇る前)。これで
+/// 太陽の位置と建物の窓灯りが一致する (前は別位相で違和感があった)。
 fn make_sky_line(tick: u64, width: usize) -> Vec<Span<'static>> {
     if width == 0 {
         return vec![Span::raw("")];
     }
-    let cycle = (width * 2).max(1) as u64;
-    let phase = (tick / 30) % cycle;
-    let is_day = (phase as usize) < width;
-    let pos = (phase as usize) % width;
+    let phase = logic::day_phase(tick);
+    let progress = logic::day_progress(tick);
+    let is_day = matches!(phase, logic::DayPhase::Day | logic::DayPhase::Dusk);
+    let pos = ((progress * width.saturating_sub(1) as f32) as usize).min(width - 1);
     let body = if is_day { "◉" } else { "◯" };
     let body_color = if is_day { Color::Yellow } else { Color::LightCyan };
 
@@ -299,12 +302,26 @@ fn make_skyline_silhouette(tick: u64, width: usize, pop: u32) -> Vec<Span<'stati
 
 // ── Grid ────────────────────────────────────────────────────
 
-fn render_grid(state: &City, f: &mut Frame, area: Rect, cell_width: u16) {
-    let title = format!(
-        " ▟▙ City — POP {}  WIP {} ",
-        state.population(),
-        state.active_constructions()
-    );
+fn render_grid(
+    state: &City,
+    f: &mut Frame,
+    area: Rect,
+    cell_width: u16,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let title = if state.demolish_mode {
+        format!(
+            " 🗑 City — DEMOLISH MODE  POP {}  WIP {} ",
+            state.population(),
+            state.active_constructions()
+        )
+    } else {
+        format!(
+            " ▟▙ City — POP {}  WIP {} ",
+            state.population(),
+            state.active_constructions()
+        )
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
@@ -322,9 +339,27 @@ fn render_grid(state: &City, f: &mut Frame, area: Rect, cell_width: u16) {
         lines.push(Line::from(spans));
     }
     f.render_widget(Paragraph::new(lines), inner);
+
+    // 撤去モード時のみ、Built セルをクリック対象として登録する。
+    // Built 以外のセル (Empty/Construction/Clearing) も登録するが、
+    // demolish_at 側で false を返すので副作用なし。シンプルに全セル登録する。
+    if state.demolish_mode {
+        let mut cs = click_state.borrow_mut();
+        let grid = ClickableGrid::new(GRID_W, GRID_H, DEMOLISH_CELL_BASE, cell_width);
+        grid.register_targets(area, &block, &mut cs, 0);
+    }
 }
 
 fn grid_border_color(state: &City) -> Color {
+    // 撤去モードは絶対優先で赤系 — 「危険な操作中」を視覚的に強調。
+    // 0.6 sec 周期で点滅させると注意を引きやすい。
+    if state.demolish_mode {
+        if (state.tick / 6).is_multiple_of(2) {
+            return Color::LightRed;
+        } else {
+            return Color::Red;
+        }
+    }
     // 完成フラッシュが多い時は LightGreen、それ以外は Cyan 系。
     if state.completion_flash_until.iter().flatten().any(|t| *t > state.tick) {
         Color::LightGreen
@@ -376,7 +411,7 @@ fn tile_span_1(
                 g.to_string(),
                 Style::default()
                     .fg(Color::LightYellow)
-                    .bg(terrain_bg(state.terrain_at(x, y))),
+                    .bg(terrain_bg_at(state.terrain_at(x, y), tick)),
             )
         }
         Tile::Construction {
@@ -432,7 +467,7 @@ fn tile_span_1(
                 ch.to_string(),
                 Style::default()
                     .fg(color)
-                    .bg(house_bg(tier))
+                    .bg(house_bg(tier, tick))
                     .add_modifier(m),
             )
         }
@@ -490,6 +525,27 @@ fn tile_span_1(
             };
             Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg))
         }
+        Tile::Built(Building::Park) => {
+            // 1-wide: 公園は花/蝶を 1 文字でゆらす。夜は蛍。
+            let (ch, fg) = park_glyph_1wide(tick);
+            let (br, bg, bb) = park_bg_rgb(tick);
+            Span::styled(
+                ch.to_string(),
+                Style::default().fg(fg).bg(Color::Rgb(br, bg, bb)),
+            )
+        }
+        Tile::Built(Building::Outpost) => {
+            // 開拓機材: 重機の点滅。1-wide では `⚒` を tick で点滅。
+            let blink = (tick / 4).is_multiple_of(2);
+            let ch = if blink { '⚒' } else { '⚙' };
+            Span::styled(
+                ch.to_string(),
+                Style::default()
+                    .fg(Color::LightYellow)
+                    .bg(Color::Rgb(50, 40, 20))
+                    .add_modifier(Modifier::BOLD),
+            )
+        }
     }
 }
 
@@ -499,6 +555,8 @@ fn tile_char_1(b: Building) -> char {
         Building::House => 'H',
         Building::Workshop => 'W',
         Building::Shop => 'S',
+        Building::Park => 'P',
+        Building::Outpost => 'O',
     }
 }
 
@@ -535,7 +593,7 @@ fn tile_spans_2(
                 pair.to_string(),
                 Style::default()
                     .fg(Color::LightYellow)
-                    .bg(terrain_bg(state.terrain_at(x, y))),
+                    .bg(terrain_bg_at(state.terrain_at(x, y), tick)),
             )]
         }
         Tile::Construction {
@@ -589,22 +647,14 @@ fn tile_spans_2(
             // 道路網が「線として繋がっている」絵が出ることで、ただの灰色マスから
             // 「街路網」へ印象が変わる。1 つだけポツンとある時は十字 (+) を出して
             // 「未接続だが道路として意図されている」ことを示す。
+            //
+            // **交通フロー演出**: 直線道路 (水平 `══` / 垂直 `║`) は、進行方向に
+            // 沿って明るい光点が走るアニメに差し替える。x または y で位相をずらすと
+            // 「車のヘッドライトが流れて見える」効果が出る。曲がり角 / 交差点 / 孤立は
+            // そのまま静的グリフ (動かすとチラつき増)。
             let connections = road_connections(state, x, y);
-            let glyph = road_2wide_glyph(connections);
-            // 車流れ: 車があると `· ·` のスクロールアニメ。dim modifier。
-            let traffic_phase = ((tick / 3) as usize + x + y) % 4;
-            let modifier = if traffic_phase == 0 {
-                Modifier::BOLD
-            } else {
-                Modifier::DIM
-            };
-            vec![Span::styled(
-                glyph.to_string(),
-                Style::default()
-                    .fg(Color::Gray)
-                    .bg(Color::Rgb(40, 40, 40))
-                    .add_modifier(modifier),
-            )]
+            let traffic = road_traffic_glyph(connections, x, y, tick);
+            road_spans_2wide(connections, traffic, tick)
         }
         Tile::Built(Building::House) => {
             // 2 軸表現: HouseTier (経済充実度) × HouseLevel (隣接密度)。
@@ -615,13 +665,35 @@ fn tile_spans_2(
             let level = logic::house_level(state, x, y);
             let glyph = house_glyph_2wide(tier, level);
             let (color, modifier) = house_style_2wide(tier, tick);
-            vec![Span::styled(
-                glyph.to_string(),
-                Style::default()
-                    .fg(color)
-                    .bg(house_bg(tier))
-                    .add_modifier(modifier),
-            )]
+            let bg = house_bg(tier, tick);
+
+            // 航空標識: Highrise が密集 (周囲 3 軒以上 Highrise) で、夜間に
+            // 1.5 秒周期で右側 1 文字を `*` (赤太字) に差し替える。
+            // 都市感の最後のスパイス — Tier 4 経済まで育てたプレイヤーへのご褒美。
+            if matches!(tier, logic::HouseTier::Highrise)
+                && logic::should_show_aviation_light(state, x, y, tick)
+            {
+                let mut chars = glyph.chars();
+                let left = chars.next().unwrap_or(' ');
+                vec![
+                    Span::styled(
+                        left.to_string(),
+                        Style::default().fg(color).bg(bg).add_modifier(modifier),
+                    ),
+                    Span::styled(
+                        "*".to_string(),
+                        Style::default()
+                            .fg(Color::LightRed)
+                            .bg(bg)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ]
+            } else {
+                vec![Span::styled(
+                    glyph.to_string(),
+                    Style::default().fg(color).bg(bg).add_modifier(modifier),
+                )]
+            }
         }
         Tile::Built(Building::Shop) => {
             let level = logic::shop_level(state, x, y);
@@ -680,17 +752,117 @@ fn tile_spans_2(
             };
             vec![Span::styled(glyph, Style::default().fg(fg).bg(bg))]
         }
+        Tile::Built(Building::Park) => {
+            // 公園: 2-wide 右側の文字を「蝶/花/蛍」のアニメで動かす。
+            // 昼間は花 + 蝶が舞い、夜は蛍が黄色く点滅。Forest と被らない
+            // ように左の文字は固定の `❀` 系、右はフレームアニメ。
+            //
+            // x/y で位相をずらすと「公園が複数並んだ時に蝶が同時に動かない」
+            // 自然な雰囲気が出る。
+            let (left_ch, right_ch, fg) = park_glyph_2wide(tick, x, y);
+            let (br, bg, bb) = park_bg_rgb(tick);
+            let bg_color = Color::Rgb(br, bg, bb);
+            vec![
+                Span::styled(left_ch.to_string(), Style::default().fg(fg).bg(bg_color)),
+                Span::styled(
+                    right_ch.to_string(),
+                    Style::default()
+                        .fg(fg)
+                        .bg(bg_color)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]
+        }
+        Tile::Built(Building::Outpost) => {
+            // 開拓機材: 重機 (左) + 操作パネル (右) の 2-wide 表現。
+            // ライトが 4 frame で回転して「稼働中」を示す。
+            let phase = (tick / 3) as usize % 4;
+            let lamp = ['◐', '◓', '◑', '◒'][phase];
+            let body = '⚒';
+            vec![
+                Span::styled(
+                    lamp.to_string(),
+                    Style::default()
+                        .fg(Color::LightYellow)
+                        .bg(Color::Rgb(50, 40, 20))
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    body.to_string(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .bg(Color::Rgb(50, 40, 20))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]
+        }
     }
 }
 
-/// House の背景色 — Tier ごとに段階的に「街区が育つ」色相に。
-/// Cottage は土の上 (暗茶)、Apartment は舗装地 (灰)、Highrise はガラス張り (青)。
-fn house_bg(tier: logic::HouseTier) -> Color {
-    match tier {
-        logic::HouseTier::Cottage => Color::Rgb(40, 25, 15),
-        logic::HouseTier::Apartment => Color::Rgb(40, 40, 40),
-        logic::HouseTier::Highrise => Color::Rgb(20, 30, 60),
+/// Park の背景 RGB (昼/夜で変化)。Forest より少し明るく開けた緑にして
+/// 「人の手が入った緑地」感を出す。
+fn park_bg_rgb(tick: u64) -> (u8, u8, u8) {
+    let base = (25, 70, 35); // 明るい草地
+    let dim = logic::day_phase(tick).dim_factor();
+    logic::dim_rgb(base.0, base.1, base.2, dim)
+}
+
+/// 1-wide Park: 1 文字で「花/蝶/蛍」のいずれかを tick で循環。
+fn park_glyph_1wide(tick: u64) -> (char, Color) {
+    let phase = (tick / 5) as usize % 4;
+    if matches!(logic::day_phase(tick), logic::DayPhase::Night) {
+        // 夜は蛍を点滅。
+        let (ch, fg) = [('*', Color::LightYellow), ('·', Color::Yellow)][phase % 2];
+        (ch, fg)
+    } else {
+        // 昼は蝶/花を循環。
+        let table: [(char, Color); 4] = [
+            ('❀', Color::LightMagenta),
+            ('*', Color::White),
+            ('❀', Color::LightYellow),
+            ('·', Color::LightGreen),
+        ];
+        table[phase]
     }
+}
+
+/// 2-wide Park: 左 = 固定の花 (`❀`)、右 = 蝶/蛍がアニメ。
+fn park_glyph_2wide(tick: u64, x: usize, y: usize) -> (char, char, Color) {
+    let phase = ((tick / 4) as usize + x + y * 2) % 4;
+    if matches!(logic::day_phase(tick), logic::DayPhase::Night) {
+        // 夜: 蛍が黄色で揺れる。左側もたまに点く (位相違い)。
+        let firefly_right = ['*', '·', '˙', '·'][phase];
+        let firefly_left = if (phase + 2).is_multiple_of(4) { '*' } else { ' ' };
+        (firefly_left, firefly_right, Color::LightYellow)
+    } else {
+        // 昼: 左に花 ❀、右に蝶/葉が舞う。
+        let butterfly = ['*', '·', '✿', '·'][phase];
+        let fg = match phase {
+            0 => Color::White,
+            2 => Color::LightMagenta,
+            _ => Color::LightGreen,
+        };
+        ('❀', butterfly, fg)
+    }
+}
+
+/// House の元 RGB (昼間)。Tier ごとに「街区が育つ」色相。
+/// Cottage は土の上 (暗茶)、Apartment は舗装地 (灰)、Highrise はガラス張り (青)。
+fn house_bg_rgb(tier: logic::HouseTier) -> (u8, u8, u8) {
+    match tier {
+        logic::HouseTier::Cottage => (40, 25, 15),
+        logic::HouseTier::Apartment => (40, 40, 40),
+        logic::HouseTier::Highrise => (20, 30, 60),
+    }
+}
+
+/// DayPhase 込みの House bg。夜間は土が黒く沈み、ガラス張りの Highrise も
+/// 周囲の闇に溶ける (= 窓の灯りが浮かび上がる対比演出)。
+fn house_bg(tier: logic::HouseTier, tick: u64) -> Color {
+    let (r, g, b) = house_bg_rgb(tier);
+    let dim = logic::day_phase(tick).dim_factor();
+    let (r, g, b) = logic::dim_rgb(r, g, b, dim);
+    Color::Rgb(r, g, b)
 }
 
 // ── Road auto-connect (Phase B) ─────────────────────────────
@@ -754,6 +926,71 @@ fn road_1wide_glyph(mask: u8) -> char {
     }
 }
 
+/// 直線道路を「2 文字 × 明暗位相」で交通フローを演出する。
+///
+/// 戻り値は `(left_glyph, right_glyph, left_bright, right_bright)`。
+///   - 水平 (`══`): 左右 2 文字のうちどちらが明るいかを tick で振る。
+///     横位置 `x` を位相シードに使うと、車が左→右へ流れる錯覚が出る。
+///   - 垂直 (`║`): 1 セル幅で左右のないグリフ (左 ` ` / 右 `║`)。
+///     右側の明るさだけ y で位相を回す → 縦に光が下へ流れる。
+///   - その他 (曲がり角・交差点・孤立): 位相なし固定。
+fn road_traffic_glyph(mask: u8, x: usize, y: usize, tick: u64) -> RoadTraffic {
+    let horizontal = mask == ROAD_E | ROAD_W || mask == ROAD_E || mask == ROAD_W;
+    let vertical = mask == ROAD_N | ROAD_S || mask == ROAD_N || mask == ROAD_S;
+    if horizontal {
+        // 周期 4 で「光の塊」が x 軸を流れる: 4 ステップで 1 セル進む。
+        let phase = ((tick / 2) as usize + x * 2) % 4;
+        // 0..2 で左明るい、2..4 で右明るい (左→右の流れ)。
+        let left_bright = phase < 2;
+        RoadTraffic {
+            left_bright,
+            right_bright: !left_bright,
+        }
+    } else if vertical {
+        // 縦方向: y 軸で位相、tick で進行方向 (上→下)。
+        let phase = ((tick / 2) as usize + y * 2) % 4;
+        let bright = phase < 2;
+        RoadTraffic {
+            left_bright: bright,
+            right_bright: bright,
+        }
+    } else {
+        // 曲がり角・交差点・孤立: チラつきを抑えるため固定明るさ。
+        RoadTraffic {
+            left_bright: false,
+            right_bright: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RoadTraffic {
+    left_bright: bool,
+    right_bright: bool,
+}
+
+/// 2-wide 道路を 2 つの Span に分割し、交通フローの明暗を per-character で適用。
+fn road_spans_2wide(mask: u8, traffic: RoadTraffic, _tick: u64) -> Vec<Span<'static>> {
+    let glyph = road_2wide_glyph(mask);
+    let mut chars = glyph.chars();
+    let left = chars.next().unwrap_or(' ');
+    let right = chars.next().unwrap_or(' ');
+    let bg = Color::Rgb(40, 40, 40);
+    let make_style = |bright: bool| {
+        let m = if bright {
+            Modifier::BOLD
+        } else {
+            Modifier::DIM
+        };
+        let fg = if bright { Color::White } else { Color::Gray };
+        Style::default().fg(fg).bg(bg).add_modifier(m)
+    };
+    vec![
+        Span::styled(left.to_string(), make_style(traffic.left_bright)),
+        Span::styled(right.to_string(), make_style(traffic.right_bright)),
+    ]
+}
+
 /// 2-wide 用 (2 文字)。視覚的に「車線の幅」を持たせるため水平方向は 2 倍ストローク。
 fn road_2wide_glyph(mask: u8) -> &'static str {
     match mask {
@@ -804,17 +1041,18 @@ fn house_glyph_2wide(tier: logic::HouseTier, level: logic::HouseLevel) -> &'stat
 /// Apartment / Highrise の窓が灯ったように LightYellow に切り替わる。
 /// バナーの太陽 ◉/月 ◯ の往復 (周期 GRID_W * 60 ticks) と緩く同期。
 fn house_style_2wide(tier: logic::HouseTier, tick: u64) -> (Color, Modifier) {
-    use logic::HouseTier;
-    // 夜サイクル: 30 ticks (3 秒) 毎に切り替わる単純な交互パターン。
-    // 完全な太陽位置同期は make_sky_line と異なり面倒なので、ゆるい近似。
-    let is_night = (tick / 30).is_multiple_of(2);
+    use logic::{DayPhase, HouseTier};
+    // 夜判定はバナーの太陽/月と同期させるため `day_phase` を使う。
+    // Dusk は「灯りが付き始めた」状態として Night と同じ扱い (じわっと点灯)。
+    let phase = logic::day_phase(tick);
+    let is_lit = matches!(phase, DayPhase::Dusk | DayPhase::Night);
     let bright = !(tick / 10).is_multiple_of(4);
     let modifier = if bright {
         Modifier::BOLD
     } else {
         Modifier::empty()
     };
-    let color = match (tier, is_night) {
+    let color = match (tier, is_lit) {
         (HouseTier::Cottage, _) => Color::Green,
         (HouseTier::Apartment, false) => Color::LightGreen,
         (HouseTier::Apartment, true) => Color::LightYellow, // 夜の窓灯り
@@ -830,6 +1068,8 @@ fn construction_color(b: Building) -> Color {
         Building::House => Color::LightGreen,
         Building::Workshop => Color::LightRed,
         Building::Shop => Color::LightCyan,
+        Building::Park => Color::LightGreen,
+        Building::Outpost => Color::LightYellow,
     }
 }
 
@@ -839,6 +1079,8 @@ fn built_color(b: Building) -> Color {
         Building::House => Color::Green,
         Building::Workshop => Color::LightRed,
         Building::Shop => Color::Yellow,
+        Building::Park => Color::LightGreen,
+        Building::Outpost => Color::LightYellow,
     }
 }
 
@@ -848,6 +1090,8 @@ fn built_2wide_glyph(b: Building) -> &'static str {
         Building::House => "▟▙",
         Building::Workshop => "˚⊞",
         Building::Shop => "$$",
+        Building::Park => "❀✿",
+        Building::Outpost => "◐⚒",
     }
 }
 
@@ -860,21 +1104,35 @@ fn built_2wide_glyph(b: Building) -> &'static str {
 ///
 /// 全タイルに `bg(Color)` を入れることで、ASCII グリフの集合が
 /// 「色塗りされた地図」に化ける。前景色とコントラストが取れる組み合わせを選ぶ。
-fn terrain_bg(t: Terrain) -> Color {
+/// 地形の元 RGB (昼間)。`terrain_bg` は dim 適用後を返すラッパ。
+fn terrain_bg_rgb(t: Terrain) -> (u8, u8, u8) {
     match t {
-        // 平地: 暗い緑 (草原)。pure black では味気ないので少し緑寄せ。
-        Terrain::Plain => Color::Black,
+        // 平地: 暗い緑 (草原)。pure black では味気ないので Rgb 化して
+        // 夜間に dim 可能にする。
+        Terrain::Plain => (18, 28, 14),
         // 森: 濃い緑のキャンバス + 明るい緑のグリフ。
-        Terrain::Forest => Color::Rgb(15, 50, 25),
+        Terrain::Forest => (15, 50, 25),
         // 湖: 深い青の水面 + シアンの波。
-        Terrain::Water => Color::Rgb(15, 35, 80),
+        Terrain::Water => (15, 35, 80),
         // 荒地: 茶色の砂地 + 暗い黄の点。
-        Terrain::Wasteland => Color::Rgb(70, 50, 25),
+        Terrain::Wasteland => (70, 50, 25),
+        // 岩盤: 暗い灰色 (花崗岩感)。Wasteland とは違う「硬い」色味で
+        // パッと見で「ここは特殊地形」と分かるようにする。
+        Terrain::Rock => (60, 55, 50),
     }
 }
 
+/// DayPhase を反映した terrain bg。すべての地形描画で使う。
+/// 夜間に bg が暗くなる (Plain は暗緑→ほぼ黒、Water は深い藍に変化)。
+fn terrain_bg_at(t: Terrain, tick: u64) -> Color {
+    let (r, g, b) = terrain_bg_rgb(t);
+    let dim = logic::day_phase(tick).dim_factor();
+    let (r, g, b) = logic::dim_rgb(r, g, b, dim);
+    Color::Rgb(r, g, b)
+}
+
 fn terrain_span_1(t: Terrain, x: usize, y: usize, tick: u64) -> Span<'static> {
-    let bg = terrain_bg(t);
+    let bg = terrain_bg_at(t, tick);
     match t {
         Terrain::Plain => {
             let phase = (x + y).is_multiple_of(2);
@@ -911,11 +1169,28 @@ fn terrain_span_1(t: Terrain, x: usize, y: usize, tick: u64) -> Span<'static> {
                 .bg(bg)
                 .add_modifier(Modifier::DIM),
         ),
+        Terrain::Rock => {
+            // 岩盤: 1-wide では座標で固定の凹凸記号を出して「ゴツゴツ」感を表現。
+            // 動かさない (チラつき防止)。
+            let g = match (x + y * 3) % 4 {
+                0 => '▲',
+                1 => '◆',
+                2 => '▼',
+                _ => '■',
+            };
+            Span::styled(
+                g.to_string(),
+                Style::default()
+                    .fg(Color::Gray)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            )
+        }
     }
 }
 
 fn terrain_spans_2(t: Terrain, x: usize, y: usize, tick: u64) -> Vec<Span<'static>> {
-    let bg = terrain_bg(t);
+    let bg = terrain_bg_at(t, tick);
     match t {
         Terrain::Plain => {
             let phase = (x + y).is_multiple_of(2);
@@ -952,6 +1227,23 @@ fn terrain_spans_2(t: Terrain, x: usize, y: usize, tick: u64) -> Vec<Span<'stati
                 .bg(bg)
                 .add_modifier(Modifier::DIM),
         )],
+        Terrain::Rock => {
+            // 岩盤 2-wide: 凹凸感のあるグリフ 2 文字。座標で固定 (動かさない)。
+            // 「壁」感を強くするため Modifier::BOLD でくっきり描画。
+            let pattern = match (x + y * 3) % 4 {
+                0 => "▲◆",
+                1 => "◆▲",
+                2 => "▼■",
+                _ => "■▼",
+            };
+            vec![Span::styled(
+                pattern.to_string(),
+                Style::default()
+                    .fg(Color::Gray)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            )]
+        }
     }
 }
 
@@ -1040,7 +1332,7 @@ fn tab_style(active: bool) -> Style {
 // 「シード入力 → リジェネ」も加えやすいようここに集約。
 
 fn render_world(state: &City, f: &mut Frame, area: Rect) {
-    let mut counts = [0u32; 4];
+    let mut counts = [0u32; 5];
     for row in &state.terrain {
         for t in row {
             match t {
@@ -1048,6 +1340,7 @@ fn render_world(state: &City, f: &mut Frame, area: Rect) {
                 Terrain::Forest => counts[1] += 1,
                 Terrain::Water => counts[2] += 1,
                 Terrain::Wasteland => counts[3] += 1,
+                Terrain::Rock => counts[4] += 1,
             }
         }
     }
@@ -1081,9 +1374,13 @@ fn render_world(state: &City, f: &mut Frame, area: Rect) {
             Span::styled("Waste  :  ", Style::default().fg(Color::Yellow)),
             Span::styled(format!("{:>3}%", pct(counts[3])), Style::default().fg(Color::White)),
         ]),
+        Line::from(vec![
+            Span::styled("Rock   ▲  ", Style::default().fg(Color::Gray)),
+            Span::styled(format!("{:>3}%", pct(counts[4])), Style::default().fg(Color::White)),
+        ]),
         Line::from(""),
         Line::from(Span::styled(
-            "湖は建設不可。森/荒地は建てられる。",
+            "湖は建設不可。岩盤は機材で開拓。",
             Style::default().fg(Color::DarkGray),
         )),
     ];
@@ -1330,6 +1627,9 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
             Constraint::Length(1), // 選択中タグライン
             Constraint::Length(1), // 雇用
             Constraint::Length(1), // AI 進化
+            Constraint::Length(1), // 開拓機材派遣 (Phase A)
+            Constraint::Length(1), // 撤去モード (Phase A 続)
+            Constraint::Length(1), // AI 撤去判断 (Phase A 続々)
             Constraint::Min(0),
         ])
         .split(inner_area);
@@ -1428,6 +1728,60 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
         ));
         f.render_widget(p, rows[6]);
     }
+
+    // 開拓機材派遣 — 市域拡張の戦略行動。色は機材を「黄色重機」イメージで。
+    let outpost_cost = Building::Outpost.cost();
+    let outpost_color = if state.cash >= outpost_cost {
+        Color::LightYellow
+    } else {
+        Color::DarkGray
+    };
+    let outpost_label = format!("[O] ⚒ 開拓機材派遣 (${})", outpost_cost);
+    let p = Paragraph::new(Span::styled(
+        outpost_label,
+        Style::default().fg(outpost_color),
+    ));
+    Clickable::new(p, ACT_DISPATCH_OUTPOST).render(f, rows[7], &mut cs);
+
+    // 撤去モード — トグル。ON 中は REVERSED で「アクティブ」感を出す。
+    // ラベルに ON/OFF を出して状態が一目で分かる。
+    let demolish_style = if state.demolish_mode {
+        Style::default()
+            .fg(Color::LightRed)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default().fg(Color::LightRed)
+    };
+    let demolish_label = if state.demolish_mode {
+        "[D] 🗑 撤去モード ON  (cell click で撤去)"
+    } else {
+        "[D] 🗑 撤去モード OFF (外側ほど高コスト)"
+    };
+    let p = Paragraph::new(Span::styled(demolish_label, demolish_style));
+    Clickable::new(p, ACT_TOGGLE_DEMOLISH).render(f, rows[8], &mut cs);
+
+    // AI 撤去判断 — CPU が最も無駄な建物を 1 件選んで撤去。
+    // 候補がある時はラベルに「(✓)」、無い時は「(なし)」を出して
+    // 押下前に「これ押すと何かが起きるか」が予想できるようにする。
+    let ai_target = logic::auto_demolish_target(state);
+    let (ai_label, ai_color) = match ai_target {
+        Some((tx, ty, _)) => {
+            let cost = logic::demolish_cost(tx, ty);
+            let affordable = state.cash >= cost;
+            let color = if affordable {
+                Color::LightMagenta
+            } else {
+                Color::DarkGray
+            };
+            (
+                format!("[X] 🤖 AI 撤去判断 ({},{}) -${}", tx, ty, cost),
+                color,
+            )
+        }
+        None => ("[X] 🤖 AI 撤去判断 (候補なし)".to_string(), Color::DarkGray),
+    };
+    let p = Paragraph::new(Span::styled(ai_label, Style::default().fg(ai_color)));
+    Clickable::new(p, ACT_AUTO_DEMOLISH).render(f, rows[9], &mut cs);
 }
 
 fn button_row(

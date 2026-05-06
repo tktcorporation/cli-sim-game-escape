@@ -37,6 +37,11 @@ pub enum Tile {
 /// Shop (販売)。Workshop は House と Shop の中間層として機能し、隣接
 /// House の住民を雇って稼ぐ。Workshop が近くにあると House は Apartment に
 /// 育つ (`logic::house_tier_for` の判定で `n_workshop_within_5` が寄与)。
+///
+/// `Park` は経済チェーンと並行する「文化レイヤー」: 直接の収入は無く、
+/// 周囲の House を Apartment / Highrise に育てる触媒として機能する
+/// (`logic::house_tier_for` で `n_park_within_4` が寄与)。緑地保護派の
+/// Eco 戦略 + 高級住宅街を狙う Tier 4 プレイで真価を発揮する。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Building {
     /// Connector: enables shops to be supplied.
@@ -49,19 +54,32 @@ pub enum Building {
     /// Generates cash, but only if it has at least one road neighbor AND
     /// at least one house within Manhattan distance 3 (a "customer base").
     Shop,
+    /// 公園。直接の収入は無いが、周囲 4 マス以内の House を Apartment 化
+    /// する経済刺激源として機能する (Workshop / Shop と同等の Tier 上昇寄与)。
+    /// 道路接続不要 — 緑地として独立配置可能。
+    Park,
+    /// **開拓機材** — 隣接する Rock セルの整地を可能にする特殊建物。
+    /// プレイヤーが手動で配置する想定 (AI は手を出さない)。
+    /// 高価 ($600)、長時間建設 (300 ticks = 30 sec)。
+    /// 一度設置すると周囲 4-近傍の Rock を順次破砕できるようになる。
+    /// 撤去コストは「中央からの距離 × 100」(外側ほど高い)。
+    Outpost,
 }
 
 impl Building {
     /// One-time build cost in cash.
     ///
     /// バランス: Workshop は Shop より安く ($100 vs $150) 早期に開ける。
-    /// Workshop ⇒ Shop の順番で街区が育つ自然な流れになる。
+    /// Park は安め ($80) で「街並み演出」として気軽に置けるが、
+    /// 直接収入が無い分、純粋投資としては効率が悪い (= Highrise 化の触媒専用)。
     pub fn cost(self) -> i64 {
         match self {
             Building::Road => 10,
             Building::House => 40,
+            Building::Park => 80,
             Building::Workshop => 100,
             Building::Shop => 150,
+            Building::Outpost => 600,
         }
     }
 
@@ -70,8 +88,10 @@ impl Building {
         match self {
             Building::Road => 30,        // 3 sec
             Building::House => 100,      // 10 sec
+            Building::Park => 80,        // 8 sec — 短め (整地+植栽だけ)
             Building::Workshop => 150,   // 15 sec — Shop より少し短い
             Building::Shop => 200,       // 20 sec
+            Building::Outpost => 600,    // 60 sec — 重機の搬入・組立・試運転
         }
     }
 
@@ -249,6 +269,11 @@ pub struct City {
     /// ティア進化フラッシュが消える tick。`tick < value` の間バナーを光らせる。
     pub tier_flash_until: u64,
 
+    /// 撤去モード。ON にするとグリッドの全 Built セルがクリック可能になり、
+    /// クリックで建物を撤去 (cost = 50 + d² * 5)。
+    /// transient な UI 状態なので save には含めない (= ロード後は OFF)。
+    pub demolish_mode: bool,
+
     /// Build queue: how many parallel constructions the AI can run.
     /// (Each Construction tile already counts toward this limit.)
     pub workers: u32,
@@ -313,6 +338,7 @@ impl City {
             panel_tab: PanelTab::Manager,
             last_observed_tier: CityTier::Village,
             tier_flash_until: 0,
+            demolish_mode: false,
             workers: 1,
             rng_state: seed,
             buildings_started: 0,

@@ -74,11 +74,13 @@ fn tier1_random(city: &mut City) -> AiAction {
 
     // Try up to 30 random cells; if none are empty + buildable, idle.
     // Tier 1 はあえて愚直: 水セルに当たっても "haha 投げる" 回数で済ませる。
+    // ただし Rock は機材必須なので、隣接 Outpost が無い Rock は除外する。
+    // Tier 1 でも「機材ゲートは absolute rule」として尊重 — 戦略の話ではない。
     for _ in 0..30 {
         let r = city.next_rand();
         let x = (r as usize) % GRID_W;
         let y = ((r >> 32) as usize) % GRID_H;
-        if matches!(city.tile(x, y), Tile::Empty) && city.terrain_at(x, y).buildable() {
+        if super::logic::ai_can_break_ground(city, x, y) {
             return AiAction::Build { x, y, kind };
         }
     }
@@ -115,14 +117,11 @@ fn tier2_greedy(city: &mut City) -> AiAction {
     }
 
     // Collect candidate empties adjacent to a built/under-construction tile.
-    // 地形が建設不可 (Water) のセルは候補外。
+    // 地形が建設不可 (Water) や機材未到達の Rock は候補外。
     let mut candidates: Vec<(usize, usize)> = Vec::new();
     for y in 0..GRID_H {
         for x in 0..GRID_W {
-            if !matches!(city.tile(x, y), Tile::Empty) {
-                continue;
-            }
-            if !city.terrain_at(x, y).buildable() {
+            if !super::logic::ai_can_break_ground(city, x, y) {
                 continue;
             }
             if has_built_neighbor(city, x, y) {
@@ -159,10 +158,7 @@ fn has_built_neighbor(city: &City, x: usize, y: usize) -> bool {
 /// True if the cell at (x, y) is an Empty tile next to a finished or
 /// under-construction Road.
 fn is_empty_next_to_road(city: &City, x: usize, y: usize) -> bool {
-    if !matches!(city.tile(x, y), Tile::Empty) {
-        return false;
-    }
-    if !city.terrain_at(x, y).buildable() {
+    if !super::logic::ai_can_break_ground(city, x, y) {
         return false;
     }
     for (dx, dy) in DIRS4 {
@@ -186,10 +182,7 @@ fn is_empty_next_to_road(city: &City, x: usize, y: usize) -> bool {
 /// True if (x, y) is an Empty cell adjacent to a House or Shop, useful
 /// for "extend the road grid here so future buildings can connect".
 fn is_empty_next_to_building(city: &City, x: usize, y: usize) -> bool {
-    if !matches!(city.tile(x, y), Tile::Empty) {
-        return false;
-    }
-    if !city.terrain_at(x, y).buildable() {
+    if !super::logic::ai_can_break_ground(city, x, y) {
         return false;
     }
     for (dx, dy) in DIRS4 {
@@ -259,8 +252,16 @@ fn tier3_road_planner(city: &mut City) -> AiAction {
     }
 
     let candidates: Vec<(usize, usize)> = match kind {
-        // Buildings prefer to live next to roads.
-        Building::House | Building::Shop | Building::Workshop => (0..GRID_H)
+        // Buildings prefer to live next to roads. Park は道路接続不要だが
+        // Tier 3 が Park を選ぶことは無い (kind picker が House/Road/Shop のみ
+        // — debug_assert で守る) — ただし match は網羅性が必要なので、
+        // ここに来た場合は House と同じ扱いで safe fallback。
+        // Outpost も AI は建てないが網羅性のため。
+        Building::House
+        | Building::Shop
+        | Building::Workshop
+        | Building::Park
+        | Building::Outpost => (0..GRID_H)
             .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
             .filter(|(x, y)| is_empty_next_to_road(city, *x, *y))
             .collect(),
@@ -300,7 +301,7 @@ fn tier4_demand_aware(city: &mut City) -> AiAction {
     let info = super::logic::strategy_info(city.strategy);
     // 重みの合計は 100 を厳守 (テストで保証)。
     debug_assert_eq!(
-        info.house_pct + info.road_pct + info.workshop_pct + info.shop_pct,
+        info.house_pct + info.road_pct + info.workshop_pct + info.shop_pct + info.park_pct,
         100,
         "strategy weights must sum to 100"
     );
@@ -309,14 +310,17 @@ fn tier4_demand_aware(city: &mut City) -> AiAction {
     let h = info.house_pct;
     let hr = h + info.road_pct;
     let hrw = hr + info.workshop_pct;
+    let hrws = hrw + info.shop_pct;
     let kind = if roll < h {
         Building::House
     } else if roll < hr {
         Building::Road
     } else if roll < hrw {
         Building::Workshop
-    } else {
+    } else if roll < hrws {
         Building::Shop
+    } else {
+        Building::Park
     };
 
     if city.cash < kind.cost() {
@@ -378,6 +382,14 @@ fn tier4_demand_aware(city: &mut City) -> AiAction {
                 is_empty_next_to_building(city, *x, *y) && forest_ok(city, *x, *y)
             })
             .collect(),
+        // Park: 道路不要 / Manhattan 4 以内に House がある場所が「効く」配置。
+        // 整地不要セルに限る (Workshop と同じく即時効果を狙う smart AI らしさ)。
+        Building::Park => (0..GRID_H)
+            .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
+            .filter(|(x, y)| would_park_be_useful_here(city, *x, *y) && forest_ok(city, *x, *y))
+            .collect(),
+        // Outpost は AI 戦略には乗らない (player-only)。網羅性のため空候補。
+        Building::Outpost => Vec::new(),
     };
 
     if candidates.is_empty() {
@@ -422,6 +434,38 @@ fn would_workshop_activate_here(city: &City, wx: usize, wy: usize) -> bool {
         }
     }
     has_road && has_house
+}
+
+/// True iff placing a Park at (x, y) would actually help (= at least one
+/// House within Manhattan distance 4 to receive the Tier-bump effect).
+///
+/// Park は道路接続不要・収入無し。意味があるのは「住宅の Apartment / Highrise
+/// 化を後押しする触媒」としてのみ。なので「近くに House が居る」を必須条件に
+/// 置くのが Tier 4 の smart 配置。整地必要セルは避ける (Workshop と同じ)。
+fn would_park_be_useful_here(city: &City, px: usize, py: usize) -> bool {
+    if !matches!(city.tile(px, py), Tile::Empty) {
+        return false;
+    }
+    if !city.terrain_at(px, py).buildable() {
+        return false;
+    }
+    if city.terrain_at(px, py).needs_clearing() {
+        return false;
+    }
+    // House within Manhattan distance 4 — Park の効果範囲は §B 仕様で 4 にする。
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            if !matches!(city.tile(x, y), Tile::Built(Building::House)) {
+                continue;
+            }
+            let dx = x as i32 - px as i32;
+            let dy = y as i32 - py as i32;
+            if dx.abs() + dy.abs() <= 4 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// True iff placing a Shop at (x, y) right now would have it earning
