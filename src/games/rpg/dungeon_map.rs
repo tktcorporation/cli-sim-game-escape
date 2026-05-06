@@ -206,6 +206,7 @@ pub fn generate_map(floor: u32, rng_seed: &mut u64) -> DungeonMap {
         last_dir: Facing::North,
         rooms,
         monsters,
+        is_overworld: false,
     }
 }
 

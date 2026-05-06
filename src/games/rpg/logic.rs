@@ -6,11 +6,12 @@
 use super::dungeon_map::generate_map;
 use super::events::{generate_event, resolve_event, EventOutcome};
 use super::lore::{atmosphere_text, floor_entry_text, floor_theme};
+use super::overworld_map::generate_overworld;
 use super::state::{
     affix_info, enemy_info, item_info, level_stats, shop_items, skill_element, skill_info,
-    CellType, EnemyKind, Facing, InventoryItem, ItemCategory, ItemKind, Monster,
-    Overlay, Pet, PlayerBuffs, Quest, QuestKind, RpgState, Scene, SkillKind,
-    Tile, ALL_AFFIXES, ALL_SKILLS, MAX_FLOOR, MAX_LEVEL,
+    CellType, DungeonEvent, EnemyKind, EventAction, EventChoice, Facing, InventoryItem,
+    ItemCategory, ItemKind, Monster, Overlay, Pet, PlayerBuffs, Quest, QuestKind, RpgState,
+    Scene, SkillKind, Tile, ALL_AFFIXES, ALL_SKILLS, MAX_FLOOR, MAX_LEVEL,
 };
 
 // ── Tick (no-op: command-based game) ─────────────────────────
@@ -52,9 +53,7 @@ pub fn cursor_count(state: &RpgState) -> usize {
         }
         Some(Overlay::Status) => 0,
         None => match state.scene {
-            Scene::Town => town_choices(state).len(),
-            Scene::Intro(_) => 1,
-            Scene::DungeonExplore => state
+            Scene::Overworld | Scene::DungeonExplore => state
                 .active_event
                 .as_ref()
                 .map(|e| e.choices.len())
@@ -102,118 +101,207 @@ pub(super) fn rng_range(state: &mut RpgState, max: u32) -> u32 {
     ((state.rng_seed >> 33) % max as u64) as u32
 }
 
-// ── Intro ─────────────────────────────────────────────────────
+// ── Overworld (village) ─────────────────────────────────────
 
-pub fn advance_intro(state: &mut RpgState) {
-    let step = match state.scene {
-        Scene::Intro(s) => s,
-        _ => return,
+/// Load the village map and switch to the overworld scene. Used at game
+/// start, on dungeon retreat, and after death.
+pub fn enter_overworld(state: &mut RpgState) {
+    state.dungeon = Some(generate_overworld());
+    state.scene = Scene::Overworld;
+    state.active_event = None;
+    state.cursor = 0;
+    state.scene_text = vec!["辺境の村に立っている。".into()];
+}
+
+/// Build the event triggered by stepping on an overworld facility / NPC tile.
+/// Mirrors `events::generate_event` but takes &state because content depends
+/// on flags like `met_reception`.
+pub fn generate_overworld_event(state: &RpgState, cell_type: CellType) -> Option<DungeonEvent> {
+    match cell_type {
+        CellType::DungeonEntrance => Some(DungeonEvent {
+            description: vec![
+                "ダンジョンの入口だ。深い闇が広がっている。".into(),
+                "奥には魔王が潜んでいるという…".into(),
+            ],
+            choices: vec![
+                EventChoice { label: "降りる (B1F へ)".into(), action: EventAction::EnterDungeon },
+                EventChoice { label: "やめておく".into(), action: EventAction::Ignore },
+            ],
+        }),
+        CellType::ShopTile => Some(DungeonEvent {
+            description: vec![
+                "武器・道具屋。店主が並べた品を勧めてくる。".into(),
+            ],
+            choices: vec![
+                EventChoice { label: "品物を見る".into(), action: EventAction::OpenShop },
+                EventChoice { label: "何も買わずに出る".into(), action: EventAction::Ignore },
+            ],
+        }),
+        CellType::QuestBoardTile => Some(DungeonEvent {
+            description: vec![
+                "依頼掲示板。何枚もの依頼書が貼られている。".into(),
+            ],
+            choices: vec![
+                EventChoice { label: "依頼を見る".into(), action: EventAction::OpenQuestBoardOverlay },
+                EventChoice { label: "離れる".into(), action: EventAction::Ignore },
+            ],
+        }),
+        CellType::InnTile => {
+            let needs_rest = state.hp < state.effective_max_hp()
+                || state.mp < state.max_mp
+                || state.satiety < state.satiety_max;
+            let label = if needs_rest {
+                "泊まる (10G で全回復)"
+            } else {
+                "泊まる (回復は不要そうだ)"
+            };
+            Some(DungeonEvent {
+                description: vec![
+                    "宿屋。暖炉の火が穏やかに燃えている。".into(),
+                ],
+                choices: vec![
+                    EventChoice { label: label.into(), action: EventAction::RestAtInn },
+                    EventChoice { label: "出る".into(), action: EventAction::Ignore },
+                ],
+            })
+        }
+        CellType::ShrineTile => Some(DungeonEvent {
+            description: vec![
+                "村の祭壇。古びた石像が祀られている。".into(),
+            ],
+            choices: vec![
+                EventChoice { label: "祈る".into(), action: EventAction::OpenShrineOverlay },
+                EventChoice { label: "立ち去る".into(), action: EventAction::Ignore },
+            ],
+        }),
+        CellType::ReceptionNpc => {
+            let (desc, label) = if !state.met_reception {
+                (
+                    vec![
+                        "受付嬢「ようこそ、冒険者さん！」".into(),
+                        "「この先にあるダンジョンには魔物が棲んでいます。」".into(),
+                        "「奥深くには魔王が潜んでいるとか…」".into(),
+                        "「まずはこれを持って行ってください」".into(),
+                    ],
+                    "受け取る (薬草x3 / パンx2 / 50G)",
+                )
+            } else if state.game_cleared {
+                (
+                    vec!["受付嬢「魔王討伐おめでとうございます！」".into()],
+                    "雑談する",
+                )
+            } else if state.max_floor_reached == 0 {
+                (
+                    vec!["受付嬢「ダンジョンの様子はいかがですか？」".into()],
+                    "話を聞く",
+                )
+            } else {
+                (
+                    vec![format!(
+                        "受付嬢「最深到達 B{}F！さらに奥を目指しましょう！」",
+                        state.max_floor_reached
+                    )],
+                    "話を聞く",
+                )
+            };
+            Some(DungeonEvent {
+                description: desc,
+                choices: vec![
+                    EventChoice { label: label.into(), action: EventAction::TalkReception },
+                    EventChoice { label: "離れる".into(), action: EventAction::Ignore },
+                ],
+            })
+        }
+        CellType::BlacksmithNpc => {
+            let (desc, label) = if !state.met_blacksmith {
+                (
+                    vec![
+                        "武具屋の親父「初めて見る顔だな。」".into(),
+                        "「これくらいは持っていけ。安全第一だぞ」".into(),
+                    ],
+                    "受け取る (木の剣 / 旅人の服)",
+                )
+            } else {
+                (
+                    vec![
+                        "武具屋の親父「装備が必要なら声をかけてくれ。」".into(),
+                        "「店の方で売ってる。」".into(),
+                    ],
+                    "話を聞く",
+                )
+            };
+            Some(DungeonEvent {
+                description: desc,
+                choices: vec![
+                    EventChoice { label: label.into(), action: EventAction::TalkBlacksmith },
+                    EventChoice { label: "離れる".into(), action: EventAction::Ignore },
+                ],
+            })
+        }
+        CellType::VillagerNpc => Some(DungeonEvent {
+            description: vec![villager_flavor(state).into()],
+            choices: vec![
+                EventChoice { label: "うなずく".into(), action: EventAction::TalkVillager },
+                EventChoice { label: "離れる".into(), action: EventAction::Ignore },
+            ],
+        }),
+        _ => None,
+    }
+}
+
+fn villager_flavor(state: &RpgState) -> &'static str {
+    let bucket = state.turn_count.wrapping_add(state.rng_seed) % 6;
+    match bucket {
+        0 => "村人「最近、ダンジョンから戻らない冒険者が増えてる…気をつけてな」",
+        1 => "村人「お腹が空いたら宿屋でゆっくり休むといい」",
+        2 => "村人「掲示板の依頼を受けると、ちょっとした稼ぎになる」",
+        3 => "村人「祭壇に祈ると神様が応えてくれることがある」",
+        4 => "村人「武具屋の親父は腕がいい。装備はあそこで揃えな」",
+        _ => "村人「魔王なんてものが本当にいるのかね…」",
+    }
+}
+
+/// Apply the result of an overworld event action. Returns true on success.
+/// Overworld events are short-circuited here rather than going through
+/// `apply_event_outcome` because they do facility/menu transitions, not
+/// stat changes.
+pub fn resolve_overworld_event_choice(state: &mut RpgState, choice_index: usize) -> bool {
+    let event = match &state.active_event {
+        Some(e) => e.clone(),
+        None => return false,
     };
-
-    match step {
-        0 => {
-            state.scene_text = vec![
-                "冒険者ギルドの受付嬢が語りかける。".into(),
-                "".into(),
-                "「ようこそ、冒険者さん。".into(),
-                "  この先にあるダンジョンには魔物が棲んでいます。".into(),
-                "  奥深くには魔王が潜んでいるとか…」".into(),
-                "".into(),
-                "「まずはこれを持って行ってください」".into(),
-            ];
-            state.scene = Scene::Intro(1);
-        }
-        1 => {
-            // Give starting equipment (in inventory + equipped)
-            state.inventory.push(InventoryItem {
-                kind: ItemKind::WoodenSword, count: 1, affix: None,
-            });
-            state.weapon_idx = Some(state.inventory.len() - 1);
-            state.inventory.push(InventoryItem {
-                kind: ItemKind::TravelClothes, count: 1, affix: None,
-            });
-            state.armor_idx = Some(state.inventory.len() - 1);
-            state.gold += 50;
-            add_item(state, ItemKind::Herb, 3);
-            add_item(state, ItemKind::Bread, 2);
-            state.add_log("木の剣と旅人の服を受け取った！");
-            state.add_log("薬草x3 / パンx2 / 50G を受け取った！");
-            state.scene = Scene::Town;
-            update_town_text(state);
-        }
-        _ => {
-            state.scene = Scene::Town;
-            update_town_text(state);
-        }
-    }
-}
-
-// ── Town ──────────────────────────────────────────────────────
-
-pub fn update_town_text(state: &mut RpgState) {
-    let mut lines = vec!["＜冒険者ギルド＞".into(), "".into()];
-
-    if state.max_floor_reached == 0 {
-        lines.push("受付嬢「ダンジョンに挑戦してみましょう！」".into());
-    } else if state.game_cleared {
-        lines.push("受付嬢「おめでとうございます！もう一度挑戦も歓迎ですよ」".into());
-    } else {
-        lines.push(format!(
-            "受付嬢「最深到達: B{}F。さらに奥を目指しましょう！」",
-            state.max_floor_reached
-        ));
-    }
-    if let Some(q) = &state.active_quest {
-        lines.push("".into());
-        lines.push(format!("受託中: {}", q.description()));
-    }
-
-    state.scene_text = lines;
-}
-
-#[derive(Clone, Debug)]
-pub struct Choice {
-    pub label: String,
-}
-
-pub fn town_choices(state: &RpgState) -> Vec<Choice> {
-    let mut choices = vec![Choice { label: "ダンジョンに入る".into() }];
-    choices.push(Choice { label: "ショップ".into() });
-    choices.push(Choice { label: "依頼書 (掲示板)".into() });
-    choices.push(Choice { label: "祭壇で祈る".into() });
-    if state.hp < state.max_hp || state.mp < state.max_mp || state.satiety < state.satiety_max {
-        choices.push(Choice {
-            label: "宿で休む (HP/MP/満腹度回復, 10G)".into(),
-        });
-    }
-    choices
-}
-
-pub fn execute_town_choice(state: &mut RpgState, index: usize) -> bool {
-    let choices = town_choices(state);
-    if index >= choices.len() {
+    if choice_index >= event.choices.len() {
         return false;
     }
+    let action = event.choices[choice_index].action.clone();
 
-    match index {
-        0 => {
+    match action {
+        EventAction::Ignore | EventAction::Continue => {
+            state.active_event = None;
+            state.cursor = 0;
+            true
+        }
+        EventAction::EnterDungeon => {
+            state.active_event = None;
             enter_dungeon(state, 1);
             true
         }
-        1 => {
+        EventAction::OpenShop => {
+            state.active_event = None;
             state.open_overlay(Overlay::Shop);
             true
         }
-        2 => {
+        EventAction::OpenQuestBoardOverlay => {
+            state.active_event = None;
             state.open_overlay(Overlay::QuestBoard);
             true
         }
-        3 => {
+        EventAction::OpenShrineOverlay => {
+            state.active_event = None;
             state.open_overlay(Overlay::PrayMenu);
             true
         }
-        4 => {
-            // Inn (only if needed)
+        EventAction::RestAtInn => {
             if state.gold < 10 {
                 state.add_log("お金が足りない (宿代10G)");
                 return false;
@@ -225,7 +313,54 @@ pub fn execute_town_choice(state: &mut RpgState, index: usize) -> bool {
             state.buffs = PlayerBuffs::default();
             if let Some(p) = &mut state.pet { p.hp = p.max_hp; }
             state.add_log("宿でゆっくり休んだ。完全回復！");
-            update_town_text(state);
+            state.active_event = None;
+            state.cursor = 0;
+            true
+        }
+        EventAction::TalkReception => {
+            if !state.met_reception {
+                state.met_reception = true;
+                state.gold += 50;
+                add_item(state, ItemKind::Herb, 3);
+                add_item(state, ItemKind::Bread, 2);
+                state.add_log("薬草x3 / パンx2 / 50G を受け取った！");
+            }
+            state.active_event = None;
+            state.cursor = 0;
+            true
+        }
+        EventAction::TalkBlacksmith => {
+            if !state.met_blacksmith {
+                state.met_blacksmith = true;
+                // Codex P2 (#98): Overworld 化でダンジョンを先に経験してから
+                // 武具屋と初対面、というフローが起き得る。その時点で既に
+                // 拾った武器/防具を装備していたら、初期装備で上書きすると
+                // ダウングレードになるので、装備スロットが空のときだけ
+                // 自動装備する。アイテム自体は inventory に必ず追加するので
+                // 不要なら捨てる/置き換えることもできる。
+                state.inventory.push(InventoryItem {
+                    kind: ItemKind::WoodenSword, count: 1, affix: None,
+                });
+                let sword_idx = state.inventory.len() - 1;
+                if state.weapon_idx.is_none() {
+                    state.weapon_idx = Some(sword_idx);
+                }
+                state.inventory.push(InventoryItem {
+                    kind: ItemKind::TravelClothes, count: 1, affix: None,
+                });
+                let armor_idx = state.inventory.len() - 1;
+                if state.armor_idx.is_none() {
+                    state.armor_idx = Some(armor_idx);
+                }
+                state.add_log("木の剣と旅人の服を受け取った！");
+            }
+            state.active_event = None;
+            state.cursor = 0;
+            true
+        }
+        EventAction::TalkVillager => {
+            state.active_event = None;
+            state.cursor = 0;
             true
         }
         _ => false,
@@ -296,7 +431,6 @@ pub fn accept_quest(state: &mut RpgState, idx: usize) -> bool {
     state.add_log(&format!("依頼を受けた: {}", q.description()));
     state.active_quest = Some(q);
     state.close_overlay();
-    update_town_text(state);
     true
 }
 
@@ -304,7 +438,6 @@ pub fn abandon_quest(state: &mut RpgState) -> bool {
     if state.active_quest.is_none() { return false; }
     state.active_quest = None;
     state.add_log("依頼を破棄した");
-    update_town_text(state);
     true
 }
 
@@ -372,7 +505,6 @@ pub fn pray(state: &mut RpgState) -> bool {
         state.mp = (state.mp + state.max_mp / 4).min(state.max_mp);
         state.add_log("祈りが届いた。HP/MPが少し回復した");
     }
-    update_town_text(state);
     true
 }
 
@@ -402,7 +534,11 @@ pub fn enter_dungeon(state: &mut RpgState, floor: u32) {
     let py = map.player_y;
     map.grid[py][px].visited = true;
     map.grid[py][px].revealed = true;
-    map.grid[py][px].event_done = true;
+    // NOTE: do NOT set event_done = true here. The spawn cell is the
+    // floor's Entrance, and we want the entrance event ("町に帰還する"
+    // on B1F or "B(N-1)F へ戻る" on B2F+) to re-trigger when the player
+    // walks back. `after_move` isn't called on spawn placement so there's
+    // no immediate popup to suppress.
 
     reveal_room(&mut map, px, py);
 
@@ -553,6 +689,7 @@ fn after_move(state: &mut RpgState, nx: usize, ny: usize) {
     let was_visited;
     let cell_type;
     let event_done;
+    let is_overworld;
     {
         let map = state.dungeon.as_mut().unwrap();
         was_visited = map.grid[ny][nx].visited;
@@ -561,9 +698,10 @@ fn after_move(state: &mut RpgState, nx: usize, ny: usize) {
         reveal_room(map, nx, ny);
         cell_type = map.grid[ny][nx].cell_type;
         event_done = map.grid[ny][nx].event_done;
+        is_overworld = map.is_overworld;
     }
 
-    if !was_visited {
+    if !is_overworld && !was_visited {
         state.run_rooms_explored += 1;
     }
 
@@ -573,7 +711,12 @@ fn after_move(state: &mut RpgState, nx: usize, ny: usize) {
     let atmo = atmosphere_text(theme, rng_val);
     state.scene_text = vec![atmo.into()];
 
-    if cell_type != CellType::Corridor && !event_done {
+    if is_overworld {
+        if let Some(event) = generate_overworld_event(state, cell_type) {
+            state.active_event = Some(event);
+            state.cursor = 0;
+        }
+    } else if cell_type != CellType::Corridor && !event_done {
         if let Some(event) = generate_event(cell_type, floor, theme, &mut state.rng_seed) {
             // Stay in DungeonExplore — the event is rendered as a popup
             // overlay on the same scene (see issue #89).
@@ -588,6 +731,7 @@ fn after_move(state: &mut RpgState, nx: usize, ny: usize) {
 /// Wait in place for one turn — same monster/satiety tick as moving,
 /// but the player doesn't change cell. Used by the A button when there's
 /// no contextual action (no event under foot, no adjacent enemy).
+/// In overworld this is a no-op (no monsters to react, no satiety drain).
 pub fn wait_in_place(state: &mut RpgState) -> bool {
     if state.dungeon.is_none() || state.scene != Scene::DungeonExplore {
         return false;
@@ -604,7 +748,9 @@ pub fn move_direction(state: &mut RpgState, dir: Facing) -> bool {
     }
     let mut steps = 0;
     let max_steps = 8;
-    while steps < max_steps && state.scene == Scene::DungeonExplore {
+    while steps < max_steps
+        && matches!(state.scene, Scene::DungeonExplore | Scene::Overworld)
+    {
         let next_dir = match auto_walk_direction(state) {
             Some(d) => d,
             None => break,
@@ -622,6 +768,11 @@ pub fn move_direction(state: &mut RpgState, dir: Facing) -> bool {
 
 fn auto_walk_direction(state: &RpgState) -> Option<Facing> {
     let map = state.dungeon.as_ref()?;
+    // No auto-walk in the village — the player needs precise control to
+    // pick which facility tile to step on.
+    if map.is_overworld {
+        return None;
+    }
     let cell = map.player_cell();
 
     if cell.cell_type != CellType::Corridor && !cell.event_done { return None; }
@@ -785,9 +936,13 @@ fn drop_random_affix_equipment(state: &mut RpgState, killer: EnemyKind) {
 }
 
 /// Called after every player action. Triggers monster turn, satiety,
-/// buff tick, pet turn, and death checks.
+/// buff tick, pet turn, and death checks. Skipped entirely in the village.
 pub fn on_player_action(state: &mut RpgState) {
     if state.dungeon.is_none() || state.scene == Scene::GameClear {
+        return;
+    }
+    // Overworld has no monsters or hunger, so player actions don't tick time.
+    if state.dungeon.as_ref().map(|m| m.is_overworld).unwrap_or(false) {
         return;
     }
     state.turn_count = state.turn_count.wrapping_add(1);
@@ -1173,6 +1328,14 @@ pub fn tame_with_treat(state: &mut RpgState, treat_inv_idx: usize) -> bool {
 // ── Dungeon Events ───────────────────────────────────────────
 
 pub fn resolve_event_choice(state: &mut RpgState, choice_index: usize) -> bool {
+    // Overworld events use a separate, simpler dispatch (no stat outcomes,
+    // just facility/menu transitions).
+    if state.scene == Scene::Overworld
+        || state.dungeon.as_ref().map(|m| m.is_overworld).unwrap_or(false)
+    {
+        return resolve_overworld_event_choice(state, choice_index);
+    }
+
     let event = match &state.active_event {
         Some(e) => e.clone(),
         None => return false,
@@ -1203,8 +1366,15 @@ pub fn resolve_event_choice(state: &mut RpgState, choice_index: usize) -> bool {
         return false;
     }
 
-    if let Some(map) = &mut state.dungeon {
-        map.grid[map.player_y][map.player_x].event_done = true;
+    // Stairs / Entrance are persistent landmarks, not consumable events:
+    // the player must be able to come back later to descend or return to
+    // town. Marking them done would silently break the "もう一度登る" /
+    // "やっぱり帰る" flow because `after_move` skips events on done tiles.
+    let consumable = !matches!(cell_type, CellType::Stairs | CellType::Entrance);
+    if consumable {
+        if let Some(map) = &mut state.dungeon {
+            map.grid[map.player_y][map.player_x].event_done = true;
+        }
     }
     state.active_event = None;
 
@@ -1396,9 +1566,6 @@ pub fn retreat_to_town(state: &mut RpgState) {
     let bonus = return_bonus(floor, rooms);
     if bonus > 0 { state.gold += bonus; }
 
-    state.dungeon = None;
-    state.active_event = None;
-    state.scene = Scene::Town;
     state.faith = state.faith.saturating_add(1);
 
     if run_kills > 0 || run_gold > 0 {
@@ -1411,9 +1578,9 @@ pub fn retreat_to_town(state: &mut RpgState) {
             state.add_log(&format!("帰還！ 獲得: {}G / {}EXP / {}体撃破", run_gold, run_exp, run_kills));
         }
     } else {
-        state.add_log("町に戻った。");
+        state.add_log("村に戻った。");
     }
-    update_town_text(state);
+    enter_overworld(state);
 }
 
 pub fn return_bonus(floor: u32, rooms_explored: u32) -> u32 {
@@ -1429,11 +1596,8 @@ fn process_dungeon_death(state: &mut RpgState) {
     state.hp = state.max_hp / 2;
     state.mp = state.max_mp / 2;
     state.satiety = state.satiety_max / 2;
-    state.dungeon = None;
-    state.active_event = None;
-    state.scene = Scene::Town;
     state.add_log(&format!("力尽きた… {}G失った", lost_gold));
-    update_town_text(state);
+    enter_overworld(state);
 }
 
 // ── Skills (inline) ──────────────────────────────────────────
@@ -1643,12 +1807,18 @@ pub fn use_item(state: &mut RpgState, inv_index: usize) -> bool {
                 return tame_with_treat(state, inv_index);
             }
             ItemKind::ReturnScroll => {
-                if state.dungeon.is_none() {
+                // Only useful inside the dungeon — refuse in the village.
+                let in_dungeon = state
+                    .dungeon
+                    .as_ref()
+                    .map(|m| !m.is_overworld)
+                    .unwrap_or(false);
+                if !in_dungeon {
                     state.add_log("ここでは使えない");
                     return false;
                 }
                 consume_inventory_slot(state, inv_index);
-                state.add_log("帰還の巻物を破った！ 町へ戻る…");
+                state.add_log("帰還の巻物を破った！ 村へ戻る…");
                 retreat_to_town(state);
                 return true;
             }
@@ -1728,37 +1898,169 @@ mod tests {
     use super::super::state::{Affix, Monster};
 
     #[test]
-    fn intro_full_sequence() {
+    fn npc_first_meet_grants_starter_kit() {
         let mut s = RpgState::new();
-        advance_intro(&mut s);
-        advance_intro(&mut s);
+        // Receive both NPC starter packages.
+        s.active_event = generate_overworld_event(&s, CellType::ReceptionNpc);
+        assert!(resolve_event_choice(&mut s, 0));
+        s.active_event = generate_overworld_event(&s, CellType::BlacksmithNpc);
+        assert!(resolve_event_choice(&mut s, 0));
         assert!(s.weapon().is_some());
         assert!(s.armor().is_some());
         assert_eq!(s.gold, 50);
-        assert_eq!(s.scene, Scene::Town);
+        assert!(s.met_reception);
+        assert!(s.met_blacksmith);
+    }
+
+    /// Codex P2 (#98): もしプレイヤーがダンジョンを先に経験して
+    /// 既に強い装備を着けている状態で武具屋と初対面した場合、
+    /// 木の剣 / 旅人の服 で装備を上書きしてはいけない。
+    /// アイテムは inventory に追加されるが、装備スロットは維持される。
+    #[test]
+    fn blacksmith_first_meet_does_not_downgrade_existing_gear() {
+        let mut s = RpgState::new();
+        // Pre-equip something stronger (e.g. iron sword + leather armor).
+        s.inventory.push(InventoryItem {
+            kind: ItemKind::IronSword, count: 1, affix: None,
+        });
+        s.weapon_idx = Some(0);
+        s.inventory.push(InventoryItem {
+            kind: ItemKind::LeatherArmor, count: 1, affix: None,
+        });
+        s.armor_idx = Some(1);
+        let atk_before = s.total_atk();
+        let def_before = s.total_def();
+
+        s.active_event = generate_overworld_event(&s, CellType::BlacksmithNpc);
+        assert!(resolve_event_choice(&mut s, 0));
+
+        // Equipped slots must still point at the strong gear.
+        assert_eq!(s.weapon_idx, Some(0));
+        assert_eq!(s.armor_idx, Some(1));
+        assert_eq!(s.total_atk(), atk_before, "ATK must not regress");
+        assert_eq!(s.total_def(), def_before, "DEF must not regress");
+        // Starter items are still added to inventory (player can drop / equip later).
+        assert!(s.inventory.iter().any(|i| i.kind == ItemKind::WoodenSword));
+        assert!(s.inventory.iter().any(|i| i.kind == ItemKind::TravelClothes));
     }
 
     #[test]
-    fn return_scroll_warps_to_town_from_dungeon() {
+    fn return_scroll_warps_to_overworld_from_dungeon() {
         let mut s = RpgState::new();
         enter_dungeon(&mut s, 3);
         add_item(&mut s, ItemKind::ReturnScroll, 1);
         let idx = s.inventory.iter().position(|i| i.kind == ItemKind::ReturnScroll).unwrap();
         assert_eq!(s.scene, Scene::DungeonExplore);
         assert!(use_item(&mut s, idx));
-        assert_eq!(s.scene, Scene::Town);
+        assert_eq!(s.scene, Scene::Overworld);
         assert!(!s.inventory.iter().any(|i| i.kind == ItemKind::ReturnScroll));
     }
 
     #[test]
-    fn return_scroll_refuses_in_town() {
+    fn return_scroll_refuses_in_overworld() {
         let mut s = RpgState::new();
-        s.scene = Scene::Town;
+        // Already in Overworld at construction.
         add_item(&mut s, ItemKind::ReturnScroll, 1);
         let idx = s.inventory.iter().position(|i| i.kind == ItemKind::ReturnScroll).unwrap();
         assert!(!use_item(&mut s, idx));
-        // Scroll should not be consumed.
         assert!(s.inventory.iter().any(|i| i.kind == ItemKind::ReturnScroll));
+    }
+
+    /// 階段や入口は永続ランドマーク。"探索を続ける" を選んでも消費されず、
+    /// もう一度踏めば再度ダイアログが出る必要がある。
+    /// 旧実装では `event_done = true` がセットされて二度と発火しなくなり、
+    /// 帰宅も降下もできなくなっていた。
+    #[test]
+    fn stairs_re_trigger_after_continue() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        // Find a stairs cell on the generated map.
+        let map = s.dungeon.as_mut().unwrap();
+        let mut stairs = None;
+        for y in 0..map.height {
+            for x in 0..map.width {
+                if map.grid[y][x].cell_type == CellType::Stairs {
+                    stairs = Some((x, y));
+                    break;
+                }
+            }
+            if stairs.is_some() { break; }
+        }
+        let (sx, sy) = stairs.expect("map should have stairs");
+
+        // Find a walkable neighbor; `step_on` is the direction from that
+        // neighbor onto the stairs (so reverse() steps off).
+        let mut neighbor = None;
+        for dir in [Facing::North, Facing::East, Facing::South, Facing::West] {
+            let nx = sx as i32 - dir.dx();
+            let ny = sy as i32 - dir.dy();
+            if !map.in_bounds(nx, ny) { continue; }
+            if map.grid[ny as usize][nx as usize].is_walkable() {
+                neighbor = Some((nx as usize, ny as usize, dir));
+                break;
+            }
+        }
+        let (fx, fy, step_on) = neighbor.expect("stairs has a walkable neighbor");
+        map.player_x = fx;
+        map.player_y = fy;
+        map.monsters.clear();
+
+        // Step onto stairs → stairs event fires.
+        try_move(&mut s, step_on);
+        assert!(s.active_event.is_some(), "stairs should fire event on first step");
+        let n_choices = s.active_event.as_ref().unwrap().choices.len();
+        // Continue (last choice) — don't descend.
+        assert!(resolve_event_choice(&mut s, n_choices - 1));
+        assert!(s.active_event.is_none());
+        // Cell must NOT be marked done.
+        let map = s.dungeon.as_ref().unwrap();
+        assert!(!map.grid[sy][sx].event_done, "stairs must remain re-triggerable");
+
+        // Walk off and back — event must fire again.
+        try_move(&mut s, step_on.reverse());
+        // Stepping off may briefly land on another event tile; clear it so
+        // we can isolate the re-entry assertion.
+        s.active_event = None;
+        try_move(&mut s, step_on);
+        assert!(
+            s.active_event.is_some(),
+            "stairs event must re-trigger after walking back"
+        );
+    }
+
+    /// 入口セル (B1F の帰還口) も同様に永続ランドマーク。
+    /// スポーン直後はポップアップが出ないが、一度離れて戻れば再度発火する。
+    #[test]
+    fn entrance_re_triggers_after_walking_off_and_back() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        let (ex, ey) = (map.player_x, map.player_y);
+        assert_eq!(map.grid[ey][ex].cell_type, CellType::Entrance);
+        // Spawn cell must not pre-mark event_done — that's the bug we fixed.
+        assert!(!map.grid[ey][ex].event_done, "entrance must not be pre-consumed");
+        map.monsters.clear();
+
+        // Find an adjacent walkable cell.
+        let mut step_dir = None;
+        for dir in [Facing::North, Facing::East, Facing::South, Facing::West] {
+            let nx = ex as i32 + dir.dx();
+            let ny = ey as i32 + dir.dy();
+            if map.in_bounds(nx, ny) && map.grid[ny as usize][nx as usize].is_walkable() {
+                step_dir = Some(dir);
+                break;
+            }
+        }
+        let dir = step_dir.expect("entrance has a walkable neighbor");
+
+        // Step away, dismiss any incidental event, step back.
+        try_move(&mut s, dir);
+        s.active_event = None;
+        try_move(&mut s, dir.reverse());
+        assert!(
+            s.active_event.is_some(),
+            "entrance event must fire on return"
+        );
     }
 
     #[test]
@@ -1817,8 +2119,6 @@ mod tests {
     #[test]
     fn bump_attack_damages_monster() {
         let mut s = RpgState::new();
-        advance_intro(&mut s);
-        advance_intro(&mut s);
         enter_dungeon(&mut s, 1);
         // Place a slime adjacent to the player
         let map = s.dungeon.as_mut().unwrap();
@@ -1876,8 +2176,6 @@ mod tests {
     #[test]
     fn pray_consumes_for_run() {
         let mut s = RpgState::new();
-        advance_intro(&mut s);
-        advance_intro(&mut s);
         let _ = pray(&mut s);
         assert!(s.prayed_this_run);
         // Second pray should fail
@@ -1913,15 +2211,13 @@ mod tests {
     }
 
     #[test]
-    fn defeat_returns_to_town() {
+    fn defeat_returns_to_overworld() {
         let mut s = RpgState::new();
-        advance_intro(&mut s);
-        advance_intro(&mut s);
         s.gold = 100;
         enter_dungeon(&mut s, 1);
         s.hp = 0;
         process_dungeon_death(&mut s);
-        assert_eq!(s.scene, Scene::Town);
+        assert_eq!(s.scene, Scene::Overworld);
         assert_eq!(s.gold, 80);
     }
 

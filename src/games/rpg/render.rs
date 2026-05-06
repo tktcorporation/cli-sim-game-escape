@@ -18,7 +18,7 @@ use crate::widgets::{Clickable, ClickableGrid, ClickableList, TabBar};
 
 use super::actions::*;
 use super::dungeon_view;
-use super::logic::{available_quests, available_skills, return_bonus, town_choices};
+use super::logic::{available_quests, available_skills, return_bonus};
 use super::lore::{floor_theme, theme_name};
 use super::state::{
     affix_info, enemy_info, item_info, skill_element, skill_info, Element, Overlay, RpgState,
@@ -44,9 +44,7 @@ pub fn render(
     }
 
     match state.scene {
-        Scene::Intro(_) => render_intro(state, f, area, click_state),
-        Scene::Town => render_main(state, f, area, click_state),
-        Scene::DungeonExplore => render_main(state, f, area, click_state),
+        Scene::Overworld | Scene::DungeonExplore => render_main(state, f, area, click_state),
         Scene::GameClear => render_game_clear(state, f, area, click_state),
     }
 }
@@ -85,72 +83,6 @@ fn borders_for(area_width: u16) -> Borders {
     }
 }
 
-// ── Intro ──────────────────────────────────────────────────
-
-fn render_intro(
-    state: &RpgState,
-    f: &mut Frame,
-    area: Rect,
-    click_state: &Rc<RefCell<ClickState>>,
-) {
-    let borders = borders_for(area.width);
-    let step = match state.scene {
-        Scene::Intro(s) => s,
-        _ => 0,
-    };
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(6), Constraint::Length(8)])
-        .split(area);
-
-    let mut lines = Vec::new();
-    if step == 0 {
-        lines.push(Line::from(""));
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            " ……冒険者ギルドの扉を開けた。",
-            Style::default().fg(Color::White),
-        )));
-    } else {
-        for text in &state.scene_text {
-            if text.is_empty() {
-                lines.push(Line::from(""));
-            } else {
-                lines.push(Line::from(Span::styled(
-                    format!(" {}", text),
-                    Style::default().fg(Color::White),
-                )));
-            }
-        }
-    }
-
-    let title = " Dungeon Dive ";
-    let block = Block::default()
-        .borders(borders)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(Span::styled(title, Style::default().fg(Color::DarkGray)));
-    f.render_widget(
-        Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
-        chunks[0],
-    );
-
-    let mut cl = ClickableList::new();
-    cl.push(Line::from(""));
-    match step {
-        0 => push_choice(&mut cl, 0, "中に入る"),
-        1 => push_choice(&mut cl, 0, "受け取って出発する"),
-        _ => push_choice(&mut cl, 0, "続ける"),
-    }
-
-    let choice_block = Block::default()
-        .borders(borders)
-        .border_style(Style::default().fg(Color::DarkGray));
-
-    let mut cs = click_state.borrow_mut();
-    cl.render(f, chunks[1], choice_block, &mut cs, false, 0);
-}
-
 // ── Main Screen ─────────────────────────────────────────────
 
 fn render_main(
@@ -166,20 +98,12 @@ fn render_main(
     let in_dungeon = state.dungeon.is_some();
     let dbar_h: u16 = if in_dungeon { 1 } else { 0 };
 
-    let constraints = if in_dungeon {
-        vec![
-            Constraint::Length(3),
-            Constraint::Length(dbar_h),
-            Constraint::Min(6),
-            Constraint::Length(log_h),
-        ]
-    } else {
-        vec![
-            Constraint::Length(3),
-            Constraint::Min(6),
-            Constraint::Length(log_h),
-        ]
-    };
+    let constraints = vec![
+        Constraint::Length(3),
+        Constraint::Length(dbar_h),
+        Constraint::Min(6),
+        Constraint::Length(log_h),
+    ];
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -274,6 +198,30 @@ fn render_status_bar(
 fn render_floor_indicator(state: &RpgState, f: &mut Frame, area: Rect, borders: Borders) {
     if let Some(map) = &state.dungeon {
         let theme = floor_theme(map.floor_num);
+        let block = Block::default()
+            .borders(borders)
+            .border_style(Style::default().fg(Color::DarkGray));
+
+        if map.is_overworld {
+            // Village indicator: just label + facility legend hint.
+            let line = Line::from(vec![
+                Span::styled(
+                    " 〈村〉 ",
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("〈{}〉 ", theme_name(theme)),
+                    Style::default().fg(Color::Cyan),
+                ),
+                Span::styled(
+                    "R=受付 B=武具 v=村人 $=店 ⚑=掲示板 ⌂=宿 ✴=祭壇 ▼=ダンジョン",
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]);
+            f.render_widget(Paragraph::new(vec![line]).block(block), area);
+            return;
+        }
+
         let bonus = return_bonus(map.floor_num, state.run_rooms_explored);
         let bonus_span = if bonus > 0 {
             Span::styled(
@@ -312,9 +260,6 @@ fn render_floor_indicator(state: &RpgState, f: &mut Frame, area: Rect, borders: 
             bonus_span,
         ]);
 
-        let block = Block::default()
-            .borders(borders)
-            .border_style(Style::default().fg(Color::DarkGray));
         f.render_widget(Paragraph::new(vec![line]).block(block), area);
     }
 }
@@ -327,7 +272,7 @@ fn render_scene_content(
     click_state: &Rc<RefCell<ClickState>>,
 ) {
     match state.scene {
-        Scene::DungeonExplore => {
+        Scene::Overworld | Scene::DungeonExplore => {
             render_dungeon_explore(state, f, area, borders, click_state);
             // Inline event popup — drawn on top of the explore view so the
             // map stays visible while the player picks a choice. See issue
@@ -336,60 +281,8 @@ fn render_scene_content(
                 render_event_popup(state, f, area, click_state);
             }
         }
-        Scene::Town => render_town_content(state, f, area, borders, click_state),
         _ => {}
     }
-}
-
-fn render_town_content(
-    state: &RpgState,
-    f: &mut Frame,
-    area: Rect,
-    borders: Borders,
-    click_state: &Rc<RefCell<ClickState>>,
-) {
-    let mut cl = ClickableList::new();
-
-    for text in &state.scene_text {
-        if text.is_empty() {
-            cl.push(Line::from(""));
-        } else {
-            cl.push(Line::from(Span::styled(
-                format!(" {}", text),
-                Style::default().fg(Color::White),
-            )));
-        }
-    }
-
-    if state.max_floor_reached > 0 {
-        cl.push(Line::from(Span::styled(
-            format!(
-                " 最深到達: B{}F  クリア: {}回  信仰: {}",
-                state.max_floor_reached, state.total_clears, state.faith,
-            ),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-
-    cl.push(Line::from(""));
-    cl.push(Line::from(Span::styled(
-        " \u{2500}".repeat(15),
-        Style::default().fg(Color::DarkGray),
-    )));
-    cl.push(Line::from(""));
-
-    let choices = town_choices(state);
-    for (i, choice) in choices.iter().enumerate() {
-        push_choice_marked(&mut cl, i, &choice.label, i == state.cursor);
-    }
-
-    push_overlay_hints(&mut cl);
-
-    let block = Block::default()
-        .borders(borders)
-        .border_style(Style::default().fg(Color::DarkGray));
-    let mut cs = click_state.borrow_mut();
-    cl.render(f, area, block, &mut cs, true, 0);
 }
 
 // ── Dungeon Explore ──────────────────────────────────────────
@@ -841,53 +734,21 @@ fn render_log(state: &RpgState, f: &mut Frame, area: Rect, borders: Borders) {
 
 // ── Choice Helpers ──────────────────────────────────────────
 
+/// Game Clear screen reuses this for its single "メニューに戻る" button.
 fn push_choice(cl: &mut ClickableList, index: usize, label: &str) {
-    push_choice_marked(cl, index, label, false);
-}
-
-/// Like `push_choice`, but renders an arrow + bold yellow when `selected`,
-/// indicating the cursor is on this row. Used by every menu that responds
-/// to arrow + A button navigation.
-fn push_choice_marked(cl: &mut ClickableList, index: usize, label: &str, selected: bool) {
-    let (prefix, label_style) = if selected {
-        (
-            "▶",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        )
-    } else {
-        (" ", Style::default().fg(Color::White))
-    };
     cl.push_clickable(
         Line::from(vec![
             Span::styled(
-                format!(" {} ", prefix),
+                "   ",
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("{}. ", index + 1),
                 Style::default().fg(Color::Cyan),
             ),
-            Span::styled(label.to_string(), label_style),
+            Span::styled(label.to_string(), Style::default().fg(Color::White)),
         ]),
         CHOICE_BASE + index as u16,
-    );
-}
-
-fn push_overlay_hints(cl: &mut ClickableList) {
-    cl.push(Line::from(""));
-    cl.push_clickable(
-        Line::from(vec![
-            Span::styled(" 🎒 ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled("持ち物", Style::default().fg(Color::White)),
-        ]),
-        OPEN_INVENTORY,
-    );
-    cl.push_clickable(
-        Line::from(vec![
-            Span::styled(" 📊 ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::styled("ステータス", Style::default().fg(Color::White)),
-        ]),
-        OPEN_STATUS,
     );
 }
 

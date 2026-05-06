@@ -8,8 +8,10 @@
 use super::state::FloorTheme;
 
 /// Get the theme for a given floor number.
+/// floor 0 は村の地上マップ。
 pub fn floor_theme(floor: u32) -> FloorTheme {
     match floor {
+        0 => FloorTheme::Village,
         1..=2 => FloorTheme::MossyRuins,
         3..=4 => FloorTheme::Underground,
         5..=6 => FloorTheme::AncientTemple,
@@ -21,6 +23,7 @@ pub fn floor_theme(floor: u32) -> FloorTheme {
 /// Theme display name.
 pub fn theme_name(theme: FloorTheme) -> &'static str {
     match theme {
+        FloorTheme::Village => "辺境の村",
         FloorTheme::MossyRuins => "苔むした遺跡",
         FloorTheme::Underground => "地下水脈",
         FloorTheme::AncientTemple => "古代神殿",
@@ -32,6 +35,12 @@ pub fn theme_name(theme: FloorTheme) -> &'static str {
 /// Get atmospheric flavor text for the current movement.
 pub fn atmosphere_text(theme: FloorTheme, rng_val: u32) -> &'static str {
     match theme {
+        FloorTheme::Village => match rng_val % 4 {
+            0 => "村の広場には穏やかな空気が流れている。",
+            1 => "誰かが薪を割る音が遠くから聞こえる。",
+            2 => "焼き立てのパンの匂いがする。",
+            _ => "風が心地よい。鳥のさえずりが聞こえる。",
+        },
         FloorTheme::MossyRuins => match rng_val % 8 {
             0 => "苔むした壁が続いている。水滴が落ちる音がする。",
             1 => "古い松明の跡がある。かつて誰かが通った道だ。",
@@ -88,6 +97,7 @@ pub fn atmosphere_text(theme: FloorTheme, rng_val: u32) -> &'static str {
 /// Get dungeon entry flavor text.
 pub fn floor_entry_text(floor: u32, theme: FloorTheme) -> Vec<String> {
     let theme_desc = match theme {
+        FloorTheme::Village => "辺境の村。鍛冶屋・宿屋・掲示板・祭壇が並ぶ穏やかな広場。",
         FloorTheme::MossyRuins => "苔と湿気に覆われた古い遺跡。微かに光る苔が道を照らす。",
         FloorTheme::Underground => "水の流れる音が響く地下世界。暗い水面が足元に広がる。",
         FloorTheme::AncientTemple => "荘厳な古代神殿の遺構。崩れた柱の間から光が差し込む。",
@@ -131,6 +141,7 @@ mod tests {
 
     #[test]
     fn themes_assigned_correctly() {
+        assert_eq!(floor_theme(0), FloorTheme::Village);
         assert_eq!(floor_theme(1), FloorTheme::MossyRuins);
         assert_eq!(floor_theme(3), FloorTheme::Underground);
         assert_eq!(floor_theme(5), FloorTheme::AncientTemple);

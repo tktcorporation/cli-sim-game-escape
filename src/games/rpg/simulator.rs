@@ -127,8 +127,13 @@ impl Policy for AutoExplorerPolicy {
         }
 
         match state.scene {
-            Scene::Intro(_) => Action::EventChoice(0),
-            Scene::Town => self.choose_in_town(state),
+            Scene::Overworld => {
+                if state.active_event.is_some() {
+                    self.choose_event(state)
+                } else {
+                    self.choose_in_overworld(state)
+                }
+            }
             Scene::DungeonExplore => {
                 if state.active_event.is_some() {
                     self.choose_event(state)
@@ -201,7 +206,7 @@ impl AutoExplorerPolicy {
         }
     }
 
-    fn choose_in_town(&mut self, state: &RpgState) -> Action {
+    fn choose_in_overworld(&mut self, state: &RpgState) -> Action {
         // 新しい訪問のためにリセット
         self.turns_this_visit = 0;
         let max_hp = state.effective_max_hp();
@@ -550,9 +555,19 @@ impl Simulator {
     pub fn new(seed: u64, policy: Box<dyn Policy>) -> Self {
         let mut state = RpgState::new();
         state.rng_seed = seed;
-        // Skip intro
-        logic::advance_intro(&mut state);
-        logic::advance_intro(&mut state);
+        // Skip the village walk: directly invoke the reception + blacksmith
+        // first-meet events so the simulator starts with the same starter
+        // kit the player would get on the overworld.
+        state.active_event = logic::generate_overworld_event(
+            &state,
+            super::state::CellType::ReceptionNpc,
+        );
+        let _ = logic::resolve_event_choice(&mut state, 0);
+        state.active_event = logic::generate_overworld_event(
+            &state,
+            super::state::CellType::BlacksmithNpc,
+        );
+        let _ = logic::resolve_event_choice(&mut state, 0);
         Self { state, policy, metrics: SimMetrics::default() }
     }
 
@@ -600,19 +615,36 @@ impl Simulator {
                 return "clear";
             }
 
-            // Track starvation
-            if self.state.satiety == 0 && self.state.dungeon.is_some() && !hp_check_starvation_warned {
+            // Track starvation (dungeon-floor only — village has no satiety drain).
+            let in_dungeon_floor = self
+                .state
+                .dungeon
+                .as_ref()
+                .map(|m| !m.is_overworld)
+                .unwrap_or(false);
+            if self.state.satiety == 0 && in_dungeon_floor && !hp_check_starvation_warned {
                 hp_check_starvation_warned = true;
             }
 
             let action = self.policy.choose(&self.state);
-            let prev_dungeon = self.state.dungeon.is_some();
+            // Codex P1 (#98): `dungeon.is_some()` is now always true because
+            // the village also lives in a `DungeonMap`. To detect "run ended",
+            // we need "was on a dungeon floor before this action". Otherwise
+            // every overworld action (opening shop / quest board) would count
+            // as a retreat and bail out of the run before it even starts.
+            let prev_in_dungeon_floor = in_dungeon_floor;
             self.apply_action(action);
             run_actions += 1;
             self.metrics.total_actions += 1;
 
-            // Detect transition: was in dungeon, now in town
-            if prev_dungeon && self.state.dungeon.is_none() && self.state.scene == Scene::Town {
+            // Transition: was on a dungeon floor, now back in the village.
+            let now_overworld = self
+                .state
+                .dungeon
+                .as_ref()
+                .map(|m| m.is_overworld)
+                .unwrap_or(false);
+            if prev_in_dungeon_floor && now_overworld && self.state.scene == Scene::Overworld {
                 let last_log = self.state.log.last().cloned().unwrap_or_default();
                 if last_log.starts_with("力尽きた") {
                     self.metrics.deaths_in_dungeon += 1;
@@ -668,11 +700,7 @@ impl Simulator {
             }
             Action::UseSkill(idx) => { logic::use_skill(&mut self.state, idx); }
             Action::EventChoice(i) => {
-                if self.state.scene == Scene::Intro(0) || self.state.scene == Scene::Intro(1) {
-                    logic::advance_intro(&mut self.state);
-                } else {
-                    logic::resolve_event_choice(&mut self.state, i);
-                }
+                logic::resolve_event_choice(&mut self.state, i);
             }
             Action::OpenInventory => self.state.overlay = Some(Overlay::Inventory),
             Action::OpenSkill => self.state.overlay = Some(Overlay::SkillMenu),
@@ -682,7 +710,18 @@ impl Simulator {
             Action::AcceptQuest(i) => { logic::accept_quest(&mut self.state, i); }
             Action::Pray => { logic::pray(&mut self.state); }
             Action::EnterDungeon => { logic::enter_dungeon(&mut self.state, 1); }
-            Action::Inn => { logic::execute_town_choice(&mut self.state, 4); }
+            Action::Inn => {
+                // Inn shortcut for the simulator: apply the same effect as
+                // the InnTile event without requiring the bot to walk there.
+                if self.state.gold >= 10 {
+                    self.state.gold -= 10;
+                    self.state.hp = self.state.effective_max_hp();
+                    self.state.mp = self.state.max_mp;
+                    self.state.satiety = self.state.satiety_max;
+                    self.state.buffs = super::state::PlayerBuffs::default();
+                    if let Some(p) = &mut self.state.pet { p.hp = p.max_hp; }
+                }
+            }
             Action::BuyItem(kind) => {
                 let shop = super::state::shop_items(self.state.max_floor_reached);
                 if let Some(idx) = shop.iter().position(|(k, _)| *k == kind) {
