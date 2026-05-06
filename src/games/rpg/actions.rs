@@ -35,3 +35,17 @@ pub const QUEST_ABANDON: u16 = 175;
 
 // ── Pray ─────────────────────────────────────────────────────
 pub const PRAY_CONFIRM: u16 = 180;
+
+// ── A/B buttons (dungeon explore) ────────────────────────────
+/// Context-sensitive primary action.
+/// Adjacent enemy → open skill menu.
+/// Standing on event → confirm primary choice.
+/// Otherwise → wait one turn.
+pub const AB_A_BUTTON: u16 = 190;
+/// Open the unified menu (持ち物 / スキル / ステータス tabs).
+pub const AB_B_BUTTON: u16 = 191;
+
+// ── Unified menu tab switch ──────────────────────────────────
+pub const MENU_TAB_INVENTORY: u16 = 200;
+pub const MENU_TAB_SKILL: u16 = 201;
+pub const MENU_TAB_STATUS: u16 = 202;

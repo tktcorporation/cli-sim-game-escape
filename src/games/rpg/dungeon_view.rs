@@ -199,6 +199,13 @@ fn cell_marker(cell: &super::state::MapCell) -> (String, Color) {
             CellType::Npc => ("? ".to_string(), Color::Magenta),
             CellType::Trap => ("\u{00b7} ".to_string(), Color::Reset),
             CellType::Corridor => ("\u{00b7} ".to_string(), Color::Reset),
+            // Issue #90: distinct glyphs so the player can tell encounters apart.
+            CellType::FallenAdventurer => ("\u{2020} ".to_string(), Color::Rgb(180, 180, 180)),
+            CellType::FruitTree => ("\u{2663} ".to_string(), Color::Green),
+            CellType::Well => ("\u{25cb} ".to_string(), Color::Cyan),
+            CellType::Idol => ("\u{2734} ".to_string(), Color::Yellow),
+            CellType::Peddler => ("$ ".to_string(), Color::Yellow),
+            CellType::MonsterEgg => ("\u{25cf} ".to_string(), Color::Magenta),
         }
     } else {
         match cell.cell_type {
@@ -209,14 +216,13 @@ fn cell_marker(cell: &super::state::MapCell) -> (String, Color) {
     }
 }
 
-/// Whether the cell should show as a plain floor dot.
+/// Whether the cell should show as a plain floor dot when revealed but
+/// not currently visible.
 fn ch_is_floor(cell: &super::state::MapCell) -> bool {
-    matches!(
-        cell.cell_type,
-        CellType::Corridor | CellType::Trap
-    ) || (cell.event_done
-        && cell.cell_type != CellType::Entrance
-        && cell.cell_type != CellType::Stairs)
+    matches!(cell.cell_type, CellType::Corridor | CellType::Trap)
+        || (cell.event_done
+            && cell.cell_type != CellType::Entrance
+            && cell.cell_type != CellType::Stairs)
 }
 
 // ── Tests ──────────────────────────────────────────────────────

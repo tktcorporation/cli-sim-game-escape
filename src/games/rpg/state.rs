@@ -45,19 +45,21 @@ pub struct EnemyInfo {
 
 pub fn enemy_info(kind: EnemyKind) -> EnemyInfo {
     match kind {
+        // Issue #92 (balance): early floor enemies softened so a fresh
+        // Lv.1 player isn't 1-2 shotted before they can react.
         EnemyKind::Slime => EnemyInfo {
-            name: "スライム", glyph: 's', max_hp: 12, atk: 4, def: 1, exp: 5, gold: 8,
-            drop: Some((ItemKind::Herb, 40)),
+            name: "スライム", glyph: 's', max_hp: 10, atk: 3, def: 1, exp: 5, gold: 8,
+            drop: Some((ItemKind::Herb, 45)),
             weakness: Some(Element::Fire), can_charge: false, tameable: true,
         },
         EnemyKind::Rat => EnemyInfo {
-            name: "大ネズミ", glyph: 'r', max_hp: 10, atk: 6, def: 0, exp: 4, gold: 6,
-            drop: Some((ItemKind::Herb, 25)),
+            name: "大ネズミ", glyph: 'r', max_hp: 9, atk: 5, def: 0, exp: 4, gold: 6,
+            drop: Some((ItemKind::Herb, 30)),
             weakness: None, can_charge: false, tameable: true,
         },
         EnemyKind::Goblin => EnemyInfo {
-            name: "ゴブリン", glyph: 'g', max_hp: 28, atk: 10, def: 4, exp: 15, gold: 20,
-            drop: Some((ItemKind::MagicWater, 30)),
+            name: "ゴブリン", glyph: 'g', max_hp: 26, atk: 9, def: 3, exp: 15, gold: 20,
+            drop: Some((ItemKind::MagicWater, 35)),
             weakness: Some(Element::Fire), can_charge: false, tameable: true,
         },
         EnemyKind::Bat => EnemyInfo {
@@ -505,6 +507,15 @@ pub enum CellType {
     Spring,
     Lore,
     Npc,
+    /// Issue #90: Elona-flavored small encounters scattered across floors.
+    /// Adds探索の彩り — each carries its own cost/reward profile so the
+    /// player gets to make different micro-decisions on every floor.
+    FallenAdventurer,
+    FruitTree,
+    Well,
+    Idol,
+    Peddler,
+    MonsterEgg,
 }
 
 #[derive(Clone, Debug)]
@@ -625,6 +636,35 @@ pub enum EventAction {
     DescendStairs,
     ReturnToTown,
     Continue,
+    // ── Issue #90: new event actions ──
+    /// Help up the fallen adventurer — chance the body was a mimic.
+    ReviveAdventurer,
+    /// Strip the body for affixed equipment + gold.
+    LootAdventurer,
+    /// Pluck fruit (satiety + apples).
+    PickFruit,
+    /// Shake the tree — more food, but may rouse a monster.
+    ShakeTree,
+    /// Drink from the well — random outcome (heal / poison / nothing).
+    DrinkWell,
+    /// Bottle the well water as herbs.
+    BottleWell,
+    /// Look down into the well — chance of gold or random tip.
+    PeerWell,
+    /// Pray to the idol — small faith + blessing roll.
+    PrayIdol,
+    /// Offer a consumable to the idol — major blessing.
+    OfferIdol,
+    /// Buy herbs from the peddler.
+    PeddlerBuyHerb,
+    /// Buy magic water from the peddler.
+    PeddlerBuyMagicWater,
+    /// Buy bread from the peddler.
+    PeddlerBuyBread,
+    /// Take the monster egg — chance of new pet, else hatches hostile.
+    TakeEgg,
+    /// Crush the egg — yolk feeds you a little.
+    BreakEgg,
 }
 
 // ── Quests (Elona-style request board) ────────────────────────
@@ -696,8 +736,9 @@ impl Quest {
 pub enum Scene {
     Intro(u8),
     Town,
+    /// Single dungeon scene — events are popups overlaid on the explore
+    /// view, not a separate scene transition. See issue #89.
     DungeonExplore,
-    DungeonEvent,
     GameClear,
 }
 
@@ -713,6 +754,17 @@ pub enum Overlay {
     QuestBoard,
     /// Pray confirmation (town).
     PrayMenu,
+}
+
+impl Overlay {
+    /// Whether this overlay belongs to the unified menu tab set
+    /// (Inventory / SkillMenu / Status), tabbed via the dungeon B button.
+    pub fn is_menu_tab(self) -> bool {
+        matches!(
+            self,
+            Overlay::Inventory | Overlay::SkillMenu | Overlay::Status
+        )
+    }
 }
 
 // ── Player Status Effects ─────────────────────────────────────
@@ -824,11 +876,31 @@ pub struct RpgState {
 
     /// Counter that increments on each player action (turn-based).
     pub turn_count: u64,
+
+    /// Cursor index for the currently visible menu/overlay/event popup.
+    /// Arrow keys move it; A button confirms the cursor's choice.
+    /// Reset to 0 on every scene/overlay/event transition so the cursor
+    /// never points past the new menu's choice list.
+    pub cursor: usize,
 }
 
 pub const SATIETY_MAX_DEFAULT: u32 = 1000;
 
 impl RpgState {
+    /// Open an overlay and reset the cursor so it points at the first item
+    /// of the new menu (not a stale index from the previous one).
+    pub fn open_overlay(&mut self, overlay: Overlay) {
+        self.overlay = Some(overlay);
+        self.cursor = 0;
+    }
+
+    /// Close the active overlay and reset the cursor for whatever scene
+    /// menu is now visible.
+    pub fn close_overlay(&mut self) {
+        self.overlay = None;
+        self.cursor = 0;
+    }
+
     pub fn new() -> Self {
         let stats = level_stats(1);
         Self {
@@ -869,6 +941,7 @@ impl RpgState {
             pet: None,
             buffs: PlayerBuffs::default(),
             turn_count: 0,
+            cursor: 0,
         }
     }
 
