@@ -20,7 +20,19 @@ fn step_one_tick(city: &mut City) {
     advance_construction(city);
     drive_ai(city);
     accrue_income(city);
+    detect_tier_advance(city);
     city.tick = city.tick.wrapping_add(1);
+}
+
+/// ティア境界を跨いだら演出をトリガー。降格 (建物撤去等で人口減) は
+/// 現状ありえない (撤去機能なし) ので、上昇のみ検出する。
+fn detect_tier_advance(city: &mut City) {
+    let now = city_tier_for(city.population());
+    if now > city.last_observed_tier {
+        city.tier_flash_until = city.tick + TIER_FLASH_TICKS;
+        city.push_event(format!("🎊 街が「{}」に成長しました!", now.jp()));
+        city.last_observed_tier = now;
+    }
 }
 
 /// Decrement every Construction tile; promote to Built when finished.
@@ -78,13 +90,30 @@ fn drive_ai(city: &mut City) {
     }
 }
 
+/// Tech 戦略時の建設速度ブースト。20% 短縮 → ticks * 4 / 5。
+/// `state.strategy` の唯一の "副作用" であり、副作用の集約点として `logic.rs`
+/// に置く (state/render は読取専用)。
+fn build_ticks_for(city: &City, kind: Building) -> u32 {
+    let base = kind.build_ticks();
+    if matches!(city.strategy, Strategy::Tech) {
+        (base as u64 * 4).div_ceil(5) as u32 // ceil-div で 0 化を防ぐ
+    } else {
+        base
+    }
+}
+
 /// Spend cash and turn an Empty cell into a Construction tile.
-/// Returns false if the cell is non-empty or we can't afford it.
+/// Returns false if the cell is non-empty, terrain forbids it, or we can't
+/// afford it.
 pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -> bool {
     if x >= GRID_W || y >= GRID_H {
         return false;
     }
     if !matches!(city.grid[y][x], Tile::Empty) {
+        return false;
+    }
+    // 地形の建設可否 (湖には建てられない)。
+    if !city.terrain_at(x, y).buildable() {
         return false;
     }
     let cost = kind.cost();
@@ -93,9 +122,10 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
     }
     city.cash -= cost;
     city.cash_spent_total += cost;
+    let ticks = build_ticks_for(city, kind);
     city.grid[y][x] = Tile::Construction {
         target: kind,
-        ticks_remaining: kind.build_ticks(),
+        ticks_remaining: ticks,
     };
     city.buildings_started += 1;
     city.push_event(format!(
@@ -163,7 +193,86 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
             }
         }
     }
+
+    // Tech 戦略の収入ペナルティ: -20% (整数で *4/5)。
+    // 0 化の死スパイラルを避けるため `1` を下限に。
+    if matches!(city.strategy, Strategy::Tech) && income > 0 {
+        income = ((income * 4) / 5).max(1);
+    }
     income
+}
+
+/// 住宅の段階レベル (描画専用の派生値)。
+///
+/// 純関数 — 周辺の House 密度から計算する。state にフィールドを増やさず、
+/// 描画時に毎回計算する設計。Cookie Factory と同じ Pure Logic Pattern。
+///
+/// **デザイン**: 隣接 (4-近傍) に House がいくつあるか:
+///   - 0 → Low  (低層)   `▟▙`
+///   - 1〜2 → Mid (中層) `▛▜`
+///   - 3〜4 → High (高層) `█▌`
+///
+/// 都市計画のリアルさ: 周りに住宅クラスターがあると土地が高密度化する。
+/// プレイヤーが「住宅は固めて配置すべき」と気付ける戦略レイヤー。
+pub fn house_level(city: &City, x: usize, y: usize) -> HouseLevel {
+    let mut neighbors = 0u32;
+    for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+            continue;
+        }
+        if matches!(city.tile(nx as usize, ny as usize), Tile::Built(Building::House)) {
+            neighbors += 1;
+        }
+    }
+    match neighbors {
+        0 => HouseLevel::Low,
+        1 | 2 => HouseLevel::Mid,
+        _ => HouseLevel::High,
+    }
+}
+
+/// 住宅密度レベル。描画専用 — state には保持しない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HouseLevel {
+    Low,
+    Mid,
+    High,
+}
+
+/// 店舗の段階レベル — 隣接アクティブ House 数 + 道路接続で評価。
+/// 賑わいの可視化用。アクティブで Mid 以上の住宅が近いとプレミアム。
+pub fn shop_level(city: &City, x: usize, y: usize) -> ShopLevel {
+    if !shop_is_active(city, x, y) {
+        return ShopLevel::Idle;
+    }
+    let mut customers = 0u32;
+    for cy in 0..GRID_H {
+        for cx in 0..GRID_W {
+            if matches!(city.tile(cx, cy), Tile::Built(Building::House)) {
+                let dx = cx as i32 - x as i32;
+                let dy = cy as i32 - y as i32;
+                if dx.abs() + dy.abs() <= 3 {
+                    customers += 1;
+                }
+            }
+        }
+    }
+    match customers {
+        0 => ShopLevel::Idle,
+        1 | 2 => ShopLevel::Basic,
+        3..=5 => ShopLevel::Busy,
+        _ => ShopLevel::Premium,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShopLevel {
+    Idle,    // 非アクティブ (灰)
+    Basic,   // 道路はあるが客は少ない
+    Busy,    // 標準的な賑わい
+    Premium, // 大繁盛 (★付き表示)
 }
 
 /// A shop earns money if it has a road neighbor *and* a house within
@@ -344,6 +453,46 @@ mod tests {
         // Far above any reasonable game state — clamps via MAX_WORKERS gate
         assert_eq!(hire_worker_cost(1_000), None);
         assert_eq!(hire_worker_cost(u32::MAX), None);
+    }
+
+    /// ティアが上がる瞬間に flash と event が発火する。
+    #[test]
+    fn tier_advance_triggers_flash_and_event() {
+        let mut city = City::new();
+        // 50 pop = 10 軒の House で Town 到達。
+        for i in 0..10 {
+            city.set_tile(i, 0, Tile::Built(Building::House));
+        }
+        assert_eq!(city.last_observed_tier, CityTier::Village);
+        // 1 tick 進めれば detect_tier_advance が走る。
+        tick(&mut city, 1);
+        assert_eq!(city.last_observed_tier, CityTier::Town);
+        assert!(city.tier_flash_until > city.tick);
+        // イベントログの先頭にティア進化メッセージ。
+        assert!(
+            city.events.first().is_some_and(|e| e.contains("町")),
+            "first event should mention 町, got {:?}",
+            city.events.first()
+        );
+    }
+
+    /// 追加 House でも同じティア内なら再発火しない (ログ汚染防止)。
+    #[test]
+    fn tier_does_not_re_trigger_within_same_tier() {
+        let mut city = City::new();
+        for i in 0..10 {
+            city.set_tile(i, 0, Tile::Built(Building::House));
+        }
+        tick(&mut city, 1);
+        let event_count_after_tier_event = city.events.len();
+        // もう 1 軒追加 (まだ Town 範囲内: 55 pop)。
+        city.set_tile(11, 0, Tile::Built(Building::House));
+        tick(&mut city, 5);
+        assert_eq!(
+            city.events.len(),
+            event_count_after_tier_event,
+            "re-tick within same tier should not push another tier event"
+        );
     }
 
     #[test]

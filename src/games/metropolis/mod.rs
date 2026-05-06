@@ -16,6 +16,7 @@ pub mod logic;
 pub mod render;
 pub mod simulator;
 pub mod state;
+pub mod terrain;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -26,7 +27,7 @@ use ratzilla::ratatui::Frame;
 use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
-use state::{City, Strategy};
+use state::{City, PanelTab, Strategy};
 
 // ── Action IDs scoped to MetropolisGame ─────────────────────────
 //
@@ -34,9 +35,17 @@ use state::{City, Strategy};
 // they're persisted through Click events keyed by `ClickScope::Game(...)`.
 pub const ACT_STRATEGY_GROWTH: u16 = 1;
 pub const ACT_STRATEGY_INCOME: u16 = 2;
-pub const ACT_STRATEGY_BALANCED: u16 = 3;
+/// 旧 `ACT_STRATEGY_BALANCED` の枠を流用。Tech 戦略 (建設速度 +20% / 収入 -20%)。
+/// 数値 ID は永続クリックスコープのため変更しない。
+pub const ACT_STRATEGY_TECH: u16 = 3;
 pub const ACT_HIRE_WORKER: u16 = 4;
 pub const ACT_UPGRADE_AI: u16 = 5;
+
+// タブ切替アクション (10-13 を予約; 戦略の隣だが衝突しない)。
+pub const ACT_TAB_STATUS: u16 = 10;
+pub const ACT_TAB_MANAGER: u16 = 11;
+pub const ACT_TAB_EVENTS: u16 = 12;
+pub const ACT_TAB_WORLD: u16 = 13;
 
 pub struct MetropolisGame {
     pub state: City,
@@ -67,9 +76,13 @@ impl Game for MetropolisGame {
             InputEvent::Key(c) => match c {
                 'g' | 'G' => ACT_STRATEGY_GROWTH,
                 'i' | 'I' => ACT_STRATEGY_INCOME,
-                'b' | 'B' => ACT_STRATEGY_BALANCED,
+                't' | 'T' => ACT_STRATEGY_TECH,
                 'w' | 'W' => ACT_HIRE_WORKER,
                 'u' | 'U' => ACT_UPGRADE_AI,
+                '1' => ACT_TAB_STATUS,
+                '2' => ACT_TAB_MANAGER,
+                '3' => ACT_TAB_EVENTS,
+                '4' => ACT_TAB_WORLD,
                 _ => return false,
             },
         };
@@ -85,13 +98,29 @@ impl Game for MetropolisGame {
                 self.state.push_event("💰 戦略: 収入重視".to_string());
                 true
             }
-            ACT_STRATEGY_BALANCED => {
-                self.state.strategy = Strategy::Balanced;
-                self.state.push_event("⚖ 戦略: バランス".to_string());
+            ACT_STRATEGY_TECH => {
+                self.state.strategy = Strategy::Tech;
+                self.state.push_event("⚙ 戦略: 技術投資 (建設+20% / 収入-20%)".to_string());
                 true
             }
             ACT_HIRE_WORKER => logic::hire_worker(&mut self.state),
             ACT_UPGRADE_AI => logic::upgrade_ai(&mut self.state),
+            ACT_TAB_STATUS => {
+                self.state.panel_tab = PanelTab::Status;
+                true
+            }
+            ACT_TAB_MANAGER => {
+                self.state.panel_tab = PanelTab::Manager;
+                true
+            }
+            ACT_TAB_EVENTS => {
+                self.state.panel_tab = PanelTab::Events;
+                true
+            }
+            ACT_TAB_WORLD => {
+                self.state.panel_tab = PanelTab::World;
+                true
+            }
             _ => false,
         }
     }
@@ -121,8 +150,8 @@ mod tests {
         assert_eq!(g.state.strategy, Strategy::Growth);
         g.handle_input(&InputEvent::Key('i'));
         assert_eq!(g.state.strategy, Strategy::Income);
-        g.handle_input(&click(ACT_STRATEGY_BALANCED));
-        assert_eq!(g.state.strategy, Strategy::Balanced);
+        g.handle_input(&click(ACT_STRATEGY_TECH));
+        assert_eq!(g.state.strategy, Strategy::Tech);
     }
 
     #[test]
