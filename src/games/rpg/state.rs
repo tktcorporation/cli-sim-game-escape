@@ -138,6 +138,8 @@ pub enum ItemKind {
     Apple,
     // Pet food
     PetTreat,
+    /// 帰還の巻物 — 使用するとダンジョンから町へ即座に戻る (Town Portal 系)
+    ReturnScroll,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -222,6 +224,10 @@ pub fn item_info(kind: ItemKind) -> ItemInfo {
             name: "ペットの餌", description: "野生の魔物に与えると懐く可能性",
             category: ItemCategory::Consumable, buy_price: 60, value: 0,
         },
+        ItemKind::ReturnScroll => ItemInfo {
+            name: "帰還の巻物", description: "ダンジョンから町へ即座に戻る",
+            category: ItemCategory::Consumable, buy_price: 150, value: 0,
+        },
     }
 }
 
@@ -235,6 +241,7 @@ pub fn shop_items(max_floor: u32) -> Vec<(ItemKind, u32)> {
         (ItemKind::WoodenSword, 1),
         (ItemKind::TravelClothes, 1),
         (ItemKind::PetTreat, 99),
+        (ItemKind::ReturnScroll, 99),
     ];
     if max_floor >= 2 {
         items.push((ItemKind::Jerky, 99));
@@ -634,6 +641,8 @@ pub enum EventAction {
     TalkNpc,
     TradeNpc,
     DescendStairs,
+    /// 入口階段から前のフロア (B2F+ で利用、B1F は ReturnToTown が代わりに出る)
+    AscendStairs,
     ReturnToTown,
     Continue,
     // ── Issue #90: new event actions ──

@@ -33,7 +33,7 @@ pub fn generate_event(
         CellType::Lore => Some(lore_event(floor, rng_seed)),
         CellType::Npc => Some(npc_event(floor, rng_seed)),
         CellType::Stairs => Some(stairs_event(floor)),
-        CellType::Entrance => Some(entrance_event()),
+        CellType::Entrance => Some(entrance_event(floor)),
         CellType::Corridor => None,
         CellType::FallenAdventurer => Some(fallen_adventurer_event(rng_seed)),
         CellType::FruitTree => Some(fruit_tree_event(theme)),
@@ -288,13 +288,28 @@ fn stairs_event(floor: u32) -> DungeonEvent {
     }
 }
 
-fn entrance_event() -> DungeonEvent {
-    DungeonEvent {
-        description: vec!["入口の階段がある。町へ戻れる。".into()],
-        choices: vec![
-            EventChoice { label: "町に帰還する".into(), action: EventAction::ReturnToTown },
-            EventChoice { label: "探索を続ける".into(), action: EventAction::Continue },
-        ],
+fn entrance_event(floor: u32) -> DungeonEvent {
+    if floor <= 1 {
+        DungeonEvent {
+            description: vec!["入口の階段がある。町へ戻れる。".into()],
+            choices: vec![
+                EventChoice { label: "町に帰還する".into(), action: EventAction::ReturnToTown },
+                EventChoice { label: "探索を続ける".into(), action: EventAction::Continue },
+            ],
+        }
+    } else {
+        DungeonEvent {
+            description: vec![
+                format!("入口の階段がある。B{}Fへ戻れる。", floor - 1),
+            ],
+            choices: vec![
+                EventChoice {
+                    label: format!("B{}Fへ戻る", floor - 1),
+                    action: EventAction::AscendStairs,
+                },
+                EventChoice { label: "探索を続ける".into(), action: EventAction::Continue },
+            ],
+        }
     }
 }
 
@@ -308,6 +323,8 @@ pub struct EventOutcome {
     pub mp_change: i32,
     pub item: Option<(ItemKind, u32)>,
     pub descend: bool,
+    /// 入口階段から前のフロアへ戻る (B2F+).
+    pub ascend: bool,
     pub return_to_town: bool,
     pub lore_id: Option<u32>,
     /// Issue #90: outcome may extend the satiety bar (fruit/peddler bread).
@@ -333,6 +350,7 @@ impl EventOutcome {
             mp_change: 0,
             item: None,
             descend: false,
+            ascend: false,
             return_to_town: false,
             lore_id: None,
             satiety_change: 0,
@@ -447,6 +465,11 @@ pub fn resolve_event(
         (EventAction::ReturnToTown, CellType::Entrance) => EventOutcome {
             description: vec!["町へ帰還する。".into()],
             return_to_town: true,
+            ..EventOutcome::empty()
+        },
+        (EventAction::AscendStairs, CellType::Entrance) => EventOutcome {
+            description: vec![format!("B{}Fへ戻る…", floor.saturating_sub(1).max(1))],
+            ascend: true,
             ..EventOutcome::empty()
         },
         // ── Issue #90 resolutions ──
