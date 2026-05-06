@@ -417,7 +417,10 @@ fn ensure_connectivity(
     let sx = start_room.x + start_room.w / 2;
     let sy = start_room.y + start_room.h / 2;
 
-    loop {
+    // Hard cap on outer iterations as defense in depth — every iteration
+    // that makes progress reduces the unreachable set by at least one, so
+    // `rooms.len()` rounds is plenty.
+    for _ in 0..rooms.len().saturating_add(2) {
         // BFS from the first room center
         let distances = bfs_distances(grid, w, h, sx, sy);
 
@@ -437,10 +440,12 @@ fn ensure_connectivity(
             .collect();
 
         if unreachable.is_empty() {
-            break;
+            return;
         }
 
-        // For each unreachable room, find its section neighbor and force a corridor
+        // First, try to connect each unreachable room to a reachable
+        // neighbor section (the cheap, "natural-looking" path).
+        let mut progressed = false;
         for &room_idx in &unreachable {
             // Find which section this room belongs to
             let sec_idx = room_section_map
@@ -489,10 +494,47 @@ fn ensure_connectivity(
                         };
                         carve_vertical_corridor(grid, w, h, top, bot, sec_h, rng_seed);
                     }
+                    progressed = true;
                     break;
                 }
             }
         }
+
+        // If no unreachable room had a reachable neighbor section, the
+        // section graph is disconnected (e.g. skip pattern {1,3} isolates
+        // section 0). Force-connect the first unreachable room directly
+        // to the start room with an L-shaped corridor — guaranteed to
+        // make progress, so the next BFS round will see fewer unreachable
+        // rooms.
+        if !progressed {
+            let target = &rooms[unreachable[0]];
+            let tx = target.x + target.w / 2;
+            let ty = target.y + target.h / 2;
+            carve_l_corridor(grid, w, h, sx, sy, tx, ty, rng_seed);
+        }
+    }
+}
+
+/// Carve an L-shaped corridor between two arbitrary points, going through
+/// any walls in between. Used as a last-resort fallback when adjacent-section
+/// routing can't reach an isolated room.
+#[allow(clippy::too_many_arguments)]
+fn carve_l_corridor(
+    grid: &mut [Vec<MapCell>],
+    w: usize,
+    h: usize,
+    x1: usize,
+    y1: usize,
+    x2: usize,
+    y2: usize,
+    rng_seed: &mut u64,
+) {
+    if rng_range(rng_seed, 2) == 0 {
+        carve_horizontal_segment(grid, w, h, x1, x2, y1);
+        carve_vertical_segment(grid, w, h, x2, y1, y2);
+    } else {
+        carve_vertical_segment(grid, w, h, x1, y1, y2);
+        carve_horizontal_segment(grid, w, h, x1, y2, x2);
     }
 }
 
@@ -660,6 +702,30 @@ fn room_distribution(floor: u32, total: usize) -> RoomDist {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// When the section-skip RNG picks an isolating pattern (e.g. skipping
+    /// sections {1,3} cuts off section 0; {1,5} cuts off section 2),
+    /// `ensure_connectivity` used to spin forever because no unreachable room
+    /// has a reachable adjacent section. This test sweeps many seeds across
+    /// every floor and asserts both termination and full connectivity.
+    #[test]
+    fn generate_map_always_connects_all_rooms() {
+        for floor in 1..=super::super::state::MAX_FLOOR {
+            for seed_start in 0u64..500 {
+                let mut seed = seed_start.wrapping_mul(0x9E3779B97F4A7C15);
+                let map = generate_map(floor, &mut seed);
+                let dist = bfs_distances(&map.grid, map.width, map.height, map.player_x, map.player_y);
+                for room in &map.rooms {
+                    let cx = room.x + room.w / 2;
+                    let cy = room.y + room.h / 2;
+                    assert!(
+                        dist[cy][cx] > 0 || (cx == map.player_x && cy == map.player_y),
+                        "floor={floor} seed_start={seed_start}: room at ({cx},{cy}) unreachable from entrance"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn generates_valid_map() {
