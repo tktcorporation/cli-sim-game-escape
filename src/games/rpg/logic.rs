@@ -1211,6 +1211,11 @@ pub fn resolve_event_choice(state: &mut RpgState, choice_index: usize) -> bool {
     if outcome.descend {
         let next_floor = floor + 1;
         enter_dungeon(state, next_floor);
+    } else if outcome.ascend {
+        // B2F+ 入口階段から前のフロアへ。floor==1 から ascend を出すことは
+        // entrance_event 側でガード済みだが、安全側に倒して saturating_sub。
+        let prev_floor = floor.saturating_sub(1).max(1);
+        enter_dungeon(state, prev_floor);
     } else if outcome.return_to_town {
         retreat_to_town(state);
     } else if state.dungeon.is_some() {
@@ -1637,6 +1642,16 @@ pub fn use_item(state: &mut RpgState, inv_index: usize) -> bool {
             ItemKind::PetTreat => {
                 return tame_with_treat(state, inv_index);
             }
+            ItemKind::ReturnScroll => {
+                if state.dungeon.is_none() {
+                    state.add_log("ここでは使えない");
+                    return false;
+                }
+                consume_inventory_slot(state, inv_index);
+                state.add_log("帰還の巻物を破った！ 町へ戻る…");
+                retreat_to_town(state);
+                return true;
+            }
             _ => {
                 state.add_log("使えないアイテム");
                 return false;
@@ -1721,6 +1736,49 @@ mod tests {
         assert!(s.armor().is_some());
         assert_eq!(s.gold, 50);
         assert_eq!(s.scene, Scene::Town);
+    }
+
+    #[test]
+    fn return_scroll_warps_to_town_from_dungeon() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 3);
+        add_item(&mut s, ItemKind::ReturnScroll, 1);
+        let idx = s.inventory.iter().position(|i| i.kind == ItemKind::ReturnScroll).unwrap();
+        assert_eq!(s.scene, Scene::DungeonExplore);
+        assert!(use_item(&mut s, idx));
+        assert_eq!(s.scene, Scene::Town);
+        assert!(!s.inventory.iter().any(|i| i.kind == ItemKind::ReturnScroll));
+    }
+
+    #[test]
+    fn return_scroll_refuses_in_town() {
+        let mut s = RpgState::new();
+        s.scene = Scene::Town;
+        add_item(&mut s, ItemKind::ReturnScroll, 1);
+        let idx = s.inventory.iter().position(|i| i.kind == ItemKind::ReturnScroll).unwrap();
+        assert!(!use_item(&mut s, idx));
+        // Scroll should not be consumed.
+        assert!(s.inventory.iter().any(|i| i.kind == ItemKind::ReturnScroll));
+    }
+
+    #[test]
+    fn ascend_stairs_from_b2_returns_to_b1() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 2);
+        // Place player on entrance cell to trigger ascend choice.
+        let event = super::super::events::generate_event(
+            super::super::state::CellType::Entrance,
+            2,
+            super::super::state::FloorTheme::Underground,
+            &mut s.rng_seed,
+        )
+        .expect("entrance event exists");
+        // First choice on B2F entrance must be AscendStairs.
+        assert_eq!(event.choices[0].action, super::super::state::EventAction::AscendStairs);
+        s.active_event = Some(event);
+        assert!(resolve_event_choice(&mut s, 0));
+        let dungeon = s.dungeon.as_ref().expect("still in dungeon");
+        assert_eq!(dungeon.floor_num, 1);
     }
 
     #[test]
