@@ -67,6 +67,7 @@ fn building_name(b: Building) -> &'static str {
     match b {
         Building::Road => "道路",
         Building::House => "住宅",
+        Building::Workshop => "工房",
         Building::Shop => "店舗",
     }
 }
@@ -190,6 +191,18 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
     let houses = city.count_built(Building::House) as i64;
     income += (houses + 1) / 2;
 
+    // Workshops → 労働力 (隣接 House) + Road 接続が必要。$1/s。
+    // House より早期に建てられる「最初の職場」として、戦略の幅を増やす。
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            if matches!(city.tile(x, y), Tile::Built(Building::Workshop))
+                && workshop_is_active(city, x, y)
+            {
+                income += 1;
+            }
+        }
+    }
+
     // Shops → check connectivity + customer base.
     for y in 0..GRID_H {
         for x in 0..GRID_W {
@@ -304,6 +317,7 @@ pub fn gather_house_neighborhood(city: &City, x: usize, y: usize) -> HouseNeighb
     }
 
     let mut n_shop_within_5 = 0u32;
+    let mut n_workshop_within_5 = 0u32;
     let mut n_house_within_3 = 0u32;
     for cy in 0..GRID_H {
         for cx in 0..GRID_W {
@@ -312,6 +326,7 @@ pub fn gather_house_neighborhood(city: &City, x: usize, y: usize) -> HouseNeighb
             let manhattan = (dx + dy) as u32;
             match city.tile(cx, cy) {
                 Tile::Built(Building::Shop) if manhattan <= 5 => n_shop_within_5 += 1,
+                Tile::Built(Building::Workshop) if manhattan <= 5 => n_workshop_within_5 += 1,
                 Tile::Built(Building::House) if manhattan <= 3 && (cx, cy) != (x, y) => {
                     n_house_within_3 += 1
                 }
@@ -322,8 +337,7 @@ pub fn gather_house_neighborhood(city: &City, x: usize, y: usize) -> HouseNeighb
 
     HouseNeighborhood {
         n_road_adj,
-        // Workshop 建物はまだ未実装。実装後にここでカウントを足す。
-        n_workshop_within_5: 0,
+        n_workshop_within_5,
         n_shop_within_5,
         n_house_within_3,
     }
@@ -410,6 +424,13 @@ pub enum ShopLevel {
     Basic,   // 道路はあるが客は少ない
     Busy,    // 標準的な賑わい
     Premium, // 大繁盛 (★付き表示)
+}
+
+/// Workshop は隣接 House (労働力) と Road 接続の両方が必要。
+/// Shop と違って距離は隣接のみ — 「働き手は徒歩圏内から来る」感を出す。
+pub(super) fn workshop_is_active(city: &City, wx: usize, wy: usize) -> bool {
+    has_neighbor_kind(city, wx, wy, Building::Road)
+        && has_neighbor_kind(city, wx, wy, Building::House)
 }
 
 /// A shop earns money if it has a road neighbor *and* a house within
@@ -577,6 +598,37 @@ mod tests {
         city.set_tile(5, 6, Tile::Built(Building::House));
         // Shop is inactive (no road neighbor) → only the house's $1 counts.
         assert_eq!(compute_income_per_sec(&city), 1);
+    }
+
+    /// Workshop は隣接 House と Road が両方必要。片方だけでは inactive。
+    #[test]
+    fn workshop_needs_road_and_house_neighbors() {
+        let mut city = City::new();
+        // (5,5) に Workshop。隣接 Road のみ → inactive。
+        city.set_tile(5, 5, Tile::Built(Building::Workshop));
+        city.set_tile(5, 4, Tile::Built(Building::Road));
+        // House (5,6) は Road 隣接 0 なので Cottage = $1。
+        // Workshop は House 隣接無しで inactive → $0。
+        assert_eq!(compute_income_per_sec(&city), 0);
+
+        // 隣接 House を追加 → Workshop activate。
+        city.set_tile(5, 6, Tile::Built(Building::House));
+        // House (5,6): n_road_adj=0, Cottage = $1
+        // Workshop: active → $1
+        // Total: $2
+        assert_eq!(compute_income_per_sec(&city), 2);
+    }
+
+    /// Workshop が近くにあると House は Apartment になる (Workshop が経済刺激源)。
+    #[test]
+    fn workshop_promotes_nearby_house_to_apartment() {
+        let mut city = City::new();
+        city.set_tile(1, 1, Tile::Built(Building::House));
+        city.set_tile(0, 1, Tile::Built(Building::Road));
+        // Workshop at (3,1): Manhattan distance 2 from (1,1)。
+        city.set_tile(3, 1, Tile::Built(Building::Workshop));
+        let tier = house_tier_for(gather_house_neighborhood(&city, 1, 1));
+        assert_eq!(tier, HouseTier::Apartment);
     }
 
     #[test]

@@ -243,7 +243,7 @@ fn tier3_road_planner(city: &mut City) -> AiAction {
 
     let candidates: Vec<(usize, usize)> = match kind {
         // Buildings prefer to live next to roads.
-        Building::House | Building::Shop => (0..GRID_H)
+        Building::House | Building::Shop | Building::Workshop => (0..GRID_H)
             .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
             .filter(|(x, y)| is_empty_next_to_road(city, *x, *y))
             .collect(),
@@ -271,15 +271,20 @@ fn tier3_road_planner(city: &mut City) -> AiAction {
 /// AND a house within Manhattan-3).  This is the difference that lets
 /// Tier 4 reliably outproduce Tier 3 even with the same building counts.
 ///
-/// Per-strategy roll weights (House% / Road% / Shop%):
-///   - Growth   →  70 / 20 / 10  (population first)
-///   - Tech     →  35 / 50 / 15  (road network first; expansion-heavy)
-///   - Income   →  35 / 25 / 40  (cash first, lots of shops)
+/// Per-strategy roll weights (House% / Road% / Workshop% / Shop%):
+///   - Growth   →  70 / 20 / 0  / 10  (population first; Workshop に興味なし)
+///   - Tech     →  35 / 50 / 0  / 15  (road network first; Workshop 不採用)
+///   - Income   →  30 / 22 / 13 / 35  (cash first, lots of shops + workshops)
+///
+/// **Workshop は Income 戦略の独自要素** — Tier 4 の Income プレイヤーが
+/// Shop 一択ではなく「Workshop で Apartment 化を促し、その上に Shop を載せる」
+/// 経済チェーン構築を試みる、というキャラ付け。Growth/Tech は旧来の重みを
+/// 維持して戦略特化を保つ (simulator::tier4_strategies_specialize の不変条件)。
 fn tier4_demand_aware(city: &mut City) -> AiAction {
-    let (house_pct, road_pct) = match city.strategy {
-        Strategy::Growth => (70, 20),
-        Strategy::Tech => (35, 50),
-        Strategy::Income => (35, 25),
+    let (house_pct, road_pct, workshop_pct) = match city.strategy {
+        Strategy::Growth => (70, 20, 0),
+        Strategy::Tech => (35, 50, 0),
+        Strategy::Income => (30, 22, 13),
     };
 
     let roll = (city.next_rand() % 100) as u32;
@@ -287,6 +292,8 @@ fn tier4_demand_aware(city: &mut City) -> AiAction {
         Building::House
     } else if roll < house_pct + road_pct {
         Building::Road
+    } else if roll < house_pct + road_pct + workshop_pct {
+        Building::Workshop
     } else {
         Building::Shop
     };
@@ -297,17 +304,27 @@ fn tier4_demand_aware(city: &mut City) -> AiAction {
     if !matches!(kind, Building::House) && city.cash < Building::House.cost() {
         return AiAction::Idle;
     }
+    // Workshop / Shop は労働力 / 顧客となる House が最低限必要。
     if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 {
+        return AiAction::Idle;
+    }
+    if matches!(kind, Building::Workshop) && city.count_built(Building::House) < 2 {
         return AiAction::Idle;
     }
 
     // Smartest placement: a shop only goes where it will earn from
     // turn 1 (road-adjacent + customer base in range).  Houses prefer
     // road-adjacent; roads prefer next-to-buildings.
+    // Workshop は隣接 House と Road が両方必要なので、その条件を
+    // 直接フィルタする (= 即時稼働する場所だけに置く)。
     let candidates: Vec<(usize, usize)> = match kind {
         Building::Shop => (0..GRID_H)
             .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
             .filter(|(x, y)| would_shop_activate_here(city, *x, *y))
+            .collect(),
+        Building::Workshop => (0..GRID_H)
+            .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
+            .filter(|(x, y)| would_workshop_activate_here(city, *x, *y))
             .collect(),
         Building::House => (0..GRID_H)
             .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
@@ -325,6 +342,35 @@ fn tier4_demand_aware(city: &mut City) -> AiAction {
     let pick = (city.next_rand() as usize) % candidates.len();
     let (x, y) = candidates[pick];
     AiAction::Build { x, y, kind }
+}
+
+/// True iff placing a Workshop at (x, y) right now would have it earning
+/// income from tick 1 (隣接 House (労働力) AND 隣接 Road が両方必要)。
+fn would_workshop_activate_here(city: &City, wx: usize, wy: usize) -> bool {
+    if !matches!(city.tile(wx, wy), Tile::Empty) {
+        return false;
+    }
+    if !city.terrain_at(wx, wy).buildable() {
+        return false;
+    }
+    let mut has_road = false;
+    let mut has_house = false;
+    for (dx, dy) in DIRS4 {
+        let nx = wx as i32 + dx;
+        let ny = wy as i32 + dy;
+        if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+            continue;
+        }
+        match city.tile(nx as usize, ny as usize) {
+            Tile::Built(Building::Road) => has_road = true,
+            Tile::Built(Building::House) => has_house = true,
+            _ => {}
+        }
+        if has_road && has_house {
+            return true;
+        }
+    }
+    has_road && has_house
 }
 
 /// True iff placing a Shop at (x, y) right now would have it earning

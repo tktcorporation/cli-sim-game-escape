@@ -460,6 +460,23 @@ fn tile_span_1(
                 Span::styled(ch.to_string(), style)
             }
         }
+        Tile::Built(Building::Workshop) => {
+            let active = logic::workshop_is_active(state, x, y);
+            // 煙突アニメ: 3 フレーム周期で `°` `゜` ` ` を切り替えて煙が立つ感じ。
+            // 非アクティブは灰色固定で「火が入っていない」を表現。
+            let smoke_phase = (tick / 4) as usize % 3;
+            let ch = if active {
+                ['w', 'W', 'w'][smoke_phase]
+            } else {
+                'w'
+            };
+            let (fg, bg) = if active {
+                (Color::LightRed, Color::Rgb(60, 30, 30))
+            } else {
+                (Color::DarkGray, Color::Rgb(40, 40, 40))
+            };
+            Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg))
+        }
     }
 }
 
@@ -467,6 +484,7 @@ fn tile_char_1(b: Building) -> char {
     match b {
         Building::Road => '+',
         Building::House => 'H',
+        Building::Workshop => 'W',
         Building::Shop => 'S',
     }
 }
@@ -618,6 +636,25 @@ fn tile_spans_2(
                 vec![Span::styled(glyph.to_string(), style)]
             }
         }
+        Tile::Built(Building::Workshop) => {
+            // 工房: 煙突 (左) + 建物本体 (右)。煙突から煙が立ち上る 4 frame アニメ。
+            // アクティブで初めて火が入って煙が出る — 非アクティブは煙ゼロの暗い灰。
+            let active = logic::workshop_is_active(state, x, y);
+            let phase = (tick / 4) as usize % 4;
+            let smoke = if active {
+                ['°', '˚', '·', ' '][phase]
+            } else {
+                ' '
+            };
+            let body = if active { '⊞' } else { '⊟' };
+            let glyph = format!("{}{}", smoke, body);
+            let (fg, bg) = if active {
+                (Color::LightRed, Color::Rgb(60, 30, 30))
+            } else {
+                (Color::DarkGray, Color::Rgb(40, 40, 40))
+            };
+            vec![Span::styled(glyph, Style::default().fg(fg).bg(bg))]
+        }
     }
 }
 
@@ -766,6 +803,7 @@ fn construction_color(b: Building) -> Color {
     match b {
         Building::Road => Color::Yellow,
         Building::House => Color::LightGreen,
+        Building::Workshop => Color::LightRed,
         Building::Shop => Color::LightCyan,
     }
 }
@@ -774,6 +812,7 @@ fn built_color(b: Building) -> Color {
     match b {
         Building::Road => Color::Gray,
         Building::House => Color::Green,
+        Building::Workshop => Color::LightRed,
         Building::Shop => Color::Yellow,
     }
 }
@@ -782,6 +821,7 @@ fn built_2wide_glyph(b: Building) -> &'static str {
     match b {
         Building::Road => "══",
         Building::House => "▟▙",
+        Building::Workshop => "˚⊞",
         Building::Shop => "$$",
     }
 }

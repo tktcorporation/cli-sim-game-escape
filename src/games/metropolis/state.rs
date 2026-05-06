@@ -27,14 +27,21 @@ pub enum Tile {
     Built(Building),
 }
 
-/// Buildings the AI can place.  Kept small for the MVP — three types is
-/// enough to express the "houses feed shops feed cash" loop.
+/// Buildings the AI can place.
+///
+/// **経済チェーン**: Road (インフラ) → House (人口) → Workshop (生産) →
+/// Shop (販売)。Workshop は House と Shop の中間層として機能し、隣接
+/// House の住民を雇って稼ぐ。Workshop が近くにあると House は Apartment に
+/// 育つ (`logic::house_tier_for` の判定で `n_workshop_within_5` が寄与)。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Building {
     /// Connector: enables shops to be supplied.
     Road,
     /// Adds population.
     House,
+    /// 工房。隣接 House (労働力) と Road 接続が必要。Shop より早期に開けて
+    /// 「家 → 職場」の経済段階を担当する。
+    Workshop,
     /// Generates cash, but only if it has at least one road neighbor AND
     /// at least one house within Manhattan distance 3 (a "customer base").
     Shop,
@@ -42,10 +49,14 @@ pub enum Building {
 
 impl Building {
     /// One-time build cost in cash.
+    ///
+    /// バランス: Workshop は Shop より安く ($100 vs $150) 早期に開ける。
+    /// Workshop ⇒ Shop の順番で街区が育つ自然な流れになる。
     pub fn cost(self) -> i64 {
         match self {
             Building::Road => 10,
             Building::House => 40,
+            Building::Workshop => 100,
             Building::Shop => 150,
         }
     }
@@ -53,9 +64,10 @@ impl Building {
     /// Ticks needed to finish construction.
     pub fn build_ticks(self) -> u32 {
         match self {
-            Building::Road => 30,    // 3 sec
-            Building::House => 100,  // 10 sec
-            Building::Shop => 200,   // 20 sec
+            Building::Road => 30,        // 3 sec
+            Building::House => 100,      // 10 sec
+            Building::Workshop => 150,   // 15 sec — Shop より少し短い
+            Building::Shop => 200,       // 20 sec
         }
     }
 
