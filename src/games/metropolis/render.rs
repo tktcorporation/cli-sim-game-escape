@@ -35,7 +35,7 @@ use ratzilla::ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::ClickState;
-use crate::widgets::{Clickable, ClickableGrid, TabBar};
+use crate::widgets::{Clickable, TabBar};
 
 use super::logic;
 use super::state::{
@@ -44,9 +44,8 @@ use super::state::{
 };
 use super::terrain::Terrain;
 use super::{
-    ACT_AUTO_DEMOLISH, ACT_DISPATCH_OUTPOST, ACT_HIRE_WORKER, ACT_STRATEGY_ECO,
-    ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH, ACT_TAB_EVENTS, ACT_TAB_MANAGER,
-    ACT_TAB_STATUS, ACT_TAB_WORLD, ACT_TOGGLE_DEMOLISH, ACT_UPGRADE_AI, DEMOLISH_CELL_BASE,
+    ACT_HIRE_WORKER, ACT_STRATEGY_ECO, ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH,
+    ACT_TAB_EVENTS, ACT_TAB_MANAGER, ACT_TAB_STATUS, ACT_TAB_WORLD, ACT_UPGRADE_AI,
 };
 
 /// Wide layout が必要とする最小幅。
@@ -307,21 +306,13 @@ fn render_grid(
     f: &mut Frame,
     area: Rect,
     cell_width: u16,
-    click_state: &Rc<RefCell<ClickState>>,
+    _click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let title = if state.demolish_mode {
-        format!(
-            " 🗑 City — DEMOLISH MODE  POP {}  WIP {} ",
-            state.population(),
-            state.active_constructions()
-        )
-    } else {
-        format!(
-            " ▟▙ City — POP {}  WIP {} ",
-            state.population(),
-            state.active_constructions()
-        )
-    };
+    let title = format!(
+        " ▟▙ City — POP {}  WIP {} ",
+        state.population(),
+        state.active_constructions()
+    );
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
@@ -339,27 +330,9 @@ fn render_grid(
         lines.push(Line::from(spans));
     }
     f.render_widget(Paragraph::new(lines), inner);
-
-    // 撤去モード時のみ、Built セルをクリック対象として登録する。
-    // Built 以外のセル (Empty/Construction/Clearing) も登録するが、
-    // demolish_at 側で false を返すので副作用なし。シンプルに全セル登録する。
-    if state.demolish_mode {
-        let mut cs = click_state.borrow_mut();
-        let grid = ClickableGrid::new(GRID_W, GRID_H, DEMOLISH_CELL_BASE, cell_width);
-        grid.register_targets(area, &block, &mut cs, 0);
-    }
 }
 
 fn grid_border_color(state: &City) -> Color {
-    // 撤去モードは絶対優先で赤系 — 「危険な操作中」を視覚的に強調。
-    // 0.6 sec 周期で点滅させると注意を引きやすい。
-    if state.demolish_mode {
-        if (state.tick / 6).is_multiple_of(2) {
-            return Color::LightRed;
-        } else {
-            return Color::Red;
-        }
-    }
     // 完成フラッシュが多い時は LightGreen、それ以外は Cyan 系。
     if state.completion_flash_until.iter().flatten().any(|t| *t > state.tick) {
         Color::LightGreen
@@ -1482,7 +1455,149 @@ fn render_status(state: &City, f: &mut Frame, area: Rect) {
     lines.push(Line::from(""));
     lines.extend(strategy_status_lines(state));
 
+    // 区切り + ワーカー稼働状況 (誰が何を建てているか)。
+    lines.push(Line::from(""));
+    lines.extend(worker_status_lines(state));
+
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// ワーカー一覧を 1 行/人で出力する。
+///
+/// 各 Construction / Clearing タイルを行優先で列挙し W1, W2, ... と連番を
+/// 振る。残りの (workers - busy) は「待機中」として列挙する。
+/// プレイヤー視点で「ワーカーが何の作業をやっているか」が一目で分かる。
+fn worker_status_lines(state: &City) -> Vec<Line<'static>> {
+    let mut out: Vec<Line> = Vec::new();
+    out.push(Line::from(vec![Span::styled(
+        format!(
+            "WORKERS ({}/{} 稼働)",
+            state.active_constructions(),
+            state.workers
+        ),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )]));
+
+    let mut idx: u32 = 0;
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            let line = match state.tile(x, y) {
+                Tile::Construction {
+                    target,
+                    ticks_remaining,
+                } => {
+                    idx += 1;
+                    let icon = building_icon(*target);
+                    let secs = (*ticks_remaining).div_ceil(10);
+                    Some(Line::from(vec![
+                        Span::styled(
+                            format!(" W{} ", idx),
+                            Style::default()
+                                .fg(Color::LightYellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("{} {}", icon, building_name_for(*target)),
+                            Style::default().fg(Color::White),
+                        ),
+                        Span::styled(
+                            format!(" ({},{}) ", x, y),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::styled(
+                            format!("⏱{}s", secs),
+                            Style::default().fg(Color::Cyan),
+                        ),
+                    ]))
+                }
+                Tile::Clearing { ticks_remaining } => {
+                    idx += 1;
+                    let secs = (*ticks_remaining).div_ceil(10);
+                    let terrain = state.terrain[y][x];
+                    Some(Line::from(vec![
+                        Span::styled(
+                            format!(" W{} ", idx),
+                            Style::default()
+                                .fg(Color::LightYellow)
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("⛏ 整地 ({})", terrain_name_for(terrain)),
+                            Style::default().fg(Color::White),
+                        ),
+                        Span::styled(
+                            format!(" ({},{}) ", x, y),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                        Span::styled(
+                            format!("⏱{}s", secs),
+                            Style::default().fg(Color::Cyan),
+                        ),
+                    ]))
+                }
+                _ => None,
+            };
+            if let Some(l) = line {
+                out.push(l);
+            }
+        }
+    }
+
+    // 待機中ワーカーを idx の続きで列挙。
+    let idle = state.workers.saturating_sub(idx);
+    for _ in 0..idle {
+        idx += 1;
+        out.push(Line::from(vec![
+            Span::styled(
+                format!(" W{} ", idx),
+                Style::default().fg(Color::DarkGray),
+            ),
+            Span::styled(
+                "待機中",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            ),
+        ]));
+    }
+    out
+}
+
+/// `building_name` は logic.rs にあるが pub では無いので render 側で複製。
+/// 種類が増えた時に両方更新する必要がある (clippy で気付くのは難しいので注意)。
+fn building_name_for(b: Building) -> &'static str {
+    match b {
+        Building::Road => "道路",
+        Building::House => "住宅",
+        Building::Workshop => "工房",
+        Building::Shop => "店舗",
+        Building::Park => "公園",
+        Building::Outpost => "開拓機材",
+    }
+}
+
+fn terrain_name_for(t: Terrain) -> &'static str {
+    match t {
+        Terrain::Plain => "平地",
+        Terrain::Forest => "森",
+        Terrain::Wasteland => "荒地",
+        Terrain::Water => "湖",
+        Terrain::Rock => "岩盤",
+    }
+}
+
+/// 建物の絵文字アイコン (ワーカー一覧表示用)。
+fn building_icon(b: Building) -> &'static str {
+    match b {
+        Building::Road => "🛣",
+        Building::House => "🏠",
+        Building::Workshop => "🔧",
+        Building::Shop => "🏪",
+        Building::Park => "🌳",
+        Building::Outpost => "⚒",
+    }
 }
 
 /// 現在の Strategy の内訳を表示する 4 行ブロック。
@@ -1627,9 +1742,7 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
             Constraint::Length(1), // 選択中タグライン
             Constraint::Length(1), // 雇用
             Constraint::Length(1), // AI 進化
-            Constraint::Length(1), // 開拓機材派遣 (Phase A)
-            Constraint::Length(1), // 撤去モード (Phase A 続)
-            Constraint::Length(1), // AI 撤去判断 (Phase A 続々)
+            Constraint::Length(1), // 自動運用ステータス
             Constraint::Min(0),
         ])
         .split(inner_area);
@@ -1729,59 +1842,28 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
         f.render_widget(p, rows[6]);
     }
 
-    // 開拓機材派遣 — 市域拡張の戦略行動。色は機材を「黄色重機」イメージで。
-    let outpost_cost = Building::Outpost.cost();
-    let outpost_color = if state.cash >= outpost_cost {
-        Color::LightYellow
-    } else {
-        Color::DarkGray
-    };
-    let outpost_label = format!("[O] ⚒ 開拓機材派遣 (${})", outpost_cost);
-    let p = Paragraph::new(Span::styled(
-        outpost_label,
-        Style::default().fg(outpost_color),
-    ));
-    Clickable::new(p, ACT_DISPATCH_OUTPOST).render(f, rows[7], &mut cs);
-
-    // 撤去モード — トグル。ON 中は REVERSED で「アクティブ」感を出す。
-    // ラベルに ON/OFF を出して状態が一目で分かる。
-    let demolish_style = if state.demolish_mode {
-        Style::default()
-            .fg(Color::LightRed)
-            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-    } else {
-        Style::default().fg(Color::LightRed)
-    };
-    let demolish_label = if state.demolish_mode {
-        "[D] 🗑 撤去モード ON  (cell click で撤去)"
-    } else {
-        "[D] 🗑 撤去モード OFF (外側ほど高コスト)"
-    };
-    let p = Paragraph::new(Span::styled(demolish_label, demolish_style));
-    Clickable::new(p, ACT_TOGGLE_DEMOLISH).render(f, rows[8], &mut cs);
-
-    // AI 撤去判断 — CPU が最も無駄な建物を 1 件選んで撤去。
-    // 候補がある時はラベルに「(✓)」、無い時は「(なし)」を出して
-    // 押下前に「これ押すと何かが起きるか」が予想できるようにする。
-    let ai_target = logic::auto_demolish_target(state);
-    let (ai_label, ai_color) = match ai_target {
-        Some((tx, ty, _)) => {
-            let cost = logic::demolish_cost(tx, ty);
-            let affordable = state.cash >= cost;
-            let color = if affordable {
-                Color::LightMagenta
-            } else {
-                Color::DarkGray
-            };
-            (
-                format!("[X] 🤖 AI 撤去判断 ({},{}) -${}", tx, ty, cost),
-                color,
-            )
-        }
-        None => ("[X] 🤖 AI 撤去判断 (候補なし)".to_string(), Color::DarkGray),
-    };
-    let p = Paragraph::new(Span::styled(ai_label, Style::default().fg(ai_color)));
-    Clickable::new(p, ACT_AUTO_DEMOLISH).render(f, rows[9], &mut cs);
+    // 自動運用ステータス — 戦略に応じた撤去 / 開拓の周期を表示。
+    // 旧 `[O]` `[D]` `[X]` ボタンは廃止され、すべて tick 駆動で自動発火する。
+    let policy = logic::automation_policy(state.strategy);
+    let outpost_txt = policy
+        .outpost_dispatch_period_ticks
+        .map(|p| format!("拡張{}s", p / 10))
+        .unwrap_or_else(|| "拡張なし".to_string());
+    let demolish_txt = policy
+        .auto_demolish_period_ticks
+        .map(|p| format!("撤去{}s", p / 10))
+        .unwrap_or_else(|| "撤去なし".to_string());
+    let auto_label = format!(
+        " 🤖 自動運用: {} / {} / 予備${}",
+        outpost_txt, demolish_txt, policy.min_cash_reserve
+    );
+    f.render_widget(
+        Paragraph::new(Span::styled(
+            auto_label,
+            Style::default().fg(Color::DarkGray),
+        )),
+        rows[7],
+    );
 }
 
 fn button_row(
@@ -1857,6 +1939,36 @@ mod tests {
                 render(&city, f, Rect::new(0, 0, 100, 30), &cs);
             })
             .unwrap();
+    }
+
+    /// `worker_status_lines`: 建設中タイルが行に変換され、待機中ワーカーが
+    /// 残数分追加される (= ワーカー数 = 表示行数 - ヘッダ 1)。
+    #[test]
+    fn worker_status_lines_lists_active_and_idle() {
+        let mut city = City::new();
+        city.workers = 3;
+        // 1 ワーカーを Construction に、1 ワーカーを Clearing に割り当てる。
+        city.set_tile(0, 0, Tile::Construction { target: Building::House, ticks_remaining: 50 });
+        city.set_tile(1, 0, Tile::Clearing { ticks_remaining: 30 });
+
+        let lines = worker_status_lines(&city);
+        // 1 (header) + 2 (busy) + 1 (idle) = 4 行
+        assert_eq!(lines.len(), 4);
+        // 行 1 がヘッダ ("WORKERS" を含む)
+        let header_text: String = lines[0].iter().map(|s| s.content.as_ref()).collect::<Vec<&str>>().join("");
+        assert!(header_text.contains("WORKERS"), "header missing: {:?}", header_text);
+        // 最後の行が "待機中"
+        let last_text: String = lines[3].iter().map(|s| s.content.as_ref()).collect::<Vec<&str>>().join("");
+        assert!(last_text.contains("待機中"), "last line should be idle: {:?}", last_text);
+    }
+
+    /// すべてアイドルなら、ヘッダ + ワーカー数行が出る。
+    #[test]
+    fn worker_status_lines_all_idle() {
+        let mut city = City::new();
+        city.workers = 4;
+        let lines = worker_status_lines(&city);
+        assert_eq!(lines.len(), 1 + 4); // header + 4 idle
     }
 
     #[test]

@@ -29,10 +29,16 @@ use super::state::{
 use super::terrain::{Terrain, TerrainLayer};
 
 /// セーブデータのフォーマットバージョン。フィールド追加で +1。
+///
+/// バージョン履歴:
+///   v1: 初期 (cookie/save と同じ schema 形式)
+///   v2: `last_outpost_dispatch_tick` / `last_auto_demolish_tick` を追加
+///       (Phase A 撤去・開拓の自動化クールダウン)
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 1;
+const SAVE_VERSION: u32 = 2;
 
 /// 互換性を維持できる最小バージョン。破壊的変更で +1。
+/// v1 → v2 はフィールド追加だけなので `serde(default)` で透過的にロード可能。
 #[cfg(any(target_arch = "wasm32", test))]
 const MIN_COMPATIBLE_VERSION: u32 = 1;
 
@@ -324,47 +330,129 @@ struct GameSave {
 
     /// イベントログ (新→旧)。`MAX_EVENTS` で切られている。
     events: Vec<String>,
+
+    /// v2 以降: 自動運用クールダウン用 tick。
+    /// 旧データには無いので `serde(default)` の 0 を使う (= 「未着手」扱い、
+    /// ロード後最初の tick で発火可能になる)。
+    last_outpost_dispatch_tick: u64,
+    last_auto_demolish_tick: u64,
+    /// v2 以降: 累計 Outpost 派遣数 (戦略の挙動を測る統計)。
+    /// 旧データは 0 始まり (未計測扱い)。
+    outposts_dispatched_total: u64,
 }
 
+/// `City` の全フィールドを「永続化対象 / 一時状態 (transient)」の 2 群に
+/// 明示的に振り分けて取り出す。**`..` を使わず destructure** することで、
+/// `City` にフィールドが追加された時に compile error で気付ける = 管理漏れ
+/// 防止の中核。新フィールドを足したら必ずどちらかの群に分類すること。
 #[cfg(any(target_arch = "wasm32", test))]
 fn extract_save(state: &City) -> SaveData {
+    // ── 重要: ここで `..` を使わない ───────────────────────────────
+    // `City` に新しいフィールドが追加されると compile error になる。
+    // 永続化するなら `GameSave` への書き込みを足す。一時状態 (フラッシュ
+    // タイマ等) なら `_` バインドして無視する旨をコメントで残す。
+    let City {
+        // ── 永続化対象 ─────────────────────────────────────────
+        ref grid,
+        ref terrain,
+        world_seed,
+        cash,
+        tick,
+        ai_tier,
+        strategy,
+        panel_tab,
+        last_observed_tier,
+        workers,
+        rng_state,
+        buildings_started,
+        buildings_finished,
+        cash_earned_total,
+        cash_spent_total,
+        ref events,
+        last_outpost_dispatch_tick,
+        last_auto_demolish_tick,
+        outposts_dispatched_total,
+        // ── 一時状態 (再ロード後はリセットでよい UI / フラッシュタイマ) ──
+        // ティア進化バナーフラッシュ。
+        tier_flash_until: _,
+        // 完成セルフラッシュ (per-cell)。
+        completion_flash_until: _,
+        // 給料セルフラッシュ (per-cell)。
+        payout_flash_until: _,
+        // 直近の収入額 (status の "+$X" 演出用)。
+        last_payout_amount: _,
+        // 直近の収入が発生した tick。
+        last_payout_tick: _,
+    } = state;
+
     let mut tiles = Vec::with_capacity(GRID_W * GRID_H);
     let mut terrain_buf = Vec::with_capacity(GRID_W * GRID_H);
     for y in 0..GRID_H {
         for x in 0..GRID_W {
-            tiles.push(tile_to_save(state.tile(x, y)));
-            terrain_buf.push(terrain_to_u8(state.terrain[y][x]));
+            tiles.push(tile_to_save(&grid[y][x]));
+            terrain_buf.push(terrain_to_u8(terrain[y][x]));
         }
     }
 
     SaveData {
         version: SAVE_VERSION,
         game: GameSave {
-            world_seed: state.world_seed,
-            cash: state.cash,
-            tick: state.tick,
+            world_seed: *world_seed,
+            cash: *cash,
+            tick: *tick,
             tiles,
             terrain: terrain_buf,
-            ai_tier: ai_tier_to_u8(state.ai_tier),
-            strategy: strategy_to_u8(state.strategy),
-            panel_tab: panel_to_u8(state.panel_tab),
-            last_observed_tier: city_tier_to_u8(state.last_observed_tier),
-            workers: state.workers,
-            rng_state: state.rng_state,
-            buildings_started: state.buildings_started,
-            buildings_finished: state.buildings_finished,
-            cash_earned_total: state.cash_earned_total,
-            cash_spent_total: state.cash_spent_total,
-            events: state.events.clone(),
+            ai_tier: ai_tier_to_u8(*ai_tier),
+            strategy: strategy_to_u8(*strategy),
+            panel_tab: panel_to_u8(*panel_tab),
+            last_observed_tier: city_tier_to_u8(*last_observed_tier),
+            workers: *workers,
+            rng_state: *rng_state,
+            buildings_started: *buildings_started,
+            buildings_finished: *buildings_finished,
+            cash_earned_total: *cash_earned_total,
+            cash_spent_total: *cash_spent_total,
+            events: events.clone(),
+            last_outpost_dispatch_tick: *last_outpost_dispatch_tick,
+            last_auto_demolish_tick: *last_auto_demolish_tick,
+            outposts_dispatched_total: *outposts_dispatched_total,
         },
     }
 }
 
+/// `GameSave` を `City` に書き戻す。
+///
+/// `extract_save` と対称に「永続化対象」と「一時状態」を明示し、新フィールド
+/// 追加時は両方の関数を更新するルールを徹底する。`GameSave` の destructure
+/// も `..` 無しで行うため、`GameSave` にフィールドを足したらここで未バインド
+/// になり compile error で気付ける。
 #[cfg(any(target_arch = "wasm32", test))]
 fn apply_save(state: &mut City, save: &GameSave) {
-    state.world_seed = save.world_seed;
-    state.cash = save.cash;
-    state.tick = save.tick;
+    let GameSave {
+        world_seed,
+        cash,
+        tick,
+        tiles,
+        terrain,
+        ai_tier,
+        strategy,
+        panel_tab,
+        last_observed_tier,
+        workers,
+        rng_state,
+        buildings_started,
+        buildings_finished,
+        cash_earned_total,
+        cash_spent_total,
+        events,
+        last_outpost_dispatch_tick,
+        last_auto_demolish_tick,
+        outposts_dispatched_total,
+    } = save;
+
+    state.world_seed = *world_seed;
+    state.cash = *cash;
+    state.tick = *tick;
 
     // タイルと地形は (GRID_W * GRID_H) 長を期待する。長さが足りなければ
     // 残りはデフォルト (Empty / Plain) のままにする — 破損データへの安全策。
@@ -372,31 +460,32 @@ fn apply_save(state: &mut City, save: &GameSave) {
     for i in 0..expected {
         let y = i / GRID_W;
         let x = i % GRID_W;
-        if let Some(t) = save.tiles.get(i) {
+        if let Some(t) = tiles.get(i) {
             state.grid[y][x] = tile_from_save(*t);
         }
-        if let Some(tr) = save.terrain.get(i) {
+        if let Some(tr) = terrain.get(i) {
             state.terrain[y][x] = terrain_from_u8(*tr);
         }
     }
 
-    state.ai_tier = ai_tier_from_u8(save.ai_tier);
-    state.strategy = strategy_from_u8(save.strategy);
-    state.panel_tab = panel_from_u8(save.panel_tab);
-    state.last_observed_tier = city_tier_from_u8(save.last_observed_tier);
+    state.ai_tier = ai_tier_from_u8(*ai_tier);
+    state.strategy = strategy_from_u8(*strategy);
+    state.panel_tab = panel_from_u8(*panel_tab);
+    state.last_observed_tier = city_tier_from_u8(*last_observed_tier);
     // workers は 1..=MAX_WORKERS にクランプ (0 や巨大値はゲームを壊す)。
-    state.workers = save
-        .workers
-        .clamp(1, super::state::MAX_WORKERS);
-    state.rng_state = save.rng_state;
+    state.workers = (*workers).clamp(1, super::state::MAX_WORKERS);
+    state.rng_state = *rng_state;
 
-    state.buildings_started = save.buildings_started;
-    state.buildings_finished = save.buildings_finished;
-    state.cash_earned_total = save.cash_earned_total;
-    state.cash_spent_total = save.cash_spent_total;
+    state.buildings_started = *buildings_started;
+    state.buildings_finished = *buildings_finished;
+    state.cash_earned_total = *cash_earned_total;
+    state.cash_spent_total = *cash_spent_total;
+    state.last_outpost_dispatch_tick = *last_outpost_dispatch_tick;
+    state.last_auto_demolish_tick = *last_auto_demolish_tick;
+    state.outposts_dispatched_total = *outposts_dispatched_total;
 
     // イベントログは長さ上限を切る。
-    let mut ev = save.events.clone();
+    let mut ev = events.clone();
     if ev.len() > MAX_EVENTS {
         ev.truncate(MAX_EVENTS);
     }
@@ -526,6 +615,10 @@ mod tests {
         original.buildings_finished = 47;
         original.cash_earned_total = 99999;
         original.cash_spent_total = 87654;
+        // 自動運用クールダウン (v2) と Outpost 派遣カウンタも復元される。
+        original.last_outpost_dispatch_tick = 800;
+        original.last_auto_demolish_tick = 600;
+        original.outposts_dispatched_total = 7;
         original.set_tile(0, 0, Tile::Built(Building::House));
         original.set_tile(1, 0, Tile::Built(Building::Workshop));
         original.set_tile(2, 0, Tile::Built(Building::Shop));
@@ -562,6 +655,9 @@ mod tests {
         assert_eq!(restored.cash_earned_total, 99999);
         assert_eq!(restored.cash_spent_total, 87654);
         assert_eq!(restored.world_seed, 0xDEADBEEF);
+        assert_eq!(restored.last_outpost_dispatch_tick, 800);
+        assert_eq!(restored.last_auto_demolish_tick, 600);
+        assert_eq!(restored.outposts_dispatched_total, 7);
 
         assert!(matches!(restored.tile(0, 0), Tile::Built(Building::House)));
         assert!(matches!(
