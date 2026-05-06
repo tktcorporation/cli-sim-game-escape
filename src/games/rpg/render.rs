@@ -380,7 +380,7 @@ fn render_town_content(
 
     let choices = town_choices(state);
     for (i, choice) in choices.iter().enumerate() {
-        push_choice(&mut cl, i, &choice.label);
+        push_choice_marked(&mut cl, i, &choice.label, i == state.cursor);
     }
 
     push_overlay_hints(&mut cl);
@@ -781,24 +781,27 @@ fn render_event_popup(
     )));
 
     for (i, choice) in event.choices.iter().enumerate() {
-        let marker = if i == 0 {
-            "[A]"
-        } else if i == event.choices.len() - 1 && event.choices.len() > 1 {
-            "[B]"
+        let selected = i == state.cursor;
+        // Cursor marker first so the player sees what A will pick. The
+        // older [A]/[B] hardcoded markers were misleading after the cursor
+        // unification — A now confirms whichever row is highlighted.
+        let prefix = if selected { "▶" } else { " " };
+        let label_style = if selected {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
         } else {
-            "   "
+            Style::default().fg(Color::White)
         };
         cl.push_clickable(
             Line::from(vec![
                 Span::styled(
-                    format!(" {} ", marker),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    format!(" {} ", prefix),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!("{}. ", i + 1),
                     Style::default().fg(Color::DarkGray),
                 ),
-                Span::styled(choice.label.clone(), Style::default().fg(Color::White)),
+                Span::styled(choice.label.clone(), label_style),
             ]),
             EVENT_CHOICE_BASE + i as u16,
         );
@@ -839,13 +842,32 @@ fn render_log(state: &RpgState, f: &mut Frame, area: Rect, borders: Borders) {
 // ── Choice Helpers ──────────────────────────────────────────
 
 fn push_choice(cl: &mut ClickableList, index: usize, label: &str) {
+    push_choice_marked(cl, index, label, false);
+}
+
+/// Like `push_choice`, but renders an arrow + bold yellow when `selected`,
+/// indicating the cursor is on this row. Used by every menu that responds
+/// to arrow + A button navigation.
+fn push_choice_marked(cl: &mut ClickableList, index: usize, label: &str, selected: bool) {
+    let (prefix, label_style) = if selected {
+        (
+            "▶",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )
+    } else {
+        (" ", Style::default().fg(Color::White))
+    };
     cl.push_clickable(
         Line::from(vec![
             Span::styled(
-                format!(" {}. ", index + 1),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                format!(" {} ", prefix),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(label.to_string(), Style::default().fg(Color::White)),
+            Span::styled(
+                format!("{}. ", index + 1),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(label.to_string(), label_style),
         ]),
         CHOICE_BASE + index as u16,
     );
@@ -944,15 +966,30 @@ fn render_inventory(
                 format!("{}{} x{}", tag, display, item.count)
             };
             if i < 9 {
+                let selected = i == state.cursor;
+                let prefix = if selected { "▶" } else { " " };
+                // Selected and affixed items both deserve yellow; folded
+                // into a single condition (clippy complains about the
+                // duplicate arm otherwise).
+                let label_color = if selected || item.affix.is_some() {
+                    Color::Yellow
+                } else {
+                    Color::White
+                };
+                let label_mod = if selected { Modifier::BOLD } else { Modifier::empty() };
                 cl.push_clickable(
                     Line::from(vec![
                         Span::styled(
-                            format!(" {}. ", i + 1),
+                            format!(" {} ", prefix),
+                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("{}. ", i + 1),
                             Style::default().fg(Color::Cyan),
                         ),
                         Span::styled(
                             label,
-                            Style::default().fg(if item.affix.is_some() { Color::Yellow } else { Color::White }),
+                            Style::default().fg(label_color).add_modifier(label_mod),
                         ),
                         Span::styled(
                             format!(" - {}", iinfo.description),
@@ -1152,12 +1189,24 @@ fn render_shop(
     for (i, &(kind, _)) in shop.iter().enumerate() {
         let iinfo = item_info(kind);
         let affordable = state.gold >= iinfo.buy_price;
-        let color = if affordable { Color::White } else { Color::DarkGray };
+        let selected = i == state.cursor;
+        let color = if !affordable {
+            Color::DarkGray
+        } else if selected {
+            Color::Yellow
+        } else {
+            Color::White
+        };
+        let prefix = if selected { "▶" } else { " " };
         if i < 9 {
             cl.push_clickable(
                 Line::from(vec![
                     Span::styled(
-                        format!(" {}. ", i + 1),
+                        format!(" {} ", prefix),
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{}. ", i + 1),
                         Style::default().fg(Color::DarkGray),
                     ),
                     Span::styled(
@@ -1225,20 +1274,31 @@ fn render_skill_menu(
                 None => "  ",
             };
             let label = format!("{}{} (MP:{}) - {}", elem_icon, info.name, info.mp_cost, info.description);
+            let selected = i == state.cursor;
+            let prefix = if selected { "▶" } else { " " };
             if can_use {
+                let label_style = if selected {
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::White)
+                };
                 cl.push_clickable(
                     Line::from(vec![
                         Span::styled(
-                            format!(" {}. ", i + 1),
+                            format!(" {} ", prefix),
+                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("{}. ", i + 1),
                             Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(label, Style::default().fg(Color::White)),
+                        Span::styled(label, label_style),
                     ]),
                     SKILL_BASE + i as u16,
                 );
             } else {
                 cl.push(Line::from(Span::styled(
-                    format!(" {}. {}", i + 1, label),
+                    format!("   {}. {}", i + 1, label),
                     Style::default().fg(Color::DarkGray),
                 )));
             }
@@ -1298,13 +1358,24 @@ fn render_quest_board(
     } else {
         let quests = available_quests(state);
         for (i, q) in quests.iter().enumerate() {
+            let selected = i == state.cursor;
+            let prefix = if selected { "▶" } else { " " };
+            let label_style = if selected {
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
             cl.push_clickable(
                 Line::from(vec![
                     Span::styled(
-                        format!(" {}. ", i + 1),
+                        format!(" {} ", prefix),
+                        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        format!("{}. ", i + 1),
                         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(q.description(), Style::default().fg(Color::White)),
+                    Span::styled(q.description(), label_style),
                 ]),
                 QUEST_ACCEPT_BASE + i as u16,
             );

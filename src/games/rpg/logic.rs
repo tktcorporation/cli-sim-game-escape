@@ -17,6 +17,78 @@ use super::state::{
 
 pub fn tick(_state: &mut RpgState, _delta_ticks: u32) {}
 
+// ── Cursor navigation (Issue: arrow + A/B unification) ───────
+//
+// All choice-based menus (intro / town / event popup / overlays) share a
+// single `state.cursor` index. Arrow keys move it; A confirms; B cancels.
+// Number keys still work as direct shortcuts for backward compat.
+//
+// The owner of "how many choices does THIS menu have" is `cursor_count`;
+// every handler that needs cursor selection asks here. Keeping the source
+// of truth in one place avoids drift between render highlights and key
+// handlers.
+
+/// Count of selectable items in the current scene/overlay/event popup.
+/// Returns 0 when no cursor navigation is active (e.g. dungeon explore
+/// without a popup — arrow keys move the player there).
+pub fn cursor_count(state: &RpgState) -> usize {
+    match state.overlay {
+        Some(Overlay::Inventory) => state.inventory.len().min(9),
+        Some(Overlay::Shop) => shop_items(state.max_floor_reached).len().min(9),
+        Some(Overlay::SkillMenu) => available_skills(state.level).len(),
+        Some(Overlay::QuestBoard) => {
+            if state.active_quest.is_some() {
+                1 // abandon button
+            } else {
+                available_quests(state).len()
+            }
+        }
+        Some(Overlay::PrayMenu) => {
+            if state.prayed_this_run {
+                0
+            } else {
+                1
+            }
+        }
+        Some(Overlay::Status) => 0,
+        None => match state.scene {
+            Scene::Town => town_choices(state).len(),
+            Scene::Intro(_) => 1,
+            Scene::DungeonExplore => state
+                .active_event
+                .as_ref()
+                .map(|e| e.choices.len())
+                .unwrap_or(0),
+            Scene::GameClear => 1,
+        },
+    }
+}
+
+/// Move the cursor by `delta` (-1 / +1) within the current menu's range.
+/// Wraps around for a more natural feel on small lists.
+pub fn cursor_move(state: &mut RpgState, delta: i32) {
+    let n = cursor_count(state);
+    if n == 0 {
+        state.cursor = 0;
+        return;
+    }
+    let cur = state.cursor.min(n - 1) as i32;
+    let next = (cur + delta).rem_euclid(n as i32);
+    state.cursor = next as usize;
+}
+
+/// Clamp cursor into valid range without changing it otherwise — useful
+/// to call once per render so a stale cursor (from a previous menu) never
+/// points past the current item count.
+pub fn cursor_clamp(state: &mut RpgState) {
+    let n = cursor_count(state);
+    if n == 0 {
+        state.cursor = 0;
+    } else if state.cursor >= n {
+        state.cursor = n - 1;
+    }
+}
+
 // ── RNG ──────────────────────────────────────────────────────
 
 fn next_rng(seed: u64) -> u64 {
@@ -129,15 +201,15 @@ pub fn execute_town_choice(state: &mut RpgState, index: usize) -> bool {
             true
         }
         1 => {
-            state.overlay = Some(Overlay::Shop);
+            state.open_overlay(Overlay::Shop);
             true
         }
         2 => {
-            state.overlay = Some(Overlay::QuestBoard);
+            state.open_overlay(Overlay::QuestBoard);
             true
         }
         3 => {
-            state.overlay = Some(Overlay::PrayMenu);
+            state.open_overlay(Overlay::PrayMenu);
             true
         }
         4 => {
@@ -223,7 +295,7 @@ pub fn accept_quest(state: &mut RpgState, idx: usize) -> bool {
     let q = qs[idx].clone();
     state.add_log(&format!("依頼を受けた: {}", q.description()));
     state.active_quest = Some(q);
-    state.overlay = None;
+    state.close_overlay();
     update_town_text(state);
     true
 }
@@ -259,7 +331,7 @@ pub fn pray(state: &mut RpgState) -> bool {
     state.faith = state.faith.saturating_add(1);
     let roll = rng_range(state, 100);
     let blessing_thresh = 40 + state.faith.min(40);
-    state.overlay = None;
+    state.close_overlay();
 
     if roll < 10 {
         // Curse (low chance)
@@ -506,6 +578,9 @@ fn after_move(state: &mut RpgState, nx: usize, ny: usize) {
             // Stay in DungeonExplore — the event is rendered as a popup
             // overlay on the same scene (see issue #89).
             state.active_event = Some(event);
+            // Reset cursor so the popup starts highlighting choice 0
+            // (avoids a stale index from a previously visited menu).
+            state.cursor = 0;
         }
     }
 }
@@ -1117,7 +1192,16 @@ pub fn resolve_event_choice(state: &mut RpgState, choice_index: usize) -> bool {
 
     let outcome = resolve_event(action, cell_type, floor, state.level, &mut state.rng_seed);
 
-    apply_event_outcome(state, &outcome);
+    let succeeded = apply_event_outcome(state, &outcome);
+
+    // Codex P1 (#95): if the outcome bailed out (insufficient gold for a
+    // purchase, or the offering item wasn't held), don't mark the event tile
+    // as resolved and don't close the popup — the player should be able to
+    // pick a different choice or walk away. Otherwise we'd "consume" the
+    // peddler / idol after a failed attempt and leave contradictory state.
+    if !succeeded {
+        return false;
+    }
 
     if let Some(map) = &mut state.dungeon {
         map.grid[map.player_y][map.player_x].event_done = true;
@@ -1140,35 +1224,48 @@ pub fn resolve_event_choice(state: &mut RpgState, choice_index: usize) -> bool {
     true
 }
 
-fn apply_event_outcome(state: &mut RpgState, outcome: &EventOutcome) {
-    // require_consume gates the rest of the outcome. If the player doesn't
-    // have it, replace with a "no offering" message and bail out before
-    // applying gold / hp / etc.
-    if let Some(needed) = outcome.require_consume {
+/// Apply the resolved outcome to player state.
+///
+/// Returns `true` on success, `false` when a precondition (gold cost,
+/// require_consume) wasn't met. Callers must check the return value to
+/// avoid showing "you bought it" text after a failed purchase (Codex P1
+/// review on PR #95).
+fn apply_event_outcome(state: &mut RpgState, outcome: &EventOutcome) -> bool {
+    // Validate require_consume + gold cost up-front, before mutating
+    // anything. This way a failed precondition leaves state untouched and
+    // the event tile remains usable.
+    let consume_idx = if let Some(needed) = outcome.require_consume {
         let idx = state
             .inventory
             .iter()
             .position(|i| i.kind == needed && i.affix.is_none());
         match idx {
-            Some(i) => {
-                consume_inventory_slot(state, i);
-            }
+            Some(i) => Some(i),
             None => {
                 state.add_log("供える物がない…");
-                return;
+                return false;
             }
         }
+    } else {
+        None
+    };
+    if outcome.gold < 0 {
+        let cost = (-outcome.gold) as u32;
+        if state.gold < cost {
+            state.add_log("お金が足りない…");
+            return false;
+        }
+    }
+
+    // Preconditions OK — mutate.
+    if let Some(i) = consume_idx {
+        consume_inventory_slot(state, i);
     }
     if outcome.gold > 0 {
         state.gold += outcome.gold as u32;
         state.run_gold_earned += outcome.gold as u32;
     } else if outcome.gold < 0 {
-        let cost = (-outcome.gold) as u32;
-        if state.gold < cost {
-            state.add_log("お金が足りない…");
-            return;
-        }
-        state.gold -= cost;
+        state.gold -= (-outcome.gold) as u32;
     }
     if outcome.hp_change == 9999 {
         let heal = state.max_hp / 4;
@@ -1238,6 +1335,7 @@ fn apply_event_outcome(state: &mut RpgState, outcome: &EventOutcome) {
     if state.hp == 0 {
         process_dungeon_death(state);
     }
+    true
 }
 
 fn spawn_hostile_near_player(state: &mut RpgState, kind: EnemyKind) {
@@ -1246,10 +1344,13 @@ fn spawn_hostile_near_player(state: &mut RpgState, kind: EnemyKind) {
         None => return,
     };
     let info = enemy_info(kind);
-    // Find a free adjacent tile; fall back to player's tile if none.
+    // Codex P2 (#95): only spawn when a free adjacent tile exists. Falling
+    // back to the player's tile created same-cell overlap which the move /
+    // attack code can't reason about (combat targets neighbors, not own
+    // cell), leading to an unattackable monster on top of the player.
     let dirs = [Facing::North, Facing::East, Facing::South, Facing::West];
     let map = state.dungeon.as_ref().unwrap();
-    let mut spot = (px, py);
+    let mut spot: Option<(usize, usize)> = None;
     for d in &dirs {
         let nx = px as i32 + d.dx();
         let ny = py as i32 + d.dy();
@@ -1259,14 +1360,20 @@ fn spawn_hostile_near_player(state: &mut RpgState, kind: EnemyKind) {
         if map.monsters.iter().any(|m| m.hp > 0 && m.x == ux && m.y == uy) {
             continue;
         }
-        spot = (ux, uy);
+        spot = Some((ux, uy));
         break;
     }
+    let Some((sx, sy)) = spot else {
+        // No free adjacent tile — skip the spawn rather than overlap the
+        // player. The flavor text already played; just log the near-miss.
+        state.add_log("…が、すぐには現れなかった。");
+        return;
+    };
     let map = state.dungeon.as_mut().unwrap();
     map.monsters.push(Monster {
         kind,
-        x: spot.0,
-        y: spot.1,
+        x: sx,
+        y: sy,
         hp: info.max_hp,
         max_hp: info.max_hp,
         awake: true,
@@ -1373,7 +1480,7 @@ pub fn use_skill(state: &mut RpgState, skill_index: usize) -> bool {
         }
     }
 
-    state.overlay = None;
+    state.close_overlay();
     on_player_action(state);
     true
 }

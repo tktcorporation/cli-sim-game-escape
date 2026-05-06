@@ -34,6 +34,29 @@ pub const MENU_SCROLL_UP: u16 = 10;
 pub const MENU_SCROLL_DOWN: u16 = 11;
 pub const BACK_TO_MENU: u16 = 65535;
 
+/// Last valid index of the main menu cards (8 games + settings → 0..=8).
+const MENU_LAST_INDEX: u8 = 8;
+
+/// Cursor → menu action, used for the A button on the main menu.
+enum MenuPick {
+    Game(GameChoice),
+    Settings,
+}
+
+fn menu_pick_for(idx: u8) -> MenuPick {
+    match idx {
+        0 => MenuPick::Game(GameChoice::Cookie),
+        1 => MenuPick::Game(GameChoice::Factory),
+        2 => MenuPick::Game(GameChoice::Career),
+        3 => MenuPick::Game(GameChoice::Rpg),
+        4 => MenuPick::Game(GameChoice::Cafe),
+        5 => MenuPick::Game(GameChoice::Abyss),
+        6 => MenuPick::Game(GameChoice::Godfield),
+        7 => MenuPick::Game(GameChoice::Metropolis),
+        _ => MenuPick::Settings,
+    }
+}
+
 // ── Settings action IDs ─────────────────────────────────────────
 const SETTINGS_RESET_COOKIE: u16 = 10;
 const SETTINGS_RESET_CAREER: u16 = 11;
@@ -231,51 +254,69 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
     }
 
     match &mut *state {
-        AppState::Menu { scroll } => {
-            let choice = match event {
+        AppState::Menu { scroll, selected } => {
+            let direct = match event {
                 InputEvent::Key('1') | InputEvent::Click(_, MENU_SELECT_COOKIE) => {
-                    Some(GameChoice::Cookie)
+                    Some(MenuPick::Game(GameChoice::Cookie))
                 }
                 InputEvent::Key('2') | InputEvent::Click(_, MENU_SELECT_FACTORY) => {
-                    Some(GameChoice::Factory)
+                    Some(MenuPick::Game(GameChoice::Factory))
                 }
                 InputEvent::Key('3') | InputEvent::Click(_, MENU_SELECT_CAREER) => {
-                    Some(GameChoice::Career)
+                    Some(MenuPick::Game(GameChoice::Career))
                 }
                 InputEvent::Key('4') | InputEvent::Click(_, MENU_SELECT_RPG) => {
-                    Some(GameChoice::Rpg)
+                    Some(MenuPick::Game(GameChoice::Rpg))
                 }
                 InputEvent::Key('5') | InputEvent::Click(_, MENU_SELECT_CAFE) => {
-                    Some(GameChoice::Cafe)
+                    Some(MenuPick::Game(GameChoice::Cafe))
                 }
                 InputEvent::Key('6') | InputEvent::Click(_, MENU_SELECT_ABYSS) => {
-                    Some(GameChoice::Abyss)
+                    Some(MenuPick::Game(GameChoice::Abyss))
                 }
                 InputEvent::Key('7') | InputEvent::Click(_, MENU_SELECT_GODFIELD) => {
-                    Some(GameChoice::Godfield)
+                    Some(MenuPick::Game(GameChoice::Godfield))
                 }
                 InputEvent::Key('8') | InputEvent::Click(_, MENU_SELECT_METROPOLIS) => {
-                    Some(GameChoice::Metropolis)
+                    Some(MenuPick::Game(GameChoice::Metropolis))
                 }
+                InputEvent::Key('9') | InputEvent::Click(_, MENU_SELECT_SETTINGS) => {
+                    Some(MenuPick::Settings)
+                }
+                // A button (' ' / Enter via main.rs key map) confirms the
+                // currently highlighted card, so keyboard-only and tap users
+                // share the same selection model.
+                InputEvent::Key(' ') => Some(menu_pick_for(*selected)),
                 _ => None,
             };
-            if let Some(choice) = choice {
-                let game = create_game(&choice);
-                *state = AppState::Playing { game };
-            } else if matches!(
-                event,
-                InputEvent::Key('9') | InputEvent::Click(_, MENU_SELECT_SETTINGS)
-            ) {
-                *state = AppState::Settings {
-                    confirm_reset: None,
-                };
+            if let Some(pick) = direct {
+                match pick {
+                    MenuPick::Game(choice) => {
+                        let game = create_game(&choice);
+                        *state = AppState::Playing { game };
+                    }
+                    MenuPick::Settings => {
+                        *state = AppState::Settings { confirm_reset: None };
+                    }
+                }
             } else {
                 match event {
+                    // Arrow up/k: move highlight up. Auto-scroll so the
+                    // selection always stays visible (keeps the UX usable
+                    // when the menu list is taller than the viewport).
                     InputEvent::Key('k') | InputEvent::Click(_, MENU_SCROLL_UP) => {
-                        *scroll = scroll.saturating_sub(2);
+                        *selected = selected.saturating_sub(1);
+                        // 3 lines per game card → keep ~one card above
+                        let target = (*selected as u16) * 3;
+                        if *scroll > target {
+                            *scroll = target;
+                        }
                     }
                     InputEvent::Key('j') | InputEvent::Click(_, MENU_SCROLL_DOWN) => {
-                        *scroll = scroll.saturating_add(2);
+                        *selected = (*selected + 1).min(MENU_LAST_INDEX);
+                        // No upper-bound auto-scroll here — render_menu
+                        // re-clamps `scroll` against the actual viewport.
+                        *scroll = scroll.saturating_add(0);
                     }
                     _ => {}
                 }
@@ -311,7 +352,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                         *confirm_reset = Some(GameChoice::Abyss);
                     }
                     InputEvent::Key('q') | InputEvent::Click(_, BACK_TO_MENU) => {
-                        *state = AppState::Menu { scroll: 0 };
+                        *state = AppState::Menu { scroll: 0, selected: 0 };
                     }
                     _ => {}
                 }
@@ -322,7 +363,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 // Let the game handle back first (e.g., sub-screen → main screen).
                 // Only go to menu if the game didn't consume it.
                 if !game.handle_input(event) {
-                    *state = AppState::Menu { scroll: 0 };
+                    *state = AppState::Menu { scroll: 0, selected: 0 };
                 }
             } else {
                 game.handle_input(event);
@@ -347,7 +388,7 @@ fn perform_reset(game: &GameChoice) {
 fn main() -> io::Result<()> {
     console_error_panic_hook::set_once();
 
-    let app_state = Rc::new(RefCell::new(AppState::Menu { scroll: 0 }));
+    let app_state = Rc::new(RefCell::new(AppState::Menu { scroll: 0, selected: 0 }));
     let click_state = Rc::new(RefCell::new(ClickState::new()));
     let game_time = Rc::new(RefCell::new(GameTime::new(10)));
     let backend = DomBackend::new()?;
@@ -383,6 +424,12 @@ fn main() -> io::Result<()> {
                 KeyCode::Right => InputEvent::Key('l'),
                 KeyCode::Up => InputEvent::Key('k'),
                 KeyCode::Down => InputEvent::Key('j'),
+                // Enter is a synonym for the A button — confirms whatever
+                // the cursor is currently highlighting (RPG menus, main
+                // menu game selection, etc.). ' ' is the canonical char
+                // for A; mapping Enter to it lets us reuse all existing
+                // handlers without per-scene Enter wiring.
+                KeyCode::Enter => InputEvent::Key(' '),
                 _ => return,
             };
             dispatch_event(&event, &app_state);
@@ -419,8 +466,8 @@ fn main() -> io::Result<()> {
                 AppState::Playing { game } => ClickScope::Game(game.choice()),
             });
             match &mut *state {
-                AppState::Menu { scroll } => {
-                    render_menu(f, size, &click_state, scroll);
+                AppState::Menu { scroll, selected } => {
+                    render_menu(f, size, &click_state, scroll, *selected);
                 }
                 AppState::Settings { confirm_reset } => {
                     render_settings(f, size, &click_state, confirm_reset.as_ref());
@@ -458,6 +505,7 @@ fn render_menu(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
     scroll: &mut u16,
+    selected: u8,
 ) {
     let is_narrow = is_narrow_layout(area.width);
 
@@ -495,143 +543,60 @@ fn render_menu(
     .alignment(Alignment::Center);
     f.render_widget(title_widget, chunks[0]);
 
-    // Menu items — title + description rows share the same action ID
+    // Menu items — driven by a single source of truth (MENU_ENTRIES) so
+    // adding a new game is one entry edit. Each card occupies 3 visual
+    // rows: blank / title / description; sharing the action ID across
+    // title + desc lets the player tap either row.
+    type Entry = (&'static str, &'static str, u16, char);
+    const MENU_ENTRIES: &[Entry] = &[
+        ("Cookie Factory", "クッキーをクリックして増やす放置ゲーム", MENU_SELECT_COOKIE, '▶'),
+        ("Tiny Factory", "工場を作って生産ラインを最適化する放置ゲーム", MENU_SELECT_FACTORY, '▶'),
+        ("Career Simulator", "スキルを磨いて転職・投資でキャリアを築くシミュレーション", MENU_SELECT_CAREER, '▶'),
+        ("Dungeon Dive", "ダンジョンを探索して帰還するローグライト風RPG", MENU_SELECT_RPG, '▶'),
+        ("廃墟カフェ復興記", "廃墟カフェを復興するシナリオ経営SLG", MENU_SELECT_CAFE, '▶'),
+        ("深淵潜行 (Abyss Idle)", "自動戦闘で深層を目指す放置型ローグダンジョン", MENU_SELECT_ABYSS, '▶'),
+        ("神の戦場 (God Field)", "4人で戦うターン制カードバトルロイヤル", MENU_SELECT_GODFIELD, '▶'),
+        ("Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶'),
+        ("設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙'),
+    ];
+
     let mut cl = ClickableList::new();
-
-    cl.push(Line::from(""));
-    cl.push_clickable(Line::from(vec![
-        Span::styled(
-            " ▶ ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Cookie Factory", Style::default().fg(Color::White)),
-    ]), MENU_SELECT_COOKIE);
-    cl.push_clickable(Line::from(Span::styled(
-        "    クッキーをクリックして増やす放置ゲーム",
-        Style::default().fg(Color::DarkGray),
-    )), MENU_SELECT_COOKIE);
-
-    cl.push(Line::from(""));
-    cl.push_clickable(Line::from(vec![
-        Span::styled(
-            " ▶ ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Tiny Factory", Style::default().fg(Color::White)),
-    ]), MENU_SELECT_FACTORY);
-    cl.push_clickable(Line::from(Span::styled(
-        "    工場を作って生産ラインを最適化する放置ゲーム",
-        Style::default().fg(Color::DarkGray),
-    )), MENU_SELECT_FACTORY);
-
-    cl.push(Line::from(""));
-    cl.push_clickable(Line::from(vec![
-        Span::styled(
-            " ▶ ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Career Simulator", Style::default().fg(Color::White)),
-    ]), MENU_SELECT_CAREER);
-    cl.push_clickable(Line::from(Span::styled(
-        "    スキルを磨いて転職・投資でキャリアを築くシミュレーション",
-        Style::default().fg(Color::DarkGray),
-    )), MENU_SELECT_CAREER);
-
-    cl.push(Line::from(""));
-    cl.push_clickable(Line::from(vec![
-        Span::styled(
-            " ▶ ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Dungeon Dive", Style::default().fg(Color::White)),
-    ]), MENU_SELECT_RPG);
-    cl.push_clickable(Line::from(Span::styled(
-        "    ダンジョンを探索して帰還するローグライト風RPG",
-        Style::default().fg(Color::DarkGray),
-    )), MENU_SELECT_RPG);
-
-    cl.push(Line::from(""));
-    cl.push_clickable(Line::from(vec![
-        Span::styled(
-            " ▶ ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("廃墟カフェ復興記", Style::default().fg(Color::White)),
-    ]), MENU_SELECT_CAFE);
-    cl.push_clickable(Line::from(Span::styled(
-        "    廃墟カフェを復興するシナリオ経営SLG",
-        Style::default().fg(Color::DarkGray),
-    )), MENU_SELECT_CAFE);
-
-    cl.push(Line::from(""));
-    cl.push_clickable(Line::from(vec![
-        Span::styled(
-            " ▶ ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("深淵潜行 (Abyss Idle)", Style::default().fg(Color::White)),
-    ]), MENU_SELECT_ABYSS);
-    cl.push_clickable(Line::from(Span::styled(
-        "    自動戦闘で深層を目指す放置型ローグダンジョン",
-        Style::default().fg(Color::DarkGray),
-    )), MENU_SELECT_ABYSS);
-
-    cl.push(Line::from(""));
-    cl.push_clickable(Line::from(vec![
-        Span::styled(
-            " ▶ ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("神の戦場 (God Field)", Style::default().fg(Color::White)),
-    ]), MENU_SELECT_GODFIELD);
-    cl.push_clickable(Line::from(Span::styled(
-        "    4人で戦うターン制カードバトルロイヤル",
-        Style::default().fg(Color::DarkGray),
-    )), MENU_SELECT_GODFIELD);
-
-    cl.push(Line::from(""));
-    cl.push_clickable(Line::from(vec![
-        Span::styled(
-            " ▶ ",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("Idle Metropolis", Style::default().fg(Color::White)),
-    ]), MENU_SELECT_METROPOLIS);
-    cl.push_clickable(Line::from(Span::styled(
-        "    AIが街を建てるのを眺める放置シティビルダー",
-        Style::default().fg(Color::DarkGray),
-    )), MENU_SELECT_METROPOLIS);
-
-    cl.push(Line::from(""));
-    cl.push_clickable(Line::from(vec![
-        Span::styled(
-            " ⚙ ",
-            Style::default()
-                .fg(Color::Gray)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("設定", Style::default().fg(Color::Gray)),
-    ]), MENU_SELECT_SETTINGS);
-    cl.push_clickable(Line::from(Span::styled(
-        "    セーブデータの管理",
-        Style::default().fg(Color::DarkGray),
-    )), MENU_SELECT_SETTINGS);
+    for (i, (name, desc, action_id, default_marker)) in MENU_ENTRIES.iter().enumerate() {
+        let is_selected = i as u8 == selected;
+        // Highlighted card: solid yellow ▶ marker + bold yellow title.
+        // Unselected: same shape but muted, so the layout doesn't shift
+        // when the cursor moves.
+        let marker = if is_selected { '▶' } else { *default_marker };
+        let marker_style = if is_selected {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else if *default_marker == '⚙' {
+            Style::default().fg(Color::Gray).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let title_style = if is_selected {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else if *default_marker == '⚙' {
+            Style::default().fg(Color::Gray)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        cl.push(Line::from(""));
+        cl.push_clickable(
+            Line::from(vec![
+                Span::styled(format!(" {} ", marker), marker_style),
+                Span::styled(*name, title_style),
+            ]),
+            *action_id,
+        );
+        cl.push_clickable(
+            Line::from(Span::styled(
+                format!("    {}", desc),
+                Style::default().fg(Color::DarkGray),
+            )),
+            *action_id,
+        );
+    }
 
     let menu_block = Block::default()
         .borders(borders)
@@ -644,6 +609,20 @@ fn render_menu(
     let total_lines = cl.len() as u16;
     let visible_rows = inner.height;
     let max_scroll = total_lines.saturating_sub(visible_rows);
+    if *scroll > max_scroll {
+        *scroll = max_scroll;
+    }
+
+    // Auto-scroll so the highlighted card stays visible. Each card spans
+    // 3 rows (blank / title / desc), with the title at row 3*selected + 1.
+    // We aim to keep the title row inside [scroll, scroll + visible_rows).
+    let card_top = (selected as u16) * 3;
+    let card_bottom = card_top + 3;
+    if card_top < *scroll {
+        *scroll = card_top;
+    } else if visible_rows > 0 && card_bottom > *scroll + visible_rows {
+        *scroll = card_bottom.saturating_sub(visible_rows);
+    }
     if *scroll > max_scroll {
         *scroll = max_scroll;
     }

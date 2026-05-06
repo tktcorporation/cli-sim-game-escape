@@ -876,11 +876,31 @@ pub struct RpgState {
 
     /// Counter that increments on each player action (turn-based).
     pub turn_count: u64,
+
+    /// Cursor index for the currently visible menu/overlay/event popup.
+    /// Arrow keys move it; A button confirms the cursor's choice.
+    /// Reset to 0 on every scene/overlay/event transition so the cursor
+    /// never points past the new menu's choice list.
+    pub cursor: usize,
 }
 
 pub const SATIETY_MAX_DEFAULT: u32 = 1000;
 
 impl RpgState {
+    /// Open an overlay and reset the cursor so it points at the first item
+    /// of the new menu (not a stale index from the previous one).
+    pub fn open_overlay(&mut self, overlay: Overlay) {
+        self.overlay = Some(overlay);
+        self.cursor = 0;
+    }
+
+    /// Close the active overlay and reset the cursor for whatever scene
+    /// menu is now visible.
+    pub fn close_overlay(&mut self) {
+        self.overlay = None;
+        self.cursor = 0;
+    }
+
     pub fn new() -> Self {
         let stats = level_stats(1);
         Self {
@@ -921,6 +941,7 @@ impl RpgState {
             pet: None,
             buffs: PlayerBuffs::default(),
             turn_count: 0,
+            cursor: 0,
         }
     }
 

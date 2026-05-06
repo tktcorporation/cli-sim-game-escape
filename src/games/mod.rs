@@ -53,6 +53,9 @@ pub enum AppState {
         /// Vertical scroll offset (in visual rows) for the game list,
         /// so it stays usable when more games exist than fit on screen.
         scroll: u16,
+        /// 0-based index of the currently highlighted game card.
+        /// Arrow keys move it; Enter/Space (= A button) launches.
+        selected: u8,
     },
     /// Showing settings screen (data reset).
     /// `confirm_reset` is `Some(game)` when a confirmation dialog is shown.
