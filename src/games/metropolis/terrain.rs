@@ -35,6 +35,31 @@ impl Terrain {
     pub fn buildable(self) -> bool {
         !matches!(self, Terrain::Water)
     }
+
+    /// この地形は着工前に整地が必要か。Plain は不要、Forest/Wasteland は要整地、
+    /// Water は buildable=false なので整地以前の問題。
+    pub fn needs_clearing(self) -> bool {
+        matches!(self, Terrain::Forest | Terrain::Wasteland)
+    }
+
+    /// 整地に必要な tick 数。Wasteland (荒地) は短く、Forest (伐採) は長め。
+    /// `0` = 整地不要 (既に Plain)。
+    pub fn clearing_ticks(self) -> u32 {
+        match self {
+            Terrain::Wasteland => 30,    // 3 sec — 表土を均すだけ
+            Terrain::Forest => 60,       // 6 sec — 木を切り倒す
+            Terrain::Plain | Terrain::Water => 0,
+        }
+    }
+
+    /// 整地コスト (cash)。Wasteland は安く、Forest は高い (人手がかかる)。
+    pub fn clearing_cost(self) -> i64 {
+        match self {
+            Terrain::Wasteland => 5,
+            Terrain::Forest => 15,
+            Terrain::Plain | Terrain::Water => 0,
+        }
+    }
 }
 
 /// 地形レイヤー。`generate(seed)` で初期化。

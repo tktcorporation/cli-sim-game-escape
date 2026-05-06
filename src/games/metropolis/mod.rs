@@ -40,6 +40,9 @@ pub const ACT_STRATEGY_INCOME: u16 = 2;
 pub const ACT_STRATEGY_TECH: u16 = 3;
 pub const ACT_HIRE_WORKER: u16 = 4;
 pub const ACT_UPGRADE_AI: u16 = 5;
+/// Eco 戦略 (建設 -10% / 収入 +5% / Forest を切らない)。
+/// 既存 ID 1-5 と重複しないよう新しい番号を取得。
+pub const ACT_STRATEGY_ECO: u16 = 6;
 
 // タブ切替アクション (10-13 を予約; 戦略の隣だが衝突しない)。
 pub const ACT_TAB_STATUS: u16 = 10;
@@ -77,6 +80,7 @@ impl Game for MetropolisGame {
                 'g' | 'G' => ACT_STRATEGY_GROWTH,
                 'i' | 'I' => ACT_STRATEGY_INCOME,
                 't' | 'T' => ACT_STRATEGY_TECH,
+                'e' | 'E' => ACT_STRATEGY_ECO,
                 'w' | 'W' => ACT_HIRE_WORKER,
                 'u' | 'U' => ACT_UPGRADE_AI,
                 '1' => ACT_TAB_STATUS,
@@ -98,6 +102,10 @@ impl Game for MetropolisGame {
             }
             ACT_STRATEGY_TECH => {
                 set_strategy(&mut self.state, Strategy::Tech, "⚙");
+                true
+            }
+            ACT_STRATEGY_ECO => {
+                set_strategy(&mut self.state, Strategy::Eco, "🌳");
                 true
             }
             ACT_HIRE_WORKER => logic::hire_worker(&mut self.state),

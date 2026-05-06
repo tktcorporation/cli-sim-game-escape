@@ -19,6 +19,10 @@ pub const MAX_WORKERS: u32 = 8;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tile {
     Empty,
+    /// 整地中。Wasteland / Forest の地形を Plain 化する工程。
+    /// 完了すると下層の `terrain` が Plain に書き換わり、再び Empty タイルに戻る。
+    /// 続けて何を建てるかは AI が次の tick で決める設計 (= 建物自由度を保つ)。
+    Clearing { ticks_remaining: u32 },
     /// Construction in progress: target building, ticks remaining.
     Construction {
         target: Building,
@@ -162,7 +166,8 @@ impl PanelTab {
 /// Tier-1 ignores this field.
 ///
 /// `Tech` は短期収入を犠牲にして建設速度と (将来の) 研究ポイントを稼ぐ路線。
-/// `Balanced` は「中間値で意思決定が薄まる」ため削除し、3 択全てに明確な
+/// `Eco` は森を残し荒地だけ整地する「環境配慮」型 — 整地メカニクスと組み合わせ。
+/// `Balanced` は「中間値で意思決定が薄まる」ため削除し、各択に明確な
 /// トレードオフを持たせる方針 (Plan #1)。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Strategy {
@@ -170,6 +175,9 @@ pub enum Strategy {
     Income, // prefer Shops
     /// Tech: 建設速度 +20% / 収入 -20%。AI は道路を優先し展開を重視。
     Tech,
+    /// Eco: 森を切らない (Forest 整地を AI が回避)。建設速度 -10% / 収入 +5%。
+    /// 「ゆっくり丁寧に育てる」自然と共存する街づくり。
+    Eco,
 }
 
 /// CPU intelligence tier.  Higher = smarter placement decisions.

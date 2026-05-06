@@ -185,6 +185,40 @@ mod tests {
         );
     }
 
+    /// Eco 戦略は遅いがゲームを止めない: 建設 -10% / 収入 +5% で、
+    /// Forest 回避により候補が狭まるが、人口・現金は最低限伸びる。
+    /// Income に大きく劣るが、Tier 1 (Random) よりは健全に進行することを担保。
+    #[test]
+    fn eco_strategy_does_not_stall() {
+        let seed = 0xC1A5_5EED;
+        let span = 1800;
+        let cps = [1800];
+        let eco = run_with_strategy(seed, AiTier::DemandAware, Strategy::Eco, 1, span, &cps);
+        let final_snap = eco.last().unwrap();
+        eprintln!(
+            "[Eco 30min] cash=${} pop={} built={} (R{} H{} S{})",
+            final_snap.cash,
+            final_snap.population,
+            final_snap.buildings_built,
+            final_snap.roads,
+            final_snap.houses,
+            final_snap.shops,
+        );
+        // Tier 1 (Random) が同時間で 50 軒以上の家を建てて pop 250+ 行くので、
+        // Eco は最低でも pop 100+ で「動いている」状態を維持してほしい。
+        assert!(
+            final_snap.population >= 100,
+            "Eco should still grow population: got {}",
+            final_snap.population
+        );
+        // 現金も最低 $20K は溜まる (Tier 4 の Income/Tech/Growth は 70K+)。
+        assert!(
+            final_snap.cash >= 20_000,
+            "Eco should still earn cash: got ${}",
+            final_snap.cash
+        );
+    }
+
     /// Each higher Tier should produce more cash than the one below it
     /// at the same wall-clock time.  This is the *headline* reason a
     /// player would spend money on CPU upgrades.

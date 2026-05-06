@@ -35,27 +35,48 @@ fn detect_tier_advance(city: &mut City) {
     }
 }
 
-/// Decrement every Construction tile; promote to Built when finished.
+/// Decrement every Construction / Clearing tile; promote them when finished.
+///
+/// Clearing 完了時は地形を Plain に書き換え、タイルを Empty に戻す
+/// (=「整地済み」を地形レイヤーに永続化する設計)。これで撤去機能が
+/// 将来入っても、整地済みエリアは再露出しても Plain のままになる。
 fn advance_construction(city: &mut City) {
     let mut completions: Vec<(usize, usize, Building)> = Vec::new();
+    let mut clearings: Vec<(usize, usize)> = Vec::new();
     for y in 0..GRID_H {
         for x in 0..GRID_W {
             let tile = &mut city.grid[y][x];
-            if let Tile::Construction {
-                target,
-                ticks_remaining,
-            } = tile
-            {
-                if *ticks_remaining <= 1 {
-                    let kind = *target;
-                    *tile = Tile::Built(kind);
-                    city.buildings_finished += 1;
-                    completions.push((x, y, kind));
-                } else {
-                    *ticks_remaining -= 1;
+            match tile {
+                Tile::Construction {
+                    target,
+                    ticks_remaining,
+                } => {
+                    if *ticks_remaining <= 1 {
+                        let kind = *target;
+                        *tile = Tile::Built(kind);
+                        city.buildings_finished += 1;
+                        completions.push((x, y, kind));
+                    } else {
+                        *ticks_remaining -= 1;
+                    }
                 }
+                Tile::Clearing { ticks_remaining } => {
+                    if *ticks_remaining <= 1 {
+                        *tile = Tile::Empty;
+                        clearings.push((x, y));
+                    } else {
+                        *ticks_remaining -= 1;
+                    }
+                }
+                _ => {}
             }
         }
+    }
+    // 整地完了: 地形を Plain に書き換え、軽いログを出す。
+    for (x, y) in clearings {
+        city.terrain[y][x] = super::terrain::Terrain::Plain;
+        city.completion_flash_until[y][x] = city.tick + COMPLETION_FLASH_TICKS;
+        city.push_event(format!("⛏ ({},{}) 整地完了", x, y));
     }
     for (x, y, kind) in completions {
         city.completion_flash_until[y][x] = city.tick + COMPLETION_FLASH_TICKS;
@@ -69,6 +90,16 @@ fn building_name(b: Building) -> &'static str {
         Building::House => "住宅",
         Building::Workshop => "工房",
         Building::Shop => "店舗",
+    }
+}
+
+fn terrain_name(t: super::terrain::Terrain) -> &'static str {
+    use super::terrain::Terrain::*;
+    match t {
+        Plain => "平地",
+        Forest => "森",
+        Wasteland => "荒地",
+        Water => "湖",
     }
 }
 
@@ -163,6 +194,18 @@ pub fn strategy_info(s: Strategy) -> StrategyInfo {
             speed_bonus_pct: 20,
             income_penalty_pct: -20,
         },
+        Strategy::Eco => StrategyInfo {
+            label: "環境配慮",
+            tagline: "森を残し丁寧に育てる (建設-10% / 収入+5%)",
+            house_pct: 45,
+            road_pct: 25,
+            workshop_pct: 0,
+            shop_pct: 30,
+            // 副作用は「ゆっくり育てる」を表現する負の建設速度と僅かな収入ボーナス。
+            // ボーナスは正の `income_penalty_pct = +5` として扱う (関数側で 100+5)。
+            speed_bonus_pct: -10,
+            income_penalty_pct: 5,
+        },
     }
 }
 
@@ -185,6 +228,11 @@ pub fn strategy_thought_verb(s: Strategy, kind: Building) -> &'static str {
         (Strategy::Tech, Building::Road) => "道路網を伸ばす",
         (Strategy::Tech, Building::Shop) => "幹線沿いに出店",
         (Strategy::Tech, Building::Workshop) => "工業地区を試験設置",
+
+        (Strategy::Eco, Building::House) => "緑に囲まれた住宅を整備",
+        (Strategy::Eco, Building::Road) => "並木道を敷設",
+        (Strategy::Eco, Building::Shop) => "地域密着の店舗を出店",
+        (Strategy::Eco, Building::Workshop) => "森に配慮した工房を整備",
     }
 }
 
@@ -201,6 +249,29 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
     // 地形の建設可否 (湖には建てられない)。
     if !city.terrain_at(x, y).buildable() {
         return false;
+    }
+    // 要整地の地形 (Forest/Wasteland) はまず整地工程を発生させる。
+    // 整地中は Tile::Clearing になり worker を 1 占有する。完了後は Empty に
+    // 戻り、AI が次の tick で改めて建物を建てに来る (= 関数を 2 回通る)。
+    let terrain = city.terrain_at(x, y);
+    if terrain.needs_clearing() {
+        let clearing_cost = terrain.clearing_cost();
+        if city.cash < clearing_cost {
+            return false;
+        }
+        city.cash -= clearing_cost;
+        city.cash_spent_total += clearing_cost;
+        city.grid[y][x] = Tile::Clearing {
+            ticks_remaining: terrain.clearing_ticks(),
+        };
+        city.push_event(format!(
+            "⛏ ({},{}) 整地着工 ({}) -${}",
+            x,
+            y,
+            terrain_name(terrain),
+            clearing_cost
+        ));
+        return true;
     }
     let cost = kind.cost();
     if city.cash < cost {
@@ -313,11 +384,12 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
         }
     }
 
-    // Strategy の収入ペナルティ (Tech は -20% 等)。
+    // Strategy の収入修正 (Tech は -20%、Eco は +5% 等)。
     // 0 化の死スパイラルを避けるため `1` を下限に。
-    let penalty = strategy_info(city.strategy).income_penalty_pct;
-    if penalty < 0 && income > 0 {
-        let factor = (100 + penalty).max(10) as i64; // -20 → 80。下限 10。
+    // `income_penalty_pct` という名前だが正値も扱う (Eco の +5% など)。
+    let modifier = strategy_info(city.strategy).income_penalty_pct;
+    if modifier != 0 && income > 0 {
+        let factor = (100 + modifier).max(10) as i64; // -20 → 80、+5 → 105。下限 10。
         income = ((income * factor) / 100).max(1);
     }
     income
@@ -718,6 +790,56 @@ mod tests {
         // Workshop: active → $1
         // Total: $2
         assert_eq!(compute_income_per_sec(&city), 2);
+    }
+
+    /// 要整地の地形 (Forest) に建てようとすると、まず整地工程が起きる。
+    /// 整地完了後に terrain が Plain に書き換わる。
+    #[test]
+    fn forest_triggers_clearing_then_plain() {
+        let mut city = City::new();
+        city.cash = 1000;
+        // (5,5) を強制的に Forest に。
+        city.terrain[5][5] = super::super::terrain::Terrain::Forest;
+        let ok = start_construction(&mut city, 5, 5, Building::House);
+        assert!(ok, "start_construction should succeed (triggers clearing)");
+        // 直後は Clearing タイル。
+        assert!(matches!(city.tile(5, 5), Tile::Clearing { .. }));
+        // 整地時間 (Forest = 60 ticks) を進めると Empty に戻り terrain が Plain に。
+        tick(&mut city, 60);
+        assert!(matches!(city.tile(5, 5), Tile::Empty));
+        assert_eq!(
+            city.terrain_at(5, 5),
+            super::super::terrain::Terrain::Plain,
+            "clearing should overwrite terrain to Plain"
+        );
+    }
+
+    /// Eco 戦略は collection-time builder of Forest avoidance。
+    /// strategy_info の `speed_bonus_pct` が負、`income_penalty_pct` が正。
+    #[test]
+    fn eco_strategy_has_negative_speed_and_positive_income() {
+        let info = strategy_info(Strategy::Eco);
+        assert!(info.speed_bonus_pct < 0, "Eco builds slower");
+        assert!(info.income_penalty_pct > 0, "Eco earns slightly more");
+    }
+
+    /// Eco 戦略時、Tech と同じく定数倍が income に効く。+5% で 1 軒 → 1$/s が
+    /// 維持される (床保護)。
+    #[test]
+    fn eco_income_bonus_does_not_break_floor() {
+        let mut city = City::new();
+        city.strategy = Strategy::Eco;
+        city.set_tile(0, 0, Tile::Built(Building::House));
+        // (1+1)/2 = 1, +5% = 1.05 → floor で 1。床保護で 1 を下回らない。
+        assert!(compute_income_per_sec(&city) >= 1);
+    }
+
+    /// Wasteland の整地は Forest より速く安い (terrain.rs のバランスに合う)。
+    #[test]
+    fn wasteland_clearing_is_cheaper_and_faster() {
+        use super::super::terrain::Terrain;
+        assert!(Terrain::Wasteland.clearing_ticks() < Terrain::Forest.clearing_ticks());
+        assert!(Terrain::Wasteland.clearing_cost() < Terrain::Forest.clearing_cost());
     }
 
     /// Workshop が近くにあると House は Apartment になる (Workshop が経済刺激源)。

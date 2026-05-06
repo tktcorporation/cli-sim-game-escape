@@ -44,8 +44,9 @@ use super::state::{
 };
 use super::terrain::Terrain;
 use super::{
-    ACT_HIRE_WORKER, ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH,
-    ACT_TAB_EVENTS, ACT_TAB_MANAGER, ACT_TAB_STATUS, ACT_TAB_WORLD, ACT_UPGRADE_AI,
+    ACT_HIRE_WORKER, ACT_STRATEGY_ECO, ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME,
+    ACT_STRATEGY_TECH, ACT_TAB_EVENTS, ACT_TAB_MANAGER, ACT_TAB_STATUS, ACT_TAB_WORLD,
+    ACT_UPGRADE_AI,
 };
 
 /// Wide layout が必要とする最小幅。
@@ -202,6 +203,7 @@ fn strategy_tag(s: Strategy) -> &'static str {
         Strategy::Growth => "[GRW]",
         Strategy::Income => "[CSH]",
         Strategy::Tech => "[TEC]",
+        Strategy::Eco => "[ECO]",
     }
 }
 
@@ -366,6 +368,17 @@ fn tile_span_1(
     }
     match tile {
         Tile::Empty => terrain_span_1(state.terrain_at(x, y), x, y, tick),
+        Tile::Clearing { .. } => {
+            // 整地中: 元の地形 (Forest/Wasteland) の上を斜線で覆う。
+            // tick で斜線が回転して「作業中」感を出す。
+            let g = ['╳', '╲', '╱', '╳'][((tick / 3) as usize) % 4];
+            Span::styled(
+                g.to_string(),
+                Style::default()
+                    .fg(Color::LightYellow)
+                    .bg(terrain_bg(state.terrain_at(x, y))),
+            )
+        }
         Tile::Construction {
             target,
             ticks_remaining,
@@ -513,6 +526,18 @@ fn tile_spans_2(
     }
     match tile {
         Tile::Empty => terrain_spans_2(state.terrain_at(x, y), x, y, tick),
+        Tile::Clearing { .. } => {
+            // 2-wide 整地中: 斧 / 鍬 が動くアニメ + 元の地形背景。
+            // 4-frame で `╲╳ ╳╱ ╱╳ ╳╲` を回し、作業員が振ってる感を出す。
+            let frame = ((tick / 3) as usize) % 4;
+            let pair = ["╲╳", "╳╱", "╱╳", "╳╲"][frame];
+            vec![Span::styled(
+                pair.to_string(),
+                Style::default()
+                    .fg(Color::LightYellow)
+                    .bg(terrain_bg(state.terrain_at(x, y))),
+            )]
+        }
         Tile::Construction {
             target,
             ticks_remaining,
@@ -1292,15 +1317,16 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
     // タブの外側 Block が既に枠を提供するため、ここでは中身のみ。
     let inner_area = area;
 
-    // 行構成: [GRW][CSH][TEC] の 3 ボタン → 現在選択中のタグライン 1 行 →
-    // 雇用 → AI Upgrade。タグラインを 1 行だけにすることで、Manager パネルの
-    // 縦圧迫を避けつつ「選んだ戦略の意図」が常に画面に出るようにする。
+    // 行構成: [GRW][CSH][TEC][ECO] 4 ボタン → タグライン 1 行 →
+    // 雇用 → AI Upgrade。Eco 追加で 4 行になったが、タブパネル下端が
+    // 余っているので問題ない。
     let rows = Layout::default()
         .direction(LayoutDir::Vertical)
         .constraints([
             Constraint::Length(1), // [GRW]
             Constraint::Length(1), // [CSH]
             Constraint::Length(1), // [TEC]
+            Constraint::Length(1), // [ECO]
             Constraint::Length(1), // 選択中タグライン
             Constraint::Length(1), // 雇用
             Constraint::Length(1), // AI 進化
@@ -1337,6 +1363,15 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
         state.strategy == Strategy::Tech,
         Color::Cyan,
     );
+    button_row(
+        f,
+        rows[3],
+        &mut cs,
+        ACT_STRATEGY_ECO,
+        "[E] [ECO] 環境配慮",
+        state.strategy == Strategy::Eco,
+        Color::LightGreen,
+    );
 
     // 選択中 Strategy のタグライン (1 行)。
     let info = logic::strategy_info(state.strategy);
@@ -1361,7 +1396,7 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
         suffix.push(')');
         tag_spans.push(Span::styled(suffix, Style::default().fg(Color::DarkGray)));
     }
-    f.render_widget(Paragraph::new(Line::from(tag_spans)), rows[3]);
+    f.render_widget(Paragraph::new(Line::from(tag_spans)), rows[4]);
 
     let hire_cost = logic::hire_worker_cost(state.workers);
     let (hire_label, hire_color) = match hire_cost {
@@ -1370,7 +1405,7 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
         None => ("[W] ▰ 作業員MAX到達".to_string(), Color::DarkGray),
     };
     let p = Paragraph::new(Span::styled(hire_label, Style::default().fg(hire_color)));
-    Clickable::new(p, ACT_HIRE_WORKER).render(f, rows[4], &mut cs);
+    Clickable::new(p, ACT_HIRE_WORKER).render(f, rows[5], &mut cs);
 
     if let Some(next) = state.ai_tier.next() {
         let color = if state.cash >= next.upgrade_cost() {
@@ -1385,13 +1420,13 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
             next.upgrade_cost()
         );
         let p = Paragraph::new(Span::styled(label, Style::default().fg(color)));
-        Clickable::new(p, ACT_UPGRADE_AI).render(f, rows[5], &mut cs);
+        Clickable::new(p, ACT_UPGRADE_AI).render(f, rows[6], &mut cs);
     } else {
         let p = Paragraph::new(Span::styled(
             "[U] [IV] CPU最大Tier到達",
             Style::default().fg(Color::DarkGray),
         ));
-        f.render_widget(p, rows[5]);
+        f.render_widget(p, rows[6]);
     }
 }
 
@@ -1448,6 +1483,7 @@ fn strategy_label(s: Strategy) -> &'static str {
         Strategy::Growth => "成長",
         Strategy::Income => "収入",
         Strategy::Tech => "技術",
+        Strategy::Eco => "環境",
     }
 }
 
