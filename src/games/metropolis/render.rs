@@ -35,7 +35,7 @@ use ratzilla::ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::ClickState;
-use crate::widgets::{Clickable, TabBar};
+use crate::widgets::{Clickable, ClickableGrid, TabBar};
 
 use super::logic;
 use super::state::{
@@ -46,7 +46,7 @@ use super::terrain::Terrain;
 use super::{
     ACT_DISPATCH_OUTPOST, ACT_HIRE_WORKER, ACT_STRATEGY_ECO, ACT_STRATEGY_GROWTH,
     ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH, ACT_TAB_EVENTS, ACT_TAB_MANAGER, ACT_TAB_STATUS,
-    ACT_TAB_WORLD, ACT_UPGRADE_AI,
+    ACT_TAB_WORLD, ACT_TOGGLE_DEMOLISH, ACT_UPGRADE_AI, DEMOLISH_CELL_BASE,
 };
 
 /// Wide layout が必要とする最小幅。
@@ -85,7 +85,7 @@ fn render_wide(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCell
         .constraints([Constraint::Length(grid_w), Constraint::Min(24)])
         .split(v[1]);
 
-    render_grid(state, f, h[0], 2);
+    render_grid(state, f, h[0], 2, click_state);
     render_tab_panel(state, f, h[1], click_state);
 }
 
@@ -101,7 +101,7 @@ fn render_narrow(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCe
         ])
         .split(area);
     render_banner(state, f, chunks[0], true);
-    render_grid(state, f, chunks[1], 1);
+    render_grid(state, f, chunks[1], 1, click_state);
     render_tab_panel(state, f, chunks[2], click_state);
 }
 
@@ -302,12 +302,26 @@ fn make_skyline_silhouette(tick: u64, width: usize, pop: u32) -> Vec<Span<'stati
 
 // ── Grid ────────────────────────────────────────────────────
 
-fn render_grid(state: &City, f: &mut Frame, area: Rect, cell_width: u16) {
-    let title = format!(
-        " ▟▙ City — POP {}  WIP {} ",
-        state.population(),
-        state.active_constructions()
-    );
+fn render_grid(
+    state: &City,
+    f: &mut Frame,
+    area: Rect,
+    cell_width: u16,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let title = if state.demolish_mode {
+        format!(
+            " 🗑 City — DEMOLISH MODE  POP {}  WIP {} ",
+            state.population(),
+            state.active_constructions()
+        )
+    } else {
+        format!(
+            " ▟▙ City — POP {}  WIP {} ",
+            state.population(),
+            state.active_constructions()
+        )
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Double)
@@ -325,9 +339,27 @@ fn render_grid(state: &City, f: &mut Frame, area: Rect, cell_width: u16) {
         lines.push(Line::from(spans));
     }
     f.render_widget(Paragraph::new(lines), inner);
+
+    // 撤去モード時のみ、Built セルをクリック対象として登録する。
+    // Built 以外のセル (Empty/Construction/Clearing) も登録するが、
+    // demolish_at 側で false を返すので副作用なし。シンプルに全セル登録する。
+    if state.demolish_mode {
+        let mut cs = click_state.borrow_mut();
+        let grid = ClickableGrid::new(GRID_W, GRID_H, DEMOLISH_CELL_BASE, cell_width);
+        grid.register_targets(area, &block, &mut cs, 0);
+    }
 }
 
 fn grid_border_color(state: &City) -> Color {
+    // 撤去モードは絶対優先で赤系 — 「危険な操作中」を視覚的に強調。
+    // 0.6 sec 周期で点滅させると注意を引きやすい。
+    if state.demolish_mode {
+        if (state.tick / 6).is_multiple_of(2) {
+            return Color::LightRed;
+        } else {
+            return Color::Red;
+        }
+    }
     // 完成フラッシュが多い時は LightGreen、それ以外は Cyan 系。
     if state.completion_flash_until.iter().flatten().any(|t| *t > state.tick) {
         Color::LightGreen
@@ -1596,6 +1628,7 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
             Constraint::Length(1), // 雇用
             Constraint::Length(1), // AI 進化
             Constraint::Length(1), // 開拓機材派遣 (Phase A)
+            Constraint::Length(1), // 撤去モード (Phase A 続)
             Constraint::Min(0),
         ])
         .split(inner_area);
@@ -1708,6 +1741,23 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
         Style::default().fg(outpost_color),
     ));
     Clickable::new(p, ACT_DISPATCH_OUTPOST).render(f, rows[7], &mut cs);
+
+    // 撤去モード — トグル。ON 中は REVERSED で「アクティブ」感を出す。
+    // ラベルに ON/OFF を出して状態が一目で分かる。
+    let demolish_style = if state.demolish_mode {
+        Style::default()
+            .fg(Color::LightRed)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+    } else {
+        Style::default().fg(Color::LightRed)
+    };
+    let demolish_label = if state.demolish_mode {
+        "[D] 🗑 撤去モード ON  (cell click で撤去)"
+    } else {
+        "[D] 🗑 撤去モード OFF (外側ほど高コスト)"
+    };
+    let p = Paragraph::new(Span::styled(demolish_label, demolish_style));
+    Clickable::new(p, ACT_TOGGLE_DEMOLISH).render(f, rows[8], &mut cs);
 }
 
 fn button_row(

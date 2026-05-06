@@ -91,7 +91,7 @@ impl Building {
             Building::Park => 80,        // 8 sec — 短め (整地+植栽だけ)
             Building::Workshop => 150,   // 15 sec — Shop より少し短い
             Building::Shop => 200,       // 20 sec
-            Building::Outpost => 300,    // 30 sec — 重機の搬入と組立
+            Building::Outpost => 600,    // 60 sec — 重機の搬入・組立・試運転
         }
     }
 
@@ -269,6 +269,11 @@ pub struct City {
     /// ティア進化フラッシュが消える tick。`tick < value` の間バナーを光らせる。
     pub tier_flash_until: u64,
 
+    /// 撤去モード。ON にするとグリッドの全 Built セルがクリック可能になり、
+    /// クリックで建物を撤去 (cost = 50 + d² * 5)。
+    /// transient な UI 状態なので save には含めない (= ロード後は OFF)。
+    pub demolish_mode: bool,
+
     /// Build queue: how many parallel constructions the AI can run.
     /// (Each Construction tile already counts toward this limit.)
     pub workers: u32,
@@ -333,6 +338,7 @@ impl City {
             panel_tab: PanelTab::Manager,
             last_observed_tier: CityTier::Village,
             tier_flash_until: 0,
+            demolish_mode: false,
             workers: 1,
             rng_state: seed,
             buildings_started: 0,

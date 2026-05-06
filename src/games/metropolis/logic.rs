@@ -849,6 +849,64 @@ fn has_neighbor_kind(city: &City, x: usize, y: usize, kind: Building) -> bool {
     false
 }
 
+/// 撤去コスト (cash)。中央からの Manhattan 距離で 2 次関数的に上がる。
+///
+/// 公式: `50 + d² * 5`
+/// - 中央 (d=0): $50  ← 街の中心は撤去しやすい
+/// - コア端 (d=5): $50 + 125 = $175
+/// - 中間 (d=10): $50 + 500 = $550
+/// - 外周 (d=20): $50 + 2000 = $2050
+///
+/// d² 曲線にすることで、外側に建てた建物を「気軽に撤去」できなくなる。
+/// プレイヤーは「市域拡張は慎重に」というプレッシャーを受ける。
+pub fn demolish_cost(x: usize, y: usize) -> i64 {
+    let cx = (GRID_W / 2) as i32;
+    let cy = (GRID_H / 2) as i32;
+    let dx = (x as i32 - cx).abs();
+    let dy = (y as i32 - cy).abs();
+    let d = (dx + dy) as i64;
+    50 + d * d * 5
+}
+
+/// セル (x, y) の建物を撤去する。Built タイル限定 (Construction や Empty は false)。
+/// コストは `demolish_cost(x, y)` で計算。地形 (terrain) は変更しない (= Plain 化済み
+/// だった整地後の Rock セルは Plain のまま、再露出はしない)。
+///
+/// 戻り値: 撤去成功時 true。
+///   - 撤去済み / 建設中 / 空セル: false
+///   - 現金不足: false
+pub fn demolish_at(city: &mut City, x: usize, y: usize) -> bool {
+    if x >= GRID_W || y >= GRID_H {
+        return false;
+    }
+    let kind = match city.tile(x, y) {
+        Tile::Built(b) => *b,
+        _ => return false,
+    };
+    let cost = demolish_cost(x, y);
+    if city.cash < cost {
+        city.push_event(format!(
+            "❌ 撤去には ${} 必要 (現在 ${})",
+            cost, city.cash
+        ));
+        return false;
+    }
+    city.cash -= cost;
+    city.cash_spent_total += cost;
+    city.grid[y][x] = Tile::Empty;
+    // 既存フラッシュをリセット (古い完成フラッシュが残ると違和感)。
+    city.completion_flash_until[y][x] = 0;
+    city.payout_flash_until[y][x] = 0;
+    city.push_event(format!(
+        "🗑 ({},{}) {} を撤去 -${}",
+        x,
+        y,
+        building_name(kind),
+        cost
+    ));
+    true
+}
+
 /// 開拓機材 (Outpost) を派遣する。
 ///
 /// **配置ロジック (idle ゲームの哲学に沿って自動)**:
@@ -1374,6 +1432,70 @@ mod tests {
             event_count_after_tier_event,
             "re-tick within same tier should not push another tier event"
         );
+    }
+
+    /// 撤去コストは中央で最小、外周で最大。d² 曲線が効いていることを確認。
+    #[test]
+    fn demolish_cost_scales_with_distance() {
+        let cx = GRID_W / 2;
+        let cy = GRID_H / 2;
+        let center = demolish_cost(cx, cy);
+        let edge = demolish_cost(0, 0);
+        let mid = demolish_cost(cx, 0); // 中央列の上端
+        assert_eq!(center, 50);
+        // 外周は中央の 10 倍以上 (急峻なペナルティ)。
+        assert!(
+            edge >= center * 10,
+            "outer cost ({}) should be ≥ 10× inner ({})",
+            edge,
+            center
+        );
+        // 中間は中央 < mid < edge。
+        assert!(center < mid && mid < edge);
+    }
+
+    /// 撤去成功で Built → Empty に戻り、cash が引かれる。
+    #[test]
+    fn demolish_removes_built_tile() {
+        let mut city = City::new();
+        city.cash = 10_000;
+        let cx = GRID_W / 2;
+        let cy = GRID_H / 2;
+        city.set_tile(cx, cy, Tile::Built(Building::House));
+        let before_cash = city.cash;
+        let cost = demolish_cost(cx, cy);
+        assert!(demolish_at(&mut city, cx, cy));
+        assert!(matches!(city.tile(cx, cy), Tile::Empty));
+        assert_eq!(city.cash, before_cash - cost);
+    }
+
+    /// 建設中タイルは撤去対象外 (Construction は別ロジックで cancel すべき)。
+    #[test]
+    fn demolish_rejects_construction_tile() {
+        let mut city = City::new();
+        city.cash = 10_000;
+        let cx = GRID_W / 2;
+        let cy = GRID_H / 2;
+        city.terrain[cy][cx] = super::super::terrain::Terrain::Plain;
+        // 着工中。
+        assert!(start_construction(&mut city, cx, cy, Building::House));
+        let cash_before_demolish = city.cash;
+        assert!(!demolish_at(&mut city, cx, cy));
+        // cash は変化しない。
+        assert_eq!(city.cash, cash_before_demolish);
+    }
+
+    /// 現金不足だと撤去失敗 + cash 据え置き + ログ。
+    #[test]
+    fn demolish_fails_on_insufficient_cash() {
+        let mut city = City::new();
+        city.cash = 10;
+        // 外周 (0,0) に House を強制配置 — コスト = 50 + 24² * 5 = $2930。
+        city.set_tile(0, 0, Tile::Built(Building::House));
+        assert!(!demolish_at(&mut city, 0, 0));
+        assert_eq!(city.cash, 10);
+        // House はそのまま。
+        assert!(matches!(city.tile(0, 0), Tile::Built(Building::House)));
     }
 
     /// dispatch_outpost: 隣接 Rock がある建物境界を見つけて Outpost 着工する。
