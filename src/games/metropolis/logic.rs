@@ -849,6 +849,15 @@ fn has_neighbor_kind(city: &City, x: usize, y: usize, kind: Building) -> bool {
     false
 }
 
+/// 中央からの Manhattan 距離。撤去コスト計算と AI スコアリングで共通利用。
+pub fn distance_from_center(x: usize, y: usize) -> u32 {
+    let cx = (GRID_W / 2) as i32;
+    let cy = (GRID_H / 2) as i32;
+    let dx = (x as i32 - cx).abs();
+    let dy = (y as i32 - cy).abs();
+    (dx + dy) as u32
+}
+
 /// 撤去コスト (cash)。中央からの Manhattan 距離で 2 次関数的に上がる。
 ///
 /// 公式: `50 + d² * 5`
@@ -860,11 +869,7 @@ fn has_neighbor_kind(city: &City, x: usize, y: usize, kind: Building) -> bool {
 /// d² 曲線にすることで、外側に建てた建物を「気軽に撤去」できなくなる。
 /// プレイヤーは「市域拡張は慎重に」というプレッシャーを受ける。
 pub fn demolish_cost(x: usize, y: usize) -> i64 {
-    let cx = (GRID_W / 2) as i32;
-    let cy = (GRID_H / 2) as i32;
-    let dx = (x as i32 - cx).abs();
-    let dy = (y as i32 - cy).abs();
-    let d = (dx + dy) as i64;
+    let d = distance_from_center(x, y) as i64;
     50 + d * d * 5
 }
 
@@ -905,6 +910,174 @@ pub fn demolish_at(city: &mut City, x: usize, y: usize) -> bool {
         cost
     ));
     true
+}
+
+// ── AI 撤去判断 (Phase A 続) ────────────────────────────────────
+//
+// Idle Metropolis の哲学「CPU が街を作る、プレイヤーは方向だけ」に沿って、
+// 撤去判断も CPU 側に委譲する。プレイヤーが [X] ボタンを押すと、CPU が
+// **最も無駄な建物**を 1 つ選んで撤去する。手動撤去モード (`demolish_mode`)
+// は残してあるので、CPU の判断が気に入らなければプレイヤーが override 可能。
+//
+// ## 評価関数の設計
+//
+// 「無駄な建物」の定義は複数あり得る:
+//   1. 機能不全 (inactive Shop / Workshop)
+//   2. 役目を終えた (Outpost で周囲に Rock がもう無い)
+//   3. 戦略的にミスマッチ (Cottage in core, でも income に貢献している…)
+//
+// すべて足し合わせた **wastefulness score** から **demolish_cost / 10** を引いた
+// 値を「撤去で得をする度合い」とし、最大値の建物を選ぶ。負の値しか出ない場合
+// (= どの撤去も損) は何もしない。
+//
+// この設計だと:
+// - 中央のミスは積極的に撤去される (cost 安い)
+// - 外周の建設ミスは滅多に撤去されない (cost 高い、d² 曲線が AI を萎縮させる)
+//   → プレイヤーが「外側に建てる前に再考しろ」と誘導される
+
+/// 撤去候補の優先度スコア (高いほど撤去すべき)。
+///
+/// **正の値** = wasted potential、**負の値** = useful asset。
+/// `auto_demolish` が「最大スコア > 0」の建物を 1 つ選んで取り壊す。
+///
+/// 設計判断: スコアの絶対値は重要でなく、**相対順位**のみが意味を持つ。
+/// バランス調整時はここの数字を弄る。
+fn wastefulness_score(city: &City, x: usize, y: usize) -> Option<i64> {
+    let kind = match city.tile(x, y) {
+        Tile::Built(b) => *b,
+        _ => return None,
+    };
+
+    let mut score: i64 = 0;
+    match kind {
+        Building::Shop => {
+            // 非アクティブ Shop は最大の無駄。
+            if !shop_is_active(city, x, y) {
+                score += 250;
+            }
+        }
+        Building::Workshop => {
+            if !workshop_is_active(city, x, y) {
+                score += 200;
+            }
+        }
+        Building::Outpost => {
+            // 役目を終えた Outpost (周囲 4-近傍に Rock が無い) は撤去候補。
+            // 周囲に Rock があるならまだ仕事中なので score 0 (== 撤去しない)。
+            if count_rock_neighbors(city, x, y) == 0 {
+                score += 300;
+            }
+        }
+        Building::House => {
+            // House はほぼ常に有用 — 唯一例外は「孤立 Cottage」(Road 接続無し)。
+            // ただし Cottage でも +1$/2 の収入源なので慎重に。スコア控えめ。
+            let stats = gather_house_neighborhood(city, x, y);
+            if stats.n_road_adj == 0 && stats.n_house_within_3 == 0 {
+                score += 80;
+            }
+        }
+        Building::Road => {
+            // 行き止まりの孤立 Road (隣接 Built が 0)。実害は小さいが見た目が悪い。
+            if !has_any_neighbor_built(city, x, y) {
+                score += 60;
+            }
+        }
+        Building::Park => {
+            // Park は Manhattan 4 以内に House が無いと触媒として機能しない。
+            if !has_house_within(city, x, y, 4) {
+                score += 100;
+            }
+        }
+    }
+
+    if score == 0 {
+        return None;
+    }
+
+    // コスト割引: 撤去には金がかかる。コスト/10 をスコアから引く。
+    // 中央 ($50) なら -5、外周 ($2050) なら -205。
+    // → 同じ「inactive Shop」でも、中央なら net +245、外周なら net +45。
+    //   外周は大幅にスコアが落ちるが、まだプラスなので最後の手段として撤去対象に
+    //   なり得る。AI が外周を「やむなく撤去」する挙動が出る。
+    let cost_penalty = demolish_cost(x, y) / 10;
+    Some(score - cost_penalty)
+}
+
+fn has_any_neighbor_built(city: &City, x: usize, y: usize) -> bool {
+    for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+            continue;
+        }
+        if matches!(city.tile(nx as usize, ny as usize), Tile::Built(_)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_house_within(city: &City, x: usize, y: usize, dist: u32) -> bool {
+    for hy in 0..GRID_H {
+        for hx in 0..GRID_W {
+            if !matches!(city.tile(hx, hy), Tile::Built(Building::House)) {
+                continue;
+            }
+            let dx = (hx as i32 - x as i32).unsigned_abs();
+            let dy = (hy as i32 - y as i32).unsigned_abs();
+            if dx + dy <= dist {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 全 Built タイルから最高スコアの撤去候補を返す。
+///
+/// 戻り値: `(x, y, score)`。何も無い時は None。
+/// ここで返ってくる候補は「スコア > 0 かつコストを引いてもプラス」のもの限定。
+pub fn auto_demolish_target(city: &City) -> Option<(usize, usize, i64)> {
+    let mut best: Option<(usize, usize, i64)> = None;
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            if let Some(score) = wastefulness_score(city, x, y) {
+                if score <= 0 {
+                    continue;
+                }
+                let better = match best {
+                    None => true,
+                    Some((_, _, prev)) => score > prev,
+                };
+                if better {
+                    best = Some((x, y, score));
+                }
+            }
+        }
+    }
+    best
+}
+
+/// AI に撤去判断を一任する。最高スコアの建物を 1 つ撤去する。
+/// 候補が無い (= どの撤去も net 損) 時は false + ログメッセージ。
+pub fn auto_demolish(city: &mut City) -> bool {
+    let Some((x, y, score)) = auto_demolish_target(city) else {
+        city.push_event("🤖 撤去すべき建物を AI が判断できなかった".to_string());
+        return false;
+    };
+    let cost = demolish_cost(x, y);
+    if city.cash < cost {
+        city.push_event(format!(
+            "❌ AI 撤去候補 ({},{}) 発見も現金不足 (要 ${}, 現在 ${})",
+            x, y, cost, city.cash
+        ));
+        return false;
+    }
+    city.push_event(format!(
+        "🤖 AI 撤去判断 → ({},{}) score={}",
+        x, y, score
+    ));
+    demolish_at(city, x, y)
 }
 
 /// 開拓機材 (Outpost) を派遣する。
@@ -1496,6 +1669,95 @@ mod tests {
         assert_eq!(city.cash, 10);
         // House はそのまま。
         assert!(matches!(city.tile(0, 0), Tile::Built(Building::House)));
+    }
+
+    /// AI 撤去: 中央に置いた inactive Shop が最高スコアで撤去対象になる。
+    #[test]
+    fn auto_demolish_picks_inactive_shop_in_core() {
+        let mut city = City::new();
+        city.cash = 10_000;
+        let cx = GRID_W / 2;
+        let cy = GRID_H / 2;
+        // 中央 Shop だけ置く (隣接 Road なし → inactive)。
+        city.set_tile(cx, cy, Tile::Built(Building::Shop));
+        let target = auto_demolish_target(&city);
+        assert!(target.is_some(), "should find a candidate");
+        let (tx, ty, score) = target.unwrap();
+        assert_eq!((tx, ty), (cx, cy));
+        assert!(score > 0);
+    }
+
+    /// AI 撤去: 全建物が active なら撤去対象なし。
+    #[test]
+    fn auto_demolish_returns_none_when_everything_active() {
+        let mut city = City::new();
+        city.cash = 10_000;
+        let cx = GRID_W / 2;
+        let cy = GRID_H / 2;
+        // House を 1 軒、Road 接続あり (有用な Cottage)。
+        city.set_tile(cx, cy, Tile::Built(Building::House));
+        city.set_tile(cx + 1, cy, Tile::Built(Building::Road));
+        // 撤去候補なし (孤立 House でもなく、Shop/Workshop でもなく、Outpost でもない)。
+        // ただし Road は隣接 Built (House) があるので「行き止まり」判定にもならない。
+        let target = auto_demolish_target(&city);
+        assert!(
+            target.is_none(),
+            "no waste should mean no demolition target, got {:?}",
+            target
+        );
+    }
+
+    /// AI 撤去: 外周の inactive Shop はコスト負けして撤去されない。
+    /// 中央の inactive Shop の方が優先される (= プレイヤーの「外周は重い」体感に整合)。
+    #[test]
+    fn auto_demolish_prefers_cheaper_targets() {
+        let mut city = City::new();
+        city.cash = 10_000;
+        // 中央と外周の両方に inactive Shop を置く。
+        let cx = GRID_W / 2;
+        let cy = GRID_H / 2;
+        city.set_tile(cx, cy, Tile::Built(Building::Shop));
+        city.set_tile(0, 0, Tile::Built(Building::Shop));
+        let (tx, ty, _) = auto_demolish_target(&city).expect("should find candidate");
+        assert_eq!(
+            (tx, ty),
+            (cx, cy),
+            "central inactive Shop should be picked over the outer one (cost penalty)"
+        );
+    }
+
+    /// auto_demolish: 候補がある + 現金十分なら撤去成功。
+    #[test]
+    fn auto_demolish_runs_when_target_exists() {
+        let mut city = City::new();
+        city.cash = 10_000;
+        let cx = GRID_W / 2;
+        let cy = GRID_H / 2;
+        city.set_tile(cx, cy, Tile::Built(Building::Shop));
+        assert!(auto_demolish(&mut city));
+        assert!(matches!(city.tile(cx, cy), Tile::Empty));
+    }
+
+    /// auto_demolish: 候補なしなら false + ログ。
+    #[test]
+    fn auto_demolish_no_candidate_returns_false() {
+        let mut city = City::new();
+        city.cash = 10_000;
+        assert!(!auto_demolish(&mut city));
+        assert!(city.events.iter().any(|e| e.contains("判断できなかった")));
+    }
+
+    /// 役目を終えた Outpost (周囲 Rock が無い) は AI が撤去する。
+    #[test]
+    fn auto_demolish_picks_idle_outpost() {
+        let mut city = City::new();
+        city.cash = 10_000;
+        let cx = GRID_W / 2;
+        let cy = GRID_H / 2;
+        // 中央コアは Rock が出ない (CORE_RADIUS=5)。Outpost を置けば「役目無し」状態。
+        city.set_tile(cx, cy, Tile::Built(Building::Outpost));
+        let (tx, ty, _) = auto_demolish_target(&city).expect("idle Outpost should be a candidate");
+        assert_eq!((tx, ty), (cx, cy));
     }
 
     /// dispatch_outpost: 隣接 Rock がある建物境界を見つけて Outpost 着工する。

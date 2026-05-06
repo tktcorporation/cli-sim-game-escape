@@ -49,6 +49,8 @@ pub const ACT_STRATEGY_ECO: u16 = 6;
 pub const ACT_DISPATCH_OUTPOST: u16 = 7;
 /// 撤去モードのトグル。ON にするとグリッドの全 Built セルがクリック可能に。
 pub const ACT_TOGGLE_DEMOLISH: u16 = 8;
+/// AI に撤去判断を一任する。手動撤去モードと並列で利用可。
+pub const ACT_AUTO_DEMOLISH: u16 = 9;
 
 /// グリッドセルクリック (撤去モード時のみ反応) のアクション ID 基準値。
 ///
@@ -122,6 +124,7 @@ impl Game for MetropolisGame {
                 'u' | 'U' => ACT_UPGRADE_AI,
                 'o' | 'O' => ACT_DISPATCH_OUTPOST,
                 'd' | 'D' => ACT_TOGGLE_DEMOLISH,
+                'x' | 'X' => ACT_AUTO_DEMOLISH,
                 '1' => ACT_TAB_STATUS,
                 '2' => ACT_TAB_MANAGER,
                 '3' => ACT_TAB_EVENTS,
@@ -175,6 +178,7 @@ impl Game for MetropolisGame {
                 self.state.push_event(msg.to_string());
                 true
             }
+            ACT_AUTO_DEMOLISH => logic::auto_demolish(&mut self.state),
             ACT_TAB_STATUS => {
                 self.state.panel_tab = PanelTab::Status;
                 true
@@ -303,6 +307,20 @@ mod tests {
         let action = DEMOLISH_CELL_BASE + (cy as u16) * (GRID_W as u16) + (cx as u16);
         let consumed = g.handle_input(&click(action));
         assert!(consumed);
+        assert!(matches!(g.state.tile(cx, cy), Tile::Empty));
+    }
+
+    /// 'X' キーで AI 撤去判断が発火する (候補があれば成功、無ければ false 返し)。
+    #[test]
+    fn x_key_triggers_auto_demolish() {
+        use state::{Building, Tile, GRID_W, GRID_H};
+        let mut g = MetropolisGame::new();
+        g.state.cash = 10_000;
+        let cx = GRID_W / 2;
+        let cy = GRID_H / 2;
+        // inactive Shop を中央に置く。
+        g.state.set_tile(cx, cy, Tile::Built(Building::Shop));
+        assert!(g.handle_input(&InputEvent::Key('x')));
         assert!(matches!(g.state.tile(cx, cy), Tile::Empty));
     }
 

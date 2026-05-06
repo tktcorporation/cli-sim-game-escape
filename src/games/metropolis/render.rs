@@ -44,9 +44,9 @@ use super::state::{
 };
 use super::terrain::Terrain;
 use super::{
-    ACT_DISPATCH_OUTPOST, ACT_HIRE_WORKER, ACT_STRATEGY_ECO, ACT_STRATEGY_GROWTH,
-    ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH, ACT_TAB_EVENTS, ACT_TAB_MANAGER, ACT_TAB_STATUS,
-    ACT_TAB_WORLD, ACT_TOGGLE_DEMOLISH, ACT_UPGRADE_AI, DEMOLISH_CELL_BASE,
+    ACT_AUTO_DEMOLISH, ACT_DISPATCH_OUTPOST, ACT_HIRE_WORKER, ACT_STRATEGY_ECO,
+    ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH, ACT_TAB_EVENTS, ACT_TAB_MANAGER,
+    ACT_TAB_STATUS, ACT_TAB_WORLD, ACT_TOGGLE_DEMOLISH, ACT_UPGRADE_AI, DEMOLISH_CELL_BASE,
 };
 
 /// Wide layout が必要とする最小幅。
@@ -1629,6 +1629,7 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
             Constraint::Length(1), // AI 進化
             Constraint::Length(1), // 開拓機材派遣 (Phase A)
             Constraint::Length(1), // 撤去モード (Phase A 続)
+            Constraint::Length(1), // AI 撤去判断 (Phase A 続々)
             Constraint::Min(0),
         ])
         .split(inner_area);
@@ -1758,6 +1759,29 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
     };
     let p = Paragraph::new(Span::styled(demolish_label, demolish_style));
     Clickable::new(p, ACT_TOGGLE_DEMOLISH).render(f, rows[8], &mut cs);
+
+    // AI 撤去判断 — CPU が最も無駄な建物を 1 件選んで撤去。
+    // 候補がある時はラベルに「(✓)」、無い時は「(なし)」を出して
+    // 押下前に「これ押すと何かが起きるか」が予想できるようにする。
+    let ai_target = logic::auto_demolish_target(state);
+    let (ai_label, ai_color) = match ai_target {
+        Some((tx, ty, _)) => {
+            let cost = logic::demolish_cost(tx, ty);
+            let affordable = state.cash >= cost;
+            let color = if affordable {
+                Color::LightMagenta
+            } else {
+                Color::DarkGray
+            };
+            (
+                format!("[X] 🤖 AI 撤去判断 ({},{}) -${}", tx, ty, cost),
+                color,
+            )
+        }
+        None => ("[X] 🤖 AI 撤去判断 (候補なし)".to_string(), Color::DarkGray),
+    };
+    let p = Paragraph::new(Span::styled(ai_label, Style::default().fg(ai_color)));
+    Clickable::new(p, ACT_AUTO_DEMOLISH).render(f, rows[9], &mut cs);
 }
 
 fn button_row(
