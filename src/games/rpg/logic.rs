@@ -534,7 +534,11 @@ pub fn enter_dungeon(state: &mut RpgState, floor: u32) {
     let py = map.player_y;
     map.grid[py][px].visited = true;
     map.grid[py][px].revealed = true;
-    map.grid[py][px].event_done = true;
+    // NOTE: do NOT set event_done = true here. The spawn cell is the
+    // floor's Entrance, and we want the entrance event ("町に帰還する"
+    // on B1F or "B(N-1)F へ戻る" on B2F+) to re-trigger when the player
+    // walks back. `after_move` isn't called on spawn placement so there's
+    // no immediate popup to suppress.
 
     reveal_room(&mut map, px, py);
 
@@ -1362,8 +1366,15 @@ pub fn resolve_event_choice(state: &mut RpgState, choice_index: usize) -> bool {
         return false;
     }
 
-    if let Some(map) = &mut state.dungeon {
-        map.grid[map.player_y][map.player_x].event_done = true;
+    // Stairs / Entrance are persistent landmarks, not consumable events:
+    // the player must be able to come back later to descend or return to
+    // town. Marking them done would silently break the "もう一度登る" /
+    // "やっぱり帰る" flow because `after_move` skips events on done tiles.
+    let consumable = !matches!(cell_type, CellType::Stairs | CellType::Entrance);
+    if consumable {
+        if let Some(map) = &mut state.dungeon {
+            map.grid[map.player_y][map.player_x].event_done = true;
+        }
     }
     state.active_event = None;
 
@@ -1953,6 +1964,103 @@ mod tests {
         let idx = s.inventory.iter().position(|i| i.kind == ItemKind::ReturnScroll).unwrap();
         assert!(!use_item(&mut s, idx));
         assert!(s.inventory.iter().any(|i| i.kind == ItemKind::ReturnScroll));
+    }
+
+    /// 階段や入口は永続ランドマーク。"探索を続ける" を選んでも消費されず、
+    /// もう一度踏めば再度ダイアログが出る必要がある。
+    /// 旧実装では `event_done = true` がセットされて二度と発火しなくなり、
+    /// 帰宅も降下もできなくなっていた。
+    #[test]
+    fn stairs_re_trigger_after_continue() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        // Find a stairs cell on the generated map.
+        let map = s.dungeon.as_mut().unwrap();
+        let mut stairs = None;
+        for y in 0..map.height {
+            for x in 0..map.width {
+                if map.grid[y][x].cell_type == CellType::Stairs {
+                    stairs = Some((x, y));
+                    break;
+                }
+            }
+            if stairs.is_some() { break; }
+        }
+        let (sx, sy) = stairs.expect("map should have stairs");
+
+        // Find a walkable neighbor; `step_on` is the direction from that
+        // neighbor onto the stairs (so reverse() steps off).
+        let mut neighbor = None;
+        for dir in [Facing::North, Facing::East, Facing::South, Facing::West] {
+            let nx = sx as i32 - dir.dx();
+            let ny = sy as i32 - dir.dy();
+            if !map.in_bounds(nx, ny) { continue; }
+            if map.grid[ny as usize][nx as usize].is_walkable() {
+                neighbor = Some((nx as usize, ny as usize, dir));
+                break;
+            }
+        }
+        let (fx, fy, step_on) = neighbor.expect("stairs has a walkable neighbor");
+        map.player_x = fx;
+        map.player_y = fy;
+        map.monsters.clear();
+
+        // Step onto stairs → stairs event fires.
+        try_move(&mut s, step_on);
+        assert!(s.active_event.is_some(), "stairs should fire event on first step");
+        let n_choices = s.active_event.as_ref().unwrap().choices.len();
+        // Continue (last choice) — don't descend.
+        assert!(resolve_event_choice(&mut s, n_choices - 1));
+        assert!(s.active_event.is_none());
+        // Cell must NOT be marked done.
+        let map = s.dungeon.as_ref().unwrap();
+        assert!(!map.grid[sy][sx].event_done, "stairs must remain re-triggerable");
+
+        // Walk off and back — event must fire again.
+        try_move(&mut s, step_on.reverse());
+        // Stepping off may briefly land on another event tile; clear it so
+        // we can isolate the re-entry assertion.
+        s.active_event = None;
+        try_move(&mut s, step_on);
+        assert!(
+            s.active_event.is_some(),
+            "stairs event must re-trigger after walking back"
+        );
+    }
+
+    /// 入口セル (B1F の帰還口) も同様に永続ランドマーク。
+    /// スポーン直後はポップアップが出ないが、一度離れて戻れば再度発火する。
+    #[test]
+    fn entrance_re_triggers_after_walking_off_and_back() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        let (ex, ey) = (map.player_x, map.player_y);
+        assert_eq!(map.grid[ey][ex].cell_type, CellType::Entrance);
+        // Spawn cell must not pre-mark event_done — that's the bug we fixed.
+        assert!(!map.grid[ey][ex].event_done, "entrance must not be pre-consumed");
+        map.monsters.clear();
+
+        // Find an adjacent walkable cell.
+        let mut step_dir = None;
+        for dir in [Facing::North, Facing::East, Facing::South, Facing::West] {
+            let nx = ex as i32 + dir.dx();
+            let ny = ey as i32 + dir.dy();
+            if map.in_bounds(nx, ny) && map.grid[ny as usize][nx as usize].is_walkable() {
+                step_dir = Some(dir);
+                break;
+            }
+        }
+        let dir = step_dir.expect("entrance has a walkable neighbor");
+
+        // Step away, dismiss any incidental event, step back.
+        try_move(&mut s, dir);
+        s.active_event = None;
+        try_move(&mut s, dir.reverse());
+        assert!(
+            s.active_event.is_some(),
+            "entrance event must fire on return"
+        );
     }
 
     #[test]
