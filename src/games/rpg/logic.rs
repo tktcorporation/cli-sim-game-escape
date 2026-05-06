@@ -332,14 +332,26 @@ pub fn resolve_overworld_event_choice(state: &mut RpgState, choice_index: usize)
         EventAction::TalkBlacksmith => {
             if !state.met_blacksmith {
                 state.met_blacksmith = true;
+                // Codex P2 (#98): Overworld 化でダンジョンを先に経験してから
+                // 武具屋と初対面、というフローが起き得る。その時点で既に
+                // 拾った武器/防具を装備していたら、初期装備で上書きすると
+                // ダウングレードになるので、装備スロットが空のときだけ
+                // 自動装備する。アイテム自体は inventory に必ず追加するので
+                // 不要なら捨てる/置き換えることもできる。
                 state.inventory.push(InventoryItem {
                     kind: ItemKind::WoodenSword, count: 1, affix: None,
                 });
-                state.weapon_idx = Some(state.inventory.len() - 1);
+                let sword_idx = state.inventory.len() - 1;
+                if state.weapon_idx.is_none() {
+                    state.weapon_idx = Some(sword_idx);
+                }
                 state.inventory.push(InventoryItem {
                     kind: ItemKind::TravelClothes, count: 1, affix: None,
                 });
-                state.armor_idx = Some(state.inventory.len() - 1);
+                let armor_idx = state.inventory.len() - 1;
+                if state.armor_idx.is_none() {
+                    state.armor_idx = Some(armor_idx);
+                }
                 state.add_log("木の剣と旅人の服を受け取った！");
             }
             state.active_event = None;
@@ -1887,6 +1899,38 @@ mod tests {
         assert_eq!(s.gold, 50);
         assert!(s.met_reception);
         assert!(s.met_blacksmith);
+    }
+
+    /// Codex P2 (#98): もしプレイヤーがダンジョンを先に経験して
+    /// 既に強い装備を着けている状態で武具屋と初対面した場合、
+    /// 木の剣 / 旅人の服 で装備を上書きしてはいけない。
+    /// アイテムは inventory に追加されるが、装備スロットは維持される。
+    #[test]
+    fn blacksmith_first_meet_does_not_downgrade_existing_gear() {
+        let mut s = RpgState::new();
+        // Pre-equip something stronger (e.g. iron sword + leather armor).
+        s.inventory.push(InventoryItem {
+            kind: ItemKind::IronSword, count: 1, affix: None,
+        });
+        s.weapon_idx = Some(0);
+        s.inventory.push(InventoryItem {
+            kind: ItemKind::LeatherArmor, count: 1, affix: None,
+        });
+        s.armor_idx = Some(1);
+        let atk_before = s.total_atk();
+        let def_before = s.total_def();
+
+        s.active_event = generate_overworld_event(&s, CellType::BlacksmithNpc);
+        assert!(resolve_event_choice(&mut s, 0));
+
+        // Equipped slots must still point at the strong gear.
+        assert_eq!(s.weapon_idx, Some(0));
+        assert_eq!(s.armor_idx, Some(1));
+        assert_eq!(s.total_atk(), atk_before, "ATK must not regress");
+        assert_eq!(s.total_def(), def_before, "DEF must not regress");
+        // Starter items are still added to inventory (player can drop / equip later).
+        assert!(s.inventory.iter().any(|i| i.kind == ItemKind::WoodenSword));
+        assert!(s.inventory.iter().any(|i| i.kind == ItemKind::TravelClothes));
     }
 
     #[test]
