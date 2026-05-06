@@ -241,6 +241,140 @@ pub enum HouseLevel {
     High,
 }
 
+// ── House evolution (DESIGN.md §2.3, §4) ────────────────────
+//
+// 「街が育つ感」の核となるルール群。すべて純関数で、state を増やさず
+// 周囲のセルだけ見て派生値を計算する。Pure Logic Pattern。
+
+/// 住宅の経済段階。Cottage → Apartment → Highrise と育つ。
+///
+/// `HouseLevel` (隣接 House 数による低/中/高層の見た目) とは別軸:
+/// こちらは「経済が回って住宅が高層化する」段階で、Workshop / Shop / Road の
+/// 充実度から決まる (DESIGN.md §2.3)。両者は最終的に統合する可能性があるが、
+/// 一旦は別概念として並置し、render で組み合わせる。
+///
+/// dead_code 抑制: render / income に統合されるまでの skeleton 期間のみ。
+/// 統合後はこの allow を外す。
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HouseTier {
+    Cottage,   // 基本の住宅。インフラ未整備。
+    Apartment, // 中層。Road + Workshop が近い。
+    Highrise,  // 高層。Road + Workshop + Shop が揃った成熟ゾーン。
+}
+
+/// `house_tier_for` が見る周囲の充実度サマリ。
+///
+/// dead_code 抑制: 統合までの skeleton 期間のみ。
+///
+/// House 一軒分の周辺をスキャンして集計したもの。フィールドの意味:
+/// - `n_road_adj`: 4-近傍にある Road タイル数 (0..=4)。0 だと未接続。
+/// - `n_workshop_within_5`: Manhattan 距離 5 以内の Workshop 数。
+///   現状 Workshop 建物は未実装なので常に 0。実装後に効いてくる。
+/// - `n_shop_within_5`: Manhattan 距離 5 以内の Shop 数。
+/// - `n_house_within_3`: Manhattan 距離 3 以内の House 数 (自身は除く)。
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HouseNeighborhood {
+    pub n_road_adj: u32,
+    pub n_workshop_within_5: u32,
+    pub n_shop_within_5: u32,
+    pub n_house_within_3: u32,
+}
+
+/// 周囲をスキャンして `HouseNeighborhood` を組み立てる。
+///
+/// この関数は機械的な集計のみを担当する (純関数 / 副作用なし)。
+/// 「どの数値で Tier を決めるか」というゲームデザイン判断は
+/// `house_tier_for` 側に閉じる。
+#[allow(dead_code)] // 統合までの skeleton 期間のみ
+pub fn gather_house_neighborhood(city: &City, x: usize, y: usize) -> HouseNeighborhood {
+    let mut n_road_adj = 0u32;
+    for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+            continue;
+        }
+        if matches!(
+            city.tile(nx as usize, ny as usize),
+            Tile::Built(Building::Road)
+        ) {
+            n_road_adj += 1;
+        }
+    }
+
+    let mut n_shop_within_5 = 0u32;
+    let mut n_house_within_3 = 0u32;
+    for cy in 0..GRID_H {
+        for cx in 0..GRID_W {
+            let dx = (cx as i32 - x as i32).abs();
+            let dy = (cy as i32 - y as i32).abs();
+            let manhattan = (dx + dy) as u32;
+            match city.tile(cx, cy) {
+                Tile::Built(Building::Shop) if manhattan <= 5 => n_shop_within_5 += 1,
+                Tile::Built(Building::House) if manhattan <= 3 && (cx, cy) != (x, y) => {
+                    n_house_within_3 += 1
+                }
+                _ => {}
+            }
+        }
+    }
+
+    HouseNeighborhood {
+        n_road_adj,
+        // Workshop 建物はまだ未実装。実装後にここでカウントを足す。
+        n_workshop_within_5: 0,
+        n_shop_within_5,
+        n_house_within_3,
+    }
+}
+
+/// House の経済段階を決定する純関数。**★ ゲーム体験の核**
+///
+/// この関数の中身が「街がどう育つか」を直接決める。詳細な設計指針は
+/// `DESIGN.md §4.1` を参照。簡潔に言うと:
+///
+/// - Cottage は無条件 (デフォルト)
+/// - Apartment は「インフラが届いている」感を出す条件にしたい
+/// - Highrise は「商工業が回っている」感を出す条件にしたい
+///
+/// プレイヤーが街を眺めて「あ、ここは Apartment になりかけてる、Shop を
+/// もう一つ近くに置けば育ちそう」と気付ける形が理想。
+///
+/// **TODO (User contribution)**: この関数を実装してください (5〜10 行)。
+/// 現状の `todo!()` は呼び出されると panic するため、未統合の今は問題ない
+/// ですが、render / income に組み込む際に必須になります。
+///
+/// テストは `tests::house_tier_for_*` を参照 — 期待する大まかな挙動を
+/// アサートしているので、書いた式で `cargo test -p metropolis` が通れば OK。
+#[allow(dead_code)] // 統合までの skeleton 期間のみ
+pub fn house_tier_for(stats: HouseNeighborhood) -> HouseTier {
+    // ★ ここに 5〜10 行で書いてください。
+    // 例の方針 (DESIGN.md §4.1):
+    //   - AND 条件方式
+    //   - 加重スコア方式
+    //   - 多段ゲート方式
+    // どれを採用するかで街の育ち方の手触りが変わります。
+    let _ = stats; // suppress unused warning until you implement
+    todo!("DESIGN.md §4.1 を読んで HouseTier の判定ロジックを書いてください")
+}
+
+/// House 一軒の cash/sec。Tier に応じた段階値。
+///
+/// **TODO (User contribution)**: 3 値のバランスを決めてください。
+/// 指針 (DESIGN.md §4.2):
+///   - Cottage:   1 (現状互換)
+///   - Apartment: 2〜3 程度
+///   - Highrise:  5〜8 程度
+///
+/// `compute_income_per_sec` から呼ばれる予定 (現状未統合)。
+#[allow(dead_code)] // 統合までの skeleton 期間のみ
+pub fn compute_house_income(tier: HouseTier) -> i64 {
+    let _ = tier;
+    todo!("DESIGN.md §4.2 を読んで Tier ごとの収入を返してください")
+}
+
 /// 店舗の段階レベル — 隣接アクティブ House 数 + 道路接続で評価。
 /// 賑わいの可視化用。アクティブで Mid 以上の住宅が近いとプレミアム。
 pub fn shop_level(city: &City, x: usize, y: usize) -> ShopLevel {
@@ -367,6 +501,69 @@ pub fn hire_worker(city: &mut City) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── House evolution rule (DESIGN.md §4) ────────────────
+    //
+    // user contribution が満たすべき大まかな性質をテストで明文化。
+    // 中の数字は「正解」というより「方向性」のチェック。書いたルールで
+    // 全部通ればまず妥当。
+
+    fn nbh(n_road: u32, n_workshop: u32, n_shop: u32, n_house: u32) -> HouseNeighborhood {
+        HouseNeighborhood {
+            n_road_adj: n_road,
+            n_workshop_within_5: n_workshop,
+            n_shop_within_5: n_shop,
+            n_house_within_3: n_house,
+        }
+    }
+
+    /// 完全孤立した House は Cottage のまま。
+    /// (#[ignore] を外してから実装すると、書いた式で通るか確認できる)
+    #[test]
+    #[ignore = "DESIGN.md §4.1 を実装したら #[ignore] を外す"]
+    fn isolated_house_is_cottage() {
+        assert_eq!(house_tier_for(nbh(0, 0, 0, 0)), HouseTier::Cottage);
+    }
+
+    /// インフラだけ届いている (Road あり、Shop / Workshop ゼロ) は
+    /// Highrise にはならない — 「商業が回っていない」ため。
+    #[test]
+    #[ignore = "DESIGN.md §4.1 を実装したら #[ignore] を外す"]
+    fn road_only_does_not_reach_highrise() {
+        assert_ne!(house_tier_for(nbh(2, 0, 0, 1)), HouseTier::Highrise);
+    }
+
+    /// Road + Workshop + Shop が揃い周囲に House もいる豊かなゾーンは
+    /// Highrise に到達する。
+    #[test]
+    #[ignore = "DESIGN.md §4.1 を実装したら #[ignore] を外す"]
+    fn full_economy_reaches_highrise() {
+        assert_eq!(house_tier_for(nbh(2, 2, 2, 4)), HouseTier::Highrise);
+    }
+
+    /// 単調性: 「条件が悪くなって Tier が上がる」のは想定外。
+    /// 引数の各成分を増やしても Tier は下がらない (>= で良い)。
+    #[test]
+    #[ignore = "DESIGN.md §4.1 を実装したら #[ignore] を外す"]
+    fn tier_is_monotone() {
+        let lo = house_tier_for(nbh(1, 0, 0, 1));
+        let hi = house_tier_for(nbh(2, 1, 1, 3));
+        assert!(hi >= lo, "richer neighborhood should not produce a worse tier");
+    }
+
+    /// 収入は Tier が上がるほど増える (Cottage <= Apartment <= Highrise)。
+    #[test]
+    #[ignore = "DESIGN.md §4.2 を実装したら #[ignore] を外す"]
+    fn house_income_is_monotone_in_tier() {
+        let c = compute_house_income(HouseTier::Cottage);
+        let a = compute_house_income(HouseTier::Apartment);
+        let h = compute_house_income(HouseTier::Highrise);
+        assert!(c >= 1, "Cottage should be at least $1/s for survival floor");
+        assert!(a >= c);
+        assert!(h >= a);
+        // インフレを抑えるため Highrise も $20/s 以下に収める。
+        assert!(h <= 20);
+    }
 
     #[test]
     fn empty_city_earns_nothing() {
