@@ -1065,14 +1065,19 @@ fn monster_turn(state: &mut RpgState) {
     for i in 0..count {
         if state.hp == 0 { break; }
         monster_act(state, i);
-        // Swift elites act twice per turn.
-        let swift = state
+        // Swift elites act twice per turn — but only when the first
+        // action wasn't "wind up a charge". Otherwise the telegraph
+        // ("…は力を溜めている！") would be released the same turn,
+        // turning the supposed warning into a free 2× burst.
+        let act_again = state
             .dungeon
             .as_ref()
             .and_then(|d| d.monsters.get(i))
-            .map(|m| m.affix == Some(EnemyAffix::Swift) && m.hp > 0)
+            .map(|m| {
+                m.affix == Some(EnemyAffix::Swift) && m.hp > 0 && !m.charging
+            })
             .unwrap_or(false);
-        if swift && state.hp > 0 {
+        if act_again && state.hp > 0 {
             monster_act(state, i);
         }
     }
@@ -2344,5 +2349,87 @@ mod tests {
         // Manually grant Heal, simulating an L2 pick.
         s.learned_skills.push(SkillKind::Heal);
         assert_eq!(available_skills(&s).len(), 2);
+    }
+
+    /// Regression for codex review (P2): a Swift+can_charge enemy used to
+    /// telegraph the charge AND release it on the same monster turn,
+    /// because `monster_turn` ran `monster_act` twice without checking
+    /// whether the first call had just set `charging = true`.
+    ///
+    /// The repro scenario: place a Swift Golem adjacent to the player
+    /// without `charging` set, run a single `monster_turn`, and verify
+    /// that the second Swift action did *not* release the freshly-set
+    /// charge. The pre-fix behavior would deal a 2× burst on the same
+    /// turn the warning ("…は力を溜めている！") appeared.
+    #[test]
+    fn swift_charging_enemy_does_not_release_same_turn() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+
+        // Find any walkable tile adjacent to the player so the Golem
+        // can validly attack from there.
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        let px = map.player_x;
+        let py = map.player_y;
+        let mut spot = None;
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            let nx = px as i32 + dir.dx();
+            let ny = py as i32 + dir.dy();
+            if !map.in_bounds(nx, ny) { continue; }
+            let (ux, uy) = (nx as usize, ny as usize);
+            if !map.cell(ux, uy).is_walkable() { continue; }
+            spot = Some((ux, uy));
+            break;
+        }
+        let (gx, gy) = spot.expect("dungeon entrance should have a walkable neighbor");
+
+        let info = enemy_info(EnemyKind::Golem);
+        map.monsters.push(Monster {
+            kind: EnemyKind::Golem,
+            x: gx,
+            y: gy,
+            hp: info.max_hp,
+            max_hp: info.max_hp,
+            awake: true,
+            charging: false,
+            affix: Some(EnemyAffix::Swift),
+        });
+
+        // Sweep enough seeds to find one where the first `monster_act`
+        // rolls into the 25% "wind up a charge" branch. The bug only
+        // manifests when charging is freshly set during this turn.
+        let hp_before = s.hp;
+        let mut saw_charge_set = false;
+        for trial_seed in 0u64..200 {
+            // Reset state for each trial.
+            s.rng_seed = trial_seed;
+            s.hp = hp_before;
+            let m = &mut s.dungeon.as_mut().unwrap().monsters[0];
+            m.charging = false;
+            m.hp = m.max_hp;
+
+            monster_turn(&mut s);
+
+            let m = &s.dungeon.as_ref().unwrap().monsters[0];
+            if m.charging {
+                // First action set charging; second action must NOT
+                // have released it (else the bug is back). Player HP
+                // should not have dropped — only the warning was logged.
+                saw_charge_set = true;
+                assert_eq!(
+                    s.hp, hp_before,
+                    "Swift's second action released the charge on the same turn — \
+                     telegraph bypassed (seed {})",
+                    trial_seed
+                );
+                break;
+            }
+        }
+        assert!(
+            saw_charge_set,
+            "200 trials never rolled into the charge branch — \
+             test setup is broken"
+        );
     }
 }
