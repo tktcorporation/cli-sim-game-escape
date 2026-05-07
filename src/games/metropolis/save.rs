@@ -34,8 +34,9 @@ use super::terrain::Terrain;
 ///   v1: 初期 (cookie/save と同じ schema 形式)
 ///   v2: `last_outpost_dispatch_tick` / `last_auto_demolish_tick` を追加
 ///       (Phase A 撤去・開拓の自動化クールダウン)
+///   v3: `built_at_tick` グリッドを追加 (Phase D 老朽化 / Tier 昇格 dwell time)
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 2;
+const SAVE_VERSION: u32 = 3;
 
 /// 互換性を維持できる最小バージョン。破壊的変更で +1。
 /// v1 → v2 はフィールド追加だけなので `serde(default)` で透過的にロード可能。
@@ -339,6 +340,11 @@ struct GameSave {
     /// v2 以降: 累計 Outpost 派遣数 (戦略の挙動を測る統計)。
     /// 旧データは 0 始まり (未計測扱い)。
     outposts_dispatched_total: u64,
+
+    /// v3 以降: 各 Built タイルの完成 tick。長さ = GRID_W * GRID_H、行優先。
+    /// 旧データには無いので `serde(default)` で空 Vec になる → `apply_save`
+    /// 側で「現在の tick で全建物を新築扱い」にマイグレートする。
+    built_at_tick: Vec<u64>,
 }
 
 /// `City` の全フィールドを「永続化対象 / 一時状態 (transient)」の 2 群に
@@ -372,6 +378,7 @@ fn extract_save(state: &City) -> SaveData {
         last_outpost_dispatch_tick,
         last_auto_demolish_tick,
         outposts_dispatched_total,
+        ref built_at_tick,
         // ── 一時状態 (再ロード後はリセットでよい UI / フラッシュタイマ) ──
         // ティア進化バナーフラッシュ。
         tier_flash_until: _,
@@ -387,10 +394,12 @@ fn extract_save(state: &City) -> SaveData {
 
     let mut tiles = Vec::with_capacity(GRID_W * GRID_H);
     let mut terrain_buf = Vec::with_capacity(GRID_W * GRID_H);
+    let mut built_at_buf = Vec::with_capacity(GRID_W * GRID_H);
     for y in 0..GRID_H {
         for x in 0..GRID_W {
             tiles.push(tile_to_save(&grid[y][x]));
             terrain_buf.push(terrain_to_u8(terrain[y][x]));
+            built_at_buf.push(built_at_tick[y][x]);
         }
     }
 
@@ -416,6 +425,7 @@ fn extract_save(state: &City) -> SaveData {
             last_outpost_dispatch_tick: *last_outpost_dispatch_tick,
             last_auto_demolish_tick: *last_auto_demolish_tick,
             outposts_dispatched_total: *outposts_dispatched_total,
+            built_at_tick: built_at_buf,
         },
     }
 }
@@ -448,6 +458,7 @@ fn apply_save(state: &mut City, save: &GameSave) {
         last_outpost_dispatch_tick,
         last_auto_demolish_tick,
         outposts_dispatched_total,
+        built_at_tick,
     } = save;
 
     state.world_seed = *world_seed;
@@ -483,6 +494,28 @@ fn apply_save(state: &mut City, save: &GameSave) {
     state.last_outpost_dispatch_tick = *last_outpost_dispatch_tick;
     state.last_auto_demolish_tick = *last_auto_demolish_tick;
     state.outposts_dispatched_total = *outposts_dispatched_total;
+
+    // 築年数: v3 で追加。旧データ (空 Vec) では「現在の tick で全建物を新築扱い」
+    // にマイグレートする。これでロード直後に既存の街が突然全部老朽化扱いに
+    // ならない (ロード時点を起点に再カウント開始)。
+    let now = state.tick;
+    let v3_provided = built_at_tick.len() == GRID_W * GRID_H;
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            let idx = y * GRID_W + x;
+            let is_built = matches!(state.grid[y][x], Tile::Built(_));
+            if !is_built {
+                state.built_at_tick[y][x] = 0;
+                continue;
+            }
+            if v3_provided {
+                state.built_at_tick[y][x] = built_at_tick[idx];
+            } else {
+                // v2 以前: 既存建物を「ロード時点で完成」扱いにマイグレート。
+                state.built_at_tick[y][x] = now;
+            }
+        }
+    }
 
     // イベントログは長さ上限を切る。
     let mut ev = events.clone();
@@ -622,6 +655,11 @@ mod tests {
         original.set_tile(1, 0, Tile::Built(Building::Workshop));
         original.set_tile(2, 0, Tile::Built(Building::Shop));
         original.set_tile(0, 1, Tile::Built(Building::Road));
+        // v3: built_at_tick も保存対象。各セルに異なる築 tick を入れて roundtrip を確認。
+        original.built_at_tick[0][0] = 100;
+        original.built_at_tick[0][1] = 200;
+        original.built_at_tick[0][2] = 300;
+        original.built_at_tick[1][0] = 400;
         original.grid[1][1] = Tile::Construction {
             target: Building::House,
             ticks_remaining: 42,
@@ -683,6 +721,34 @@ mod tests {
         }
         assert_eq!(restored.terrain[5][5], Terrain::Plain);
         assert_eq!(restored.events, vec!["a", "b", "c"]);
+        // v3: built_at_tick も完全復元される。
+        assert_eq!(restored.built_at_tick[0][0], 100);
+        assert_eq!(restored.built_at_tick[0][1], 200);
+        assert_eq!(restored.built_at_tick[0][2], 300);
+        assert_eq!(restored.built_at_tick[1][0], 400);
+    }
+
+    /// v2 以前のセーブをロードした時、既存建物の built_at_tick は
+    /// 「現在の tick で新築」扱いにマイグレートされる (ロード直後に
+    /// 突然全建物が老朽化扱いにならない)。
+    #[test]
+    fn v2_save_migrates_built_at_to_current_tick() {
+        let mut city = City::new();
+        let mut save = extract_save(&city);
+        // v3 フィールドを空にして v2 相当のデータを作る。
+        save.game.built_at_tick.clear();
+        // ロード時の tick と、Built タイルを準備。
+        save.game.tick = 5000;
+        // (0,0) を House にする。
+        if let Some(t) = save.game.tiles.first_mut() {
+            t.kind = TILE_BUILT;
+            t.building = BUILDING_HOUSE;
+        }
+        apply_save(&mut city, &save.game);
+        // 既存 House は now=5000 で built_at_tick が埋まっている (= 新築扱い)。
+        assert_eq!(city.built_at_tick[0][0], 5000);
+        // Built でないセルは 0 のまま。
+        assert_eq!(city.built_at_tick[0][1], 0);
     }
 
     /// 不正な workers 値はクランプされる。
