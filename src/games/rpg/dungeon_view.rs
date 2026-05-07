@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use ratzilla::ratatui::style::{Color, Style};
 use ratzilla::ratatui::text::{Line, Span};
 
-use super::state::{enemy_info, CellType, DungeonMap, FloorTheme, Tile};
+use super::state::{CellType, DungeonMap, FloorTheme, Tile};
 
 // ── Visibility ───────────────────────────────────────────────
 
@@ -140,9 +140,15 @@ pub fn render_map_2d(
             } else if is_pet {
                 buf[vy][vx] = ("\u{ff05}".to_string(), Color::Cyan); // ％ (pet)
             } else if let (true, Some(m)) = (is_visible, monster) {
-                let info = enemy_info(m.kind);
-                let glyph = format!("{} ", info.glyph);
-                let color = if m.awake { Color::Red } else { Color::Rgb(180, 80, 80) };
+                let glyph = format!("{} ", m.glyph());
+                // Elite mobs render in magenta so they stand out from regular reds.
+                let color = if m.affix.is_some() {
+                    if m.awake { Color::Magenta } else { Color::Rgb(180, 80, 180) }
+                } else if m.awake {
+                    Color::Red
+                } else {
+                    Color::Rgb(180, 80, 80)
+                };
                 buf[vy][vx] = (glyph, color);
             } else if is_visible {
                 match cell.tile {

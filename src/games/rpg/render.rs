@@ -21,7 +21,7 @@ use super::dungeon_view;
 use super::logic::{available_quests, available_skills, return_bonus};
 use super::lore::{floor_theme, theme_name};
 use super::state::{
-    affix_info, enemy_info, item_info, skill_element, skill_info, Element, Overlay, RpgState,
+    affix_info, item_info, skill_element, skill_info, Element, Overlay, RpgState,
     Scene,
 };
 
@@ -39,6 +39,7 @@ pub fn render(
             Overlay::SkillMenu => render_skill_menu(state, f, area, click_state),
             Overlay::QuestBoard => render_quest_board(state, f, area, click_state),
             Overlay::PrayMenu => render_pray_menu(state, f, area, click_state),
+            Overlay::SkillChoice => render_skill_choice(state, f, area, click_state),
         }
         return;
     }
@@ -399,12 +400,13 @@ fn render_explore_panel(
         if let Some(m) = map.monsters.iter().find(|m| {
             m.hp > 0 && (m.x as i32 - px).abs() + (m.y as i32 - py).abs() == 1
         }) {
-            let info = enemy_info(m.kind);
             let (hpb, c) = hp_bar(m.hp, m.max_hp, 8);
+            // Elite mobs adopt the magenta highlight from the map view.
+            let name_color = if m.affix.is_some() { Color::Magenta } else { Color::Red };
             cl.push(Line::from(vec![
                 Span::styled(
-                    format!(" 敵: {}", info.name),
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    format!(" 敵: {}", m.display_name()),
+                    Style::default().fg(name_color).add_modifier(Modifier::BOLD),
                 ),
             ]));
             cl.push(Line::from(vec![
@@ -998,7 +1000,7 @@ fn render_status(
     }
     cl.push(Line::from(""));
 
-    let skills = available_skills(state.level);
+    let skills = available_skills(state);
     if !skills.is_empty() {
         cl.push(Line::from(Span::styled(
             " 【スキル】",
@@ -1118,7 +1120,7 @@ fn render_skill_menu(
     )));
     cl.push(Line::from(""));
 
-    let skills = available_skills(state.level);
+    let skills = available_skills(state);
     if skills.is_empty() {
         cl.push(Line::from(Span::styled(
             " 習得済みスキルなし",
@@ -1321,6 +1323,79 @@ fn render_pray_menu(
         .border_style(Style::default().fg(Color::Yellow))
         .title(Span::styled(
             " 祭壇 ",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+
+    let mut cs = click_state.borrow_mut();
+    cl.render(f, area, block, &mut cs, false, 0);
+}
+
+// ── Skill Choice (level-up forced pick) ─────────────────────
+
+fn render_skill_choice(
+    state: &RpgState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let borders = borders_for(area.width);
+    let mut cl = ClickableList::new();
+    let Some((left, right)) = state.pending_skill_choice else {
+        // Fallback (shouldn't reach here): empty panel.
+        let block = Block::default().borders(borders);
+        f.render_widget(Paragraph::new("").block(block), area);
+        return;
+    };
+
+    cl.push(Line::from(""));
+    cl.push(Line::from(Span::styled(
+        format!(" Lv.{}に到達 — スキルを1つ選んで習得", state.level),
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )));
+    cl.push(Line::from(""));
+    cl.push(Line::from(Span::styled(
+        " ※ もう一方は今回の冒険では習得できない",
+        Style::default().fg(Color::DarkGray),
+    )));
+    cl.push(Line::from(""));
+
+    for (i, skill) in [left, right].iter().enumerate() {
+        let info = skill_info(*skill);
+        let bracket = if i == 0 { "[1]" } else { "[2]" };
+        let target_id = if i == 0 {
+            super::actions::SKILL_CHOICE_LEFT
+        } else {
+            super::actions::SKILL_CHOICE_RIGHT
+        };
+        cl.push_clickable(
+            Line::from(vec![
+                Span::styled(
+                    format!(" {} ", bracket),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    info.name,
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(" (MP{})", info.mp_cost),
+                    Style::default().fg(Color::Blue),
+                ),
+            ]),
+            target_id,
+        );
+        cl.push(Line::from(Span::styled(
+            format!("     {}", info.description),
+            Style::default().fg(Color::Gray),
+        )));
+        cl.push(Line::from(""));
+    }
+
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(Span::styled(
+            " スキル習得 ",
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
         ));
 

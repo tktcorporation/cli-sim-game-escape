@@ -317,6 +317,18 @@ fn handle_overlay_open_click(state: &mut RpgState, id: u16) -> bool {
 // ── Overlays ───────────────────────────────────────────────
 
 fn handle_overlay_key(state: &mut RpgState, ch: char) -> bool {
+    // SkillChoice is a forced pick: cancel/close shortcuts must not
+    // dismiss it, otherwise the level-up gate would be bypassed and the
+    // run could continue with `pending_skill_choice` lingering.
+    if state.overlay == Some(Overlay::SkillChoice) {
+        return match ch {
+            ' ' | 'A' | 'a' => logic::confirm_skill_choice(state, state.cursor),
+            '1' => logic::confirm_skill_choice(state, 0),
+            '2' => logic::confirm_skill_choice(state, 1),
+            _ => false,
+        };
+    }
+
     // B button / common close shortcuts work for every overlay.
     if matches!(ch, 'b' | 'B' | '0' | '-') {
         state.close_overlay();
@@ -397,11 +409,27 @@ fn handle_overlay_key(state: &mut RpgState, ch: char) -> bool {
             ' ' | '1' | 'A' | 'a' => logic::pray(state),
             _ => false,
         },
+        Some(Overlay::SkillChoice) => match ch {
+            ' ' | 'A' | 'a' => logic::confirm_skill_choice(state, state.cursor),
+            '1' => logic::confirm_skill_choice(state, 0),
+            '2' => logic::confirm_skill_choice(state, 1),
+            _ => false,
+        },
         None => false,
     }
 }
 
 fn handle_overlay_click(state: &mut RpgState, id: u16) -> bool {
+    // SkillChoice: forced pick — only accept the two skill-choice buttons,
+    // never the close-overlay click. Mirrors the key-input guard above.
+    if state.overlay == Some(Overlay::SkillChoice) {
+        return match id {
+            SKILL_CHOICE_LEFT => logic::confirm_skill_choice(state, 0),
+            SKILL_CHOICE_RIGHT => logic::confirm_skill_choice(state, 1),
+            _ => false,
+        };
+    }
+
     if id == CLOSE_OVERLAY {
         state.close_overlay();
         return true;
@@ -457,6 +485,15 @@ fn handle_overlay_click(state: &mut RpgState, id: u16) -> bool {
         Some(Overlay::PrayMenu) => {
             if id == PRAY_CONFIRM {
                 return logic::pray(state);
+            }
+            false
+        }
+        Some(Overlay::SkillChoice) => {
+            if id == SKILL_CHOICE_LEFT {
+                return logic::confirm_skill_choice(state, 0);
+            }
+            if id == SKILL_CHOICE_RIGHT {
+                return logic::confirm_skill_choice(state, 1);
             }
             false
         }
@@ -596,7 +633,7 @@ mod tests {
             map.monsters.push(state::Monster {
                 kind: state::EnemyKind::Slime,
                 x: ux, y: uy, hp: 12, max_hp: 12,
-                awake: true, charging: false,
+                awake: true, charging: false, affix: None,
             });
             break;
         }
@@ -773,5 +810,54 @@ mod tests {
         logic::resolve_event_choice(&mut g.state, 0);
         assert_eq!(g.state.gold, 40);
         assert_eq!(g.state.hp, g.state.effective_max_hp());
+    }
+
+    /// Regression for codex review (P1): the SkillChoice overlay must
+    /// not be dismissible by the shared close shortcuts (B button, '0',
+    /// '-', or the CLOSE_OVERLAY click). Otherwise the player can bypass
+    /// the level-up gate while `pending_skill_choice` lingers.
+    #[test]
+    fn skill_choice_cannot_be_dismissed_by_close_shortcuts() {
+        let mut g = make_game();
+        g.state.overlay = Some(Overlay::SkillChoice);
+        g.state.pending_skill_choice = Some((
+            state::SkillKind::Heal,
+            state::SkillKind::Shield,
+        ));
+
+        // Each of these would close any other overlay — they must NOT
+        // close SkillChoice.
+        for ch in ['b', 'B', '0', '-'] {
+            let consumed = handle_key(&mut g.state, ch);
+            assert!(
+                !consumed,
+                "key '{}' must not be accepted while SkillChoice is open",
+                ch
+            );
+            assert_eq!(
+                g.state.overlay,
+                Some(Overlay::SkillChoice),
+                "SkillChoice overlay must remain after key '{}'",
+                ch
+            );
+            assert!(
+                g.state.pending_skill_choice.is_some(),
+                "pending_skill_choice must remain after key '{}'",
+                ch
+            );
+        }
+
+        // CLOSE_OVERLAY click must also be ignored.
+        let click_consumed = handle_click(&mut g.state, CLOSE_OVERLAY);
+        assert!(!click_consumed, "CLOSE_OVERLAY click must not be accepted");
+        assert_eq!(g.state.overlay, Some(Overlay::SkillChoice));
+        assert!(g.state.pending_skill_choice.is_some());
+
+        // The valid SKILL_CHOICE_LEFT click commits and closes.
+        let left_consumed = handle_click(&mut g.state, SKILL_CHOICE_LEFT);
+        assert!(left_consumed);
+        assert_eq!(g.state.overlay, None);
+        assert!(g.state.pending_skill_choice.is_none());
+        assert!(g.state.learned_skills.contains(&state::SkillKind::Heal));
     }
 }

@@ -28,6 +28,108 @@ pub enum EnemyKind {
     DemonLord,
 }
 
+/// Rare prefix that mutates a normal enemy into an "elite" variant.
+/// Boosts stats / changes behavior / improves rewards. DemonLord is
+/// excluded from rolling these (it is a unique boss).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum EnemyAffix {
+    /// 鎧の: HP/DEF up, slower; high-quality drop.
+    Armored,
+    /// 疾風の: acts twice per turn (2 actions in monster phase).
+    Swift,
+    /// 灼熱の: melee attacks add fire damage; immune to Fire weakness bonus.
+    Burning,
+}
+
+pub struct EnemyAffixInfo {
+    pub prefix: &'static str,
+    /// Multiplier on max HP (×100, e.g. 150 = ×1.5).
+    pub hp_pct: u32,
+    /// Flat ATK bonus added to base ATK.
+    pub atk_bonus: u32,
+    /// Flat DEF bonus added to base DEF.
+    pub def_bonus: u32,
+    /// Bonus gold percentage (×100, 200 = double).
+    pub gold_pct: u32,
+    /// EXP percentage (×100).
+    pub exp_pct: u32,
+}
+
+pub fn enemy_affix_info(affix: EnemyAffix) -> EnemyAffixInfo {
+    match affix {
+        EnemyAffix::Armored => EnemyAffixInfo {
+            prefix: "鎧の",
+            hp_pct: 180,
+            atk_bonus: 0,
+            def_bonus: 6,
+            gold_pct: 250,
+            exp_pct: 200,
+        },
+        EnemyAffix::Swift => EnemyAffixInfo {
+            prefix: "疾風の",
+            hp_pct: 80,
+            atk_bonus: 0,
+            def_bonus: 0,
+            gold_pct: 220,
+            exp_pct: 220,
+        },
+        EnemyAffix::Burning => EnemyAffixInfo {
+            prefix: "灼熱の",
+            hp_pct: 110,
+            atk_bonus: 3,
+            def_bonus: 0,
+            gold_pct: 220,
+            exp_pct: 200,
+        },
+    }
+}
+
+pub const ALL_ENEMY_AFFIXES: &[EnemyAffix] = &[
+    EnemyAffix::Armored,
+    EnemyAffix::Swift,
+    EnemyAffix::Burning,
+];
+
+// ── Vault (special rooms) ─────────────────────────────────────
+
+/// "Vault" — a curated room woven into a generated dungeon floor.
+/// Each vault has hand-picked cell contents and a stronger guardian.
+/// Compare to NetHack's vaults / Brogue's special rooms.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VaultKind {
+    /// 宝物庫: multiple Treasure cells, guarded by an elite mob.
+    TreasureVault,
+    /// 祭壇の間: single Idol cell at center for a sacrifice ritual,
+    /// guarded by a heavy hitter — entering the room without a plan
+    /// can be punishing.
+    AltarChamber,
+}
+
+/// Probability (0-100) that a generated floor contains a vault.
+/// Returns 0 on the village (floor 0) and on the boss arena (MAX_FLOOR).
+pub fn vault_chance(floor: u32) -> u32 {
+    match floor {
+        0..=2 => 0,        // breathing room early floors
+        3..=5 => 35,
+        6..=9 => 50,
+        _ => 0,            // boss arena: no vaults
+    }
+}
+
+/// Probability (0-100) that a freshly spawned enemy gets an elite affix.
+/// DemonLord boss floor returns 0.
+pub fn elite_chance(floor: u32) -> u32 {
+    match floor {
+        0 | 1 => 0,
+        2 => 5,
+        3..=4 => 10,
+        5..=6 => 15,
+        7..=8 => 20,
+        9 => 25,
+        _ => 0, // boss floor: no elites, the lord is solo
+    }
+}
+
 pub struct EnemyInfo {
     pub name: &'static str,
     pub glyph: char, // letter shown on map
@@ -354,6 +456,10 @@ pub struct SkillInfo {
     pub description: &'static str,
     pub mp_cost: u32,
     pub value: u32,
+    /// Reference level at which this skill becomes available — used for
+    /// flavor text and tests; the actual unlock is gated by
+    /// `skill_choice_pair` and `RpgState::learned_skills`.
+    #[allow(dead_code)]
     pub learn_level: u32,
 }
 
@@ -399,6 +505,10 @@ pub fn skill_element(kind: SkillKind) -> Option<Element> {
     }
 }
 
+/// Reference list of every skill in the game. Kept for the metadata
+/// integrity test in this module; the live "what does the player have"
+/// list is `RpgState::learned_skills`.
+#[allow(dead_code)]
 pub const ALL_SKILLS: &[SkillKind] = &[
     SkillKind::Fire,
     SkillKind::Heal,
@@ -408,6 +518,21 @@ pub const ALL_SKILLS: &[SkillKind] = &[
     SkillKind::Drain,
     SkillKind::Berserk,
 ];
+
+/// At a given level-up, the player picks one of two skills to learn.
+/// `Fire` is the starter and not part of any pair.
+///
+/// Build identity comes from these forced picks: pure damage vs sustain,
+/// elemental vs vampiric, burst vs buff. Once made, the choice is sticky
+/// for the run — see `RpgState::learned_skills`.
+pub fn skill_choice_pair(level: u32) -> Option<(SkillKind, SkillKind)> {
+    match level {
+        2 => Some((SkillKind::Heal, SkillKind::Shield)),
+        4 => Some((SkillKind::IceBlade, SkillKind::Drain)),
+        6 => Some((SkillKind::Thunder, SkillKind::Berserk)),
+        _ => None,
+    }
+}
 
 // ── Level / EXP Table ─────────────────────────────────────────
 
@@ -580,6 +705,46 @@ pub struct Monster {
     /// True when the monster is "winding up" a charge attack
     /// (telegraphed → next turn does double damage).
     pub charging: bool,
+    /// Rare prefix that turns this monster into an "elite" variant.
+    /// None = normal mob.
+    pub affix: Option<EnemyAffix>,
+}
+
+impl Monster {
+    /// Effective ATK including elite affix bonus.
+    pub fn effective_atk(&self) -> u32 {
+        let base = enemy_info(self.kind).atk;
+        match self.affix {
+            Some(a) => base + enemy_affix_info(a).atk_bonus,
+            None => base,
+        }
+    }
+    /// Effective DEF including elite affix bonus.
+    pub fn effective_def(&self) -> u32 {
+        let base = enemy_info(self.kind).def;
+        match self.affix {
+            Some(a) => base + enemy_affix_info(a).def_bonus,
+            None => base,
+        }
+    }
+    /// Display name including the elite prefix when present.
+    pub fn display_name(&self) -> String {
+        let base = enemy_info(self.kind).name;
+        match self.affix {
+            Some(a) => format!("{}{}", enemy_affix_info(a).prefix, base),
+            None => base.to_string(),
+        }
+    }
+    /// Glyph rendered on the map. Elites use the uppercase form so the
+    /// player can spot them at a glance among regular mobs.
+    pub fn glyph(&self) -> char {
+        let g = enemy_info(self.kind).glyph;
+        if self.affix.is_some() {
+            g.to_ascii_uppercase()
+        } else {
+            g
+        }
+    }
 }
 
 /// A pet/companion on the dungeon grid (ally entity).
@@ -803,6 +968,9 @@ pub enum Overlay {
     QuestBoard,
     /// Pray confirmation (town).
     PrayMenu,
+    /// Forced level-up skill pick: choose one of two to learn.
+    /// Cannot be dismissed without picking — defines the run's build.
+    SkillChoice,
 }
 
 impl Overlay {
@@ -937,6 +1105,13 @@ pub struct RpgState {
     pub met_reception: bool,
     /// 武具屋に話したことがあるか。初回は初期装備配布、以降はフレーバー。
     pub met_blacksmith: bool,
+
+    /// Skills the player has actually learned. `Fire` is added on `new()`;
+    /// every subsequent pick comes through the `SkillChoice` overlay.
+    pub learned_skills: Vec<SkillKind>,
+    /// When set, the player has hit a level-up that gates a skill choice.
+    /// The dungeon turn engine refuses to advance until they pick.
+    pub pending_skill_choice: Option<(SkillKind, SkillKind)>,
 }
 
 pub const SATIETY_MAX_DEFAULT: u32 = 1000;
@@ -999,6 +1174,8 @@ impl RpgState {
             cursor: 0,
             met_reception: false,
             met_blacksmith: false,
+            learned_skills: vec![SkillKind::Fire],
+            pending_skill_choice: None,
         };
         // Load the village map so the player spawns on the overworld.
         s.dungeon = Some(super::overworld_map::generate_overworld());
@@ -1247,6 +1424,42 @@ mod tests {
     }
 
     #[test]
+    fn all_enemy_affixes_have_info() {
+        for &a in ALL_ENEMY_AFFIXES {
+            let info = enemy_affix_info(a);
+            assert!(!info.prefix.is_empty());
+            assert!(info.hp_pct > 0);
+            assert!(info.gold_pct >= 100);
+        }
+    }
+
+    #[test]
+    fn elite_chance_is_zero_on_starter_and_boss_floors() {
+        // Floor 0 is the village; floor 1 is the breathing-room intro;
+        // floor 10 is the boss arena. None of these should roll elites.
+        assert_eq!(elite_chance(0), 0);
+        assert_eq!(elite_chance(1), 0);
+        assert_eq!(elite_chance(10), 0);
+        // Mid-game floors should have a positive chance.
+        assert!(elite_chance(5) > 0);
+    }
+
+    #[test]
+    fn elite_monster_renders_uppercase_glyph_and_prefix() {
+        let m = Monster {
+            kind: EnemyKind::Goblin,
+            x: 0, y: 0, hp: 26, max_hp: 26,
+            awake: false, charging: false,
+            affix: Some(EnemyAffix::Armored),
+        };
+        // 'g' (goblin) → 'G' when armored
+        assert_eq!(m.glyph(), 'G');
+        assert_eq!(m.display_name(), "鎧のゴブリン");
+        // DEF should be boosted by the affix.
+        assert!(m.effective_def() > enemy_info(EnemyKind::Goblin).def);
+    }
+
+    #[test]
     fn dungeon_monster_at() {
         let map = DungeonMap {
             floor_num: 1,
@@ -1267,7 +1480,7 @@ mod tests {
             monsters: vec![Monster {
                 kind: EnemyKind::Slime,
                 x: 2, y: 2, hp: 12, max_hp: 12,
-                awake: false, charging: false,
+                awake: false, charging: false, affix: None,
             }],
             is_overworld: false,
         };

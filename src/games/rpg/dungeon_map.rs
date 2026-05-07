@@ -7,7 +7,8 @@
 #![allow(clippy::needless_range_loop)]
 
 use super::state::{
-    enemy_info, floor_enemies, CellType, DungeonMap, Facing, MapCell, Monster, Room, Tile,
+    elite_chance, enemy_affix_info, enemy_info, floor_enemies, vault_chance, CellType, DungeonMap,
+    EnemyAffix, EnemyKind, Facing, MapCell, Monster, Room, Tile, VaultKind, ALL_ENEMY_AFFIXES,
 };
 
 // ── RNG (same LCG as logic.rs) ──────────────────────────────
@@ -190,11 +191,28 @@ pub fn generate_map(floor: u32, rng_seed: &mut u64) -> DungeonMap {
     let stairs_y = stairs_room.y + stairs_room.h / 2;
     grid[stairs_y][stairs_x].cell_type = CellType::Stairs;
 
+    // Place special vault — curated room with hand-picked contents.
+    // Done BEFORE place_events so vault cells (Treasure / Idol) are
+    // already non-Corridor and the regular event distributor skips them.
+    let vault = maybe_place_vault(
+        &mut grid, &rooms, &room_section_map, floor, rng_seed,
+        entrance_room_idx, stairs_room_idx,
+    );
+
     // Place special events on RoomFloor tiles
     place_events(&mut grid, w, h, floor, rng_seed, start_x, start_y, stairs_x, stairs_y);
 
-    // Spawn monster entities (separate from cell types)
-    let monsters = spawn_monsters(&grid, w, h, floor, start_x, start_y, stairs_x, stairs_y, rng_seed);
+    // Spawn monster entities (separate from cell types). Skips the vault
+    // room id so the curated guards aren't drowned by random spawns.
+    let vault_room_id = vault.as_ref().map(|v| v.room_id);
+    let mut monsters = spawn_monsters(
+        &grid, w, h, floor, start_x, start_y, stairs_x, stairs_y, rng_seed, vault_room_id,
+    );
+
+    // Add vault guards now that the regular enemies are placed.
+    if let Some(v) = &vault {
+        spawn_vault_guards(&mut monsters, v, &rooms, floor, rng_seed);
+    }
 
     DungeonMap {
         floor_num: floor,
@@ -213,6 +231,10 @@ pub fn generate_map(floor: u32, rng_seed: &mut u64) -> DungeonMap {
 /// Spawn monster entities on walkable tiles (room floors, away from
 /// entrance/stairs/event cells). The bottom floor (B10F) spawns the
 /// Demon Lord at the stairs cell as a boss encounter.
+///
+/// `skip_room_id`: when set, no random monsters spawn inside the
+/// matching room — used by the vault system so curated guards are
+/// the only inhabitants.
 #[allow(clippy::too_many_arguments)]
 fn spawn_monsters(
     grid: &[Vec<MapCell>],
@@ -224,6 +246,7 @@ fn spawn_monsters(
     stairs_x: usize,
     stairs_y: usize,
     rng_seed: &mut u64,
+    skip_room_id: Option<u8>,
 ) -> Vec<Monster> {
     let mut monsters = Vec::new();
 
@@ -238,6 +261,7 @@ fn spawn_monsters(
             max_hp: info.max_hp,
             awake: true,
             charging: false,
+            affix: None,
         });
         return monsters;
     }
@@ -252,6 +276,9 @@ fn spawn_monsters(
             if (x, y) == (stairs_x, stairs_y) { continue; }
             if cell.cell_type != CellType::Corridor { continue; }
             if cell.tile != Tile::RoomFloor { continue; }
+            if let (Some(skip), Some(rid)) = (skip_room_id, cell.room_id) {
+                if skip == rid { continue; }
+            }
             // Don't spawn within 4 tiles of entrance (give player breathing room)
             let dx = x as i32 - entrance_x as i32;
             let dy = y as i32 - entrance_y as i32;
@@ -275,22 +302,37 @@ fn spawn_monsters(
     };
     let pool = floor_enemies(floor);
 
+    let elite_pct = elite_chance(floor);
     for &(x, y) in candidates.iter().take(count) {
         let kind = pool[rng_range(rng_seed, pool.len() as u32) as usize];
         let info = enemy_info(kind);
+        // Elite affix roll. Boss (DemonLord) is excluded by elite_chance
+        // returning 0 on the boss floor.
+        let affix = if elite_pct > 0 && rng_range(rng_seed, 100) < elite_pct {
+            let i = rng_range(rng_seed, ALL_ENEMY_AFFIXES.len() as u32) as usize;
+            Some(ALL_ENEMY_AFFIXES[i])
+        } else {
+            None
+        };
+        let max_hp = match affix {
+            Some(a) => (info.max_hp * enemy_affix_info(a).hp_pct / 100).max(1),
+            None => info.max_hp,
+        };
         monsters.push(Monster {
             kind,
             x,
             y,
-            hp: info.max_hp,
-            max_hp: info.max_hp,
+            hp: max_hp,
+            max_hp,
             awake: false,
             charging: false,
+            affix,
         });
     }
 
     monsters
 }
+
 
 /// Carve a horizontal corridor connecting left_room and right_room.
 fn carve_horizontal_corridor(
@@ -698,6 +740,156 @@ fn room_distribution(floor: u32, total: usize) -> RoomDist {
     }
 }
 
+// ── Vault placement ───────────────────────────────────────────
+
+/// Information about a placed vault, used for follow-up monster spawning.
+pub(crate) struct PlacedVault {
+    pub kind: VaultKind,
+    pub room_id: u8,
+    pub center_x: usize,
+    pub center_y: usize,
+}
+
+/// Pick a non-entrance, non-stairs room (when one exists) and convert it
+/// into a vault. Cells inside the room are repainted with vault contents
+/// (Treasure / Idol) so the regular event distributor leaves them alone.
+fn maybe_place_vault(
+    grid: &mut [Vec<MapCell>],
+    rooms: &[Room],
+    room_section_map: &[usize; 9],
+    floor: u32,
+    rng_seed: &mut u64,
+    entrance_room_idx: usize,
+    stairs_room_idx: usize,
+) -> Option<PlacedVault> {
+    let chance = vault_chance(floor);
+    if chance == 0 || rng_range(rng_seed, 100) >= chance {
+        return None;
+    }
+
+    // Eligible rooms: any room that's neither the entrance nor the stairs
+    // room. Walking-around lookups via room_section_map keep things in
+    // bounds without re-scanning the grid.
+    let mut candidates: Vec<usize> = (0..9)
+        .filter_map(|sec| {
+            let r = room_section_map[sec];
+            if r == usize::MAX { return None; }
+            if r == entrance_room_idx || r == stairs_room_idx { return None; }
+            Some(r)
+        })
+        .collect();
+    if candidates.is_empty() { return None; }
+
+    // Shuffle and take the first.
+    for i in (1..candidates.len()).rev() {
+        let j = rng_range(rng_seed, (i + 1) as u32) as usize;
+        candidates.swap(i, j);
+    }
+    let room_idx = candidates[0];
+    let room = &rooms[room_idx];
+    let cx = room.x + room.w / 2;
+    let cy = room.y + room.h / 2;
+
+    let kind = if rng_range(rng_seed, 2) == 0 {
+        VaultKind::TreasureVault
+    } else {
+        VaultKind::AltarChamber
+    };
+
+    match kind {
+        VaultKind::TreasureVault => {
+            // Three Treasure cells along the central row.
+            grid[cy][cx].cell_type = CellType::Treasure;
+            // Try left and right neighbours within the room bounds.
+            if cx > room.x {
+                grid[cy][cx - 1].cell_type = CellType::Treasure;
+            }
+            if cx + 1 < room.x + room.w {
+                grid[cy][cx + 1].cell_type = CellType::Treasure;
+            }
+        }
+        VaultKind::AltarChamber => {
+            // Single Idol at the center; the rest stays as room floor.
+            grid[cy][cx].cell_type = CellType::Idol;
+        }
+    }
+
+    Some(PlacedVault {
+        kind,
+        room_id: room_idx as u8,
+        center_x: cx,
+        center_y: cy,
+    })
+}
+
+/// Spawn 1-2 elite-flavored guards inside the vault room. The vault
+/// monsters always carry an `EnemyAffix` to stand out from regular mobs
+/// even when the floor's elite roll wouldn't normally trigger.
+fn spawn_vault_guards(
+    monsters: &mut Vec<Monster>,
+    vault: &PlacedVault,
+    rooms: &[Room],
+    floor: u32,
+    rng_seed: &mut u64,
+) {
+    let room = &rooms[vault.room_id as usize];
+    // Pick one of the floor's regular enemy kinds for thematic consistency.
+    let pool = floor_enemies(floor);
+    if pool.is_empty() { return; }
+
+    let pick_affix = |seed: &mut u64| -> EnemyAffix {
+        let i = rng_range(seed, ALL_ENEMY_AFFIXES.len() as u32) as usize;
+        ALL_ENEMY_AFFIXES[i]
+    };
+
+    let count = match vault.kind {
+        VaultKind::TreasureVault => 2,
+        VaultKind::AltarChamber => 1,
+    };
+
+    // Place guards near the corners of the room (avoid stepping on the
+    // central ritual / treasure cells).
+    let corners = [
+        (room.x + 1,           room.y + 1),
+        (room.x + room.w - 2,  room.y + 1),
+        (room.x + 1,           room.y + room.h - 2),
+        (room.x + room.w - 2,  room.y + room.h - 2),
+    ];
+
+    // Vault guards pick the toughest mob in the floor pool so the room
+    // feels distinctly more dangerous than the corridors leading to it.
+    let guard_kind = pool
+        .iter()
+        .copied()
+        .max_by_key(|k| {
+            let i = enemy_info(*k);
+            i.max_hp + i.atk * 3
+        })
+        .unwrap_or(EnemyKind::Slime);
+
+    let mut placed = 0;
+    for &(gx, gy) in &corners {
+        if placed >= count { break; }
+        if (gx, gy) == (vault.center_x, vault.center_y) { continue; }
+        if monsters.iter().any(|m| m.x == gx && m.y == gy) { continue; }
+        let info = enemy_info(guard_kind);
+        let affix = pick_affix(rng_seed);
+        let max_hp = (info.max_hp * enemy_affix_info(affix).hp_pct / 100).max(1);
+        monsters.push(Monster {
+            kind: guard_kind,
+            x: gx,
+            y: gy,
+            hp: max_hp,
+            max_hp,
+            // Guards are always alert — this is their treasure.
+            awake: true,
+            charging: false,
+            affix: Some(affix),
+        });
+        placed += 1;
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -856,6 +1048,50 @@ mod tests {
                 "Room center should have correct room_id"
             );
             assert_eq!(map.cell(cx, cy).tile, Tile::RoomFloor);
+        }
+    }
+
+    #[test]
+    fn vault_appears_on_mid_floors_within_50_seeds() {
+        // F6 has vault_chance == 50, so across 50 seeds at least one
+        // map should contain a vault. We assert both Treasure and Idol
+        // counts, since either vault kind produces at least one such cell.
+        let mut found = false;
+        for seed in 0u64..50 {
+            let mut s = seed;
+            let map = generate_map(6, &mut s);
+            let treasures = map.grid.iter().flatten()
+                .filter(|c| c.cell_type == CellType::Treasure).count();
+            let idols = map.grid.iter().flatten()
+                .filter(|c| c.cell_type == CellType::Idol).count();
+            // TreasureVault places 3 adjacent Treasure cells. Idol vault
+            // adds at least one Idol. Either signature counts.
+            if treasures >= 3 || idols >= 1 {
+                // Also verify there are elite guards.
+                let elite_count = map.monsters.iter()
+                    .filter(|m| m.affix.is_some()).count();
+                assert!(
+                    elite_count >= 1,
+                    "Vault floor seed {} should have at least one elite guard",
+                    seed
+                );
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "No vault appeared in 50 seeds on F6 (chance is 50%)");
+    }
+
+    #[test]
+    fn vault_does_not_spawn_on_boss_floor() {
+        for seed in 0u64..30 {
+            let mut s = seed;
+            let map = generate_map(super::super::state::MAX_FLOOR, &mut s);
+            // Boss floor should contain only the Demon Lord — no elite affixes.
+            assert!(
+                map.monsters.iter().all(|m| m.affix.is_none()),
+                "Boss floor must not have elite affixes (seed={})", seed
+            );
         }
     }
 
