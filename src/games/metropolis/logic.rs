@@ -743,10 +743,16 @@ fn accrue_income(city: &mut City) {
         city.last_payout_amount = income;
         city.last_payout_tick = city.tick;
     }
+    // Codex review #103 P1 対策: payout flash 検出ループは shop の数だけ
+    // BFS を再計算していた。connected を 1 度だけ計算して shop_is_active_with
+    // を使う (= shop 数 N に対し O(GRID_W*GRID_H) → O(N) の差は実質ゼロだが、
+    // BFS そのものを N 回回さないので tick 駆動の累積コストが減る)。
+    let connected = compute_edge_connected_roads(city);
     let mut flash_targets: Vec<(usize, usize)> = Vec::new();
     for y in 0..GRID_H {
         for x in 0..GRID_W {
-            if matches!(city.tile(x, y), Tile::Built(Building::Shop)) && shop_is_active(city, x, y)
+            if matches!(city.tile(x, y), Tile::Built(Building::Shop))
+                && shop_is_active_with(city, x, y, &connected)
             {
                 flash_targets.push((x, y));
             }
@@ -940,6 +946,8 @@ pub struct HouseNeighborhood {
 ///
 /// **オンデマンド版**: edge connectivity を都度 BFS する。複数 House を
 /// 評価する場合は `gather_house_neighborhood_with` で BFS 結果を共有すること。
+/// 現状はテストからのみ呼ばれる (production hot path は `_with` 経由)。
+#[allow(dead_code)]
 pub fn gather_house_neighborhood(city: &City, x: usize, y: usize) -> HouseNeighborhood {
     let connected = compute_edge_connected_roads(city);
     gather_house_neighborhood_with(city, x, y, &connected)
@@ -1125,10 +1133,13 @@ pub fn effective_house_tier(target: HouseTier, age_ticks: u64) -> HouseTier {
 }
 
 /// セル `(x, y)` の House 実効 Tier を返す convenience。
-/// 描画と `should_show_aviation_light` から共通で使う。
 ///
 /// **注意**: 内部で `compute_edge_connected_roads` を 1 回呼ぶため、
-/// 多数のセルを評価する場合は `effective_tier_at_with` を使うこと。
+/// render の per-cell ループなど多数のセルを評価する場合は
+/// `effective_tier_at_with` を使うこと。現状の production caller は
+/// すべて `_with` 経由 (Codex review #103 P1 で hot path を移行済)。
+/// この convenience 版は引き続きテスト・診断用に残す。
+#[allow(dead_code)]
 pub fn effective_tier_at(city: &City, x: usize, y: usize) -> HouseTier {
     let target = house_tier_for(gather_house_neighborhood(city, x, y));
     let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
@@ -1136,8 +1147,7 @@ pub fn effective_tier_at(city: &City, x: usize, y: usize) -> HouseTier {
 }
 
 /// `effective_tier_at` の BFS 共有版。複数セルを評価する時に使う。
-/// 現在は使用箇所が無いがレンダラ最適化用に残しておく。
-#[allow(dead_code)]
+/// `should_show_aviation_light_with` と render hot path から呼ばれる。
 pub fn effective_tier_at_with(
     city: &City,
     x: usize,
@@ -1224,7 +1234,28 @@ pub fn aging_factor_per_mille(age_ticks: u64, lifespan_x100: u32) -> u32 {
 ///
 /// 「2 軒以上」にしているのは、Highrise が単独だと「ビル建てただけ」感が
 /// 強く演出が浮くため。クラスタ化して初めて都市的な絵面になる。
+/// `should_show_aviation_light_with` の convenience 版。production caller は
+/// すべて `_with` 経由 (Codex review #103 P1 移行)。診断・テスト用に保持。
+#[allow(dead_code)]
 pub fn should_show_aviation_light(city: &City, x: usize, y: usize, tick: u64) -> bool {
+    let connected = compute_edge_connected_roads(city);
+    should_show_aviation_light_with(city, x, y, tick, &connected)
+}
+
+/// `should_show_aviation_light` の BFS 共有版。
+///
+/// **重要**: render は per-cell ループでこの関数を呼ぶため、無印版だと
+/// 4-近傍 × 1 BFS = 4 回の BFS が **タイルごと** に走り、64×32 マップで
+/// 桁違いに重くなる (Codex review #103 P1 指摘)。`render_grid` で
+/// 1 度だけ生成した `connected` を流して、隣接 Highrise 判定も BFS 共有版
+/// (`effective_tier_at_with`) を使う。
+pub fn should_show_aviation_light_with(
+    city: &City,
+    x: usize,
+    y: usize,
+    tick: u64,
+    connected: &[Vec<bool>],
+) -> bool {
     if !matches!(day_phase(tick), DayPhase::Night) {
         return false;
     }
@@ -1244,7 +1275,7 @@ pub fn should_show_aviation_light(city: &City, x: usize, y: usize, tick: u64) ->
         let nx = nx as usize;
         let ny = ny as usize;
         if matches!(city.tile(nx, ny), Tile::Built(Building::House)) {
-            let neighbor_tier = effective_tier_at(city, nx, ny);
+            let neighbor_tier = effective_tier_at_with(city, nx, ny, connected);
             if matches!(neighbor_tier, HouseTier::Highrise) {
                 highrise_neighbors += 1;
             }
@@ -1255,8 +1286,25 @@ pub fn should_show_aviation_light(city: &City, x: usize, y: usize, tick: u64) ->
 
 /// 店舗の段階レベル — 隣接アクティブ House 数 + 道路接続で評価。
 /// 賑わいの可視化用。アクティブで Mid 以上の住宅が近いとプレミアム。
+///
+/// **オンデマンド版**: 内部で BFS を 1 回実行する。render の per-cell ループ
+/// など hot path では `shop_level_with` を使うこと (Codex review #103 P1)。
+/// production caller はすべて `_with` 経由 — 診断・テスト用に保持。
+#[allow(dead_code)]
 pub fn shop_level(city: &City, x: usize, y: usize) -> ShopLevel {
-    if !shop_is_active(city, x, y) {
+    let connected = compute_edge_connected_roads(city);
+    shop_level_with(city, x, y, &connected)
+}
+
+/// `shop_level` の BFS 共有版。render の per-tile 描画など複数セルを舐める
+/// hot path で使う。`connected` は `compute_edge_connected_roads` で生成。
+pub fn shop_level_with(
+    city: &City,
+    x: usize,
+    y: usize,
+    connected: &[Vec<bool>],
+) -> ShopLevel {
+    if !shop_is_active_with(city, x, y, connected) {
         return ShopLevel::Idle;
     }
     let mut customers = 0u32;
@@ -1292,6 +1340,9 @@ pub enum ShopLevel {
 ///
 /// **Phase 2: edge connectivity HARD ルール** — 隣接 Road が「マップ端まで
 /// 繋がる幹線網」に属していないと inactive。原料の運搬が外から届かないため。
+///
+/// production caller はすべて `_with` 経由 (Codex #103 P1)。診断用に保持。
+#[allow(dead_code)]
 pub(super) fn workshop_is_active(city: &City, wx: usize, wy: usize) -> bool {
     if !has_neighbor_kind(city, wx, wy, Building::House) {
         return false;
@@ -1319,6 +1370,9 @@ pub(super) fn workshop_is_active_with(
 /// **Phase 2: edge connectivity HARD ルール** — 隣接 Road が「マップ端まで
 /// 繋がる幹線網」に属していないと inactive。商品 / 食材の搬入が外から
 /// 届かないと店は回らない、という SimCity 的な制約。
+///
+/// production caller はすべて `_with` 経由 (Codex #103 P1)。診断用に保持。
+#[allow(dead_code)]
 pub(super) fn shop_is_active(city: &City, sx: usize, sy: usize) -> bool {
     let connected = compute_edge_connected_roads(city);
     shop_is_active_with(city, sx, sy, &connected)
@@ -1536,8 +1590,12 @@ fn wastefulness_score_with(
     if city.built_at_tick[y][x] != 0 {
         let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
         let tier_opt = if matches!(kind, Building::House) {
+            // BFS 重複回避: connected を渡す `_with` 版を使う。
+            // wastefulness_score_with は `connected` 引数で呼ばれているのに、
+            // ここだけ素の `gather_house_neighborhood` を呼ぶと BFS が再計算
+            // されてしまう (Codex review #103 P1)。
             Some(effective_house_tier(
-                house_tier_for(gather_house_neighborhood(city, x, y)),
+                house_tier_for(gather_house_neighborhood_with(city, x, y, connected)),
                 age,
             ))
         } else {

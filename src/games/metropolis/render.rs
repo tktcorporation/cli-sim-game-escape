@@ -334,11 +334,16 @@ fn render_grid(
     let x1 = (x0 + VIEW_W).min(GRID_W);
     let y1 = (y0 + VIEW_H).min(GRID_H);
 
+    // Codex review #103 P1 対策: edge-connectivity BFS をフレーム冒頭で 1 回だけ
+    // 計算し、per-tile ループに流す。タイルごとに per-cell BFS を回すと
+    // 32*16 = 512 BFS / フレームになるため、UI 応答性を大きく損なう。
+    let connected = logic::compute_edge_connected_roads(state);
+
     let mut lines: Vec<Line> = Vec::with_capacity(VIEW_H);
     for y in y0..y1 {
         let mut spans: Vec<Span> = Vec::with_capacity(VIEW_W * cell_width as usize);
         for x in x0..x1 {
-            spans.extend(tile_spans(state, x, y, cell_width));
+            spans.extend(tile_spans(state, x, y, cell_width, &connected));
         }
         lines.push(Line::from(spans));
     }
@@ -354,14 +359,20 @@ fn grid_border_color(state: &City) -> Color {
     }
 }
 
-fn tile_spans(state: &City, x: usize, y: usize, cell_width: u16) -> Vec<Span<'static>> {
+fn tile_spans(
+    state: &City,
+    x: usize,
+    y: usize,
+    cell_width: u16,
+    connected: &[Vec<bool>],
+) -> Vec<Span<'static>> {
     let tile = state.tile(x, y);
     let completion = state.tick < state.completion_flash_until[y][x];
     let payout = state.tick < state.payout_flash_until[y][x];
     if cell_width == 1 {
-        vec![tile_span_1(tile, x, y, state.tick, completion, payout, state)]
+        vec![tile_span_1(tile, x, y, state.tick, completion, payout, state, connected)]
     } else {
-        tile_spans_2(tile, x, y, state.tick, completion, payout, state)
+        tile_spans_2(tile, x, y, state.tick, completion, payout, state, connected)
     }
 }
 
@@ -375,6 +386,7 @@ fn tile_span_1(
     completion: bool,
     payout: bool,
     state: &City,
+    connected: &[Vec<bool>],
 ) -> Span<'static> {
     if completion {
         if let Tile::Built(b) = tile {
@@ -441,7 +453,8 @@ fn tile_span_1(
             //   Cottage   → 'h' (緑)
             //   Apartment → 'H' (青緑、太字)
             //   Highrise  → '▮' (シアン、太字)
-            let tier = logic::effective_tier_at(state, x, y);
+            // BFS 共有版 (`_with`) を使う — render hot path での再計算回避。
+            let tier = logic::effective_tier_at_with(state, x, y, connected);
             let bright = !(tick / 10).is_multiple_of(4);
             let m = if bright { Modifier::BOLD } else { Modifier::empty() };
             let (ch, color) = match tier {
@@ -458,7 +471,8 @@ fn tile_span_1(
             )
         }
         Tile::Built(Building::Shop) => {
-            let level = logic::shop_level(state, x, y);
+            // BFS 共有版を使う (Codex review #103 P1)。
+            let level = logic::shop_level_with(state, x, y, connected);
             if matches!(level, logic::ShopLevel::Idle) {
                 Span::styled(
                     "s".to_string(),
@@ -495,7 +509,8 @@ fn tile_span_1(
             }
         }
         Tile::Built(Building::Workshop) => {
-            let active = logic::workshop_is_active(state, x, y);
+            // BFS 共有版 (Codex review #103 P1)。
+            let active = logic::workshop_is_active_with(state, x, y, connected);
             // 煙突アニメ: 3 フレーム周期で `°` `゜` ` ` を切り替えて煙が立つ感じ。
             // 非アクティブは灰色固定で「火が入っていない」を表現。
             let smoke_phase = (tick / 4) as usize % 3;
@@ -556,6 +571,7 @@ fn tile_spans_2(
     completion: bool,
     payout: bool,
     state: &City,
+    connected: &[Vec<bool>],
 ) -> Vec<Span<'static>> {
     if completion {
         if let Tile::Built(b) = tile {
@@ -647,7 +663,8 @@ fn tile_spans_2(
             //   - HouseTier がグリフの主軸 (Cottage 屋根 / Apartment 中層 / Highrise 摩天楼)
             //   - HouseLevel が密度ニュアンス (孤立 / 小集団 / 高密集)
             // 夜間 (バナーの月相と同期) になると Apartment/Highrise の窓が灯る。
-            let tier = logic::effective_tier_at(state, x, y);
+            // BFS 共有版を使う (Codex review #103 P1)。
+            let tier = logic::effective_tier_at_with(state, x, y, connected);
             let level = logic::house_level(state, x, y);
             let glyph = house_glyph_2wide(tier, level);
             let (color, modifier) = house_style_2wide(tier, tick);
@@ -657,7 +674,7 @@ fn tile_spans_2(
             // 1.5 秒周期で右側 1 文字を `*` (赤太字) に差し替える。
             // 都市感の最後のスパイス — Tier 4 経済まで育てたプレイヤーへのご褒美。
             if matches!(tier, logic::HouseTier::Highrise)
-                && logic::should_show_aviation_light(state, x, y, tick)
+                && logic::should_show_aviation_light_with(state, x, y, tick, connected)
             {
                 let mut chars = glyph.chars();
                 let left = chars.next().unwrap_or(' ');
@@ -682,7 +699,8 @@ fn tile_spans_2(
             }
         }
         Tile::Built(Building::Shop) => {
-            let level = logic::shop_level(state, x, y);
+            // BFS 共有版を使う (Codex review #103 P1)。
+            let level = logic::shop_level_with(state, x, y, connected);
             if matches!(level, logic::ShopLevel::Idle) {
                 // 非アクティブ: 灰背景でくすませる (生気のない店)。
                 vec![Span::styled(
@@ -722,7 +740,8 @@ fn tile_spans_2(
         Tile::Built(Building::Workshop) => {
             // 工房: 煙突 (左) + 建物本体 (右)。煙突から煙が立ち上る 4 frame アニメ。
             // アクティブで初めて火が入って煙が出る — 非アクティブは煙ゼロの暗い灰。
-            let active = logic::workshop_is_active(state, x, y);
+            // BFS 共有版を使う (Codex review #103 P1)。
+            let active = logic::workshop_is_active_with(state, x, y, connected);
             let phase = (tick / 4) as usize % 4;
             let smoke = if active {
                 ['°', '˚', '·', ' '][phase]
