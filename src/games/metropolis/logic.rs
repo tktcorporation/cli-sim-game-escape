@@ -1,8 +1,97 @@
 //! Pure-function game logic.  No I/O, no rendering — safe to call millions
 //! of times from `simulator.rs`.
 
+use std::collections::VecDeque;
+
 use super::ai::{decide, AiAction};
 use super::state::*;
+
+// ── Edge connectivity (Phase 2: SimCity 風 物流接続) ───────────
+//
+// 「マップの外と繋がっている道路網」を BFS で判定する純関数。
+// 戻り値の bool grid を AI / activation rule / income calc が共有して、
+// 「外との物流が通っている街区」だけが本来の収入を出す挙動を作る。
+//
+// **ルール (ユーザー指定: ハイブリッド)**:
+//   - Shop / Workshop: HARD — 隣接 Road が edge-connected で無いと inactive。
+//     (= 食材・部品の運搬が物理的に届かない)
+//   - House:           SOFT — Cottage は孤立街区でも住める (収入は半減)、
+//     Apartment / Highrise は edge-connected が必須 (= 高層化には流通インフラ)。
+//
+// 計算量: BFS O(N) を各 tick 1 回だけ実行 (`recompute_edge_connectivity`)。
+// `City::edge_connected` をキャッシュ的に保持すると更に速いが、現状は呼び側で
+// 1 度生成して使い回す pattern を奨励 (`compute_income_per_sec` 等)。
+
+/// 全 Road セルが「マップ端まで連続する道路網」に属するか判定した bool grid。
+///
+/// マップ端 (x=0, x=GRID_W-1, y=0, y=GRID_H-1) のいずれかにある Road セルから
+/// 4-近傍 BFS を流す。**完成 Road のみ**を通過 (建設中 Road は含めない —
+/// 物流は完成しないと走らない)。
+#[allow(clippy::needless_range_loop)] // 端 seed は (x,0)/(x,GRID_H-1) の二重 index 参照が本質的
+pub fn compute_edge_connected_roads(city: &City) -> Vec<Vec<bool>> {
+    let mut connected = vec![vec![false; GRID_W]; GRID_H];
+    let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
+    // Seed: マップ端の Road を全部キューに入れる。
+    let is_road = |x: usize, y: usize, c: &City| -> bool {
+        matches!(c.tile(x, y), Tile::Built(Building::Road))
+    };
+    for x in 0..GRID_W {
+        if is_road(x, 0, city) && !connected[0][x] {
+            connected[0][x] = true;
+            queue.push_back((x, 0));
+        }
+        if GRID_H >= 1 && is_road(x, GRID_H - 1, city) && !connected[GRID_H - 1][x] {
+            connected[GRID_H - 1][x] = true;
+            queue.push_back((x, GRID_H - 1));
+        }
+    }
+    for y in 0..GRID_H {
+        if is_road(0, y, city) && !connected[y][0] {
+            connected[y][0] = true;
+            queue.push_back((0, y));
+        }
+        if GRID_W >= 1 && is_road(GRID_W - 1, y, city) && !connected[y][GRID_W - 1] {
+            connected[y][GRID_W - 1] = true;
+            queue.push_back((GRID_W - 1, y));
+        }
+    }
+    // BFS: Road を辿って連結成分を塗る。
+    while let Some((x, y)) = queue.pop_front() {
+        for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                continue;
+            }
+            let (nx, ny) = (nx as usize, ny as usize);
+            if connected[ny][nx] {
+                continue;
+            }
+            if is_road(nx, ny, city) {
+                connected[ny][nx] = true;
+                queue.push_back((nx, ny));
+            }
+        }
+    }
+    connected
+}
+
+/// 建物 (x, y) が edge-connected な Road に隣接 (4-近傍) しているか。
+/// `connected` は `compute_edge_connected_roads` で取得した bool grid。
+pub fn is_building_edge_connected(connected: &[Vec<bool>], x: usize, y: usize) -> bool {
+    for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+            continue;
+        }
+        if connected[ny as usize][nx as usize] {
+            return true;
+        }
+    }
+    false
+}
+
 
 // ── Day / night cycle (Phase C) ─────────────────────────────
 //
@@ -396,24 +485,26 @@ pub fn automation_policy(s: Strategy) -> AutomationPolicy {
     match s {
         // 成長: 人口拡張のために土地が要る → 拡張は最速ペース、撤去は控えめ。
         // 戦略の主役 (人口) を支えるため、4 戦略中で最も短い拡張周期にする。
+        // **Phase 1 調整**: 拡張・撤去とも周期をほぼ半減し「街がぐにゃぐにゃ
+        // 動く」感を出す。10 分でマップが埋まり止まる現象を防ぐ。
         Strategy::Growth => AutomationPolicy {
-            outpost_dispatch_period_ticks: Some(600),
-            auto_demolish_period_ticks: Some(900),
-            min_cash_reserve: 300,
+            outpost_dispatch_period_ticks: Some(300),
+            auto_demolish_period_ticks: Some(450),
+            min_cash_reserve: 250,
         },
         // 収入: 効率最大化 = 無駄な建物を積極排除。拡張は控えめ。
         Strategy::Income => AutomationPolicy {
-            outpost_dispatch_period_ticks: Some(1500),
-            auto_demolish_period_ticks: Some(750),
-            min_cash_reserve: 500,
+            outpost_dispatch_period_ticks: Some(800),
+            auto_demolish_period_ticks: Some(400),
+            min_cash_reserve: 400,
         },
         // 技術投資: 建設+20% を活かす + 道路網重視。拡張は中庸 (= 道路を
         // 既存域内で太く張ることに比重を置く)。Growth より遅い周期にして
         // 「Growth は土地で攻める / Tech は道路網で攻める」差別化を担保。
         Strategy::Tech => AutomationPolicy {
-            outpost_dispatch_period_ticks: Some(1000),
-            auto_demolish_period_ticks: Some(750),
-            min_cash_reserve: 400,
+            outpost_dispatch_period_ticks: Some(500),
+            auto_demolish_period_ticks: Some(400),
+            min_cash_reserve: 350,
         },
         // 環境配慮: 緑も岩も残す。自動拡張・撤去とも無し。
         // 「緑地を保護し、既存の市域で完結する」キャラクター。
@@ -425,6 +516,38 @@ pub fn automation_policy(s: Strategy) -> AutomationPolicy {
             min_cash_reserve: 200,
         },
     }
+}
+
+/// マップが「飽和」しているか — buildable な Empty セル比率が低いと true。
+/// 飽和状態では `auto_strategy_actions` が撤去の周期判定を緩め、より
+/// 積極的に撤去を進めて空きを作る (= プレイヤーがマップ満杯で止まる現象を防ぐ)。
+///
+/// **判定基準**: 建設可能 Empty セル数 < buildable 全体の 12%。
+/// (Empty + Built + Construction + Clearing) のうち、地形が `buildable()` で
+/// `needs_outpost()` でも隣接 Outpost があり建てられる Empty を「真の空き」とする。
+pub fn map_is_saturated(city: &City) -> bool {
+    let mut buildable_total = 0u32;
+    let mut empty_buildable = 0u32;
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            let t = city.terrain_at(x, y);
+            if !t.buildable() {
+                continue;
+            }
+            // Rock は隣接 Outpost が無いと「アクセス不可」なので除外。
+            if t.needs_outpost() && !has_outpost_neighbor(city, x, y) {
+                continue;
+            }
+            buildable_total += 1;
+            if matches!(city.tile(x, y), Tile::Empty) {
+                empty_buildable += 1;
+            }
+        }
+    }
+    if buildable_total == 0 {
+        return false;
+    }
+    empty_buildable * 100 < buildable_total * 12
 }
 
 /// `step_one_tick` から毎 tick 呼ばれる自動運用ハブ。
@@ -439,9 +562,13 @@ pub fn auto_strategy_actions(city: &mut City) {
         return;
     }
     let policy = automation_policy(city.strategy);
+    let saturated = map_is_saturated(city);
 
     if let Some(period) = policy.outpost_dispatch_period_ticks {
-        let due = city.tick.saturating_sub(city.last_outpost_dispatch_tick) >= period as u64
+        // 飽和時は周期の半分でも発火 (= マップを広げて詰まり解消)。
+        let effective_period = if saturated { period / 2 } else { period };
+        let due = city.tick.saturating_sub(city.last_outpost_dispatch_tick)
+            >= effective_period as u64
             || city.last_outpost_dispatch_tick == 0;
         // 同時に複数の Outpost を建てない (= 1 基ずつ確実に建てて Rock を
         // 解禁してから次へ進める)。
@@ -463,15 +590,26 @@ pub fn auto_strategy_actions(city: &mut City) {
         }
     }
     if let Some(period) = policy.auto_demolish_period_ticks {
-        let due = city.tick.saturating_sub(city.last_auto_demolish_tick) >= period as u64
+        // **飽和アクセラレーション**: マップが詰まっている時は撤去周期を
+        // 1/3 にし、さらに 1 tick で複数件まで撤去する。「全部埋まって何も
+        // 動かない」現象の根本対策。
+        let effective_period = if saturated { period / 3 } else { period };
+        let max_per_tick = if saturated { 3 } else { 1 };
+        let due = city.tick.saturating_sub(city.last_auto_demolish_tick)
+            >= effective_period as u64
             || city.last_auto_demolish_tick == 0;
         if due {
-            if let Some((tx, ty, _score)) = auto_demolish_target(city) {
-                if city.cash >= demolish_cost(tx, ty) + policy.min_cash_reserve
-                    && auto_demolish(city)
-                {
-                    city.last_auto_demolish_tick = city.tick;
+            for _ in 0..max_per_tick {
+                let Some((tx, ty, _score)) = auto_demolish_target(city) else {
+                    break;
+                };
+                if city.cash < demolish_cost(tx, ty) + policy.min_cash_reserve {
+                    break;
                 }
+                if !auto_demolish(city) {
+                    break;
+                }
+                city.last_auto_demolish_tick = city.tick;
             }
         }
     }
@@ -605,10 +743,16 @@ fn accrue_income(city: &mut City) {
         city.last_payout_amount = income;
         city.last_payout_tick = city.tick;
     }
+    // Codex review #103 P1 対策: payout flash 検出ループは shop の数だけ
+    // BFS を再計算していた。connected を 1 度だけ計算して shop_is_active_with
+    // を使う (= shop 数 N に対し O(GRID_W*GRID_H) → O(N) の差は実質ゼロだが、
+    // BFS そのものを N 回回さないので tick 駆動の累積コストが減る)。
+    let connected = compute_edge_connected_roads(city);
     let mut flash_targets: Vec<(usize, usize)> = Vec::new();
     for y in 0..GRID_H {
         for x in 0..GRID_W {
-            if matches!(city.tile(x, y), Tile::Built(Building::Shop)) && shop_is_active(city, x, y)
+            if matches!(city.tile(x, y), Tile::Built(Building::Shop))
+                && shop_is_active_with(city, x, y, &connected)
             {
                 flash_targets.push((x, y));
             }
@@ -640,6 +784,9 @@ fn accrue_income(city: &mut City) {
 pub fn compute_income_per_sec(city: &City) -> i64 {
     let now = city.tick;
     let mut income_cents: i64 = 0;
+    // Phase 2: edge-connectivity grid を 1 度だけ計算して使い回す。
+    // 個別セルで都度 BFS を回すと O(N²) になる (N=2048 で約 400 万操作 / sec)。
+    let connected = compute_edge_connected_roads(city);
 
     for y in 0..GRID_H {
         for x in 0..GRID_W {
@@ -649,19 +796,33 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
             };
             // Tier (House のみ) を先に決める。aging の lifespan にも使う。
             let tier_opt = if matches!(kind, Building::House) {
-                Some(effective_tier_at(city, x, y))
+                let target =
+                    house_tier_for(gather_house_neighborhood_with(city, x, y, &connected));
+                let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
+                Some(effective_house_tier(target, age))
             } else {
                 None
             };
             // 基本収入 (cents/sec)。
             let base_cents: i64 = match kind {
-                Building::House => match tier_opt.expect("house has tier") {
-                    HouseTier::Cottage => 50,
-                    HouseTier::Apartment => 150,
-                    HouseTier::Highrise => 300,
-                },
-                Building::Workshop if workshop_is_active(city, x, y) => 100,
-                Building::Shop if shop_is_active(city, x, y) => 200,
+                Building::House => {
+                    let tier = tier_opt.expect("house has tier");
+                    let raw = match tier {
+                        HouseTier::Cottage => 50,
+                        HouseTier::Apartment => 150,
+                        HouseTier::Highrise => 300,
+                    };
+                    // House SOFT ルール: 未接続 Cottage は半減 ($0.25/sec)。
+                    // Apartment / Highrise は `house_tier_for` で edge-connected 必須に
+                    // なっているのでここに来る時点で接続済み。
+                    if !is_building_edge_connected(&connected, x, y) {
+                        raw / 2
+                    } else {
+                        raw
+                    }
+                }
+                Building::Workshop if workshop_is_active_with(city, x, y, &connected) => 100,
+                Building::Shop if shop_is_active_with(city, x, y, &connected) => 200,
                 _ => 0,
             };
             if base_cents == 0 {
@@ -763,6 +924,10 @@ pub enum HouseTier {
 /// - `n_house_within_3`: Manhattan 距離 3 以内の House 数 (自身は除く)。
 /// - `n_park_within_4`: Manhattan 距離 4 以内の Park 数。Workshop / Shop と
 ///   並ぶ「経済刺激源」として Tier 上昇に寄与する。緑地でも街が育つ。
+/// - `edge_connected`: 隣接 Road が「マップ端まで繋がる幹線網」に属するか。
+///   Phase 2 ハイブリッド連結性の SOFT ルール: 未接続でも Cottage 暮らしは可。
+///   Apartment / Highrise への昇格には edge-connected が必須 (= 流通インフラが
+///   必要なリッチ化)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HouseNeighborhood {
     pub n_road_adj: u32,
@@ -770,6 +935,7 @@ pub struct HouseNeighborhood {
     pub n_shop_within_5: u32,
     pub n_house_within_3: u32,
     pub n_park_within_4: u32,
+    pub edge_connected: bool,
 }
 
 /// 周囲をスキャンして `HouseNeighborhood` を組み立てる。
@@ -777,7 +943,22 @@ pub struct HouseNeighborhood {
 /// この関数は機械的な集計のみを担当する (純関数 / 副作用なし)。
 /// 「どの数値で Tier を決めるか」というゲームデザイン判断は
 /// `house_tier_for` 側に閉じる。
+///
+/// **オンデマンド版**: edge connectivity を都度 BFS する。複数 House を
+/// 評価する場合は `gather_house_neighborhood_with` で BFS 結果を共有すること。
+/// 現状はテストからのみ呼ばれる (production hot path は `_with` 経由)。
+#[allow(dead_code)]
 pub fn gather_house_neighborhood(city: &City, x: usize, y: usize) -> HouseNeighborhood {
+    let connected = compute_edge_connected_roads(city);
+    gather_house_neighborhood_with(city, x, y, &connected)
+}
+
+pub fn gather_house_neighborhood_with(
+    city: &City,
+    x: usize,
+    y: usize,
+    connected: &[Vec<bool>],
+) -> HouseNeighborhood {
     let mut n_road_adj = 0u32;
     for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
         let nx = x as i32 + dx;
@@ -820,6 +1001,7 @@ pub fn gather_house_neighborhood(city: &City, x: usize, y: usize) -> HouseNeighb
         n_shop_within_5,
         n_house_within_3,
         n_park_within_4,
+        edge_connected: is_building_edge_connected(connected, x, y),
     }
 }
 
@@ -865,6 +1047,14 @@ pub fn house_tier_for(stats: HouseNeighborhood) -> HouseTier {
     let park_density = stats.n_park_within_4.div_ceil(2);
     let economic_density =
         stats.n_workshop_within_5 + stats.n_shop_within_5 + park_density;
+
+    // **Phase 2 ハイブリッド連結性**: Apartment / Highrise はマップ外との
+    // 物流接続が必要 (= 隣接 Road が edge-connected であること)。Cottage は
+    // SOFT 制約 — 未接続でも住人は居るが収入は減る (`compute_income_per_sec`
+    // 側で半減処理)。
+    if !stats.edge_connected {
+        return HouseTier::Cottage;
+    }
 
     // Highrise: 商工業 + 緑地が両立した成熟ゾーン。
     if stats.n_road_adj >= 2 && economic_density >= 2 && stats.n_house_within_3 >= 3 {
@@ -943,9 +1133,28 @@ pub fn effective_house_tier(target: HouseTier, age_ticks: u64) -> HouseTier {
 }
 
 /// セル `(x, y)` の House 実効 Tier を返す convenience。
-/// 描画と `should_show_aviation_light` から共通で使う。
+///
+/// **注意**: 内部で `compute_edge_connected_roads` を 1 回呼ぶため、
+/// render の per-cell ループなど多数のセルを評価する場合は
+/// `effective_tier_at_with` を使うこと。現状の production caller は
+/// すべて `_with` 経由 (Codex review #103 P1 で hot path を移行済)。
+/// この convenience 版は引き続きテスト・診断用に残す。
+#[allow(dead_code)]
 pub fn effective_tier_at(city: &City, x: usize, y: usize) -> HouseTier {
     let target = house_tier_for(gather_house_neighborhood(city, x, y));
+    let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
+    effective_house_tier(target, age)
+}
+
+/// `effective_tier_at` の BFS 共有版。複数セルを評価する時に使う。
+/// `should_show_aviation_light_with` と render hot path から呼ばれる。
+pub fn effective_tier_at_with(
+    city: &City,
+    x: usize,
+    y: usize,
+    connected: &[Vec<bool>],
+) -> HouseTier {
+    let target = house_tier_for(gather_house_neighborhood_with(city, x, y, connected));
     let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
     effective_house_tier(target, age)
 }
@@ -1025,7 +1234,28 @@ pub fn aging_factor_per_mille(age_ticks: u64, lifespan_x100: u32) -> u32 {
 ///
 /// 「2 軒以上」にしているのは、Highrise が単独だと「ビル建てただけ」感が
 /// 強く演出が浮くため。クラスタ化して初めて都市的な絵面になる。
+/// `should_show_aviation_light_with` の convenience 版。production caller は
+/// すべて `_with` 経由 (Codex review #103 P1 移行)。診断・テスト用に保持。
+#[allow(dead_code)]
 pub fn should_show_aviation_light(city: &City, x: usize, y: usize, tick: u64) -> bool {
+    let connected = compute_edge_connected_roads(city);
+    should_show_aviation_light_with(city, x, y, tick, &connected)
+}
+
+/// `should_show_aviation_light` の BFS 共有版。
+///
+/// **重要**: render は per-cell ループでこの関数を呼ぶため、無印版だと
+/// 4-近傍 × 1 BFS = 4 回の BFS が **タイルごと** に走り、64×32 マップで
+/// 桁違いに重くなる (Codex review #103 P1 指摘)。`render_grid` で
+/// 1 度だけ生成した `connected` を流して、隣接 Highrise 判定も BFS 共有版
+/// (`effective_tier_at_with`) を使う。
+pub fn should_show_aviation_light_with(
+    city: &City,
+    x: usize,
+    y: usize,
+    tick: u64,
+    connected: &[Vec<bool>],
+) -> bool {
     if !matches!(day_phase(tick), DayPhase::Night) {
         return false;
     }
@@ -1045,7 +1275,7 @@ pub fn should_show_aviation_light(city: &City, x: usize, y: usize, tick: u64) ->
         let nx = nx as usize;
         let ny = ny as usize;
         if matches!(city.tile(nx, ny), Tile::Built(Building::House)) {
-            let neighbor_tier = effective_tier_at(city, nx, ny);
+            let neighbor_tier = effective_tier_at_with(city, nx, ny, connected);
             if matches!(neighbor_tier, HouseTier::Highrise) {
                 highrise_neighbors += 1;
             }
@@ -1056,8 +1286,25 @@ pub fn should_show_aviation_light(city: &City, x: usize, y: usize, tick: u64) ->
 
 /// 店舗の段階レベル — 隣接アクティブ House 数 + 道路接続で評価。
 /// 賑わいの可視化用。アクティブで Mid 以上の住宅が近いとプレミアム。
+///
+/// **オンデマンド版**: 内部で BFS を 1 回実行する。render の per-cell ループ
+/// など hot path では `shop_level_with` を使うこと (Codex review #103 P1)。
+/// production caller はすべて `_with` 経由 — 診断・テスト用に保持。
+#[allow(dead_code)]
 pub fn shop_level(city: &City, x: usize, y: usize) -> ShopLevel {
-    if !shop_is_active(city, x, y) {
+    let connected = compute_edge_connected_roads(city);
+    shop_level_with(city, x, y, &connected)
+}
+
+/// `shop_level` の BFS 共有版。render の per-tile 描画など複数セルを舐める
+/// hot path で使う。`connected` は `compute_edge_connected_roads` で生成。
+pub fn shop_level_with(
+    city: &City,
+    x: usize,
+    y: usize,
+    connected: &[Vec<bool>],
+) -> ShopLevel {
+    if !shop_is_active_with(city, x, y, connected) {
         return ShopLevel::Idle;
     }
     let mut customers = 0u32;
@@ -1090,16 +1337,54 @@ pub enum ShopLevel {
 
 /// Workshop は隣接 House (労働力) と Road 接続の両方が必要。
 /// Shop と違って距離は隣接のみ — 「働き手は徒歩圏内から来る」感を出す。
+///
+/// **Phase 2: edge connectivity HARD ルール** — 隣接 Road が「マップ端まで
+/// 繋がる幹線網」に属していないと inactive。原料の運搬が外から届かないため。
+///
+/// production caller はすべて `_with` 経由 (Codex #103 P1)。診断用に保持。
+#[allow(dead_code)]
 pub(super) fn workshop_is_active(city: &City, wx: usize, wy: usize) -> bool {
-    has_neighbor_kind(city, wx, wy, Building::Road)
-        && has_neighbor_kind(city, wx, wy, Building::House)
+    if !has_neighbor_kind(city, wx, wy, Building::House) {
+        return false;
+    }
+    let connected = compute_edge_connected_roads(city);
+    is_building_edge_connected(&connected, wx, wy)
+}
+
+/// `shop_is_active` / `workshop_is_active` の `connected` 持ち回し版。
+/// 同 tick 内で複数セルを評価する時に BFS 重複を避けるための内部用。
+pub(super) fn workshop_is_active_with(
+    city: &City,
+    wx: usize,
+    wy: usize,
+    connected: &[Vec<bool>],
+) -> bool {
+    has_neighbor_kind(city, wx, wy, Building::House)
+        && is_building_edge_connected(connected, wx, wy)
 }
 
 /// A shop earns money if it has a road neighbor *and* a house within
 /// Manhattan distance 3.  This makes Tier-1's random scattering punishable
 /// without being unwinnable.
+///
+/// **Phase 2: edge connectivity HARD ルール** — 隣接 Road が「マップ端まで
+/// 繋がる幹線網」に属していないと inactive。商品 / 食材の搬入が外から
+/// 届かないと店は回らない、という SimCity 的な制約。
+///
+/// production caller はすべて `_with` 経由 (Codex #103 P1)。診断用に保持。
+#[allow(dead_code)]
 pub(super) fn shop_is_active(city: &City, sx: usize, sy: usize) -> bool {
-    if !has_neighbor_kind(city, sx, sy, Building::Road) {
+    let connected = compute_edge_connected_roads(city);
+    shop_is_active_with(city, sx, sy, &connected)
+}
+
+pub(super) fn shop_is_active_with(
+    city: &City,
+    sx: usize,
+    sy: usize,
+    connected: &[Vec<bool>],
+) -> bool {
+    if !is_building_edge_connected(connected, sx, sy) {
         return false;
     }
     for y in 0..GRID_H {
@@ -1230,22 +1515,38 @@ pub fn demolish_at(city: &mut City, x: usize, y: usize) -> bool {
 ///
 /// 設計判断: スコアの絶対値は重要でなく、**相対順位**のみが意味を持つ。
 /// バランス調整時はここの数字を弄る。
+/// `wastefulness_score_with` のオンデマンド版。テスト用 (BFS 1 回)。
+#[cfg(test)]
 fn wastefulness_score(city: &City, x: usize, y: usize) -> Option<i64> {
+    let connected = compute_edge_connected_roads(city);
+    wastefulness_score_with(city, x, y, &connected)
+}
+
+/// `wastefulness_score` の BFS 共有版。`auto_demolish_target` が全セルを
+/// 走査する時の BFS 重複を回避する (BFS = O(N), 全セルで呼ぶと O(N²) になる)。
+fn wastefulness_score_with(
+    city: &City,
+    x: usize,
+    y: usize,
+    connected: &[Vec<bool>],
+) -> Option<i64> {
     let kind = match city.tile(x, y) {
         Tile::Built(b) => *b,
         _ => return None,
     };
 
+    let edge_ok = is_building_edge_connected(connected, x, y);
+
     let mut score: i64 = 0;
     match kind {
         Building::Shop => {
-            // 非アクティブ Shop は最大の無駄。
-            if !shop_is_active(city, x, y) {
+            // 非アクティブ Shop は最大の無駄 (edge 未接続もここに含まれる)。
+            if !shop_is_active_with(city, x, y, connected) {
                 score += 250;
             }
         }
         Building::Workshop => {
-            if !workshop_is_active(city, x, y) {
+            if !workshop_is_active_with(city, x, y, connected) {
                 score += 200;
             }
         }
@@ -1258,8 +1559,12 @@ fn wastefulness_score(city: &City, x: usize, y: usize) -> Option<i64> {
         }
         Building::House => {
             // House はほぼ常に有用 — 唯一例外は「孤立 Cottage」(Road 接続無し)。
-            // ただし Cottage でも +1$/2 の収入源なので慎重に。スコア控えめ。
-            let stats = gather_house_neighborhood(city, x, y);
+            // Phase 2: edge 未接続の Cottage は収入半減のため、撤去価値が
+            // 上昇 (+60)。完全孤立 (Road 接続も House 隣接も無い) は更に追加。
+            let stats = gather_house_neighborhood_with(city, x, y, connected);
+            if !edge_ok {
+                score += 60;
+            }
             if stats.n_road_adj == 0 && stats.n_house_within_3 == 0 {
                 score += 80;
             }
@@ -1285,8 +1590,12 @@ fn wastefulness_score(city: &City, x: usize, y: usize) -> Option<i64> {
     if city.built_at_tick[y][x] != 0 {
         let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
         let tier_opt = if matches!(kind, Building::House) {
+            // BFS 重複回避: connected を渡す `_with` 版を使う。
+            // wastefulness_score_with は `connected` 引数で呼ばれているのに、
+            // ここだけ素の `gather_house_neighborhood` を呼ぶと BFS が再計算
+            // されてしまう (Codex review #103 P1)。
             Some(effective_house_tier(
-                house_tier_for(gather_house_neighborhood(city, x, y)),
+                house_tier_for(gather_house_neighborhood_with(city, x, y, connected)),
                 age,
             ))
         } else {
@@ -1351,10 +1660,13 @@ fn has_house_within(city: &City, x: usize, y: usize, dist: u32) -> bool {
 /// 戻り値: `(x, y, score)`。何も無い時は None。
 /// ここで返ってくる候補は「スコア > 0 かつコストを引いてもプラス」のもの限定。
 pub fn auto_demolish_target(city: &City) -> Option<(usize, usize, i64)> {
+    // BFS は 1 度だけ。`wastefulness_score` を全セルで呼ぶと O(N²) BFS に
+    // なって 64×32 マップでは tick あたり数百万操作になる。
+    let connected = compute_edge_connected_roads(city);
     let mut best: Option<(usize, usize, i64)> = None;
     for y in 0..GRID_H {
         for x in 0..GRID_W {
-            if let Some(score) = wastefulness_score(city, x, y) {
+            if let Some(score) = wastefulness_score_with(city, x, y, &connected) {
                 if score <= 0 {
                     continue;
                 }
@@ -1574,6 +1886,8 @@ mod tests {
             n_shop_within_5: n_shop,
             n_house_within_3: n_house,
             n_park_within_4: 0,
+            // 連結性テスト以外では「edge-connected 前提」(= 既存挙動を維持)。
+            edge_connected: true,
         }
     }
 
@@ -1591,7 +1905,33 @@ mod tests {
             n_shop_within_5: n_shop,
             n_house_within_3: n_house,
             n_park_within_4: n_park,
+            edge_connected: true,
         }
+    }
+
+    /// Test helper: Road を (x, 0) に置いてマップ上端に「外と繋がる」起点を作る。
+    /// Phase 2 の edge connectivity を満たさせるためのテスト用ユーティリティ。
+    /// 何度呼んでも同じ Road を上書きするだけで副作用なし。
+    fn place_edge_road(city: &mut City, x: usize) {
+        city.set_tile(x, 0, Tile::Built(Building::Road));
+    }
+
+    /// Phase 2: edge_connected = false の場合は Cottage に縮退する (SOFT ルール)。
+    #[test]
+    fn unconnected_house_stays_cottage() {
+        let stats = HouseNeighborhood {
+            n_road_adj: 2,
+            n_workshop_within_5: 2,
+            n_shop_within_5: 2,
+            n_house_within_3: 4,
+            n_park_within_4: 2,
+            edge_connected: false,
+        };
+        assert_eq!(
+            house_tier_for(stats),
+            HouseTier::Cottage,
+            "未接続街区は条件が揃っても Cottage 止まり"
+        );
     }
 
     /// Park 単体でも Apartment まで育つ (Eco 戦略の核)。
@@ -1692,17 +2032,22 @@ mod tests {
     #[test]
     fn finished_houses_earn_residential_tax() {
         let mut city = City::new();
-        city.set_tile(0, 0, Tile::Built(Building::House));
+        // 上端に幹線道路を引いて全 House を edge-connected にする (Phase 2)。
+        // (0..4, 1) に House、(0..4, 0) に Road、Road が上端 (y=0) なので edge-connected。
+        for x in 0..4 {
+            city.set_tile(x, 0, Tile::Built(Building::Road));
+        }
+        city.set_tile(0, 1, Tile::Built(Building::House));
         // 1 Cottage = 50¢/sec → $0 だが死スパイラル防止フォールバックで $1。
         assert_eq!(compute_income_per_sec(&city), 1);
-        city.set_tile(1, 0, Tile::Built(Building::House));
+        city.set_tile(1, 1, Tile::Built(Building::House));
         // 2 Cottages = 100¢ = $1。フォールバック不要。
         assert_eq!(compute_income_per_sec(&city), 1);
-        city.set_tile(2, 0, Tile::Built(Building::House));
+        city.set_tile(2, 1, Tile::Built(Building::House));
         // 3 Cottages = 150¢ = $1 (整数切り捨て、旧 ceil(3/2)=2 から変更)。
         // Tier-aware 収入は per-cent で正確に積算するので、半端は丸めで吸収する。
         assert_eq!(compute_income_per_sec(&city), 1);
-        city.set_tile(3, 0, Tile::Built(Building::House));
+        city.set_tile(3, 1, Tile::Built(Building::House));
         // 4 Cottages = 200¢ = $2。
         assert_eq!(compute_income_per_sec(&city), 2);
     }
@@ -1717,20 +2062,24 @@ mod tests {
     }
 
     /// Workshop は隣接 House と Road が両方必要。片方だけでは inactive。
+    /// Phase 2: 隣接 Road が edge-connected であることも必須。
     #[test]
     fn workshop_needs_road_and_house_neighbors() {
         let mut city = City::new();
-        // (5,5) に Workshop。隣接 Road のみ → inactive。
-        city.set_tile(5, 5, Tile::Built(Building::Workshop));
-        city.set_tile(5, 4, Tile::Built(Building::Road));
+        // (5,1) に Workshop。隣接 Road (5,0) は上端で edge-connected。
+        // 隣接 House はまだ無いので inactive。
+        city.set_tile(5, 1, Tile::Built(Building::Workshop));
+        place_edge_road(&mut city, 5);
         // House がないので fallback も働かず、Workshop も inactive で $0。
         assert_eq!(compute_income_per_sec(&city), 0);
 
         // 隣接 House を追加 → Workshop activate。
-        city.set_tile(5, 6, Tile::Built(Building::House));
-        // House (5,6): Cottage = 50¢
-        // Workshop: active → 100¢
-        // Total: 150¢ = $1 (整数切り捨て)。
+        city.set_tile(5, 2, Tile::Built(Building::House));
+        // House (5,2): Cottage = 50¢ (edge-connected via Road at (5,0)... 待って、
+        // House (5,2) の隣接 Road は (5,1) が Workshop なので Road 隣接 0。
+        // よって edge_connected=false → Cottage で半減 25¢。
+        // Workshop: active (隣接 Road (5,0) が edge-connected、隣接 House (5,2)) → 100¢
+        // Total: 25¢ + 100¢ = 125¢ = $1。
         assert_eq!(compute_income_per_sec(&city), 1);
     }
 
@@ -1785,10 +2134,14 @@ mod tests {
     }
 
     /// Workshop が近くにあると House は Apartment になる (Workshop が経済刺激源)。
+    /// Phase 2: edge connectivity が必要なので、Road を上端 (y=0) と接続する。
     #[test]
     fn workshop_promotes_nearby_house_to_apartment() {
         let mut city = City::new();
         city.set_tile(1, 1, Tile::Built(Building::House));
+        // (1,0) に Road を置いて House を edge-connected にする。
+        place_edge_road(&mut city, 1);
+        // House の隣接 (0,1) にも Road を置いて n_road_adj を稼ぐ。
         city.set_tile(0, 1, Tile::Built(Building::Road));
         // Workshop at (3,1): Manhattan distance 2 from (1,1)。
         city.set_tile(3, 1, Tile::Built(Building::Workshop));
@@ -1799,19 +2152,27 @@ mod tests {
     #[test]
     fn shop_with_road_and_house_earns() {
         let mut city = City::new();
+        // Phase 2: Road を上端 (y=0) から (5,4) まで連続させて edge-connected に。
         city.set_tile(5, 5, Tile::Built(Building::Shop));
-        city.set_tile(5, 4, Tile::Built(Building::Road));
+        for y in 0..=4 {
+            city.set_tile(5, y, Tile::Built(Building::Road));
+        }
         city.set_tile(5, 6, Tile::Built(Building::House));
-        // Shop active = 200¢ + Cottage 50¢ = 250¢ = $2 (整数切り捨て、旧 $3 から変更)。
+        // Shop active = 200¢
+        // House (5,6) は隣接 Road が無いので edge_connected=false → Cottage 半減 25¢
+        // Total: 225¢ = $2 (整数切り捨て)。
         assert_eq!(compute_income_per_sec(&city), 2);
     }
 
     /// HouseTier は描画専用 — gather → tier_for で派生値が取れる。
     /// 道路接続 + Shop が距離 5 以内なら Apartment になる (描画切替の根拠)。
+    /// Phase 2: edge connectivity を満たすため上端 Road を追加。
     #[test]
     fn house_with_road_and_shop_renders_as_apartment() {
         let mut city = City::new();
         city.set_tile(1, 1, Tile::Built(Building::House));
+        // (1,0) Road が上端で edge-connected。
+        place_edge_road(&mut city, 1);
         city.set_tile(0, 1, Tile::Built(Building::Road));
         city.set_tile(3, 1, Tile::Built(Building::Shop));
         let tier = house_tier_for(gather_house_neighborhood(&city, 1, 1));
@@ -1835,7 +2196,8 @@ mod tests {
         let mut city = City::new();
         // 中央コア (d=0) を使う。デフォルト世界生成では (0,0) は外側で
         // ほぼ確実に Rock になるため、座標を中央に寄せる。
-        let cx = GRID_W / 2;
+        // Phase 3 で創設街路が中央列に置かれるので、+1 ずらして空セルを取る。
+        let cx = GRID_W / 2 + 1;
         let cy = GRID_H / 2;
         // 中央セルの地形を強制 Plain にして、Forest/Wasteland 由来の Clearing が
         // 紛れ込まないようにする (テストは「Road が build_ticks で完成」が論点)。
@@ -1855,7 +2217,8 @@ mod tests {
         let mut city = City::new();
         city.cash = 5; // less than any building
         // テスト中央セルを Plain に固定 (Rock だと needs_clearing で別経路に入る)。
-        let cx = GRID_W / 2;
+        // Phase 3 で創設街路が cx 列にあるため +1 ずらす。
+        let cx = GRID_W / 2 + 1;
         let cy = GRID_H / 2;
         city.terrain[cy][cx] = super::super::terrain::Terrain::Plain;
         assert!(!start_construction(&mut city, cx, cy, Building::House));
@@ -1968,7 +2331,8 @@ mod tests {
     fn demolish_rejects_construction_tile() {
         let mut city = City::new();
         city.cash = 10_000;
-        let cx = GRID_W / 2;
+        // Phase 3 創設街路を回避するため +1 ずらす。
+        let cx = GRID_W / 2 + 1;
         let cy = GRID_H / 2;
         city.terrain[cy][cx] = super::super::terrain::Terrain::Plain;
         // 着工中。
@@ -1984,7 +2348,8 @@ mod tests {
     fn demolish_fails_on_insufficient_cash() {
         let mut city = City::new();
         city.cash = 10;
-        // 外周 (0,0) に House を強制配置 — コスト = 50 + 24² * 5 = $2930。
+        // 外周 (0,0) に House を強制配置 — 64×32 マップでは d=48 でコスト
+        // = 50 + 48² * 5 = $11,570 (旧 32×16 では $2,930 だった)。
         city.set_tile(0, 0, Tile::Built(Building::House));
         assert!(!demolish_at(&mut city, 0, 0));
         assert_eq!(city.cash, 10);
@@ -2009,17 +2374,21 @@ mod tests {
     }
 
     /// AI 撤去: 全建物が active なら撤去対象なし。
+    /// Phase 2: edge-connected 必須。中央 House を上端まで Road で繋ぐ。
     #[test]
     fn auto_demolish_returns_none_when_everything_active() {
         let mut city = City::new();
         city.cash = 10_000;
         let cx = GRID_W / 2;
         let cy = GRID_H / 2;
-        // House を 1 軒、Road 接続あり (有用な Cottage)。
+        // House を 1 軒、上端から中央まで Road で連結 (= edge-connected)。
         city.set_tile(cx, cy, Tile::Built(Building::House));
+        for y in 0..cy {
+            city.set_tile(cx + 1, y, Tile::Built(Building::Road));
+        }
         city.set_tile(cx + 1, cy, Tile::Built(Building::Road));
-        // 撤去候補なし (孤立 House でもなく、Shop/Workshop でもなく、Outpost でもない)。
-        // ただし Road は隣接 Built (House) があるので「行き止まり」判定にもならない。
+        // 撤去候補なし (孤立 House でもなく、edge-connected で Cottage は半減 penalty も無く、
+        // Shop/Workshop でもなく、Outpost でもない)。Road も Built (House) 隣接。
         let target = auto_demolish_target(&city);
         assert!(
             target.is_none(),
@@ -2081,7 +2450,7 @@ mod tests {
         city.cash = 10_000;
         let cx = GRID_W / 2;
         let cy = GRID_H / 2;
-        // 中央コアは Rock が出ない (CORE_RADIUS=5)。Outpost を置けば「役目無し」状態。
+        // 中央コアは Rock が出ない (CORE_RADIUS=8)。Outpost を置けば「役目無し」状態。
         city.set_tile(cx, cy, Tile::Built(Building::Outpost));
         let (tx, ty, _) = auto_demolish_target(&city).expect("idle Outpost should be a candidate");
         assert_eq!((tx, ty), (cx, cy));
@@ -2125,10 +2494,17 @@ mod tests {
     /// 機材設置場所が無い時は false を返してサイレントに帰る。
     /// 旧仕様では失敗イベントログを出していたが、tick 駆動の自動発火に移行した
     /// ため log spam を避けてサイレント化した。
+    /// Phase 3 で創設街路が入ったので、テストは明示的にグリッドを空にする。
     #[test]
     fn dispatch_outpost_fails_when_no_boundary() {
         let mut city = City::new();
         city.cash = 1_000;
+        // 創設街路を消去して「既存建物 0」状態を再現。
+        for y in 0..GRID_H {
+            for x in 0..GRID_W {
+                city.set_tile(x, y, Tile::Empty);
+            }
+        }
         let events_before = city.events.len();
         // 既存建物無し → has_any_built_neighbor の候補ゼロ
         let result = dispatch_outpost(&mut city);
@@ -2368,15 +2744,18 @@ mod tests {
     }
 
     /// 老朽化した Cottage は wastefulness_score が加算され、撤去候補になりやすい。
+    /// Phase 3 創設街路 (中央列) を回避するため +5 ずらした孤立位置を使う
+    /// (= !edge_ok で +60、孤立 House で +80、合計 140 が cost penalty を上回る)。
     #[test]
     fn aged_cottage_becomes_demolish_candidate() {
         let mut city = City::new();
-        // 中央付近に孤立 House を置いて built_at を古めに設定。
-        city.set_tile(15, 8, Tile::Built(Building::House));
-        // 何の経済刺激もない孤立 Cottage。
+        let cx = GRID_W / 2 + 5;
+        let cy = GRID_H / 2;
+        // 完全孤立した House を置く (隣接 Road も House も無い)。
+        city.set_tile(cx, cy, Tile::Built(Building::House));
         city.tick = 5000;
-        city.built_at_tick[8][15] = 0; // age = 5000、寿命下限到達
-        let score = wastefulness_score(&city, 15, 8);
+        city.built_at_tick[cy][cx] = 0; // 老朽化計算はスキップ (built_at_tick == 0)
+        let score = wastefulness_score(&city, cx, cy);
         assert!(
             score.is_some() && score.unwrap() > 0,
             "Aged isolated cottage should be a demolish candidate: {:?}",

@@ -361,21 +361,44 @@ fn tier4_demand_aware(city: &mut City) -> AiAction {
             super::terrain::Terrain::Forest
         )
     };
+    // Phase 2: edge-connectivity grid を 1 度だけ計算。
+    let connected = super::logic::compute_edge_connected_roads(city);
     let candidates: Vec<(usize, usize)> = match kind {
         Building::Shop => (0..GRID_H)
             .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
-            .filter(|(x, y)| would_shop_activate_here(city, *x, *y) && forest_ok(city, *x, *y))
+            .filter(|(x, y)| {
+                would_shop_activate_here(city, *x, *y, &connected) && forest_ok(city, *x, *y)
+            })
             .collect(),
         Building::Workshop => (0..GRID_H)
             .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
             .filter(|(x, y)| {
-                would_workshop_activate_here(city, *x, *y) && forest_ok(city, *x, *y)
+                would_workshop_activate_here(city, *x, *y, &connected) && forest_ok(city, *x, *y)
             })
             .collect(),
-        Building::House => (0..GRID_H)
-            .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
-            .filter(|(x, y)| is_empty_next_to_road(city, *x, *y) && forest_ok(city, *x, *y))
-            .collect(),
+        // Phase 2: House は edge-connected Road の隣を優先 (= 流通インフラが
+        // 揃った街区を作る賢さ)。候補が枯渇したら通常の Road 隣接にフォールバック。
+        Building::House => {
+            let edge_candidates: Vec<(usize, usize)> = (0..GRID_H)
+                .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
+                .filter(|(x, y)| {
+                    is_empty_next_to_road(city, *x, *y)
+                        && super::logic::is_building_edge_connected(&connected, *x, *y)
+                        && forest_ok(city, *x, *y)
+                })
+                .collect();
+            if !edge_candidates.is_empty() {
+                edge_candidates
+            } else {
+                // 中継 House を作って後で道路網を伸ばす予定地。フォールバック。
+                (0..GRID_H)
+                    .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
+                    .filter(|(x, y)| {
+                        is_empty_next_to_road(city, *x, *y) && forest_ok(city, *x, *y)
+                    })
+                    .collect()
+            }
+        }
         Building::Road => (0..GRID_H)
             .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
             .filter(|(x, y)| {
@@ -401,11 +424,19 @@ fn tier4_demand_aware(city: &mut City) -> AiAction {
 }
 
 /// True iff placing a Workshop at (x, y) right now would have it earning
-/// income from tick 1 (隣接 House (労働力) AND 隣接 Road が両方必要)。
+/// income from tick 1 (隣接 House (労働力) AND **edge-connected** 隣接 Road)。
 ///
 /// Tier 4 はさらに「整地不要 = Plain」セルだけを候補にして、整地で worker
 /// を浪費しないように振る舞う (= smart AI らしさ)。
-fn would_workshop_activate_here(city: &City, wx: usize, wy: usize) -> bool {
+///
+/// **Phase 2**: 隣接 Road が「マップ端まで繋がる幹線網」に属している必要が
+/// ある (= 原料が外から運べる)。connected grid を呼び側で渡してもらう。
+fn would_workshop_activate_here(
+    city: &City,
+    wx: usize,
+    wy: usize,
+    connected: &[Vec<bool>],
+) -> bool {
     if !matches!(city.tile(wx, wy), Tile::Empty) {
         return false;
     }
@@ -414,6 +445,9 @@ fn would_workshop_activate_here(city: &City, wx: usize, wy: usize) -> bool {
     }
     // Tier 4 は要整地セルを避ける (整地+建設で worker 2 倍消費は非効率)。
     if city.terrain_at(wx, wy).needs_clearing() {
+        return false;
+    }
+    if !super::logic::is_building_edge_connected(connected, wx, wy) {
         return false;
     }
     let mut has_road = false;
@@ -469,8 +503,9 @@ fn would_park_be_useful_here(city: &City, px: usize, py: usize) -> bool {
 }
 
 /// True iff placing a Shop at (x, y) right now would have it earning
-/// income from tick 1 (road neighbour AND a House within Manhattan-3).
-fn would_shop_activate_here(city: &City, sx: usize, sy: usize) -> bool {
+/// income from tick 1 (**edge-connected** road neighbour AND a House within
+/// Manhattan-3)。Phase 2: 商品搬入の物流接続が必要。
+fn would_shop_activate_here(city: &City, sx: usize, sy: usize, connected: &[Vec<bool>]) -> bool {
     if !matches!(city.tile(sx, sy), Tile::Empty) {
         return false;
     }
@@ -481,23 +516,8 @@ fn would_shop_activate_here(city: &City, sx: usize, sy: usize) -> bool {
     if city.terrain_at(sx, sy).needs_clearing() {
         return false;
     }
-    // Road neighbour required.
-    let mut has_road = false;
-    for (dx, dy) in DIRS4 {
-        let nx = sx as i32 + dx;
-        let ny = sy as i32 + dy;
-        if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
-            continue;
-        }
-        if matches!(
-            city.tile(nx as usize, ny as usize),
-            Tile::Built(Building::Road)
-        ) {
-            has_road = true;
-            break;
-        }
-    }
-    if !has_road {
+    // Edge-connected Road neighbour required (Phase 2)。
+    if !super::logic::is_building_edge_connected(connected, sx, sy) {
         return false;
     }
     // House within Manhattan distance 3.
