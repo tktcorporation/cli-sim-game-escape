@@ -397,6 +397,12 @@ fn handle_overlay_key(state: &mut RpgState, ch: char) -> bool {
             ' ' | '1' | 'A' | 'a' => logic::pray(state),
             _ => false,
         },
+        Some(Overlay::SkillChoice) => match ch {
+            ' ' | 'A' | 'a' => logic::confirm_skill_choice(state, state.cursor),
+            '1' => logic::confirm_skill_choice(state, 0),
+            '2' => logic::confirm_skill_choice(state, 1),
+            _ => false,
+        },
         None => false,
     }
 }
@@ -457,6 +463,15 @@ fn handle_overlay_click(state: &mut RpgState, id: u16) -> bool {
         Some(Overlay::PrayMenu) => {
             if id == PRAY_CONFIRM {
                 return logic::pray(state);
+            }
+            false
+        }
+        Some(Overlay::SkillChoice) => {
+            if id == SKILL_CHOICE_LEFT {
+                return logic::confirm_skill_choice(state, 0);
+            }
+            if id == SKILL_CHOICE_RIGHT {
+                return logic::confirm_skill_choice(state, 1);
             }
             false
         }
@@ -596,7 +611,7 @@ mod tests {
             map.monsters.push(state::Monster {
                 kind: state::EnemyKind::Slime,
                 x: ux, y: uy, hp: 12, max_hp: 12,
-                awake: true, charging: false,
+                awake: true, charging: false, affix: None,
             });
             break;
         }

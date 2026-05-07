@@ -8,10 +8,10 @@ use super::events::{generate_event, resolve_event, EventOutcome};
 use super::lore::{atmosphere_text, floor_entry_text, floor_theme};
 use super::overworld_map::generate_overworld;
 use super::state::{
-    affix_info, enemy_info, item_info, level_stats, shop_items, skill_element, skill_info,
-    CellType, DungeonEvent, EnemyKind, EventAction, EventChoice, Facing, InventoryItem,
-    ItemCategory, ItemKind, Monster, Overlay, Pet, PlayerBuffs, Quest, QuestKind, RpgState,
-    Scene, SkillKind, Tile, ALL_AFFIXES, ALL_SKILLS, MAX_FLOOR, MAX_LEVEL,
+    affix_info, enemy_affix_info, enemy_info, item_info, level_stats, shop_items, skill_choice_pair,
+    skill_element, skill_info, CellType, DungeonEvent, EnemyAffix, EnemyKind, EventAction,
+    EventChoice, Facing, InventoryItem, ItemCategory, ItemKind, Monster, Overlay, Pet, PlayerBuffs,
+    Quest, QuestKind, RpgState, Scene, SkillKind, Tile, ALL_AFFIXES, MAX_FLOOR, MAX_LEVEL,
 };
 
 // ── Tick (no-op: command-based game) ─────────────────────────
@@ -36,7 +36,7 @@ pub fn cursor_count(state: &RpgState) -> usize {
     match state.overlay {
         Some(Overlay::Inventory) => state.inventory.len().min(9),
         Some(Overlay::Shop) => shop_items(state.max_floor_reached).len().min(9),
-        Some(Overlay::SkillMenu) => available_skills(state.level).len(),
+        Some(Overlay::SkillMenu) => available_skills(state).len(),
         Some(Overlay::QuestBoard) => {
             if state.active_quest.is_some() {
                 1 // abandon button
@@ -52,6 +52,7 @@ pub fn cursor_count(state: &RpgState) -> usize {
             }
         }
         Some(Overlay::Status) => 0,
+        Some(Overlay::SkillChoice) => 2,
         None => match state.scene {
             Scene::Overworld | Scene::DungeonExplore => state
                 .active_event
@@ -812,21 +813,23 @@ pub fn attack_monster(state: &mut RpgState, idx: usize) {
     let element_dmg = state.weapon_element_dmg();
     let vamp_pct = state.weapon_vampiric_pct();
 
-    let (kind, einfo, hp_before) = {
+    let (kind, einfo, hp_before, eff_def, m_affix, m_name) = {
         let m = &state.dungeon.as_ref().unwrap().monsters[idx];
-        (m.kind, enemy_info(m.kind), m.hp)
+        (m.kind, enemy_info(m.kind), m.hp, m.effective_def(), m.affix, m.display_name())
     };
 
     let crit_roll = rng_range(state, 100);
     let is_crit = crit_roll < 10;
-    let mut base = player_atk.saturating_sub(einfo.def / 2).max(1);
+    let mut base = player_atk.saturating_sub(eff_def / 2).max(1);
     if is_crit { base = base * 3 / 2; }
 
-    // Affix elemental bonus
+    // Affix elemental bonus. Burning elites resist Fire weakness — the
+    // flame is part of them, so Fire stops doubling the bonus.
     let mut bonus = 0;
     if let Some(elem) = player_element {
         bonus += element_dmg;
-        if einfo.weakness == Some(elem) {
+        let burning_immune = m_affix == Some(EnemyAffix::Burning) && elem == super::state::Element::Fire;
+        if einfo.weakness == Some(elem) && !burning_immune {
             bonus += element_dmg; // weakness doubles affix damage
         }
     }
@@ -840,13 +843,14 @@ pub fn attack_monster(state: &mut RpgState, idx: usize) {
     }
 
     let weak_str = match einfo.weakness {
-        Some(e) if Some(e) == player_element => " [弱点!]",
+        Some(e) if Some(e) == player_element
+            && !(m_affix == Some(EnemyAffix::Burning) && e == super::state::Element::Fire) => " [弱点!]",
         _ => "",
     };
     if is_crit {
-        state.add_log(&format!("会心の一撃！ {}に{}ダメージ{}", einfo.name, damage, weak_str));
+        state.add_log(&format!("会心の一撃！ {}に{}ダメージ{}", m_name, damage, weak_str));
     } else {
-        state.add_log(&format!("{}に{}ダメージ{}", einfo.name, damage, weak_str));
+        state.add_log(&format!("{}に{}ダメージ{}", m_name, damage, weak_str));
     }
 
     if vamp_pct > 0 {
@@ -861,27 +865,45 @@ pub fn attack_monster(state: &mut RpgState, idx: usize) {
     }
 }
 
-fn on_monster_killed(state: &mut RpgState, _idx: usize, kind: EnemyKind, _hp_before: u32) {
+fn on_monster_killed(state: &mut RpgState, idx: usize, kind: EnemyKind, _hp_before: u32) {
     let info = enemy_info(kind);
-    state.exp += info.exp;
-    state.gold += info.gold;
-    state.run_gold_earned += info.gold;
-    state.run_exp_earned += info.exp;
+    let (m_affix, display_name) = state
+        .dungeon
+        .as_ref()
+        .and_then(|d| d.monsters.get(idx))
+        .map(|m| (m.affix, m.display_name()))
+        .unwrap_or((None, info.name.to_string()));
+
+    // Elite affixes scale gold / exp rewards.
+    let (gold, exp) = match m_affix {
+        Some(a) => {
+            let ai = enemy_affix_info(a);
+            (info.gold * ai.gold_pct / 100, info.exp * ai.exp_pct / 100)
+        }
+        None => (info.gold, info.exp),
+    };
+    state.exp += exp;
+    state.gold += gold;
+    state.run_gold_earned += gold;
+    state.run_exp_earned += exp;
     state.run_enemies_killed += 1;
-    state.add_log(&format!("{}を倒した！ EXP+{} +{}G", info.name, info.exp, info.gold));
+    state.add_log(&format!("{}を倒した！ EXP+{} +{}G", display_name, exp, gold));
 
     // Drop
     if let Some((drop_item, pct)) = info.drop {
-        if rng_range(state, 100) < pct {
+        // Elites: +20pp drop chance and bumped affixed-gear chance.
+        let elite_drop_bonus = if m_affix.is_some() { 20 } else { 0 };
+        if rng_range(state, 100) < pct + elite_drop_bonus {
             // Issue #92 (balance): mid-game (B4-7) had near-zero affix
             // drops, leading to a flatline in player power. Bumped the
             // mid-tier kills' affix chance so the difficulty curve has
             // matching gear progression.
-            let affixed_chance = match kind {
+            let mut affixed_chance = match kind {
                 EnemyKind::Skeleton | EnemyKind::Golem | EnemyKind::DarkKnight => 35,
                 EnemyKind::Demon | EnemyKind::Dragon => 55,
                 _ => 8,
             };
+            if m_affix.is_some() { affixed_chance += 30; }
             add_item(state, drop_item, 1);
             state.add_log(&format!("{}をドロップ！", item_info(drop_item).name));
             // Bonus affixed equipment chance
@@ -1043,19 +1065,31 @@ fn monster_turn(state: &mut RpgState) {
     for i in 0..count {
         if state.hp == 0 { break; }
         monster_act(state, i);
+        // Swift elites act twice per turn.
+        let swift = state
+            .dungeon
+            .as_ref()
+            .and_then(|d| d.monsters.get(i))
+            .map(|m| m.affix == Some(EnemyAffix::Swift) && m.hp > 0)
+            .unwrap_or(false);
+        if swift && state.hp > 0 {
+            monster_act(state, i);
+        }
     }
 }
 
 fn monster_act(state: &mut RpgState, idx: usize) {
-    let (mx, my, kind, charging, can_charge, awake, hp) = {
+    let (mx, my, charging, can_charge, awake, hp, eff_atk, m_affix, m_name) = {
         let m = match state.dungeon.as_ref().and_then(|d| d.monsters.get(idx)) {
             Some(m) => m,
             None => return,
         };
-        (m.x, m.y, m.kind, m.charging, enemy_info(m.kind).can_charge, m.awake, m.hp)
+        (
+            m.x, m.y, m.charging, enemy_info(m.kind).can_charge, m.awake, m.hp,
+            m.effective_atk(), m.affix, m.display_name(),
+        )
     };
     if hp == 0 || !awake { return; }
-    let einfo = enemy_info(kind);
 
     let (px, py) = {
         let m = state.dungeon.as_ref().unwrap();
@@ -1069,11 +1103,11 @@ fn monster_act(state: &mut RpgState, idx: usize) {
     if charging {
         // Release charged attack
         if adjacent_to_player {
-            let damage = (einfo.atk * 2).saturating_sub(state.total_def() / 2).max(1);
+            let damage = (eff_atk * 2).saturating_sub(state.total_def() / 2).max(1);
             state.hp = state.hp.saturating_sub(damage);
-            state.add_log(&format!("{}の渾身の一撃！ {}ダメージ！", einfo.name, damage));
+            state.add_log(&format!("{}の渾身の一撃！ {}ダメージ！", m_name, damage));
         } else {
-            state.add_log(&format!("{}の渾身の一撃は空振り…", einfo.name));
+            state.add_log(&format!("{}の渾身の一撃は空振り…", m_name));
         }
         state.dungeon.as_mut().unwrap().monsters[idx].charging = false;
         return;
@@ -1083,13 +1117,16 @@ fn monster_act(state: &mut RpgState, idx: usize) {
         // Maybe charge
         if can_charge && rng_range(state, 100) < 25 {
             state.dungeon.as_mut().unwrap().monsters[idx].charging = true;
-            state.add_log(&format!("{}は力を溜めている！", einfo.name));
+            state.add_log(&format!("{}は力を溜めている！", m_name));
             return;
         }
-        // Normal attack
-        let damage = einfo.atk.saturating_sub(state.total_def() / 2).max(1);
+        // Normal attack (+ Burning elites add fire splash damage)
+        let mut damage = eff_atk.saturating_sub(state.total_def() / 2).max(1);
+        if m_affix == Some(EnemyAffix::Burning) {
+            damage += 3;
+        }
         state.hp = state.hp.saturating_sub(damage);
-        state.add_log(&format!("{}の攻撃！ {}ダメージ！", einfo.name, damage));
+        state.add_log(&format!("{}の攻撃！ {}ダメージ！", m_name, damage));
         return;
     }
 
@@ -1553,6 +1590,7 @@ fn spawn_hostile_near_player(state: &mut RpgState, kind: EnemyKind) {
         max_hp: info.max_hp,
         awake: true,
         charging: false,
+        affix: None,
     });
 }
 
@@ -1604,7 +1642,7 @@ fn process_dungeon_death(state: &mut RpgState) {
 
 /// Use a skill from the skill menu. Returns true if a turn was consumed.
 pub fn use_skill(state: &mut RpgState, skill_index: usize) -> bool {
-    let skills = available_skills(state.level);
+    let skills = available_skills(state);
     if skill_index >= skills.len() { return false; }
     let skill = skills[skill_index];
     let info = skill_info(skill);
@@ -1731,16 +1769,42 @@ fn check_level_up(state: &mut RpgState) {
                 format!("{}も成長した！", p.name)
             });
             if let Some(msg) = pet_msg { state.add_log(&msg); }
-            for &skill in ALL_SKILLS {
-                let sinfo = skill_info(skill);
-                if sinfo.learn_level == state.level {
-                    state.add_log(&format!("スキル「{}」を習得！", sinfo.name));
-                }
+            // Skill choice gate: at certain level-ups, the player picks
+            // one of two skills. The choice is sticky for the run and
+            // defines build identity (Heal vs Shield, Ice vs Drain, etc).
+            // The loop pauses here until the player commits a pick — any
+            // remaining EXP is held over and re-evaluated on the next
+            // `check_level_up` call (e.g. after the next combat).
+            if let Some(pair) = skill_choice_pair(state.level) {
+                state.pending_skill_choice = Some(pair);
+                state.open_overlay(Overlay::SkillChoice);
+                state.add_log("レベルアップ! 新たなスキルを習得できる…");
+                break;
             }
         } else {
             break;
         }
     }
+}
+
+/// Commit one of the two pending skill choices. `idx` is 0 (left option)
+/// or 1 (right option). No-op if there's no pending choice.
+///
+/// Re-enters `check_level_up` afterward so any banked EXP that piled up
+/// past the gated level-up cascades immediately (otherwise the next
+/// level-up would only trigger after another combat tick).
+pub fn confirm_skill_choice(state: &mut RpgState, idx: usize) -> bool {
+    let Some((a, b)) = state.pending_skill_choice else { return false; };
+    let pick = if idx == 0 { a } else { b };
+    if !state.learned_skills.contains(&pick) {
+        state.learned_skills.push(pick);
+    }
+    state.pending_skill_choice = None;
+    state.close_overlay();
+    let info = skill_info(pick);
+    state.add_log(&format!("スキル「{}」を習得！", info.name));
+    check_level_up(state);
+    true
 }
 
 // ── Inventory ────────────────────────────────────────────────
@@ -1882,12 +1946,11 @@ pub fn buy_item(state: &mut RpgState, shop_index: usize) -> bool {
 
 // ── Skills Query ─────────────────────────────────────────────
 
-pub fn available_skills(level: u32) -> Vec<SkillKind> {
-    ALL_SKILLS
-        .iter()
-        .filter(|&&s| skill_info(s).learn_level <= level)
-        .copied()
-        .collect()
+/// Returns the skills the player has actually learned. `Fire` is the only
+/// skill granted automatically on `RpgState::new()`; everything else is
+/// chosen through the `SkillChoice` overlay at level-up checkpoints.
+pub fn available_skills(state: &RpgState) -> Vec<SkillKind> {
+    state.learned_skills.clone()
 }
 
 // ── Tests ────────────────────────────────────────────────────
@@ -2135,7 +2198,7 @@ mod tests {
             map.monsters.push(Monster {
                 kind: EnemyKind::Slime,
                 x: ux, y: uy, hp: 12, max_hp: 12,
-                awake: true, charging: false,
+                awake: true, charging: false, affix: None,
             });
             // Attack by trying to move into the monster
             let mlen = map.monsters.len();
@@ -2165,7 +2228,7 @@ mod tests {
         map.monsters.clear();
         map.monsters.push(Monster {
             kind: EnemyKind::Slime, x: 0, y: 0, hp: 1, max_hp: 12,
-            awake: true, charging: false,
+            awake: true, charging: false, affix: None,
         });
         attack_monster(&mut s, 0);
         // Quest should be cleared (completed and removed)
@@ -2248,5 +2311,38 @@ mod tests {
         let idx = s.inventory.iter().position(|i| i.kind == ItemKind::IronSword).unwrap();
         assert!(use_item(&mut s, idx));
         assert_eq!(s.weapon_idx, Some(idx));
+    }
+
+    #[test]
+    fn level_up_to_2_opens_skill_choice() {
+        let mut s = RpgState::new();
+        // Player starts with only Fire learned.
+        assert_eq!(s.learned_skills, vec![SkillKind::Fire]);
+        // Push EXP enough to reach level 2 (level_stats(1).exp_to_next = 20).
+        s.exp = 100;
+        check_level_up(&mut s);
+        assert_eq!(s.level, 2);
+        // SkillChoice overlay must now be open with the L2 pair.
+        assert_eq!(s.overlay, Some(Overlay::SkillChoice));
+        assert_eq!(
+            s.pending_skill_choice,
+            Some((SkillKind::Heal, SkillKind::Shield)),
+        );
+        // Picking the left option (Heal) commits and clears the gate.
+        assert!(confirm_skill_choice(&mut s, 0));
+        assert!(s.learned_skills.contains(&SkillKind::Heal));
+        assert!(!s.learned_skills.contains(&SkillKind::Shield));
+        assert!(s.pending_skill_choice.is_none());
+        assert_eq!(s.overlay, None);
+    }
+
+    #[test]
+    fn available_skills_reflects_learned_only() {
+        let mut s = RpgState::new();
+        // Fresh player: only Fire is castable.
+        assert_eq!(available_skills(&s), vec![SkillKind::Fire]);
+        // Manually grant Heal, simulating an L2 pick.
+        s.learned_skills.push(SkillKind::Heal);
+        assert_eq!(available_skills(&s).len(), 2);
     }
 }

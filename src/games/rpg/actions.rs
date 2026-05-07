@@ -49,3 +49,7 @@ pub const AB_B_BUTTON: u16 = 191;
 pub const MENU_TAB_INVENTORY: u16 = 200;
 pub const MENU_TAB_SKILL: u16 = 201;
 pub const MENU_TAB_STATUS: u16 = 202;
+
+// ── Skill choice overlay (level-up forced pick) ──────────────
+pub const SKILL_CHOICE_LEFT: u16 = 210;
+pub const SKILL_CHOICE_RIGHT: u16 = 211;

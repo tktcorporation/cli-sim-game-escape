@@ -62,6 +62,8 @@ pub enum Action {
     BuyItem(ItemKind),
     Retreat,
     CloseOverlay,
+    /// Pick one of the two pending skill choices (0 = left, 1 = right).
+    ConfirmSkillChoice(usize),
     Noop,
 }
 
@@ -202,6 +204,12 @@ impl AutoExplorerPolicy {
                 } else {
                     Action::CloseOverlay
                 }
+            }
+            Overlay::SkillChoice => {
+                // Default policy: pick left (the "first" / often more
+                // sustain-flavored option). Overrides can branch on
+                // `state.pending_skill_choice` to differentiate builds.
+                Action::ConfirmSkillChoice(0)
             }
         }
     }
@@ -410,7 +418,7 @@ fn adjacent_enemy_idx(state: &RpgState) -> Option<usize> {
 }
 
 fn skill_index<F: Fn(&super::state::SkillInfo) -> bool>(state: &RpgState, pred: F) -> usize {
-    let skills = logic::available_skills(state.level);
+    let skills = logic::available_skills(state);
     skills
         .iter()
         .position(|&s| pred(&super::state::skill_info(s)))
@@ -727,6 +735,9 @@ impl Simulator {
                 if let Some(idx) = shop.iter().position(|(k, _)| *k == kind) {
                     logic::buy_item(&mut self.state, idx);
                 }
+            }
+            Action::ConfirmSkillChoice(i) => {
+                logic::confirm_skill_choice(&mut self.state, i);
             }
             Action::Retreat => { logic::retreat_to_town(&mut self.state); }
             Action::CloseOverlay => { self.state.overlay = None; }
