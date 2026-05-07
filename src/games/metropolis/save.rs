@@ -37,17 +37,21 @@ use super::terrain::Terrain;
 ///   v3: `built_at_tick` グリッドを追加 (Phase D 老朽化 / Tier 昇格 dwell time)
 ///   v4: `cam_x` / `cam_y` 追加 + マップサイズ 32×16 → 64×32 に拡張
 ///       (Phase 3 ビューポートスクロール)。
-///       **注意**: マップサイズが変わったので、v3 以前のセーブは tile/terrain
-///       の長さが GRID_W * GRID_H に満たず、未指定領域は default で埋められる
-///       (Empty / Plain) — 旧街区はマップ左上 32×16 に再配置されたように
-///       見える挙動になる。新規スタート推奨だが互換ロードはできる。
+///       **破壊的変更**: フラット配列 (tile / terrain / built_at_tick) の
+///       インデックスは `y * GRID_W + x` で計算するため、GRID_W が変わると
+///       既存配列の再解釈ができない (旧 index 32 = 旧 (0,1) が、新 GRID_W=64
+///       では (32,0) に化ける)。v3 以前のセーブは安全に再マップできない
+///       ため `MIN_COMPATIBLE_VERSION = 4` でロード拒否し、新規開始を促す。
 #[cfg(any(target_arch = "wasm32", test))]
 const SAVE_VERSION: u32 = 4;
 
 /// 互換性を維持できる最小バージョン。破壊的変更で +1。
-/// v1 → v2 はフィールド追加だけなので `serde(default)` で透過的にロード可能。
+/// v1-v3 はフィールド追加だけだったが、v4 でマップ寸法が変わったので
+/// セーブの座標系自体が破壊された。Codex review #103 P1 (r3203124082)
+/// の指摘で 4 に引き上げ。v ≤ 3 を読み込もうとするとサイレントに座標が
+/// 化けるバグがあったため、明示的に拒否する。
 #[cfg(any(target_arch = "wasm32", test))]
-const MIN_COMPATIBLE_VERSION: u32 = 1;
+const MIN_COMPATIBLE_VERSION: u32 = 4;
 
 /// localStorage のキー。
 #[cfg(target_arch = "wasm32")]
@@ -752,9 +756,14 @@ mod tests {
         assert_eq!(restored.built_at_tick[1][0], 400);
     }
 
-    /// v2 以前のセーブをロードした時、既存建物の built_at_tick は
-    /// 「現在の tick で新築」扱いにマイグレートされる (ロード直後に
-    /// 突然全建物が老朽化扱いにならない)。
+    /// `apply_save` の field-level マイグレーション (built_at_tick が空配列の
+    /// 場合は「現在の tick で新築」扱い) が機能することを確認する単体テスト。
+    ///
+    /// **注意**: 現状の `load_game` は `MIN_COMPATIBLE_VERSION = 4` で v ≤ 3
+    /// セーブを丸ごと拒否するため、このマイグレーションが production で
+    /// 走ることはない。`apply_save` は将来の v5+ で類似の field 追加が
+    /// 起きた時にも同じパターンで使える保険として残し、本テストはその
+    /// 動作を documentation する。
     #[test]
     fn v2_save_migrates_built_at_to_current_tick() {
         let mut city = City::new();
