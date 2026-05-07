@@ -144,6 +144,10 @@ fn advance_construction(city: &mut City) {
                         let kind = *target;
                         *tile = Tile::Built(kind);
                         city.buildings_finished += 1;
+                        // 「築 0 の起点」を記録。aging_factor / effective_house_tier の
+                        // 基準点になる。撤去/再建で常に上書きされるため、その建物の
+                        // 経年と Tier 昇格 dwell time の唯一のソース。
+                        city.built_at_tick[y][x] = city.tick;
                         completions.push((x, y, kind));
                     } else {
                         *ticks_remaining -= 1;
@@ -617,59 +621,77 @@ fn accrue_income(city: &mut City) {
 
 /// Compute total cash/sec.  Pure function over the grid — easy to unit-test.
 ///
-///   • Each finished House contributes $0.5 (rounded down per tick batch
-///     via the tick-loop integer accumulator) — folded in below as cents.
-///   • Each finished Shop contributes $2.0 *if* it has at least one road
-///     neighbor AND a customer base (a House within Manhattan distance 3).
+/// **Tier × 老朽化** の二軸で建物個別に収入を出す:
+///   - House: 実効 Tier (Cottage/Apartment/Highrise) 別の基本値
+///   - Workshop / Shop: 活性条件を満たすと固定値
+///   - すべての建物に **aging_factor** を掛ける (Tier ごとの寿命差を反映)
 ///
-/// We work in whole dollars and accept the rounding; the simulator reports
-/// large numbers so the loss from int truncation is negligible.
+/// 整数演算で確定的に計算するため、内部では「セント単位」で集計し、最後に
+/// 100 で割って円ドル単位の i64 に戻す。`aging_factor_per_mille` は ‰ なので
+/// `cents * factor / 1000` で老朽化込み。
+///
+/// **Tier 別 House 収入** (`/sec`、aging 前):
+///   - Cottage:   $0.5  ((houses+1)/2 の旧仕様と同等スケール)
+///   - Apartment: $1.5  (Cottage の 3 倍)
+///   - Highrise:  $3.0  (Cottage の 6 倍 — 育てきった街区の報酬)
+///
+/// 「Highrise は 6 倍」が本機能の主役。dwell time (5 min) と寿命 (4×) を考えると
+/// 「育てた街区は長く高収入を出す」が成り立つ。
 pub fn compute_income_per_sec(city: &City) -> i64 {
-    let mut income: i64 = 0;
+    let now = city.tick;
+    let mut income_cents: i64 = 0;
 
-    // Houses → flat residential tax.  We use ceiling division so that
-    // even 1 house produces $1/sec; otherwise an unlucky early game
-    // can leave the city with 1 house and income==0 (death spiral —
-    // the simulator catches this on seed=0xDEADBEEF without this).
-    //
-    // 設計判断: HouseTier は描画レイヤーで「街が育つ感」を表現する派生値として
-    // 使い、収入計算には反映しない。理由:
-    //   - 戦略の特化 (simulator::tier4_strategies_specialize) を保つには
-    //     人口×Tier 比例の収入は Tech 戦略に有利すぎる (Tech は道路+人口優位)
-    //   - 経済発展感は次フェーズの Workshop / Shop チェーン拡張で実現する
-    //     方が分業として綺麗 (Phase A continuation, DESIGN.md §5)
-    let houses = city.count_built(Building::House) as i64;
-    income += (houses + 1) / 2;
-
-    // Workshops → 労働力 (隣接 House) + Road 接続が必要。$1/s。
-    // House より早期に建てられる「最初の職場」として、戦略の幅を増やす。
     for y in 0..GRID_H {
         for x in 0..GRID_W {
-            if matches!(city.tile(x, y), Tile::Built(Building::Workshop))
-                && workshop_is_active(city, x, y)
-            {
-                income += 1;
+            let kind = match city.tile(x, y) {
+                Tile::Built(b) => *b,
+                _ => continue,
+            };
+            // Tier (House のみ) を先に決める。aging の lifespan にも使う。
+            let tier_opt = if matches!(kind, Building::House) {
+                Some(effective_tier_at(city, x, y))
+            } else {
+                None
+            };
+            // 基本収入 (cents/sec)。
+            let base_cents: i64 = match kind {
+                Building::House => match tier_opt.expect("house has tier") {
+                    HouseTier::Cottage => 50,
+                    HouseTier::Apartment => 150,
+                    HouseTier::Highrise => 300,
+                },
+                Building::Workshop if workshop_is_active(city, x, y) => 100,
+                Building::Shop if shop_is_active(city, x, y) => 200,
+                _ => 0,
+            };
+            if base_cents == 0 {
+                continue;
             }
+            // 築年数で aging を掛ける。built_at_tick が 0 = 起点未設定 = 老けない扱い。
+            let aged = if city.built_at_tick[y][x] == 0 {
+                base_cents
+            } else {
+                let age = now.saturating_sub(city.built_at_tick[y][x]);
+                let factor = aging_factor_per_mille(age, lifespan_x100(kind, tier_opt)) as i64;
+                (base_cents * factor) / 1000
+            };
+            income_cents += aged;
         }
     }
 
-    // Shops → check connectivity + customer base.
-    for y in 0..GRID_H {
-        for x in 0..GRID_W {
-            if matches!(city.tile(x, y), Tile::Built(Building::Shop))
-                && shop_is_active(city, x, y)
-            {
-                income += 2;
-            }
-        }
+    // 死スパイラル防止: 1 軒でも House があれば最低 $1/s は保証する。
+    // 旧仕様 `(houses + 1) / 2` の「1 軒で $1」を維持し、序盤の seed-RNG
+    // 偶発で income==0 のままになるのを防ぐ (simulator::tier1_never_stalls)。
+    let any_house = city.count_built(Building::House) > 0;
+    let mut income = income_cents / 100;
+    if any_house && income == 0 {
+        income = 1;
     }
 
     // Strategy の収入修正 (Tech は -20%、Eco は +5% 等)。
-    // 0 化の死スパイラルを避けるため `1` を下限に。
-    // `income_penalty_pct` という名前だが正値も扱う (Eco の +5% など)。
     let modifier = strategy_info(city.strategy).income_penalty_pct;
     if modifier != 0 && income > 0 {
-        let factor = (100 + modifier).max(10) as i64; // -20 → 80、+5 → 105。下限 10。
+        let factor = (100 + modifier).max(10) as i64;
         income = ((income * factor) / 100).max(1);
     }
     income
@@ -857,6 +879,138 @@ pub fn house_tier_for(stats: HouseNeighborhood) -> HouseTier {
     HouseTier::Cottage
 }
 
+// ── Tier 昇格 dwell time + 老朽化 (Phase D: 建物バリエーション) ─────────
+//
+// 「良い建物はたくさん時間がかかる」「一度置いても時間が経ったら価値が下がる」
+// 「整理したくなるバランス」を 1 セットの純関数で表現する。state は
+// `built_at_tick` 1 グリッドだけ追加し、Tier や老朽化はすべて派生計算。
+//
+// ## 全体像
+//
+// - **Tier 昇格 dwell time**: `house_tier_for` が「目標 Tier」を返し、
+//   実効 Tier はその目標が **建物の築年数で許される** 範囲に制限される。
+//   Apartment は築 60 sec、Highrise は築 5 min が必要。
+// - **老朽化 (aging factor)**: 築 1 min まではフル出力、5 min かけて 50% に
+//   落ちる。**ただし Tier が高い建物ほど寿命倍率が大きい** — 同じ年数でも
+//   Cottage はぼろぼろ、Highrise はまだまだ働く。これが「Highrise を育てると
+//   長く儲かる」体感の源。
+// - **再建で寿命リセット**: 撤去 → 同セルに新築すると `built_at_tick` が
+//   更新され、aging が 0 から再カウント。`auto_demolish` が老朽化を検知して
+//   自動更新するため、idle ゲームでも「世代交代の波」が街を流れる。
+
+/// House を `target` Tier まで昇格させるのに必要な築年数 (ticks)。
+///
+/// プレイヤーが「街区が育つには時間がかかる」を体感するための主要数値。
+/// 短いと「建てたら即 Highrise」で深みがゼロになり、長いと 30 min ベンチで
+/// Highrise が一棟も拝めない。ベンチで houses ≈ 50-90 が 30 min で建つので、
+/// Highrise dwell は数分程度が妥当。
+///
+/// **採用値**:
+/// - Cottage:   0 ticks (即時、デフォルト)
+/// - Apartment: 600 ticks (= 60 sec) — 「家が建ってひと段落した頃」
+/// - Highrise:  3000 ticks (= 5 min) — 「街区が成熟した頃」
+///
+/// 30 min ベンチ (1800 sec) では、最序盤に建てた家のうち条件を満たすものが
+/// 終盤近くで Highrise 化し、見栄えとしては数棟確認できる想定。
+pub fn tier_dwell_required_ticks(target: HouseTier) -> u64 {
+    match target {
+        HouseTier::Cottage => 0,
+        HouseTier::Apartment => 600,
+        HouseTier::Highrise => 3000,
+    }
+}
+
+/// 周辺条件 (`target`) と築年数を合わせた **実効 Tier**。
+///
+/// 周辺条件を満たしていても、築年数が足りなければ一段下の Tier に留まる。
+/// 「条件は揃った、あとは時間が必要」という SimCity 的な熟成感を作る。
+///
+/// **設計判断**: 「条件が連続維持されたか」の追跡はせず、**築年数のみ**で
+/// 判定する。シンプルで純関数のままなのが利点。「条件が揺れても、家自体が
+/// 古ければ昇格できる」副作用があるが、Idle ゲームの粒度では問題にならない。
+pub fn effective_house_tier(target: HouseTier, age_ticks: u64) -> HouseTier {
+    if matches!(target, HouseTier::Highrise)
+        && age_ticks >= tier_dwell_required_ticks(HouseTier::Highrise)
+    {
+        return HouseTier::Highrise;
+    }
+    if !matches!(target, HouseTier::Cottage)
+        && age_ticks >= tier_dwell_required_ticks(HouseTier::Apartment)
+    {
+        return HouseTier::Apartment;
+    }
+    HouseTier::Cottage
+}
+
+/// セル `(x, y)` の House 実効 Tier を返す convenience。
+/// 描画と `should_show_aviation_light` から共通で使う。
+pub fn effective_tier_at(city: &City, x: usize, y: usize) -> HouseTier {
+    let target = house_tier_for(gather_house_neighborhood(city, x, y));
+    let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
+    effective_house_tier(target, age)
+}
+
+/// 建物の寿命倍率 (×100 整数で表現)。1.0 = 標準カーブ、2.0 = 倍長持ち。
+///
+/// **u32::MAX = 老いない**。Park / Road は永続資産扱い (= スクラップビルドの
+/// 対象外、街の骨格として残る)。Outpost は Rock 解禁が終わったら
+/// `auto_demolish` が拾うので寿命は短くて構わない。
+///
+/// **HouseTier 別**:
+/// - Cottage: 標準 (100) — 築 5 min で 50% に劣化
+/// - Apartment: 2.5× (250) — 築 12.5 min で 50% に劣化
+/// - Highrise: 4.0× (400) — 築 20 min で 50% に劣化
+///
+/// → 高 Tier は「育てるのに時間がかかる代わりに長く儲かる」。再建サイクルの
+/// 周期が長くなり、終盤の街が落ち着いて見える効果も狙う。
+pub fn lifespan_x100(building: Building, tier: Option<HouseTier>) -> u32 {
+    match (building, tier) {
+        (Building::House, Some(HouseTier::Highrise)) => 400,
+        (Building::House, Some(HouseTier::Apartment)) => 250,
+        (Building::House, _) => 100,
+        // Workshop / Shop は Tier 概念がない。中庸の長寿で「街の骨格」感を保つ。
+        (Building::Workshop, _) => 200,
+        (Building::Shop, _) => 220,
+        // インフラと緑地は不老。
+        (Building::Park, _) => u32::MAX,
+        (Building::Road, _) => u32::MAX,
+        // Outpost は使い捨て (Rock 解禁後に auto_demolish される前提)。
+        (Building::Outpost, _) => 100,
+    }
+}
+
+/// 築年数による出力倍率を **‰ (千分率)** で返す。500 = 0.5 倍、1000 = 等倍。
+///
+/// **カーブ**:
+/// - scaled_age < 600 (= 1 min): 1000 (フル出力)
+/// - 600 <= scaled_age < 3000 (= 1〜5 min): 1000 → 500 に線形低下
+/// - scaled_age >= 3000: 500 (下限、idle 健全性のため 0 にしない)
+///
+/// `scaled_age = age_ticks * 100 / lifespan_x100`。lifespan が大きいほど
+/// scaled_age が小さくなり、老朽化が遅延する。
+///
+/// **例**: lifespan=400 (Highrise) で age=2400 (4 min) → scaled_age=600 → 1000。
+/// つまり 4 分目までフル出力。10 min (6000 ticks) で scaled_age=1500 → 約 800。
+///
+/// `lifespan_x100 == u32::MAX` は不老建物 (Park/Road)。常に 1000 を返す。
+pub fn aging_factor_per_mille(age_ticks: u64, lifespan_x100: u32) -> u32 {
+    if lifespan_x100 == u32::MAX || lifespan_x100 == 0 {
+        return 1000;
+    }
+    // age * 100 / lifespan で寿命補正後の年齢に。
+    let scaled_age = (age_ticks.saturating_mul(100)) / (lifespan_x100 as u64);
+    if scaled_age < 600 {
+        return 1000;
+    }
+    if scaled_age >= 3000 {
+        return 500;
+    }
+    // 600..3000 の線形補間。1000 → 500 に減少。
+    let t = scaled_age - 600;
+    let span: u64 = 3000 - 600;
+    (1000 - (t * 500) / span) as u32
+}
+
 
 /// 航空標識: 高層ビル屋上の赤い点滅灯を出すか。純関数。
 ///
@@ -891,8 +1045,7 @@ pub fn should_show_aviation_light(city: &City, x: usize, y: usize, tick: u64) ->
         let nx = nx as usize;
         let ny = ny as usize;
         if matches!(city.tile(nx, ny), Tile::Built(Building::House)) {
-            let neighbor_tier =
-                house_tier_for(gather_house_neighborhood(city, nx, ny));
+            let neighbor_tier = effective_tier_at(city, nx, ny);
             if matches!(neighbor_tier, HouseTier::Highrise) {
                 highrise_neighbors += 1;
             }
@@ -1034,6 +1187,8 @@ pub fn demolish_at(city: &mut City, x: usize, y: usize) -> bool {
     // 既存フラッシュをリセット (古い完成フラッシュが残ると違和感)。
     city.completion_flash_until[y][x] = 0;
     city.payout_flash_until[y][x] = 0;
+    // 築年数も初期化 — 同セルに新築が入ったら advance_construction で再設定される。
+    city.built_at_tick[y][x] = 0;
     city.push_event(format!(
         "🗑 ({},{}) {} を撤去 -${}",
         x,
@@ -1120,6 +1275,31 @@ fn wastefulness_score(city: &City, x: usize, y: usize) -> Option<i64> {
             if !has_house_within(city, x, y, 4) {
                 score += 100;
             }
+        }
+    }
+
+    // 老朽化ボーナス: 寿命が尽きた (= aging factor が下限の 500‰ 付近) 建物は
+    // 「再建すれば収入が回復する」候補。とくに Tier が低いまま放置された
+    // Cottage / inactive な Shop / Workshop は積極的に世代交代したい。
+    // 不老建物 (Park/Road) は age 関係なくスコア加算しない (= 永続資産扱い)。
+    if city.built_at_tick[y][x] != 0 {
+        let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
+        let tier_opt = if matches!(kind, Building::House) {
+            Some(effective_house_tier(
+                house_tier_for(gather_house_neighborhood(city, x, y)),
+                age,
+            ))
+        } else {
+            None
+        };
+        let lifespan = lifespan_x100(kind, tier_opt);
+        let factor = aging_factor_per_mille(age, lifespan);
+        // 寿命下限 (=500‰) に達した建物は再建価値あり。
+        // 750..1000 の中間域では加点しない (= 「まだ働ける」ので維持)。
+        if factor <= 600 {
+            score += 80;
+        } else if factor <= 750 {
+            score += 30;
         }
     }
 
@@ -1513,13 +1693,17 @@ mod tests {
     fn finished_houses_earn_residential_tax() {
         let mut city = City::new();
         city.set_tile(0, 0, Tile::Built(Building::House));
-        // 1 house → 1 cash/sec (ceil(1/2) — survival floor, no stall)
+        // 1 Cottage = 50¢/sec → $0 だが死スパイラル防止フォールバックで $1。
         assert_eq!(compute_income_per_sec(&city), 1);
         city.set_tile(1, 0, Tile::Built(Building::House));
-        // 2 houses → still 1 cash/sec (ceil(2/2))
+        // 2 Cottages = 100¢ = $1。フォールバック不要。
         assert_eq!(compute_income_per_sec(&city), 1);
         city.set_tile(2, 0, Tile::Built(Building::House));
-        // 3 houses → 2 cash/sec (ceil(3/2))
+        // 3 Cottages = 150¢ = $1 (整数切り捨て、旧 ceil(3/2)=2 から変更)。
+        // Tier-aware 収入は per-cent で正確に積算するので、半端は丸めで吸収する。
+        assert_eq!(compute_income_per_sec(&city), 1);
+        city.set_tile(3, 0, Tile::Built(Building::House));
+        // 4 Cottages = 200¢ = $2。
         assert_eq!(compute_income_per_sec(&city), 2);
     }
 
@@ -1539,16 +1723,15 @@ mod tests {
         // (5,5) に Workshop。隣接 Road のみ → inactive。
         city.set_tile(5, 5, Tile::Built(Building::Workshop));
         city.set_tile(5, 4, Tile::Built(Building::Road));
-        // House (5,6) は Road 隣接 0 なので Cottage = $1。
-        // Workshop は House 隣接無しで inactive → $0。
+        // House がないので fallback も働かず、Workshop も inactive で $0。
         assert_eq!(compute_income_per_sec(&city), 0);
 
         // 隣接 House を追加 → Workshop activate。
         city.set_tile(5, 6, Tile::Built(Building::House));
-        // House (5,6): n_road_adj=0, Cottage = $1
-        // Workshop: active → $1
-        // Total: $2
-        assert_eq!(compute_income_per_sec(&city), 2);
+        // House (5,6): Cottage = 50¢
+        // Workshop: active → 100¢
+        // Total: 150¢ = $1 (整数切り捨て)。
+        assert_eq!(compute_income_per_sec(&city), 1);
     }
 
     /// 要整地の地形 (Forest) に建てようとすると、まず整地工程が起きる。
@@ -1619,8 +1802,8 @@ mod tests {
         city.set_tile(5, 5, Tile::Built(Building::Shop));
         city.set_tile(5, 4, Tile::Built(Building::Road));
         city.set_tile(5, 6, Tile::Built(Building::House));
-        // Shop ($2) + 1 house ceil(1/2)=1 → $3
-        assert_eq!(compute_income_per_sec(&city), 3);
+        // Shop active = 200¢ + Cottage 50¢ = 250¢ = $2 (整数切り捨て、旧 $3 から変更)。
+        assert_eq!(compute_income_per_sec(&city), 2);
     }
 
     /// HouseTier は描画専用 — gather → tier_for で派生値が取れる。
@@ -2041,5 +2224,163 @@ mod tests {
         assert!(!hire_worker(&mut city));
         assert_eq!(city.workers, MAX_WORKERS);
         assert_eq!(city.cash, 1_000_000);
+    }
+
+    // ── Phase D: 築年数 / Tier 昇格 dwell time / 老朽化 ─────────
+
+    /// 周辺条件は Highrise 級でも、築年数が足りなければ Apartment 止まり。
+    #[test]
+    fn highrise_target_with_low_age_caps_at_apartment() {
+        let target = HouseTier::Highrise;
+        // 築 600 ticks (= 60 sec) → Apartment dwell は満たすが Highrise dwell は未満。
+        assert_eq!(effective_house_tier(target, 600), HouseTier::Apartment);
+        // 築 3000 ticks (= 5 min) → Highrise dwell 達成。
+        assert_eq!(effective_house_tier(target, 3000), HouseTier::Highrise);
+    }
+
+    /// Apartment dwell 未満の家は築何年でも Cottage。
+    #[test]
+    fn fresh_house_is_cottage_regardless_of_target() {
+        for target in [HouseTier::Cottage, HouseTier::Apartment, HouseTier::Highrise] {
+            assert_eq!(effective_house_tier(target, 0), HouseTier::Cottage);
+            assert_eq!(effective_house_tier(target, 599), HouseTier::Cottage);
+        }
+    }
+
+    /// 周辺条件が Cottage なら age がいくつでも Cottage のまま (誤昇格しない)。
+    #[test]
+    fn cottage_target_never_promotes() {
+        for age in [0, 600, 3000, 10_000] {
+            assert_eq!(
+                effective_house_tier(HouseTier::Cottage, age),
+                HouseTier::Cottage
+            );
+        }
+    }
+
+    /// 老朽化曲線: 1 min まで full、5 min で 50% に達し下限。
+    #[test]
+    fn aging_curve_respects_lifespan_floor() {
+        // Cottage (lifespan 100): 600 ticks まで full、3000 ticks で 500‰。
+        assert_eq!(aging_factor_per_mille(0, 100), 1000);
+        assert_eq!(aging_factor_per_mille(599, 100), 1000);
+        assert_eq!(aging_factor_per_mille(600, 100), 1000);
+        let mid = aging_factor_per_mille(1800, 100);
+        assert!(
+            mid > 500 && mid < 1000,
+            "midway should be partial decay: got {}",
+            mid
+        );
+        assert_eq!(aging_factor_per_mille(3000, 100), 500);
+        assert_eq!(aging_factor_per_mille(10_000, 100), 500);
+    }
+
+    /// 高 Tier ほど寿命が長い: 同じ築年数でも Highrise は full、Cottage は減衰。
+    #[test]
+    fn higher_tier_ages_slower() {
+        let age = 1500; // 2.5 min
+        let cottage_factor = aging_factor_per_mille(age, lifespan_x100(Building::House, Some(HouseTier::Cottage)));
+        let apt_factor = aging_factor_per_mille(age, lifespan_x100(Building::House, Some(HouseTier::Apartment)));
+        let high_factor = aging_factor_per_mille(age, lifespan_x100(Building::House, Some(HouseTier::Highrise)));
+        assert!(
+            cottage_factor < apt_factor,
+            "Cottage should decay faster than Apartment at age {}: C={}, A={}",
+            age, cottage_factor, apt_factor
+        );
+        assert!(
+            apt_factor <= high_factor,
+            "Apartment should decay no faster than Highrise: A={}, H={}",
+            apt_factor, high_factor
+        );
+        // Highrise は 2.5 min ではまだ full (寿命 4× = scaled_age 375 < 600)。
+        assert_eq!(high_factor, 1000);
+    }
+
+    /// Park / Road は不老 (寿命 ∞)。
+    #[test]
+    fn parks_and_roads_never_age() {
+        assert_eq!(
+            aging_factor_per_mille(100_000, lifespan_x100(Building::Park, None)),
+            1000
+        );
+        assert_eq!(
+            aging_factor_per_mille(100_000, lifespan_x100(Building::Road, None)),
+            1000
+        );
+    }
+
+    /// 完成タイル (advance_construction 経由) は built_at_tick が記録される。
+    #[test]
+    fn construction_completion_stamps_built_at_tick() {
+        let mut city = City::new();
+        // 地形を Plain で固定してから建設 (seed によって forest/water になるのを避ける)。
+        city.terrain[5][5] = super::super::terrain::Terrain::Plain;
+        city.cash = 10_000;
+        city.tick = 500;
+        // 道路を建てる (build_ticks=30)。
+        assert!(start_construction(&mut city, 5, 5, Building::Road));
+        // 30 tick 進めると完成し、built_at_tick が記録される。
+        tick(&mut city, 30);
+        assert!(matches!(city.tile(5, 5), Tile::Built(Building::Road)));
+        // 完成 tick = 500 + 30 = 530 (advance_construction が tick の頭で動く)。
+        assert!(city.built_at_tick[5][5] >= 500 && city.built_at_tick[5][5] <= 530);
+    }
+
+    /// 撤去すると built_at_tick がリセットされる。
+    #[test]
+    fn demolish_clears_built_at_tick() {
+        let mut city = City::new();
+        city.cash = 10_000;
+        city.set_tile(5, 5, Tile::Built(Building::House));
+        city.built_at_tick[5][5] = 1000;
+        assert!(demolish_at(&mut city, 5, 5));
+        assert_eq!(city.built_at_tick[5][5], 0);
+    }
+
+    /// Cottage 1 軒だけでは fallback で $1 になる (死スパイラル防止)。
+    #[test]
+    fn one_cottage_uses_survival_fallback() {
+        let mut city = City::new();
+        city.set_tile(0, 0, Tile::Built(Building::House));
+        // 50¢ → $0、fallback で $1。
+        assert_eq!(compute_income_per_sec(&city), 1);
+    }
+
+    /// Tier 昇格で income が上がる。同じ街区が Cottage → Apartment になると約 3 倍。
+    #[test]
+    fn apartment_earns_more_than_cottage() {
+        let mut city = City::new();
+        // 4 軒の住宅 + 道路 + Shop で、(0,0) は Apartment 化条件を満たす。
+        city.set_tile(0, 0, Tile::Built(Building::House));
+        city.set_tile(0, 1, Tile::Built(Building::Road));
+        city.set_tile(0, 2, Tile::Built(Building::Shop));
+        // (0,0) の age 0 → Cottage 扱い。
+        let cottage_income = compute_income_per_sec(&city);
+        // age を 600 (Apartment dwell 達成) にして再計算。
+        city.tick = 600;
+        city.built_at_tick[0][0] = 0; // age = 600
+        let apartment_income = compute_income_per_sec(&city);
+        assert!(
+            apartment_income > cottage_income,
+            "Apartment should out-earn Cottage: cottage={} apt={}",
+            cottage_income, apartment_income
+        );
+    }
+
+    /// 老朽化した Cottage は wastefulness_score が加算され、撤去候補になりやすい。
+    #[test]
+    fn aged_cottage_becomes_demolish_candidate() {
+        let mut city = City::new();
+        // 中央付近に孤立 House を置いて built_at を古めに設定。
+        city.set_tile(15, 8, Tile::Built(Building::House));
+        // 何の経済刺激もない孤立 Cottage。
+        city.tick = 5000;
+        city.built_at_tick[8][15] = 0; // age = 5000、寿命下限到達
+        let score = wastefulness_score(&city, 15, 8);
+        assert!(
+            score.is_some() && score.unwrap() > 0,
+            "Aged isolated cottage should be a demolish candidate: {:?}",
+            score
+        );
     }
 }

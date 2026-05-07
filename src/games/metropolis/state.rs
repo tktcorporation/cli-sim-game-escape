@@ -307,6 +307,18 @@ pub struct City {
     pub last_payout_amount: i64,
     /// 直近の収入が発生した tick。
     pub last_payout_tick: u64,
+
+    /// 各 Built タイルが完成した tick (= 築 0 の起点)。Empty / Construction の
+    /// 間は 0。`logic::aging_factor` / `logic::effective_house_tier` が
+    /// 「築年数」「Tier 昇格 dwell time」の判定に使う。
+    ///
+    /// **設計**: Tier 昇格時に上書きしない。一度建てた建物の経年は連続で進む
+    /// (Highrise に育っても基盤の建物は同じ年代)、その代わり Tier ごとの
+    /// `lifespan_multiplier` で「高 Tier ほど老けが遅い」を表現する。
+    ///
+    /// 永続化対象。旧セーブでは default 0 だが、`apply_save` 側で
+    /// 「全建物を当該 tick 時点で新築扱い」にマイグレートする。
+    pub built_at_tick: Vec<Vec<u64>>,
 }
 
 pub const MAX_EVENTS: usize = 8;
@@ -329,10 +341,12 @@ impl City {
         let mut grid = Vec::with_capacity(GRID_H);
         let mut completion_flash_until = Vec::with_capacity(GRID_H);
         let mut payout_flash_until = Vec::with_capacity(GRID_H);
+        let mut built_at_tick = Vec::with_capacity(GRID_H);
         for _ in 0..GRID_H {
             grid.push(vec![Tile::Empty; GRID_W]);
             completion_flash_until.push(vec![0u64; GRID_W]);
             payout_flash_until.push(vec![0u64; GRID_W]);
+            built_at_tick.push(vec![0u64; GRID_W]);
         }
         let terrain = super::terrain::generate(seed);
         Self {
@@ -360,6 +374,7 @@ impl City {
             payout_flash_until,
             last_payout_amount: 0,
             last_payout_tick: 0,
+            built_at_tick,
         }
     }
 

@@ -428,7 +428,7 @@ fn tile_span_1(
             //   Cottage   → 'h' (緑)
             //   Apartment → 'H' (青緑、太字)
             //   Highrise  → '▮' (シアン、太字)
-            let tier = logic::house_tier_for(logic::gather_house_neighborhood(state, x, y));
+            let tier = logic::effective_tier_at(state, x, y);
             let bright = !(tick / 10).is_multiple_of(4);
             let m = if bright { Modifier::BOLD } else { Modifier::empty() };
             let (ch, color) = match tier {
@@ -634,7 +634,7 @@ fn tile_spans_2(
             //   - HouseTier がグリフの主軸 (Cottage 屋根 / Apartment 中層 / Highrise 摩天楼)
             //   - HouseLevel が密度ニュアンス (孤立 / 小集団 / 高密集)
             // 夜間 (バナーの月相と同期) になると Apartment/Highrise の窓が灯る。
-            let tier = logic::house_tier_for(logic::gather_house_neighborhood(state, x, y));
+            let tier = logic::effective_tier_at(state, x, y);
             let level = logic::house_level(state, x, y);
             let glyph = house_glyph_2wide(tier, level);
             let (color, modifier) = house_style_2wide(tier, tick);
