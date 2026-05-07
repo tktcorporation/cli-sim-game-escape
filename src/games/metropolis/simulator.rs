@@ -405,12 +405,12 @@ mod tests {
     }
 
     /// 自動化バランスのシミュレーション。各戦略を 30 min 動かして、
-    /// `outpost_dispatch_period_ticks: Some(_)` の戦略は累計 1 基以上派遣
-    /// していることを確認する。`automation_policy` のチューニング時に
-    /// 数値感を見るためのベンチマーク (常時実行で挙動が変わったら気付ける)。
+    /// 全戦略合計で 1 基以上 Outpost が派遣されていることを確認する。
+    /// `placement_value` のチューニング時に数値感を見るためのベンチマーク。
     ///
-    /// 4 worker DemandAware 環境を前提とする。1 worker は別の自動化ガード
-    /// (`auto_strategy_actions` 内の `workers >= 2` チェック) で除外される。
+    /// **Phase A**: Outpost 派遣は AI 評価関数 (`placement_value`) に統合された。
+    /// 旧仕様の「`workers >= 2` ガード」「戦略ごとのハードコード周期」は廃止。
+    /// 4 worker DemandAware で十分な現金が出る環境を想定する。
     #[test]
     fn automation_drives_outposts_and_demolitions() {
         let seed = 0xC1A5_5EED;

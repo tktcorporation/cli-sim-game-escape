@@ -499,10 +499,14 @@ pub fn automation_policy(s: Strategy) -> AutomationPolicy {
             auto_demolish_period_ticks: Some(400),
             min_cash_reserve: 350,
         },
-        // 環境配慮: 自動撤去は無し。
-        // 「緑地を保護し、既存の市域で完結する」キャラクター。
+        // 環境配慮: 撤去周期は控えめ (老朽化更新のみ)。
+        // 「緑地を保護し、既存の市域でゆっくり更新する」キャラクター。
+        // **Phase A**: 旧仕様で `None` だったが、Forest soft penalty 化で
+        // saturation 時に AI が森を切らずに進行可能になっても、撤去経路を
+        // 全く持たないと老朽化した街区が永続して詰まる (レビュー指摘 #1)。
+        // 控えめな周期 (900 tick = 90 sec) で老朽建物の世代交代だけ行う。
         Strategy::Eco => AutomationPolicy {
-            auto_demolish_period_ticks: None,
+            auto_demolish_period_ticks: Some(900),
             min_cash_reserve: 200,
         },
     }
@@ -1763,12 +1767,23 @@ pub fn placement_value(
     let future = future_potential_value(city, x, y, kind, connected);
     let bias = strategy_bias(city.strategy, kind);
 
+    // Eco 戦略は Forest セルを避けたいが、saturation 時に AI を完全 idle にすると
+    // 「外を割れない、撤去もしない」二重死角になる (レビュー指摘 #1)。soft penalty
+    // で「他に選択肢があれば森を残し、無ければ仕方なく切る」挙動に。
+    let eco_forest_penalty = if matches!(city.strategy, Strategy::Eco)
+        && matches!(terrain, super::terrain::Terrain::Forest)
+    {
+        -100
+    } else {
+        0
+    };
+
     // ROI: cost を「秒単価」相当に換算して引く。cost $100 → -2 cents/sec
     // (= 50 秒で回収できると評価値ゼロ)。Outpost ($600) は -12、
     // House ($40) は -0.8 ≈ 0 に近い。
     let roi_penalty = kind.cost() / 50;
 
-    direct + synergy + future + bias + clearing_penalty - roi_penalty
+    direct + synergy + future + bias + clearing_penalty + eco_forest_penalty - roi_penalty
 }
 
 /// 1. 直接 income — 建物が tick 1 から稼ぐ cents/sec。
@@ -1805,6 +1820,11 @@ fn direct_income_value(
                 return 0;
             }
             // 雇用バランス: Workshop 1 つにつき 2 House 雇用 (= 1:2 ratio)。
+            //
+            // **設計上の妥協** (レビュー指摘 #6): `count_built` は完成済み建物
+            // のみカウント。同 tick で `drive_ai` が複数 placement をシリアル
+            // 実行する場合 (= worker > 1)、相互の数えあげは反映されない。
+            // 実害は小さく (= 1 tick 1 worker のみ厳密)、次 tick で正しく収束する。
             let houses = city.count_built(Building::House) as i64;
             let workshops = city.count_built(Building::Workshop) as i64;
             let supported = houses / 2;
@@ -1935,8 +1955,14 @@ fn future_potential_value(
         Building::Road => {
             // 既に edge-connected な道路に隣接していれば、新道路も即 edge-connected。
             // 隣接 Empty buildable cells の数 × 期待値の半分 (将来発生する income なので割引)。
+            //
+            // **マップ端の Road は edge-connected の seed**: 候補位置 (x, y) 自身が
+            // マップ端にある場合は、建てれば即 BFS seed として機能する。
+            // ループ不変条件なので事前に評価する (レビュー指摘 #5)。
+            let at_map_edge = x == 0 || y == 0 || x == GRID_W - 1 || y == GRID_H - 1;
             let mut potential_cells = 0i64;
-            let mut connects_to_edge = is_building_edge_connected(connected, x, y);
+            let mut connects_to_edge =
+                is_building_edge_connected(connected, x, y) || at_map_edge;
             for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
                 let nx = x as i32 + dx;
                 let ny = y as i32 + dy;
@@ -1944,11 +1970,6 @@ fn future_potential_value(
                     continue;
                 }
                 let (nx, ny) = (nx as usize, ny as usize);
-                // 「マップ端の Road」も edge-connected の起点 (BFS の seed)。
-                // 道路自体がマップ端にあるなら、edge への突破口になる。
-                if x == 0 || y == 0 || x == GRID_W - 1 || y == GRID_H - 1 {
-                    connects_to_edge = true;
-                }
                 match city.tile(nx, ny) {
                     Tile::Empty => {
                         let t = city.terrain_at(nx, ny);

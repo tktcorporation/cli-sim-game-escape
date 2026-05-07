@@ -1537,6 +1537,13 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
             .add_modifier(Modifier::BOLD),
     )]));
 
+    // **edge connectivity を 1 度だけ計算** して下の各 building branch に流す
+    // (レビュー指摘 #7: 旧コードは House/Shop/Workshop それぞれで BFS を回し、
+    // 1 回の Status タブ描画で同じ BFS を最大 4 回繰り返していた)。
+    // House/Shop/Workshop 以外の branch では未使用だが、計算コストは僅かなので
+    // 全パスで計算しておく方がシンプル。
+    let connected = logic::compute_edge_connected_roads(state);
+
     // 1 行目: タイル種別
     let kind_label: String = match state.tile(x, y) {
         Tile::Empty => "空き地".to_string(),
@@ -1561,11 +1568,10 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
         Span::styled(terrain_label.to_string(), Style::default().fg(Color::Gray)),
     ]));
 
-    // 建物個別の詳細
+    // 建物個別の詳細 (BFS 共有版を使う)
     if let Tile::Built(b) = state.tile(x, y) {
         match b {
             Building::House => {
-                let connected = logic::compute_edge_connected_roads(state);
                 let tier = logic::effective_tier_at_with(state, x, y, &connected);
                 let stats = logic::gather_house_neighborhood_with(state, x, y, &connected);
                 let target_tier = logic::house_tier_for(stats);
@@ -1594,7 +1600,6 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                 )]));
             }
             Building::Shop => {
-                let connected = logic::compute_edge_connected_roads(state);
                 let level = logic::shop_level_with(state, x, y, &connected);
                 out.push(Line::from(vec![
                     Span::styled(" 賑わい ", Style::default().fg(Color::DarkGray)),
@@ -1605,7 +1610,6 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                 ]));
             }
             Building::Workshop => {
-                let connected = logic::compute_edge_connected_roads(state);
                 let active = logic::workshop_is_active_with(state, x, y, &connected);
                 out.push(Line::from(vec![
                     Span::styled(" 稼働 ", Style::default().fg(Color::DarkGray)),

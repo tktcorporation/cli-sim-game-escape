@@ -309,7 +309,33 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
     let connected = super::logic::compute_edge_connected_roads(city);
 
     let house_cost = Building::House.cost();
-    let avoid_forest = matches!(city.strategy, Strategy::Eco);
+    // **Eco 戦略の Forest 配慮**: `placement_value` 内に soft penalty (-100)
+    // として組み込み済み。「他に良い候補があれば森を残し、無ければ仕方なく
+    // 切る」挙動になる。AI 側の前段フィルタでは扱わない。
+
+    // 1 手目候補に乗せられるか共通ガード — 後で 2 手目評価でも同じ関数を呼ぶ
+    // ことで「1 手目で除外された組み合わせを 2 手目だけ加点する」silent
+    // divergence を防ぐ (= レビュー指摘 #3, #4)。
+    fn passes_guards(city: &City, kind: Building, virtual_cash: i64, house_cost: i64) -> bool {
+        let cost = kind.cost();
+        if virtual_cash < cost {
+            return false;
+        }
+        if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 {
+            return false;
+        }
+        if matches!(kind, Building::Workshop) && city.count_built(Building::House) < 2 {
+            return false;
+        }
+        // savings protection: 高コスト建物 (Workshop/Shop/Park) を建てたら
+        // House を建てる原資を割る場合は避ける。Outpost は飽和時専用なので例外。
+        if !matches!(kind, Building::House | Building::Outpost)
+            && (virtual_cash - cost) < house_cost
+        {
+            return false;
+        }
+        true
+    }
 
     // 候補 cells を 2 群に分けて収集する (= O(N²) を避ける):
     //   `regular`  — 既存 Built に 4-近傍隣接する Empty cells (House/Road/etc 用)
@@ -324,9 +350,6 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
             }
             let t = city.terrain_at(x, y);
             if !t.buildable() {
-                continue;
-            }
-            if avoid_forest && matches!(t, super::terrain::Terrain::Forest) {
                 continue;
             }
             // Rock セルは Outpost が建てられないので Outpost candidate にもならない。
@@ -362,9 +385,6 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
                 if !t.buildable() {
                     continue;
                 }
-                if avoid_forest && matches!(t, super::terrain::Terrain::Forest) {
-                    continue;
-                }
                 if super::logic::has_built_within_distance(city, x, y, 3) {
                     regular.push((x, y));
                 }
@@ -374,24 +394,9 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
 
     let mut best: Option<(usize, usize, Building, i64)> = None;
     let consider = |x: usize, y: usize, kind: Building, best: &mut Option<(usize, usize, Building, i64)>| {
-        let cost = kind.cost();
-        if city.cash < cost {
+        if !passes_guards(city, kind, city.cash, house_cost) {
             return;
         }
-        if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 {
-            return;
-        }
-        if matches!(kind, Building::Workshop) && city.count_built(Building::House) < 2 {
-            return;
-        }
-        // savings protection: 高コスト建物 (Workshop/Shop/Outpost) を建てたら House を
-        // 建てる原資を割る場合は避ける。Outpost は飽和時専用なので例外。
-        if !matches!(kind, Building::House | Building::Outpost)
-            && (city.cash - cost) < house_cost
-        {
-            return;
-        }
-
         let v1 = placement_value(city, x, y, kind, &connected);
         if v1 == i64::MIN {
             return;
@@ -426,24 +431,18 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
     // depth=2 (Tier 5): top-1 の (x,y,kind) を採用する代わりに、上位 K (=12) を抽出して
     // それぞれに 2 手目評価を加算し、合計最大を選ぶ。
     if depth >= 2 {
-        // 1 手目の上位 K 候補を集める。
+        // 1 手目の上位 K 候補を集める (= ガードは consider と同じ passes_guards を使う)。
         let mut top: Vec<(usize, usize, Building, i64)> = Vec::new();
         for &(x, y) in &regular {
             for &kind in normal_kinds {
-                let cost = kind.cost();
-                if city.cash < cost { continue; }
-                if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 { continue; }
-                if matches!(kind, Building::Workshop) && city.count_built(Building::House) < 2 { continue; }
-                if !matches!(kind, Building::House | Building::Outpost)
-                    && (city.cash - cost) < house_cost { continue; }
+                if !passes_guards(city, kind, city.cash, house_cost) { continue; }
                 let v = placement_value(city, x, y, kind, &connected);
                 if v == i64::MIN { continue; }
                 top.push((x, y, kind, v));
             }
         }
         for &(x, y) in &outpost {
-            let cost = Building::Outpost.cost();
-            if city.cash < cost { continue; }
+            if !passes_guards(city, Building::Outpost, city.cash, house_cost) { continue; }
             let v = placement_value(city, x, y, Building::Outpost, &connected);
             if v == i64::MIN { continue; }
             top.push((x, y, Building::Outpost, v));
@@ -507,18 +506,40 @@ fn simulate_second_step_value(
     virt.grid[y][x] = Tile::Built(kind);
     let connected2 = super::logic::compute_edge_connected_roads(&virt);
 
-    let mut best2: i64 = 0; // 2 手目を打たない選択肢があるので 0 が下限。
-    // top-K 絞り込み: 1 手目候補の周辺と Outpost 候補だけ。
-    // 単純化のため cells をそのまま使うが、1 手目で建てた (x, y) は除外。
-    // また、cash も 1 手目の cost を引いてシミュレート。
     let virtual_cash = city.cash - kind.cost();
+    let house_cost = Building::House.cost();
+    let mut best2: i64 = 0; // 2 手目を打たない選択肢があるので 0 が下限。
+
+    // **重要**: 2 手目候補にも 1 手目と同じ guard を適用する (レビュー指摘 #4)。
+    // virt は 1 手目で `kind` が完成済みの世界なので、`virt.count_built(House)` は
+    // 1 手目で House を置いたケースを正しく反映する → Shop の最低 House 3 制約等も
+    // 仮想世界の最新状態でチェックされる。`passes_guards_virt` は 1 手目の関数と
+    // 同じロジックを virt 上で実行するための inline 版。
+    let passes_virt = |k2: Building| -> bool {
+        let cost = k2.cost();
+        if virtual_cash < cost {
+            return false;
+        }
+        if matches!(k2, Building::Shop) && virt.count_built(Building::House) < 3 {
+            return false;
+        }
+        if matches!(k2, Building::Workshop) && virt.count_built(Building::House) < 2 {
+            return false;
+        }
+        if !matches!(k2, Building::House | Building::Outpost)
+            && (virtual_cash - cost) < house_cost
+        {
+            return false;
+        }
+        true
+    };
+
     for &(cx, cy) in cells {
         if (cx, cy) == (x, y) {
             continue;
         }
         for &k2 in kinds {
-            let c2 = k2.cost();
-            if virtual_cash < c2 {
+            if !passes_virt(k2) {
                 continue;
             }
             let v = super::logic::placement_value(&virt, cx, cy, k2, &connected2);
