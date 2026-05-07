@@ -450,18 +450,14 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
         top.sort_by(|a, b| b.3.cmp(&a.3));
         top.truncate(12);
 
-        // 各 top 候補に 2 手目 value を加算
+        // 各 top 候補に 2 手目 value を加算。
+        // **重要** (Codex P1 指摘): 2 手目候補は仮想着工した世界 (`virt`) で
+        // 動的に再計算する必要がある。1 手目時点の `regular`/`outpost` に縛ると、
+        // 「道路を置いた結果新たに Built 隣接になったセル」を取りこぼし、
+        // Tier 5 の主軸シナリオ (road-then-build) が読めなくなる。
         let mut best2: Option<(usize, usize, Building, i64)> = None;
         for &(x, y, kind, v1) in &top {
-            // 2 手目候補集合: 1 手目で建てた近傍 (距離 5) のみ。
-            let mut nearby: Vec<(usize, usize)> = Vec::new();
-            for &(rx, ry) in regular.iter().chain(outpost.iter()) {
-                let manh = ((rx as i32 - x as i32).abs() + (ry as i32 - y as i32).abs()) as u32;
-                if manh <= 5 && (rx, ry) != (x, y) {
-                    nearby.push((rx, ry));
-                }
-            }
-            let v2 = simulate_second_step_value(city, x, y, kind, &nearby, normal_kinds);
+            let v2 = simulate_second_step_value(city, x, y, kind, normal_kinds);
             let total = v1 + v2;
             let better = match best2 {
                 None => true,
@@ -497,7 +493,6 @@ fn simulate_second_step_value(
     x: usize,
     y: usize,
     kind: Building,
-    cells: &[(usize, usize)],
     kinds: &[Building],
 ) -> i64 {
     // 仮想着工した city。建物を Built 状態として置く (Construction tick を読まない)。
@@ -510,11 +505,43 @@ fn simulate_second_step_value(
     let house_cost = Building::House.cost();
     let mut best2: i64 = 0; // 2 手目を打たない選択肢があるので 0 が下限。
 
-    // **重要**: 2 手目候補にも 1 手目と同じ guard を適用する (レビュー指摘 #4)。
-    // virt は 1 手目で `kind` が完成済みの世界なので、`virt.count_built(House)` は
-    // 1 手目で House を置いたケースを正しく反映する → Shop の最低 House 3 制約等も
-    // 仮想世界の最新状態でチェックされる。`passes_guards_virt` は 1 手目の関数と
-    // 同じロジックを virt 上で実行するための inline 版。
+    // **2 手目候補は仮想着工後の virt で再構築** (Codex P1 指摘修正):
+    // 1 手目時点の `regular`/`outpost` に縛ると、1 手目が新たに有効化した
+    // セル (例: フロンティアに道路 → その隣の Empty が Built 隣接になる) を
+    // 取りこぼす。Manhattan 5 以内 + virt 上で has_built_neighbor を満たす
+    // セルを動的に集める。これで「道路を引いて家を載せる」シナリオが拾える。
+    let mut nearby: Vec<(usize, usize)> = Vec::new();
+    for dy in -5i32..=5 {
+        for dx in -5i32..=5 {
+            if dx.abs() + dy.abs() > 5 || (dx == 0 && dy == 0) {
+                continue;
+            }
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                continue;
+            }
+            let (nx, ny) = (nx as usize, ny as usize);
+            if !matches!(virt.tile(nx, ny), Tile::Empty) {
+                continue;
+            }
+            let t = virt.terrain_at(nx, ny);
+            if !t.buildable() {
+                continue;
+            }
+            // Outpost 解禁前の Rock などは除外。
+            if t.needs_outpost() && !super::logic::has_outpost_neighbor(&virt, nx, ny) {
+                continue;
+            }
+            // virt 上で Built 隣接 (= 1 手目で建てた建物含む) を確認。
+            if has_built_neighbor(&virt, nx, ny) {
+                nearby.push((nx, ny));
+            }
+        }
+    }
+
+    // **重要**: 2 手目候補にも 1 手目と同じ guard を適用 (silent divergence 防止)。
+    // virt は 1 手目完成済みの世界なので `virt.count_built(House)` は反映後の値。
     let passes_virt = |k2: Building| -> bool {
         let cost = k2.cost();
         if virtual_cash < cost {
@@ -534,10 +561,7 @@ fn simulate_second_step_value(
         true
     };
 
-    for &(cx, cy) in cells {
-        if (cx, cy) == (x, y) {
-            continue;
-        }
+    for &(cx, cy) in &nearby {
         for &k2 in kinds {
             if !passes_virt(k2) {
                 continue;
