@@ -43,7 +43,7 @@ use super::terrain::Terrain;
 ///       では (32,0) に化ける)。v3 以前のセーブは安全に再マップできない
 ///       ため `MIN_COMPATIBLE_VERSION = 4` でロード拒否し、新規開始を促す。
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 4;
+const SAVE_VERSION: u32 = 5;
 
 /// 互換性を維持できる最小バージョン。破壊的変更で +1。
 /// v1-v3 はフィールド追加だけだったが、v4 でマップ寸法が変わったので
@@ -51,6 +51,7 @@ const SAVE_VERSION: u32 = 4;
 /// の指摘で 4 に引き上げ。v ≤ 3 を読み込もうとするとサイレントに座標が
 /// 化けるバグがあったため、明示的に拒否する。
 #[cfg(any(target_arch = "wasm32", test))]
+#[allow(dead_code)] // 非 WASM テストビルドでは load_game が呼ばれないため未使用扱い
 const MIN_COMPATIBLE_VERSION: u32 = 4;
 
 /// localStorage のキー。
@@ -96,6 +97,7 @@ mod codes {
     pub const AI_TIER_GREEDY: u8 = 2;
     pub const AI_TIER_ROAD_PLANNER: u8 = 3;
     pub const AI_TIER_DEMAND_AWARE: u8 = 4;
+    pub const AI_TIER_DEEP_PLANNER: u8 = 5;
 
     pub const PANEL_STATUS: u8 = 0;
     pub const PANEL_MANAGER: u8 = 1;
@@ -250,6 +252,7 @@ fn ai_tier_to_u8(t: AiTier) -> u8 {
         AiTier::Greedy => AI_TIER_GREEDY,
         AiTier::RoadPlanner => AI_TIER_ROAD_PLANNER,
         AiTier::DemandAware => AI_TIER_DEMAND_AWARE,
+        AiTier::DeepPlanner => AI_TIER_DEEP_PLANNER,
     }
 }
 
@@ -259,6 +262,7 @@ fn ai_tier_from_u8(v: u8) -> AiTier {
         AI_TIER_GREEDY => AiTier::Greedy,
         AI_TIER_ROAD_PLANNER => AiTier::RoadPlanner,
         AI_TIER_DEMAND_AWARE => AiTier::DemandAware,
+        AI_TIER_DEEP_PLANNER => AiTier::DeepPlanner,
         _ => AiTier::Random,
     }
 }
@@ -408,6 +412,8 @@ fn extract_save(state: &City) -> SaveData {
         last_payout_amount: _,
         // 直近の収入が発生した tick。
         last_payout_tick: _,
+        // 選択中セル (UI 状態、再ロード後はリセット)。
+        selected_cell: _,
     } = state;
 
     let mut tiles = Vec::with_capacity(GRID_W * GRID_H);

@@ -28,6 +28,8 @@ use ratzilla::ratatui::Frame;
 use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
+use crate::widgets::ClickableGrid;
+
 use state::{City, PanelTab, Strategy};
 
 // ── Action IDs scoped to MetropolisGame ─────────────────────────
@@ -66,6 +68,13 @@ pub const ACT_SCROLL_DOWN: u16 = 23;
 /// 1 回のスクロールで動かすセル数。視野の 1/8 (32/8 = 4) で「ちょっとずつ
 /// 動かす」感じ。短すぎると到達まで連打、長すぎると見落とすバランス。
 const SCROLL_STEP: i32 = 4;
+
+/// マップセルのクリック識別子の起点。`base + row * VIEW_W + col` で
+/// ビューポート相対座標を u16 に詰め込む。`ClickableGrid::decode` で逆引き。
+/// 1000 番台はかつて DEMOLISH_CELL_BASE で使っていたが Phase A の自動撤去で
+/// 廃止済みなので再利用可能。VIEW_W * VIEW_H = 32*16 = 512 < 1000 なので
+/// 既存 ID 1-23 とも衝突しない。
+pub const ACT_GRID_CELL_BASE: u16 = 1000;
 
 pub struct MetropolisGame {
     pub state: City,
@@ -118,6 +127,32 @@ impl Game for MetropolisGame {
     }
 
     fn handle_input(&mut self, event: &InputEvent) -> bool {
+        // マップセルのクリック (action_id >= ACT_GRID_CELL_BASE) は
+        // `selected_cell` を更新する。Status タブでその施設の詳細を表示する。
+        if let InputEvent::Click(_, id) = event {
+            if *id >= ACT_GRID_CELL_BASE {
+                if let Some((col, row)) = ClickableGrid::decode(
+                    ACT_GRID_CELL_BASE,
+                    state::VIEW_W,
+                    *id,
+                ) {
+                    let abs_x = self.state.cam_x + col;
+                    let abs_y = self.state.cam_y + row;
+                    if abs_x < state::GRID_W && abs_y < state::GRID_H {
+                        // 既に選択中なら deselect (= 同じセルを再タップで閉じる)。
+                        if self.state.selected_cell == Some((abs_x, abs_y)) {
+                            self.state.selected_cell = None;
+                        } else {
+                            self.state.selected_cell = Some((abs_x, abs_y));
+                            // 選択時は Status タブにフォーカス (= 詳細を見せる)。
+                            self.state.panel_tab = PanelTab::Status;
+                        }
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
         let action_id = match event {
             InputEvent::Click(_, id) => *id,
             InputEvent::Key(c) => match c {

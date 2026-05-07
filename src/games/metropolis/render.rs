@@ -35,7 +35,7 @@ use ratzilla::ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::ClickState;
-use crate::widgets::{Clickable, TabBar};
+use crate::widgets::{Clickable, ClickableGrid, TabBar};
 
 use super::logic;
 use super::state::{
@@ -193,6 +193,7 @@ fn ai_tier_icon(t: AiTier) -> &'static str {
         AiTier::Greedy => "[II]",
         AiTier::RoadPlanner => "[III]",
         AiTier::DemandAware => "[IV]",
+        AiTier::DeepPlanner => "[V]",
     }
 }
 
@@ -306,7 +307,7 @@ fn render_grid(
     f: &mut Frame,
     area: Rect,
     cell_width: u16,
-    _click_state: &Rc<RefCell<ClickState>>,
+    click_state: &Rc<RefCell<ClickState>>,
 ) {
     // ビューポート位置を表示。マップが 64×32 の世界を 32×16 で覗く方式。
     // [hjkl] でスクロール可能 (Vim 流) ことをタイトルに併記。
@@ -348,6 +349,22 @@ fn render_grid(
         lines.push(Line::from(spans));
     }
     f.render_widget(Paragraph::new(lines), inner);
+
+    // 各セルにクリックターゲットを登録 (施設タップ詳細用)。
+    // ClickableGrid はビューポート相対の (col, row) を `base + row*VIEW_W + col` で
+    // u16 に詰める。`handle_input` 側で同じ式の逆を使い (cam_x, cam_y) を足して絶対座標に。
+    {
+        let mut cs = click_state.borrow_mut();
+        let grid = ClickableGrid::new(
+            VIEW_W,
+            VIEW_H,
+            super::ACT_GRID_CELL_BASE,
+            cell_width,
+        );
+        // padding_left = 0 (block の inner area がそのまま grid 描画範囲)。
+        // block.inner() で borders 分は既に除外されている。
+        grid.register_targets(area, &block, &mut cs, 0);
+    }
 }
 
 fn grid_border_color(state: &City) -> Color {
@@ -1487,11 +1504,161 @@ fn render_status(state: &City, f: &mut Frame, area: Rect) {
     lines.push(Line::from(""));
     lines.extend(strategy_status_lines(state));
 
+    // 選択中セルの詳細パネル (タップ / クリックで表示)。
+    if let Some((sx, sy)) = state.selected_cell {
+        lines.push(Line::from(""));
+        lines.extend(selected_cell_lines(state, sx, sy));
+    }
+
     // 区切り + ワーカー稼働状況 (誰が何を建てているか)。
     lines.push(Line::from(""));
     lines.extend(worker_status_lines(state));
 
     f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// 選択中セルの詳細を Status パネルに 4-6 行で表示する。
+///
+/// **見せる情報** (Cookie Factory 等の Pure Logic Pattern を踏襲):
+///   - セル種別 (Empty / Construction / Built / Clearing) と建物名
+///   - 地形 (Plain / Forest / Wasteland / Water / Rock)
+///   - 建物個別の状態 (House なら Tier、Shop / Workshop なら活性、Outpost なら Rock 残数)
+///   - 立ってる場合は推定 income (cents/sec → $/sec)
+///   - 道路接続状況 (edge-connected か)
+///
+/// プレイヤーが「なぜここの House が Highrise にならないのか?」を読み解く
+/// 学習の入り口になる。
+fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
+    let mut out: Vec<Line> = Vec::new();
+    out.push(Line::from(vec![Span::styled(
+        format!("📍 SELECTED ({},{})", x, y),
+        Style::default()
+            .fg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD),
+    )]));
+
+    // 1 行目: タイル種別
+    let kind_label: String = match state.tile(x, y) {
+        Tile::Empty => "空き地".to_string(),
+        Tile::Clearing { ticks_remaining } => {
+            format!("整地中 (残 {}s)", ticks_remaining.div_ceil(10))
+        }
+        Tile::Construction {
+            target,
+            ticks_remaining,
+        } => format!(
+            "{} 建設中 (残 {}s)",
+            building_name_for(*target),
+            ticks_remaining.div_ceil(10)
+        ),
+        Tile::Built(b) => building_name_for(*b).to_string(),
+    };
+    let terrain_label = terrain_name_for(state.terrain[y][x]);
+    out.push(Line::from(vec![
+        Span::styled(" 種別 ", Style::default().fg(Color::DarkGray)),
+        Span::styled(kind_label, Style::default().fg(Color::White)),
+        Span::styled(" / 地形 ", Style::default().fg(Color::DarkGray)),
+        Span::styled(terrain_label.to_string(), Style::default().fg(Color::Gray)),
+    ]));
+
+    // 建物個別の詳細
+    if let Tile::Built(b) = state.tile(x, y) {
+        match b {
+            Building::House => {
+                let connected = logic::compute_edge_connected_roads(state);
+                let tier = logic::effective_tier_at_with(state, x, y, &connected);
+                let stats = logic::gather_house_neighborhood_with(state, x, y, &connected);
+                let target_tier = logic::house_tier_for(stats);
+                out.push(Line::from(vec![
+                    Span::styled(" 段階 ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{:?}", tier),
+                        Style::default().fg(Color::LightGreen),
+                    ),
+                    Span::styled(
+                        format!(" → 目標 {:?}", target_tier),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]));
+                out.push(Line::from(vec![Span::styled(
+                    format!(
+                        " 道路{}/工房{}/店舗{}/家{}/公園{} {}",
+                        stats.n_road_adj,
+                        stats.n_workshop_within_5,
+                        stats.n_shop_within_5,
+                        stats.n_house_within_3,
+                        stats.n_park_within_4,
+                        if stats.edge_connected { "🌐" } else { "🚷" },
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )]));
+            }
+            Building::Shop => {
+                let connected = logic::compute_edge_connected_roads(state);
+                let level = logic::shop_level_with(state, x, y, &connected);
+                out.push(Line::from(vec![
+                    Span::styled(" 賑わい ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{:?}", level),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ]));
+            }
+            Building::Workshop => {
+                let connected = logic::compute_edge_connected_roads(state);
+                let active = logic::workshop_is_active_with(state, x, y, &connected);
+                out.push(Line::from(vec![
+                    Span::styled(" 稼働 ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        if active { "稼働中" } else { "停止中" },
+                        Style::default().fg(if active {
+                            Color::LightRed
+                        } else {
+                            Color::DarkGray
+                        }),
+                    ),
+                ]));
+            }
+            Building::Outpost => {
+                let n_rock = (0..4)
+                    .filter(|i| {
+                        let (dx, dy) = [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)][*i];
+                        let nx = x as i32 + dx;
+                        let ny = y as i32 + dy;
+                        if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                            return false;
+                        }
+                        matches!(
+                            state.terrain[ny as usize][nx as usize],
+                            super::terrain::Terrain::Rock
+                        )
+                    })
+                    .count();
+                out.push(Line::from(vec![
+                    Span::styled(" 隣接岩盤 ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{} 残", n_rock),
+                        Style::default().fg(Color::LightYellow),
+                    ),
+                ]));
+            }
+            _ => {}
+        }
+    }
+
+    // 築年数 (Built タイルのみ)
+    if matches!(state.tile(x, y), Tile::Built(_)) && state.built_at_tick[y][x] > 0 {
+        let age = state.tick.saturating_sub(state.built_at_tick[y][x]);
+        out.push(Line::from(vec![
+            Span::styled(" 築年 ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("{}s", age / 10),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+    }
+
+    out
 }
 
 /// ワーカー一覧を 1 行/人で出力する。
@@ -1874,20 +2041,18 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
         f.render_widget(p, rows[6]);
     }
 
-    // 自動運用ステータス — 戦略に応じた撤去 / 開拓の周期を表示。
-    // 旧 `[O]` `[D]` `[X]` ボタンは廃止され、すべて tick 駆動で自動発火する。
+    // 自動運用ステータス — 戦略に応じた撤去周期を表示。
+    // **Outpost 派遣は AI 評価関数 (placement_value) に統合済み**:
+    // 賢い AI ほど saturation 時に自然に外の岩場を選ぶため、ここでの
+    // ハードコード周期は不要。撤去だけが garbage collection として残る。
     let policy = logic::automation_policy(state.strategy);
-    let outpost_txt = policy
-        .outpost_dispatch_period_ticks
-        .map(|p| format!("拡張{}s", p / 10))
-        .unwrap_or_else(|| "拡張なし".to_string());
     let demolish_txt = policy
         .auto_demolish_period_ticks
         .map(|p| format!("撤去{}s", p / 10))
         .unwrap_or_else(|| "撤去なし".to_string());
     let auto_label = format!(
-        " 🤖 自動運用: {} / {} / 予備${}",
-        outpost_txt, demolish_txt, policy.min_cash_reserve
+        " 🤖 自動運用: {} / 予備${}",
+        demolish_txt, policy.min_cash_reserve
     );
     f.render_widget(
         Paragraph::new(Span::styled(

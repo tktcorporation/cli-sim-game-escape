@@ -18,12 +18,17 @@ pub enum AiAction {
 }
 
 /// Top-level dispatcher: routes to the active tier's brain.
+///
+/// **アーキテクチャ**: Tier 4 / 5 は `placement_value` ベースの評価 AI で、
+/// 同じ評価関数を thinking depth (1 / 2 手先) で切替えるだけの差。
+/// Tier 1-3 は historical なルールベースで残す (低 Tier の "dumb" さの担保)。
 pub fn decide(city: &mut City) -> AiAction {
     match city.ai_tier {
         AiTier::Random => tier1_random(city),
         AiTier::Greedy => tier2_greedy(city),
         AiTier::RoadPlanner => tier3_road_planner(city),
-        AiTier::DemandAware => tier4_demand_aware(city),
+        AiTier::DemandAware => tier4_value_search(city, 1),
+        AiTier::DeepPlanner => tier4_value_search(city, 2),
     }
 }
 
@@ -282,256 +287,288 @@ fn tier3_road_planner(city: &mut City) -> AiAction {
     AiAction::Build { x, y, kind }
 }
 
-/// Tier 4 — Demand Aware.
+/// Tier 4 / 5 共用の評価ベース placement search。
 ///
-/// Reads `city.strategy` to weight the build-kind roll, then places
-/// shops only on cells that *will actually activate* (road neighbour
-/// AND a house within Manhattan-3).  This is the difference that lets
-/// Tier 4 reliably outproduce Tier 3 even with the same building counts.
+/// **アーキテクチャ**: `logic::placement_value` が「この候補で income/sec が
+/// どれだけ増えるか」を cents 単位で返す純関数。AI はその値を最大化する
+/// 候補を探すだけ。candidate set は **全建物種別** (Road / House / Workshop /
+/// Shop / Park / **Outpost**) × **全 Empty cells** から評価する。
 ///
-/// 重み・速度ボーナス・収入ペナルティはすべて `logic::strategy_info` に
-/// 集約されている (Single Source of Truth)。ここではそのプロファイルを
-/// 読んで weighted roll するだけ。
+/// `depth = 1` (Tier 4): 各候補について placement_value を見て top-k から best 選択。
+/// `depth = 2` (Tier 5): 各候補について 1 手目 value + 「2 手目に建てうる最良の
+///   候補の value (= 1 手目を仮想的に着工した状態で再計算)」を加算した合計を評価。
+///   これにより「道路を引いて、その隣に家を建てるシナリオ」が拾える。
 ///
-/// **Workshop は Income 戦略の独自要素** — Tier 4 の Income プレイヤーが
-/// Shop 一択ではなく「Workshop で Apartment 化を促し、その上に Shop を載せる」
-/// 経済チェーン構築を試みる、というキャラ付け。Growth/Tech は Workshop を
-/// 取らずシンプルさを維持 (simulator::tier4_strategies_specialize の不変条件)。
-fn tier4_demand_aware(city: &mut City) -> AiAction {
-    let info = super::logic::strategy_info(city.strategy);
-    // 重みの合計は 100 を厳守 (テストで保証)。
-    debug_assert_eq!(
-        info.house_pct + info.road_pct + info.workshop_pct + info.shop_pct + info.park_pct,
-        100,
-        "strategy weights must sum to 100"
-    );
-
-    let roll = (city.next_rand() % 100) as u32;
-    let h = info.house_pct;
-    let hr = h + info.road_pct;
-    let hrw = hr + info.workshop_pct;
-    let hrws = hrw + info.shop_pct;
-    let kind = if roll < h {
-        Building::House
-    } else if roll < hr {
-        Building::Road
-    } else if roll < hrw {
-        Building::Workshop
-    } else if roll < hrws {
-        Building::Shop
-    } else {
-        Building::Park
-    };
-
-    if city.cash < kind.cost() {
-        return AiAction::Idle;
-    }
-    if !matches!(kind, Building::House) && city.cash < Building::House.cost() {
-        return AiAction::Idle;
-    }
-    // Workshop / Shop は労働力 / 顧客となる House が最低限必要。
-    if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 {
-        return AiAction::Idle;
-    }
-    if matches!(kind, Building::Workshop) && city.count_built(Building::House) < 2 {
-        return AiAction::Idle;
-    }
-
-    // Smartest placement: a shop only goes where it will earn from
-    // turn 1 (road-adjacent + customer base in range).  Houses prefer
-    // road-adjacent; roads prefer next-to-buildings.
-    // Workshop は隣接 House と Road が両方必要なので、その条件を
-    // 直接フィルタする (= 即時稼働する場所だけに置く)。
-    //
-    // Tier 4 の「smart さ」: Shop/Workshop は **即時稼働** が条件なので
-    // 要整地セルを避ける (`would_*_activate_here` 内で needs_clearing チェック)。
-    // House/Road は要整地セルでも置く — 置かないと候補枯渇で idle が増えるし、
-    // 整地後に有用な土地が得られるので長期的にはプラス。
-    //
-    // **Eco 戦略のみ Forest を絶対回避** する (Wasteland は OK)。
-    // 「森を残す」のが Eco の核心。AI 側で実装することで、戦略を変えると
-    // 即座に挙動が変わる演出になる。
-    let avoid_forest = matches!(city.strategy, super::state::Strategy::Eco);
-    let forest_ok = |c: &City, x: usize, y: usize| -> bool {
-        if !avoid_forest {
-            return true;
-        }
-        !matches!(
-            c.terrain_at(x, y),
-            super::terrain::Terrain::Forest
-        )
-    };
-    // Phase 2: edge-connectivity grid を 1 度だけ計算。
+/// **Outpost を candidate に含めることで saturation 解消が自然発生**:
+///   中央満杯 → 既存 Empty cells の placement_value はほぼ 0 →
+///   Outpost (隣接 Rock 数 × 期待 income) が相対的に勝つ → AI は外を割る。
+///
+/// 戻り値: AiAction::Build か AiAction::Idle。
+fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
+    use super::logic::placement_value;
     let connected = super::logic::compute_edge_connected_roads(city);
-    let candidates: Vec<(usize, usize)> = match kind {
-        Building::Shop => (0..GRID_H)
-            .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
-            .filter(|(x, y)| {
-                would_shop_activate_here(city, *x, *y, &connected) && forest_ok(city, *x, *y)
-            })
-            .collect(),
-        Building::Workshop => (0..GRID_H)
-            .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
-            .filter(|(x, y)| {
-                would_workshop_activate_here(city, *x, *y, &connected) && forest_ok(city, *x, *y)
-            })
-            .collect(),
-        // Phase 2: House は edge-connected Road の隣を優先 (= 流通インフラが
-        // 揃った街区を作る賢さ)。候補が枯渇したら通常の Road 隣接にフォールバック。
-        Building::House => {
-            let edge_candidates: Vec<(usize, usize)> = (0..GRID_H)
-                .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
-                .filter(|(x, y)| {
-                    is_empty_next_to_road(city, *x, *y)
-                        && super::logic::is_building_edge_connected(&connected, *x, *y)
-                        && forest_ok(city, *x, *y)
-                })
-                .collect();
-            if !edge_candidates.is_empty() {
-                edge_candidates
-            } else {
-                // 中継 House を作って後で道路網を伸ばす予定地。フォールバック。
-                (0..GRID_H)
-                    .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
-                    .filter(|(x, y)| {
-                        is_empty_next_to_road(city, *x, *y) && forest_ok(city, *x, *y)
-                    })
-                    .collect()
+
+    let house_cost = Building::House.cost();
+    let avoid_forest = matches!(city.strategy, Strategy::Eco);
+
+    // 候補 cells を 2 群に分けて収集する (= O(N²) を避ける):
+    //   `regular`  — 既存 Built に 4-近傍隣接する Empty cells (House/Road/etc 用)
+    //   `outpost`  — Rock を 4-近傍に持ち、街から距離 4 以内の Plain Empty cells
+    // 「Built 隣接」を distance 1 に絞ることで候補 cell 数が最大でも O(built * 4) ≈ 数百に。
+    let mut regular: Vec<(usize, usize)> = Vec::new();
+    let mut outpost: Vec<(usize, usize)> = Vec::new();
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            if !matches!(city.tile(x, y), Tile::Empty) {
+                continue;
+            }
+            let t = city.terrain_at(x, y);
+            if !t.buildable() {
+                continue;
+            }
+            if avoid_forest && matches!(t, super::terrain::Terrain::Forest) {
+                continue;
+            }
+            // Rock セルは Outpost が建てられないので Outpost candidate にもならない。
+            // (Outpost は Plain にだけ建つ — Rock 上には建てない)
+            let needs_outpost_unmet =
+                t.needs_outpost() && !super::logic::has_outpost_neighbor(city, x, y);
+            if needs_outpost_unmet {
+                continue;
+            }
+            // Outpost 候補: Rock 隣接 + 街の近く + 整地不要 (Plain)
+            let has_rock_n =
+                super::logic::has_terrain_neighbor(city, x, y, super::terrain::Terrain::Rock);
+            if has_rock_n
+                && !t.needs_clearing()
+                && super::logic::has_built_within_distance(city, x, y, 4)
+            {
+                outpost.push((x, y));
+            }
+            // 通常候補: Built 4-近傍隣接 (= 街の周辺 1 マス)
+            if has_built_neighbor(city, x, y) {
+                regular.push((x, y));
             }
         }
-        Building::Road => (0..GRID_H)
-            .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
-            .filter(|(x, y)| {
-                is_empty_next_to_building(city, *x, *y) && forest_ok(city, *x, *y)
-            })
-            .collect(),
-        // Park: 道路不要 / Manhattan 4 以内に House がある場所が「効く」配置。
-        // 整地不要セルに限る (Workshop と同じく即時効果を狙う smart AI らしさ)。
-        Building::Park => (0..GRID_H)
-            .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
-            .filter(|(x, y)| would_park_be_useful_here(city, *x, *y) && forest_ok(city, *x, *y))
-            .collect(),
-        // Outpost は AI 戦略には乗らない (player-only)。網羅性のため空候補。
-        Building::Outpost => Vec::new(),
+    }
+    // 序盤フォールバック: 候補が枯渇していたら Built 距離 3 まで広げる。
+    if regular.is_empty() && outpost.is_empty() {
+        for y in 0..GRID_H {
+            for x in 0..GRID_W {
+                if !matches!(city.tile(x, y), Tile::Empty) {
+                    continue;
+                }
+                let t = city.terrain_at(x, y);
+                if !t.buildable() {
+                    continue;
+                }
+                if avoid_forest && matches!(t, super::terrain::Terrain::Forest) {
+                    continue;
+                }
+                if super::logic::has_built_within_distance(city, x, y, 3) {
+                    regular.push((x, y));
+                }
+            }
+        }
+    }
+
+    let mut best: Option<(usize, usize, Building, i64)> = None;
+    let consider = |x: usize, y: usize, kind: Building, best: &mut Option<(usize, usize, Building, i64)>| {
+        let cost = kind.cost();
+        if city.cash < cost {
+            return;
+        }
+        if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 {
+            return;
+        }
+        if matches!(kind, Building::Workshop) && city.count_built(Building::House) < 2 {
+            return;
+        }
+        // savings protection: 高コスト建物 (Workshop/Shop/Outpost) を建てたら House を
+        // 建てる原資を割る場合は避ける。Outpost は飽和時専用なので例外。
+        if !matches!(kind, Building::House | Building::Outpost)
+            && (city.cash - cost) < house_cost
+        {
+            return;
+        }
+
+        let v1 = placement_value(city, x, y, kind, &connected);
+        if v1 == i64::MIN {
+            return;
+        }
+        let better = match *best {
+            None => true,
+            Some((_, _, _, prev)) => v1 > prev,
+        };
+        if better {
+            *best = Some((x, y, kind, v1));
+        }
     };
 
-    if candidates.is_empty() {
-        return tier3_road_planner(city);
+    // 通常 cells: 全 kinds (Outpost 除く) を評価
+    let normal_kinds: &[Building] = &[
+        Building::House,
+        Building::Road,
+        Building::Workshop,
+        Building::Shop,
+        Building::Park,
+    ];
+    for &(x, y) in &regular {
+        for &kind in normal_kinds {
+            consider(x, y, kind, &mut best);
+        }
     }
-    let pick = (city.next_rand() as usize) % candidates.len();
-    let (x, y) = candidates[pick];
-    AiAction::Build { x, y, kind }
+    // Outpost cells: Outpost のみ評価 (= ほとんどのプレイで saturation 時のみ value 高)
+    for &(x, y) in &outpost {
+        consider(x, y, Building::Outpost, &mut best);
+    }
+
+    // depth=2 (Tier 5): top-1 の (x,y,kind) を採用する代わりに、上位 K (=12) を抽出して
+    // それぞれに 2 手目評価を加算し、合計最大を選ぶ。
+    if depth >= 2 {
+        // 1 手目の上位 K 候補を集める。
+        let mut top: Vec<(usize, usize, Building, i64)> = Vec::new();
+        for &(x, y) in &regular {
+            for &kind in normal_kinds {
+                let cost = kind.cost();
+                if city.cash < cost { continue; }
+                if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 { continue; }
+                if matches!(kind, Building::Workshop) && city.count_built(Building::House) < 2 { continue; }
+                if !matches!(kind, Building::House | Building::Outpost)
+                    && (city.cash - cost) < house_cost { continue; }
+                let v = placement_value(city, x, y, kind, &connected);
+                if v == i64::MIN { continue; }
+                top.push((x, y, kind, v));
+            }
+        }
+        for &(x, y) in &outpost {
+            let cost = Building::Outpost.cost();
+            if city.cash < cost { continue; }
+            let v = placement_value(city, x, y, Building::Outpost, &connected);
+            if v == i64::MIN { continue; }
+            top.push((x, y, Building::Outpost, v));
+        }
+        top.sort_by(|a, b| b.3.cmp(&a.3));
+        top.truncate(12);
+
+        // 各 top 候補に 2 手目 value を加算
+        let mut best2: Option<(usize, usize, Building, i64)> = None;
+        for &(x, y, kind, v1) in &top {
+            // 2 手目候補集合: 1 手目で建てた近傍 (距離 5) のみ。
+            let mut nearby: Vec<(usize, usize)> = Vec::new();
+            for &(rx, ry) in regular.iter().chain(outpost.iter()) {
+                let manh = ((rx as i32 - x as i32).abs() + (ry as i32 - y as i32).abs()) as u32;
+                if manh <= 5 && (rx, ry) != (x, y) {
+                    nearby.push((rx, ry));
+                }
+            }
+            let v2 = simulate_second_step_value(city, x, y, kind, &nearby, normal_kinds);
+            let total = v1 + v2;
+            let better = match best2 {
+                None => true,
+                Some((_, _, _, prev)) => total > prev,
+            };
+            if better {
+                best2 = Some((x, y, kind, total));
+            }
+        }
+        if let Some((x, y, kind, _)) = best2 {
+            return AiAction::Build { x, y, kind };
+        }
+    }
+
+    match best {
+        Some((x, y, kind, _)) => AiAction::Build { x, y, kind },
+        None => AiAction::Idle,
+    }
 }
 
-/// True iff placing a Workshop at (x, y) right now would have it earning
-/// income from tick 1 (隣接 House (労働力) AND **edge-connected** 隣接 Road)。
+/// 2 手目評価 — `(x, y, kind)` を仮想着工した状態で best 2 手目の placement_value
+/// を返す。計算量抑制のため候補 cells は呼び側から渡す。
 ///
-/// Tier 4 はさらに「整地不要 = Plain」セルだけを候補にして、整地で worker
-/// を浪費しないように振る舞う (= smart AI らしさ)。
+/// 仮想着工の実現方法: city を **clone せず**、評価関数側で「(x, y) に
+/// kind が建っている」前提のラッパー city ビューを作るのが理想だが、
+/// `placement_value` は `&City` を受け取るので、簡易に **clone** する。
+/// これで logic を変えずに lookahead が成立する。
 ///
-/// **Phase 2**: 隣接 Road が「マップ端まで繋がる幹線網」に属している必要が
-/// ある (= 原料が外から運べる)。connected grid を呼び側で渡してもらう。
-fn would_workshop_activate_here(
+/// clone のコスト: City struct の grid + terrain + flash arrays で ~数 KB。
+/// Tier 5 の AI 1 回 / tick = 10 回/秒 で数万 cells 走査するので無視できる範囲。
+fn simulate_second_step_value(
     city: &City,
-    wx: usize,
-    wy: usize,
-    connected: &[Vec<bool>],
-) -> bool {
-    if !matches!(city.tile(wx, wy), Tile::Empty) {
-        return false;
-    }
-    if !city.terrain_at(wx, wy).buildable() {
-        return false;
-    }
-    // Tier 4 は要整地セルを避ける (整地+建設で worker 2 倍消費は非効率)。
-    if city.terrain_at(wx, wy).needs_clearing() {
-        return false;
-    }
-    if !super::logic::is_building_edge_connected(connected, wx, wy) {
-        return false;
-    }
-    let mut has_road = false;
-    let mut has_house = false;
-    for (dx, dy) in DIRS4 {
-        let nx = wx as i32 + dx;
-        let ny = wy as i32 + dy;
-        if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+    x: usize,
+    y: usize,
+    kind: Building,
+    cells: &[(usize, usize)],
+    kinds: &[Building],
+) -> i64 {
+    // 仮想着工した city。建物を Built 状態として置く (Construction tick を読まない)。
+    // Built として置くことで、direct_income_value も synergy も「建ってる前提」で評価される。
+    let mut virt = clone_city_for_lookahead(city);
+    virt.grid[y][x] = Tile::Built(kind);
+    let connected2 = super::logic::compute_edge_connected_roads(&virt);
+
+    let mut best2: i64 = 0; // 2 手目を打たない選択肢があるので 0 が下限。
+    // top-K 絞り込み: 1 手目候補の周辺と Outpost 候補だけ。
+    // 単純化のため cells をそのまま使うが、1 手目で建てた (x, y) は除外。
+    // また、cash も 1 手目の cost を引いてシミュレート。
+    let virtual_cash = city.cash - kind.cost();
+    for &(cx, cy) in cells {
+        if (cx, cy) == (x, y) {
             continue;
         }
-        match city.tile(nx as usize, ny as usize) {
-            Tile::Built(Building::Road) => has_road = true,
-            Tile::Built(Building::House) => has_house = true,
-            _ => {}
-        }
-        if has_road && has_house {
-            return true;
+        for &k2 in kinds {
+            let c2 = k2.cost();
+            if virtual_cash < c2 {
+                continue;
+            }
+            let v = super::logic::placement_value(&virt, cx, cy, k2, &connected2);
+            if v == i64::MIN {
+                continue;
+            }
+            if v > best2 {
+                best2 = v;
+            }
         }
     }
-    has_road && has_house
+    best2
 }
 
-/// True iff placing a Park at (x, y) would actually help (= at least one
-/// House within Manhattan distance 4 to receive the Tier-bump effect).
+/// 2 手目シミュレート用の軽量 City clone。grid と terrain だけ複製し、
+/// 残りは default (= placement_value 内で参照しないフィールドはダミー値で OK)。
 ///
-/// Park は道路接続不要・収入無し。意味があるのは「住宅の Apartment / Highrise
-/// 化を後押しする触媒」としてのみ。なので「近くに House が居る」を必須条件に
-/// 置くのが Tier 4 の smart 配置。整地必要セルは避ける (Workshop と同じ)。
-fn would_park_be_useful_here(city: &City, px: usize, py: usize) -> bool {
-    if !matches!(city.tile(px, py), Tile::Empty) {
-        return false;
+/// 完全 clone との差: `events` / `completion_flash_until` / `payout_flash_until`
+/// は使わないため empty にして大幅に軽量化。`built_at_tick` は placement_value が
+/// 読まないため empty で OK。
+fn clone_city_for_lookahead(city: &City) -> City {
+    City {
+        grid: city.grid.clone(),
+        terrain: city.terrain.clone(),
+        world_seed: city.world_seed,
+        cash: city.cash,
+        tick: city.tick,
+        ai_tier: city.ai_tier,
+        strategy: city.strategy,
+        panel_tab: city.panel_tab,
+        last_observed_tier: city.last_observed_tier,
+        tier_flash_until: 0,
+        last_outpost_dispatch_tick: city.last_outpost_dispatch_tick,
+        last_auto_demolish_tick: city.last_auto_demolish_tick,
+        outposts_dispatched_total: city.outposts_dispatched_total,
+        workers: city.workers,
+        rng_state: city.rng_state,
+        buildings_started: city.buildings_started,
+        buildings_finished: city.buildings_finished,
+        cash_earned_total: city.cash_earned_total,
+        cash_spent_total: city.cash_spent_total,
+        events: Vec::new(),
+        completion_flash_until: vec![vec![0u64; GRID_W]; GRID_H],
+        payout_flash_until: vec![vec![0u64; GRID_W]; GRID_H],
+        last_payout_amount: 0,
+        last_payout_tick: 0,
+        built_at_tick: vec![vec![0u64; GRID_W]; GRID_H],
+        cam_x: city.cam_x,
+        cam_y: city.cam_y,
+        selected_cell: None,
     }
-    if !city.terrain_at(px, py).buildable() {
-        return false;
-    }
-    if city.terrain_at(px, py).needs_clearing() {
-        return false;
-    }
-    // House within Manhattan distance 4 — Park の効果範囲は §B 仕様で 4 にする。
-    for y in 0..GRID_H {
-        for x in 0..GRID_W {
-            if !matches!(city.tile(x, y), Tile::Built(Building::House)) {
-                continue;
-            }
-            let dx = x as i32 - px as i32;
-            let dy = y as i32 - py as i32;
-            if dx.abs() + dy.abs() <= 4 {
-                return true;
-            }
-        }
-    }
-    false
 }
 
-/// True iff placing a Shop at (x, y) right now would have it earning
-/// income from tick 1 (**edge-connected** road neighbour AND a House within
-/// Manhattan-3)。Phase 2: 商品搬入の物流接続が必要。
-fn would_shop_activate_here(city: &City, sx: usize, sy: usize, connected: &[Vec<bool>]) -> bool {
-    if !matches!(city.tile(sx, sy), Tile::Empty) {
-        return false;
-    }
-    if !city.terrain_at(sx, sy).buildable() {
-        return false;
-    }
-    // Tier 4 は要整地セルを避ける (would_workshop_activate_here と同じ理由)。
-    if city.terrain_at(sx, sy).needs_clearing() {
-        return false;
-    }
-    // Edge-connected Road neighbour required (Phase 2)。
-    if !super::logic::is_building_edge_connected(connected, sx, sy) {
-        return false;
-    }
-    // House within Manhattan distance 3.
-    for y in 0..GRID_H {
-        for x in 0..GRID_W {
-            if !matches!(city.tile(x, y), Tile::Built(Building::House)) {
-                continue;
-            }
-            let dx = x as i32 - sx as i32;
-            let dy = y as i32 - sy as i32;
-            if dx.abs() + dy.abs() <= 3 {
-                return true;
-            }
-        }
-    }
-    false
-}
