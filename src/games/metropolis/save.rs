@@ -35,8 +35,14 @@ use super::terrain::Terrain;
 ///   v2: `last_outpost_dispatch_tick` / `last_auto_demolish_tick` を追加
 ///       (Phase A 撤去・開拓の自動化クールダウン)
 ///   v3: `built_at_tick` グリッドを追加 (Phase D 老朽化 / Tier 昇格 dwell time)
+///   v4: `cam_x` / `cam_y` 追加 + マップサイズ 32×16 → 64×32 に拡張
+///       (Phase 3 ビューポートスクロール)。
+///       **注意**: マップサイズが変わったので、v3 以前のセーブは tile/terrain
+///       の長さが GRID_W * GRID_H に満たず、未指定領域は default で埋められる
+///       (Empty / Plain) — 旧街区はマップ左上 32×16 に再配置されたように
+///       見える挙動になる。新規スタート推奨だが互換ロードはできる。
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 3;
+const SAVE_VERSION: u32 = 4;
 
 /// 互換性を維持できる最小バージョン。破壊的変更で +1。
 /// v1 → v2 はフィールド追加だけなので `serde(default)` で透過的にロード可能。
@@ -345,6 +351,12 @@ struct GameSave {
     /// 旧データには無いので `serde(default)` で空 Vec になる → `apply_save`
     /// 側で「現在の tick で全建物を新築扱い」にマイグレートする。
     built_at_tick: Vec<u64>,
+
+    /// v4 以降: ビューポート左上座標 (Phase 3 マップ拡張)。
+    /// 旧データ (32×16 マップ前提) は cam_x=cam_y=0 でロード — マップ中央が
+    /// ずれるが、`scroll_camera` で補正可能。
+    cam_x: u32,
+    cam_y: u32,
 }
 
 /// `City` の全フィールドを「永続化対象 / 一時状態 (transient)」の 2 群に
@@ -379,6 +391,8 @@ fn extract_save(state: &City) -> SaveData {
         last_auto_demolish_tick,
         outposts_dispatched_total,
         ref built_at_tick,
+        cam_x,
+        cam_y,
         // ── 一時状態 (再ロード後はリセットでよい UI / フラッシュタイマ) ──
         // ティア進化バナーフラッシュ。
         tier_flash_until: _,
@@ -426,6 +440,8 @@ fn extract_save(state: &City) -> SaveData {
             last_auto_demolish_tick: *last_auto_demolish_tick,
             outposts_dispatched_total: *outposts_dispatched_total,
             built_at_tick: built_at_buf,
+            cam_x: *cam_x as u32,
+            cam_y: *cam_y as u32,
         },
     }
 }
@@ -459,6 +475,8 @@ fn apply_save(state: &mut City, save: &GameSave) {
         last_auto_demolish_tick,
         outposts_dispatched_total,
         built_at_tick,
+        cam_x,
+        cam_y,
     } = save;
 
     state.world_seed = *world_seed;
@@ -494,6 +512,12 @@ fn apply_save(state: &mut City, save: &GameSave) {
     state.last_outpost_dispatch_tick = *last_outpost_dispatch_tick;
     state.last_auto_demolish_tick = *last_auto_demolish_tick;
     state.outposts_dispatched_total = *outposts_dispatched_total;
+    // v4: cam_x / cam_y を反映 (旧データは default 0 で復元 → 中央自動補正は
+    // しない。プレイヤーが hjkl で動かす)。安全クランプ: マップ範囲内に必ず収める。
+    let max_cam_x = super::state::GRID_W.saturating_sub(super::state::VIEW_W);
+    let max_cam_y = super::state::GRID_H.saturating_sub(super::state::VIEW_H);
+    state.cam_x = (*cam_x as usize).min(max_cam_x);
+    state.cam_y = (*cam_y as usize).min(max_cam_y);
 
     // 築年数: v3 で追加。旧データ (空 Vec) では「現在の tick で全建物を新築扱い」
     // にマイグレートする。これでロード直後に既存の街が突然全部老朽化扱いに

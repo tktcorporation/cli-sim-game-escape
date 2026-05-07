@@ -5,8 +5,18 @@
 //! purpose, so we need a balance simulator (see `simulator.rs`) to confirm
 //! the game is still progressing.
 
-pub const GRID_W: usize = 32;
-pub const GRID_H: usize = 16;
+/// **マップ全体**の幅 / 高さ (内部データの寸法)。
+/// 表示は `VIEW_W × VIEW_H` の窓 (viewport) に切り取る。
+/// 64×32 = 2048 セル — 32×16 (旧) の 4 倍の建設余地を持つ。
+pub const GRID_W: usize = 64;
+pub const GRID_H: usize = 32;
+
+/// ビューポート (画面に同時表示するセル数)。`render` はこの寸法だけ描画し、
+/// `City::cam_x` / `cam_y` で全マップを舐める。旧グリッドサイズ (32×16) と
+/// 同一値にすることで、既存レイアウト幅 (`METROPOLIS_WIDE_MIN_WIDTH = 90`) を
+/// 維持できる。
+pub const VIEW_W: usize = 32;
+pub const VIEW_H: usize = 16;
 
 pub const TICKS_PER_SEC: u32 = 10;
 
@@ -319,6 +329,13 @@ pub struct City {
     /// 永続化対象。旧セーブでは default 0 だが、`apply_save` 側で
     /// 「全建物を当該 tick 時点で新築扱い」にマイグレートする。
     pub built_at_tick: Vec<Vec<u64>>,
+
+    /// ビューポートの左上セル座標 (カメラ位置)。
+    /// `render` は `(cam_x..cam_x+VIEW_W, cam_y..cam_y+VIEW_H)` を描画する。
+    /// プレイヤーの h/j/k/l (もしくは矢印キー) でスクロール。
+    /// 永続化対象 (再ロード後も同じ視点を保つ)。
+    pub cam_x: usize,
+    pub cam_y: usize,
 }
 
 pub const MAX_EVENTS: usize = 8;
@@ -348,7 +365,22 @@ impl City {
             payout_flash_until.push(vec![0u64; GRID_W]);
             built_at_tick.push(vec![0u64; GRID_W]);
         }
-        let terrain = super::terrain::generate(seed);
+        let mut terrain = super::terrain::generate(seed);
+        // **創設街路**: マップ上端 (y=0) から中央 (y=GRID_H/2) まで縦断する
+        // 「幹線道路」を最初から敷いておく。Phase 2 の edge connectivity で
+        // Shop/Workshop が活性化できる土地を保証し、低 Tier AI でも経済が
+        // 立ち上がる (= 「街は外との物流から始まる」というシムシティ的な
+        // 起点)。terrain は強制的に Plain にして、Forest/Wasteland 起因の
+        // Clearing が紛れ込まないようにする。
+        let cx = GRID_W / 2;
+        for y in 0..=GRID_H / 2 {
+            terrain[y][cx] = super::terrain::Terrain::Plain;
+            grid[y][cx] = Tile::Built(Building::Road);
+        }
+        // カメラ初期位置: マップ中央が画面中央に来るように。
+        // (GRID_W - VIEW_W) / 2 = (64-32)/2 = 16, (32-16)/2 = 8。
+        let cam_x = (GRID_W.saturating_sub(VIEW_W)) / 2;
+        let cam_y = (GRID_H.saturating_sub(VIEW_H)) / 2;
         Self {
             grid,
             terrain,
@@ -375,7 +407,20 @@ impl City {
             last_payout_amount: 0,
             last_payout_tick: 0,
             built_at_tick,
+            cam_x,
+            cam_y,
         }
+    }
+
+    /// カメラを (dx, dy) だけ移動。`GRID_W - VIEW_W` を上限にクランプ。
+    /// dx/dy は符号付きで、上下左右への移動を 1 メソッドで扱う。
+    pub fn scroll_camera(&mut self, dx: i32, dy: i32) {
+        let max_x = GRID_W.saturating_sub(VIEW_W);
+        let max_y = GRID_H.saturating_sub(VIEW_H);
+        let nx = (self.cam_x as i32 + dx).clamp(0, max_x as i32);
+        let ny = (self.cam_y as i32 + dy).clamp(0, max_y as i32);
+        self.cam_x = nx as usize;
+        self.cam_y = ny as usize;
     }
 
     /// Record a new AI activity entry, keeping the log bounded.

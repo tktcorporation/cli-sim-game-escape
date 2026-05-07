@@ -40,7 +40,7 @@ use crate::widgets::{Clickable, TabBar};
 use super::logic;
 use super::state::{
     city_tier_for, next_tier_threshold, AiTier, Building, City, CityTier, PanelTab, Strategy,
-    Tile, GRID_H, GRID_W, PAYOUT_FLASH_TICKS,
+    Tile, GRID_H, GRID_W, PAYOUT_FLASH_TICKS, VIEW_H, VIEW_W,
 };
 use super::terrain::Terrain;
 use super::{
@@ -78,7 +78,7 @@ fn render_wide(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCell
 
     render_banner(state, f, v[0], false);
 
-    let grid_w = GRID_W as u16 * 2 + 2; // 2-wide cells + borders
+    let grid_w = VIEW_W as u16 * 2 + 2; // 2-wide cells + borders (viewport)
     let h = Layout::default()
         .direction(LayoutDir::Horizontal)
         .constraints([Constraint::Length(grid_w), Constraint::Min(24)])
@@ -95,7 +95,7 @@ fn render_narrow(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCe
         .direction(LayoutDir::Vertical)
         .constraints([
             Constraint::Length(4),                 // banner
-            Constraint::Length(GRID_H as u16 + 2), // grid 1-wide
+            Constraint::Length(VIEW_H as u16 + 2), // grid 1-wide (viewport)
             Constraint::Min(8),                    // tab panel
         ])
         .split(area);
@@ -308,10 +308,16 @@ fn render_grid(
     cell_width: u16,
     _click_state: &Rc<RefCell<ClickState>>,
 ) {
+    // ビューポート位置を表示。マップが 64×32 の世界を 32×16 で覗く方式。
+    // [hjkl] でスクロール可能 (Vim 流) ことをタイトルに併記。
     let title = format!(
-        " ▟▙ City — POP {}  WIP {} ",
+        " ▟▙ City — POP {}  WIP {}  ◎({},{})/{}×{}  [hjkl]スクロール ",
         state.population(),
-        state.active_constructions()
+        state.active_constructions(),
+        state.cam_x,
+        state.cam_y,
+        GRID_W,
+        GRID_H,
     );
     let block = Block::default()
         .borders(Borders::ALL)
@@ -321,10 +327,17 @@ fn render_grid(
     let inner = block.inner(area);
     f.render_widget(&block, area);
 
-    let mut lines: Vec<Line> = Vec::with_capacity(GRID_H);
-    for y in 0..GRID_H {
-        let mut spans: Vec<Span> = Vec::with_capacity(GRID_W * cell_width as usize);
-        for x in 0..GRID_W {
+    // ビューポート範囲だけ描画。`state.cam_x` / `cam_y` が左上セル。
+    // VIEW_W / VIEW_H をはみ出す座標は GRID_W / GRID_H で clamp。
+    let x0 = state.cam_x;
+    let y0 = state.cam_y;
+    let x1 = (x0 + VIEW_W).min(GRID_W);
+    let y1 = (y0 + VIEW_H).min(GRID_H);
+
+    let mut lines: Vec<Line> = Vec::with_capacity(VIEW_H);
+    for y in y0..y1 {
+        let mut spans: Vec<Span> = Vec::with_capacity(VIEW_W * cell_width as usize);
+        for x in x0..x1 {
             spans.extend(tile_spans(state, x, y, cell_width));
         }
         lines.push(Line::from(spans));
@@ -2120,11 +2133,13 @@ mod tests {
         }
     }
 
-    /// 都市グリッドが画面幅の半分以上を占めること (wide layout)。
+    /// 都市グリッド (= viewport) が画面幅の半分以上を占めること (wide layout)。
+    /// マップ全体は 64×32 だが、画面に映る viewport は VIEW_W=32 のままなので
+    /// レイアウト幅の関係は不変。
     #[test]
     fn wide_layout_grid_occupies_majority_of_width() {
-        // grid = 32*2 + 2 = 66. With area width 100 → 66/100 = 66% ≥ 50%.
-        let grid_w = GRID_W as u16 * 2 + 2;
+        // viewport = 32*2 + 2 = 66. With area width 100 → 66/100 = 66% ≥ 50%.
+        let grid_w = VIEW_W as u16 * 2 + 2;
         let area_w = 100u16;
         assert!(
             grid_w * 2 >= area_w,

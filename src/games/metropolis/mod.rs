@@ -56,6 +56,17 @@ pub const ACT_TAB_MANAGER: u16 = 11;
 pub const ACT_TAB_EVENTS: u16 = 12;
 pub const ACT_TAB_WORLD: u16 = 13;
 
+// ビューポートスクロール (Phase 3)。マップ 64×32 を 32×16 の viewport で覗く。
+// h/j/k/l (Vim 流) または矢印キー風のキーで動かす。1 回 4 セル送り (= 視野の 1/8)。
+pub const ACT_SCROLL_LEFT: u16 = 20;
+pub const ACT_SCROLL_RIGHT: u16 = 21;
+pub const ACT_SCROLL_UP: u16 = 22;
+pub const ACT_SCROLL_DOWN: u16 = 23;
+
+/// 1 回のスクロールで動かすセル数。視野の 1/8 (32/8 = 4) で「ちょっとずつ
+/// 動かす」感じ。短すぎると到達まで連打、長すぎると見落とすバランス。
+const SCROLL_STEP: i32 = 4;
+
 pub struct MetropolisGame {
     pub state: City,
     /// オートセーブまでの残り tick 数。`save::AUTOSAVE_INTERVAL` から減算。
@@ -120,6 +131,11 @@ impl Game for MetropolisGame {
                 '2' => ACT_TAB_MANAGER,
                 '3' => ACT_TAB_EVENTS,
                 '4' => ACT_TAB_WORLD,
+                // Phase 3: Vim 流 hjkl でビューポートをスクロール (64×32 マップ)。
+                'h' => ACT_SCROLL_LEFT,
+                'j' => ACT_SCROLL_DOWN,
+                'k' => ACT_SCROLL_UP,
+                'l' => ACT_SCROLL_RIGHT,
                 _ => return false,
             },
         };
@@ -157,6 +173,22 @@ impl Game for MetropolisGame {
             }
             ACT_TAB_WORLD => {
                 self.state.panel_tab = PanelTab::World;
+                true
+            }
+            ACT_SCROLL_LEFT => {
+                self.state.scroll_camera(-SCROLL_STEP, 0);
+                true
+            }
+            ACT_SCROLL_RIGHT => {
+                self.state.scroll_camera(SCROLL_STEP, 0);
+                true
+            }
+            ACT_SCROLL_UP => {
+                self.state.scroll_camera(0, -SCROLL_STEP);
+                true
+            }
+            ACT_SCROLL_DOWN => {
+                self.state.scroll_camera(0, SCROLL_STEP);
                 true
             }
             _ => false,
