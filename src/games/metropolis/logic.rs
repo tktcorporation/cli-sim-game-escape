@@ -642,16 +642,15 @@ fn accrue_income(city: &mut City) {
         city.last_payout_amount = income;
         city.last_payout_tick = city.tick;
     }
-    // Codex review #103 P1 対策: payout flash 検出ループは shop の数だけ
-    // BFS を再計算していた。connected を 1 度だけ計算して shop_is_active_with
-    // を使う (= shop 数 N に対し O(GRID_W*GRID_H) → O(N) の差は実質ゼロだが、
-    // BFS そのものを N 回回さないので tick 駆動の累積コストが減る)。
+    // 商業施設 (Shop / Mall) はどちらも収入を出すので両方フラッシュさせる。
     let connected = compute_edge_connected_roads(city);
     let mut flash_targets: Vec<(usize, usize)> = Vec::new();
     for y in 0..GRID_H {
         for x in 0..GRID_W {
-            if matches!(city.tile(x, y), Tile::Built(Building::Shop))
-                && shop_is_active_with(city, x, y, &connected)
+            if matches!(
+                city.tile(x, y),
+                Tile::Built(Building::Shop) | Tile::Built(Building::Mall)
+            ) && shop_is_active_with(city, x, y, &connected)
             {
                 flash_targets.push((x, y));
             }
@@ -2099,25 +2098,8 @@ fn commercial_demand_aware_value(
     if !(edge && near_house) {
         return 0;
     }
-    // AI 評価では House Tier を再帰計算しない (= compute_population_map 相当を
-    // 走らせると重い)。簡易見積もりとして「半径 5 内 House × Cottage 定員」を
-    // 使う。Apartment / Highrise はあとから synergy でも評価されるので二重に
-    // 数えないシンプルな下限値で済む。
-    let mut local_pop = 0i64;
-    for cy in 0..GRID_H {
-        for cx in 0..GRID_W {
-            let dx = (cx as i32 - x as i32).abs();
-            let dy = (cy as i32 - y as i32).abs();
-            if dx + dy > 5 {
-                continue;
-            }
-            if matches!(city.tile(cx, cy), Tile::Built(Building::House)) {
-                local_pop += house_capacity(HouseTier::Cottage) as i64;
-            }
-        }
-    }
+    let local_pop = count_houses_within_radius_as_cottage(city, x, y, 5);
     let demand = local_pop * PURCHASE_POWER_PER_CAPITA;
-    // 自分自身を加えた商業キャパシティで按分。
     let total_capacity = commercial_capacity_within(city, x, y, 5) + my_capacity;
     let share = demand * my_capacity / total_capacity.max(1);
     share.min(my_capacity)
@@ -2138,23 +2120,39 @@ fn employment_demand_aware_value(
     if !is_building_edge_connected(connected, x, y) {
         return 0;
     }
-    let mut local_pop = 0i64;
-    for cy in 0..GRID_H {
-        for cx in 0..GRID_W {
-            let dx = (cx as i32 - x as i32).abs();
-            let dy = (cy as i32 - y as i32).abs();
-            if dx + dy > 5 {
-                continue;
-            }
-            if matches!(city.tile(cx, cy), Tile::Built(Building::House)) {
-                local_pop += house_capacity(HouseTier::Cottage) as i64;
-            }
-        }
-    }
+    let local_pop = count_houses_within_radius_as_cottage(city, x, y, 5);
     let demand = local_pop * demand_per_capita;
     let total_capacity = employment_capacity_within(city, x, y, 5) + my_capacity;
     let share = demand * my_capacity / total_capacity.max(1);
     share.min(my_capacity)
+}
+
+/// AI 評価用の簡易局所人口集計。半径 R 内 House を全て Cottage 定員で数える。
+///
+/// `compute_population_map` 相当の精密計算は再帰参照になり重いため、AI が
+/// 候補を順位付けする目的では Cottage 固定の下限値で十分 (相対比較が大事)。
+/// bounded loop でマップ全走査を避ける。
+fn count_houses_within_radius_as_cottage(city: &City, x: usize, y: usize, radius: i32) -> i64 {
+    let mut local_pop = 0i64;
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx.abs() + dy.abs() > radius {
+                continue;
+            }
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                continue;
+            }
+            if matches!(
+                city.tile(nx as usize, ny as usize),
+                Tile::Built(Building::House)
+            ) {
+                local_pop += house_capacity(HouseTier::Cottage) as i64;
+            }
+        }
+    }
+    local_pop
 }
 
 /// 2. シナジー — 周囲の既存 House の Tier が上昇しうる場合の income 増分。
@@ -3446,6 +3444,7 @@ mod tests {
     }
 
     /// 過剰店舗ペナルティ: 同範囲に Shop を増やすと 1 軒あたりの収入が減る。
+    /// 需要が中庸 (Shop 上限未達) なシナリオで「按分が効いた」ことを strict に確認。
     #[test]
     fn excess_shops_split_demand() {
         let mut city = City::new();
@@ -3455,24 +3454,24 @@ mod tests {
         city.set_tile(0, 1, Tile::Built(Building::Road));
         city.set_tile(0, 2, Tile::Built(Building::Road));
         city.set_tile(0, 3, Tile::Built(Building::Road));
-        for x in 1..7 {
+        // House 4 軒で local_pop ≈ 16 → demand 64 cents (Shop 上限 200 未達)。
+        for x in 1..5 {
             city.set_tile(x, 1, Tile::Built(Building::House));
         }
-        // Shop 1 軒目を Road 隣接位置に。
         city.set_tile(1, 2, Tile::Built(Building::Shop));
         let connected = compute_edge_connected_roads(&city);
         let pop_map = compute_population_map(&city, &connected);
         let solo = commercial_income_cents(&city, 1, 2, SHOP_CAPACITY_CENTS, &pop_map, &connected);
 
-        // 同範囲に Shop をもう 1 軒追加 (Road 隣接位置)。
+        // 同範囲に Shop を追加すると total_capacity が倍 → 1 軒あたりの share が半減。
         city.set_tile(1, 3, Tile::Built(Building::Shop));
         let connected = compute_edge_connected_roads(&city);
         let pop_map = compute_population_map(&city, &connected);
         let with_competition =
             commercial_income_cents(&city, 1, 2, SHOP_CAPACITY_CENTS, &pop_map, &connected);
         assert!(
-            with_competition <= solo,
-            "Adding competing shop should not increase single shop income: solo={} comp={}",
+            with_competition < solo,
+            "Adding competing shop should strictly reduce single shop income: solo={} comp={}",
             solo, with_competition
         );
     }
