@@ -284,6 +284,7 @@ fn advance_construction(city: &mut City) {
             }
         }
     }
+    let mutated = !clearings.is_empty() || !completions.is_empty();
     // 整地完了: 地形を Plain に書き換え、軽いログを出す。
     for (x, y) in clearings {
         city.terrain[y][x] = super::terrain::Terrain::Plain;
@@ -293,6 +294,12 @@ fn advance_construction(city: &mut City) {
     for (x, y, kind) in completions {
         city.completion_flash_until[y][x] = city.tick + COMPLETION_FLASH_TICKS;
         city.push_event(format!("✓ {} ({},{}) 完成", building_name(kind), x, y));
+    }
+    // 同一 tick 内で複数 worker が走る経路 (Tier 3+ workers) では、
+    // 完成→次 worker の判断の間に population が古いままにならないよう
+    // ここでも invalidate する。tick 終了時の一括クリアと二重防御。
+    if mutated {
+        city.invalidate_population_cache();
     }
 }
 
@@ -612,6 +619,7 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
         city.grid[y][x] = Tile::Clearing {
             ticks_remaining: terrain.clearing_ticks(),
         };
+        city.invalidate_population_cache();
         city.push_event(format!(
             "⛏ ({},{}) 整地着工 ({}) -${}",
             x,
@@ -632,6 +640,7 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
         target: kind,
         ticks_remaining: ticks,
     };
+    city.invalidate_population_cache();
     city.buildings_started += 1;
     // Outpost 派遣統計: AI が `placement_value` 経由で Outpost を選んだ時にも
     // カウントされるよう、start_construction でフックする (= 旧 dispatch_outpost
@@ -791,9 +800,12 @@ fn commercial_capacity_within(
     total
 }
 
-/// 半径内の **active な** 雇用供給キャパシティ合計 (cents/sec 単位)。
-/// inactive Workshop/Factory/Office は除外 (`commercial_capacity_within` と同思想)。
-fn employment_capacity_within(
+/// 半径内の active な **工業** 雇用キャパシティ (Workshop / Factory)。
+///
+/// Office (ホワイトカラー) は `white_collar_capacity_within` で別 pool にする。
+/// 同じ pool で割ると Workshop と Office が抑制し合い、需要クラスを別々に
+/// モデル化した意図 (= 工場労働者とオフィス勤務者は別の労働者) が崩れる。
+fn industrial_capacity_within(
     city: &City,
     x: usize,
     y: usize,
@@ -815,7 +827,6 @@ fn employment_capacity_within(
             let cap = match city.tile(nx, ny) {
                 Tile::Built(Building::Workshop) => WORKSHOP_CAPACITY_CENTS,
                 Tile::Built(Building::Factory) => FACTORY_CAPACITY_CENTS,
-                Tile::Built(Building::Office) => OFFICE_CAPACITY_CENTS,
                 _ => continue,
             };
             if workshop_is_active_with(city, nx, ny, connected) {
@@ -824,6 +835,44 @@ fn employment_capacity_within(
         }
     }
     total
+}
+
+/// 半径内の active な **ホワイトカラー** 雇用キャパシティ (Office)。
+fn white_collar_capacity_within(
+    city: &City,
+    x: usize,
+    y: usize,
+    radius: i32,
+    connected: &[Vec<bool>],
+) -> i64 {
+    let mut total = 0i64;
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx.abs() + dy.abs() > radius {
+                continue;
+            }
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                continue;
+            }
+            let (nx, ny) = (nx as usize, ny as usize);
+            if matches!(city.tile(nx as usize, ny as usize), Tile::Built(Building::Office))
+                && workshop_is_active_with(city, nx, ny, connected)
+            {
+                total += OFFICE_CAPACITY_CENTS;
+            }
+        }
+    }
+    total
+}
+
+/// 雇用クラス。Industrial = Workshop/Factory、WhiteCollar = Office。
+/// `employment_income_cents` / `employment_demand_aware_value` で需給 pool を選ぶ。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmploymentClass {
+    Industrial,
+    WhiteCollar,
 }
 
 /// 商業供給キャパシティ (cents/sec) — Shop / Mall の上限収入。
@@ -868,14 +917,15 @@ fn commercial_income_cents(
 
 /// 雇用建物 (Workshop / Factory / Office) の per-tile 収入 (cents/sec)。
 ///
-/// `demand_per_capita` は工業 (Workshop/Factory) なら `EMPLOYMENT_DEMAND_PER_CAPITA`、
-/// オフィス (Office) なら `WHITE_COLLAR_DEMAND_PER_CAPITA`。
+/// `class` ごとに別 pool で按分する: Industrial (Workshop+Factory) と
+/// WhiteCollar (Office) を分離して「工場労働者とオフィス勤務者は別ラベル」
+/// という意図を保つ。同じ pool だと Workshop と Office が抑制し合うバグになる。
 fn employment_income_cents(
     city: &City,
     x: usize,
     y: usize,
     my_capacity: i64,
-    demand_per_capita: i64,
+    class: EmploymentClass,
     pop_map: &[Vec<u32>],
     connected: &[Vec<bool>],
 ) -> i64 {
@@ -883,8 +933,17 @@ fn employment_income_cents(
         return 0;
     }
     let local_pop = population_within(pop_map, x, y, 5) as i64;
+    let (demand_per_capita, total_capacity) = match class {
+        EmploymentClass::Industrial => (
+            EMPLOYMENT_DEMAND_PER_CAPITA,
+            industrial_capacity_within(city, x, y, 5, connected),
+        ),
+        EmploymentClass::WhiteCollar => (
+            WHITE_COLLAR_DEMAND_PER_CAPITA,
+            white_collar_capacity_within(city, x, y, 5, connected),
+        ),
+    };
     let demand = local_pop * demand_per_capita;
-    let total_capacity = employment_capacity_within(city, x, y, 5, connected);
     if total_capacity <= 0 {
         return 0;
     }
@@ -954,7 +1013,7 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
                     x,
                     y,
                     WORKSHOP_CAPACITY_CENTS,
-                    EMPLOYMENT_DEMAND_PER_CAPITA,
+                    EmploymentClass::Industrial,
                     &pop_map,
                     &connected,
                 ),
@@ -963,7 +1022,7 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
                     x,
                     y,
                     FACTORY_CAPACITY_CENTS,
-                    EMPLOYMENT_DEMAND_PER_CAPITA,
+                    EmploymentClass::Industrial,
                     &pop_map,
                     &connected,
                 ),
@@ -972,7 +1031,7 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
                     x,
                     y,
                     OFFICE_CAPACITY_CENTS,
-                    WHITE_COLLAR_DEMAND_PER_CAPITA,
+                    EmploymentClass::WhiteCollar,
                     &pop_map,
                     &connected,
                 ),
@@ -1716,6 +1775,7 @@ pub fn demolish_at(city: &mut City, x: usize, y: usize) -> bool {
     city.cash -= cost;
     city.cash_spent_total += cost;
     city.grid[y][x] = Tile::Empty;
+    city.invalidate_population_cache();
     // 既存フラッシュをリセット (古い完成フラッシュが残ると違和感)。
     city.completion_flash_until[y][x] = 0;
     city.payout_flash_until[y][x] = 0;
@@ -2113,7 +2173,7 @@ fn direct_income_value(
             y,
             connected,
             WORKSHOP_CAPACITY_CENTS,
-            EMPLOYMENT_DEMAND_PER_CAPITA,
+            EmploymentClass::Industrial,
         ),
         Building::Factory => employment_demand_aware_value(
             city,
@@ -2121,7 +2181,7 @@ fn direct_income_value(
             y,
             connected,
             FACTORY_CAPACITY_CENTS,
-            EMPLOYMENT_DEMAND_PER_CAPITA,
+            EmploymentClass::Industrial,
         ),
         Building::Office => employment_demand_aware_value(
             city,
@@ -2129,7 +2189,7 @@ fn direct_income_value(
             y,
             connected,
             OFFICE_CAPACITY_CENTS,
-            WHITE_COLLAR_DEMAND_PER_CAPITA,
+            EmploymentClass::WhiteCollar,
         ),
         Building::Shop => commercial_demand_aware_value(city, x, y, connected, SHOP_CAPACITY_CENTS),
         Building::Mall => commercial_demand_aware_value(city, x, y, connected, MALL_CAPACITY_CENTS),
@@ -2164,13 +2224,15 @@ fn commercial_demand_aware_value(
 }
 
 /// 雇用建物 (Workshop / Factory / Office) の direct income 評価。
+/// `class` で Industrial / WhiteCollar の pool を切り替える (Office と
+/// Workshop が抑制し合わないようにする)。
 fn employment_demand_aware_value(
     city: &City,
     x: usize,
     y: usize,
     connected: &[Vec<bool>],
     my_capacity: i64,
-    demand_per_capita: i64,
+    class: EmploymentClass,
 ) -> i64 {
     if !has_neighbor_kind(city, x, y, Building::House) {
         return 0;
@@ -2179,8 +2241,18 @@ fn employment_demand_aware_value(
         return 0;
     }
     let local_pop = count_houses_within_radius_as_cottage(city, x, y, 5);
+    let (demand_per_capita, base_capacity) = match class {
+        EmploymentClass::Industrial => (
+            EMPLOYMENT_DEMAND_PER_CAPITA,
+            industrial_capacity_within(city, x, y, 5, connected),
+        ),
+        EmploymentClass::WhiteCollar => (
+            WHITE_COLLAR_DEMAND_PER_CAPITA,
+            white_collar_capacity_within(city, x, y, 5, connected),
+        ),
+    };
     let demand = local_pop * demand_per_capita;
-    let total_capacity = employment_capacity_within(city, x, y, 5, connected) + my_capacity;
+    let total_capacity = base_capacity + my_capacity;
     let share = demand * my_capacity / total_capacity.max(1);
     share.min(my_capacity)
 }
@@ -3359,6 +3431,60 @@ mod tests {
         assert_eq!(house_tier_for(stats), HouseTier::Highrise);
     }
 
+    /// Office と Workshop は雇用クラスが別 (WhiteCollar vs Industrial) なので、
+    /// 同範囲に Office を建てても Workshop の収入は薄まらない。
+    /// Codex P2 (employment pool 共有による相互抑制バグ) への回帰テスト。
+    #[test]
+    fn office_does_not_dilute_workshop_employment() {
+        let mut city = City::new();
+        for x in 0..16 {
+            place_edge_road(&mut city, x);
+        }
+        city.set_tile(8, 1, Tile::Built(Building::Road));
+        for x in 1..8 {
+            city.set_tile(x, 1, Tile::Built(Building::House));
+        }
+        for x in 9..16 {
+            city.set_tile(x, 1, Tile::Built(Building::House));
+        }
+        // Workshop の隣接 House 確保 + Workshop 配置。
+        city.set_tile(7, 2, Tile::Built(Building::House));
+        city.set_tile(8, 2, Tile::Built(Building::Workshop));
+        let connected = compute_edge_connected_roads(&city);
+        let pop_map = compute_population_map(&city, &connected);
+        let workshop_solo = employment_income_cents(
+            &city,
+            8,
+            2,
+            WORKSHOP_CAPACITY_CENTS,
+            EmploymentClass::Industrial,
+            &pop_map,
+            &connected,
+        );
+
+        // 同範囲に Office を追加 (隣接 House あり、active になる位置)。
+        city.set_tile(9, 2, Tile::Built(Building::House));
+        city.set_tile(10, 2, Tile::Built(Building::Office));
+        let connected = compute_edge_connected_roads(&city);
+        let pop_map = compute_population_map(&city, &connected);
+        let workshop_with_office = employment_income_cents(
+            &city,
+            8,
+            2,
+            WORKSHOP_CAPACITY_CENTS,
+            EmploymentClass::Industrial,
+            &pop_map,
+            &connected,
+        );
+        // Office は Industrial pool に属さないので、Workshop 収入に影響しない。
+        // (House 追加で local_pop は増える可能性がある = workshop_with_office >= workshop_solo)。
+        assert!(
+            workshop_with_office >= workshop_solo,
+            "Adding Office should not reduce Workshop income: solo={} with_office={}",
+            workshop_solo, workshop_with_office
+        );
+    }
+
     /// inactive な Mall (Road 未接続 / 顧客圏外) は周囲 Shop の収入を薄めない。
     /// 機能不全建物が capacity 按分で active 建物の取り分を奪う問題への回帰テスト。
     #[test]
@@ -3558,7 +3684,7 @@ mod tests {
             8,
             2,
             WORKSHOP_CAPACITY_CENTS,
-            EMPLOYMENT_DEMAND_PER_CAPITA,
+            EmploymentClass::Industrial,
             &pop_map,
             &connected,
         );
@@ -3570,7 +3696,7 @@ mod tests {
             8,
             2,
             FACTORY_CAPACITY_CENTS,
-            EMPLOYMENT_DEMAND_PER_CAPITA,
+            EmploymentClass::Industrial,
             &pop_map,
             &connected,
         );
