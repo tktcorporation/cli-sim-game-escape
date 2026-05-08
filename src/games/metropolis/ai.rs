@@ -412,6 +412,67 @@ pub(super) fn can_afford_demolish(city: &City, x: usize, y: usize) -> bool {
     city.cash >= cost + reserve
 }
 
+/// 1 手目 / 2 手目共用の placement guard。Tier 4/5 が candidate の `placement_value`
+/// を測る前に、cost / 機能要件 (House 数下限) / 預金保護 (撤去後に House を建てる
+/// 原資が残るか) を弾く。
+///
+/// 1 手目評価 (`tier4_value_search` 直接) と 2 手目評価
+/// (`simulate_second_step_value` の virt 上) で同じ閾値を共有することで、
+/// 「1 手目で除外された組み合わせを 2 手目で加点する」silent divergence を防ぐ。
+/// 旧実装は 1 手目を nested fn、2 手目を closure で重複定義していたため、
+/// 新建物の guard 追加が片方にしか反映されない事故が起きた。常にこの 1 関数を
+/// 通すこと。
+pub(super) fn passes_guards(
+    city: &City,
+    kind: Building,
+    virtual_cash: i64,
+    house_cost: i64,
+) -> bool {
+    let cost = kind.cost();
+    if virtual_cash < cost {
+        return false;
+    }
+    if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 {
+        return false;
+    }
+    if matches!(kind, Building::Mall) && city.count_built(Building::House) < 6 {
+        return false;
+    }
+    if matches!(kind, Building::Workshop) && city.count_built(Building::House) < 2 {
+        return false;
+    }
+    if matches!(kind, Building::Factory) && city.count_built(Building::House) < 5 {
+        return false;
+    }
+    if matches!(kind, Building::Office) && city.count_built(Building::House) < 4 {
+        return false;
+    }
+    // 超上位建物は街がそれなりに育ってから建てる (cost が高く、機能には
+    // 一定数の House が必要)。ROI ペナルティだけだと序盤に空地スコアの
+    // 関係で誤って高評価されることがあるため、人口下限のガードで弾く。
+    if matches!(kind, Building::Refinery) && city.count_built(Building::House) < 12 {
+        return false;
+    }
+    if matches!(kind, Building::MegaMall) && city.count_built(Building::House) < 12 {
+        return false;
+    }
+    if matches!(kind, Building::Headquarters) && city.count_built(Building::House) < 10 {
+        return false;
+    }
+    if matches!(kind, Building::Plaza) && city.count_built(Building::House) < 8 {
+        return false;
+    }
+    if matches!(kind, Building::Stadium) && city.count_built(Building::House) < 20 {
+        return false;
+    }
+    // savings protection: 高コスト建物を建てたら House を建てる原資を割る
+    // 場合は避ける。Outpost は飽和時専用なので例外。
+    if !matches!(kind, Building::House | Building::Outpost) && (virtual_cash - cost) < house_cost {
+        return false;
+    }
+    true
+}
+
 /// Tier 4 / 5 共用の評価ベース placement search。
 ///
 /// **アーキテクチャ**: `logic::placement_value` が「この候補で income/sec が
@@ -422,7 +483,7 @@ pub(super) fn can_afford_demolish(city: &City, x: usize, y: usize) -> bool {
 /// `depth = 1` (Tier 4): 各候補について placement_value を見て top-k から best 選択。
 /// `depth = 2` (Tier 5): 各候補について 1 手目 value + 「2 手目に建てうる最良の
 ///   候補の value (= 1 手目を仮想的に着工した状態で再計算)」を加算した合計を評価。
-///   これにより「道路を引いて、その隣に家を建てるシナリオ」が拾える。
+///   これにより「道路を引いて家を載せるシナリオ」が拾える。
 ///
 /// **Outpost を candidate に含めることで saturation 解消が自然発生**:
 ///   中央満杯 → 既存 Empty cells の placement_value はほぼ 0 →
@@ -437,57 +498,6 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
     // **Eco 戦略の Forest 配慮**: `placement_value` 内に soft penalty (-100)
     // として組み込み済み。「他に良い候補があれば森を残し、無ければ仕方なく
     // 切る」挙動になる。AI 側の前段フィルタでは扱わない。
-
-    // 1 手目候補に乗せられるか共通ガード — 後で 2 手目評価でも同じ関数を呼ぶ
-    // ことで「1 手目で除外された組み合わせを 2 手目だけ加点する」silent
-    // divergence を防ぐ (= レビュー指摘 #3, #4)。
-    fn passes_guards(city: &City, kind: Building, virtual_cash: i64, house_cost: i64) -> bool {
-        let cost = kind.cost();
-        if virtual_cash < cost {
-            return false;
-        }
-        if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 {
-            return false;
-        }
-        if matches!(kind, Building::Mall) && city.count_built(Building::House) < 6 {
-            return false;
-        }
-        if matches!(kind, Building::Workshop) && city.count_built(Building::House) < 2 {
-            return false;
-        }
-        if matches!(kind, Building::Factory) && city.count_built(Building::House) < 5 {
-            return false;
-        }
-        if matches!(kind, Building::Office) && city.count_built(Building::House) < 4 {
-            return false;
-        }
-        // 超上位建物は街がそれなりに育ってから建てる (cost が高く、機能には
-        // 一定数の House が必要)。ROI ペナルティだけだと序盤に空地スコアの
-        // 関係で誤って高評価されることがあるため、人口下限のガードで弾く。
-        if matches!(kind, Building::Refinery) && city.count_built(Building::House) < 12 {
-            return false;
-        }
-        if matches!(kind, Building::MegaMall) && city.count_built(Building::House) < 12 {
-            return false;
-        }
-        if matches!(kind, Building::Headquarters) && city.count_built(Building::House) < 10 {
-            return false;
-        }
-        if matches!(kind, Building::Plaza) && city.count_built(Building::House) < 8 {
-            return false;
-        }
-        if matches!(kind, Building::Stadium) && city.count_built(Building::House) < 20 {
-            return false;
-        }
-        // savings protection: 高コスト建物を建てたら House を建てる原資を割る
-        // 場合は避ける。Outpost は飽和時専用なので例外。
-        if !matches!(kind, Building::House | Building::Outpost)
-            && (virtual_cash - cost) < house_cost
-        {
-            return false;
-        }
-        true
-    }
 
     // 候補 cells を 2 群に分けて収集する (= O(N²) を避ける):
     //   `regular`  — 既存 Built に 4-近傍隣接する Empty cells (House/Road/etc 用)
@@ -740,34 +750,11 @@ fn simulate_second_step_value(
         }
     }
 
-    // **重要**: 2 手目候補にも 1 手目と同じ guard を適用 (silent divergence 防止)。
-    // virt は 1 手目完成済みの世界なので `virt.count_built(House)` は反映後の値。
+    // 2 手目候補にも 1 手目と同じ guard を適用する。`passes_guards` は
+    // 1 手目評価と共有することで「1 手目で除外された組み合わせを 2 手目で
+    // 加点する」silent divergence を構造的に防ぐ。
     let passes_virt = |k2: Building| -> bool {
-        let cost = k2.cost();
-        if virtual_cash < cost {
-            return false;
-        }
-        if matches!(k2, Building::Shop) && virt.count_built(Building::House) < 3 {
-            return false;
-        }
-        if matches!(k2, Building::Mall) && virt.count_built(Building::House) < 6 {
-            return false;
-        }
-        if matches!(k2, Building::Workshop) && virt.count_built(Building::House) < 2 {
-            return false;
-        }
-        if matches!(k2, Building::Factory) && virt.count_built(Building::House) < 5 {
-            return false;
-        }
-        if matches!(k2, Building::Office) && virt.count_built(Building::House) < 4 {
-            return false;
-        }
-        if !matches!(k2, Building::House | Building::Outpost)
-            && (virtual_cash - cost) < house_cost
-        {
-            return false;
-        }
-        true
+        passes_guards(&virt, k2, virtual_cash, house_cost)
     };
 
     for &(cx, cy) in &nearby {
