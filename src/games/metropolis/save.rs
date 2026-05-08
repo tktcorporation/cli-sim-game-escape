@@ -903,6 +903,10 @@ pub fn apply_offline_bonus_with_persist(state: &mut City, last_ms: u64) -> Optio
         if !state.events.is_empty() {
             state.events.remove(0);
         }
+        // `apply_offline_bonus` がセットした welcome モーダルもロールバック。
+        // 残しておくとプレイヤーは受け取っていない金額を見ることになり、
+        // 次の入力が dismiss gate に吸われる。
+        state.pending_offline_welcome = None;
         web_sys::console::warn_1(
             &"Idle Metropolis: オフラインボーナスを保存失敗のためロールバック".into(),
         );
