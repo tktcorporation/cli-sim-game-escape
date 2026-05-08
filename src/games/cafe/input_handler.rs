@@ -454,6 +454,25 @@ fn handle_gacha_result_ok(state: &mut CafeState, card_ids: &[u32]) -> bool {
     }
 }
 
+pub fn dismiss_popup(state: &mut CafeState) -> bool {
+    if let Some(reward) = state.pending_login_reward.take() {
+        state.money += reward;
+        // Also claim gems
+        if let Some(gems) = state.pending_login_gems.take() {
+            state.card_state.gems += gems;
+        }
+        state.login_bonus.today_claimed = true;
+        save::save_game(state);
+        return true;
+    }
+    if let Some(bonus) = state.pending_recovery_bonus.take() {
+        state.money += bonus;
+        save::save_game(state);
+        return true;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,23 +524,4 @@ mod tests {
         assert!(!ok);
         assert_eq!(state.card_state.equipped_card, None);
     }
-}
-
-pub fn dismiss_popup(state: &mut CafeState) -> bool {
-    if let Some(reward) = state.pending_login_reward.take() {
-        state.money += reward;
-        // Also claim gems
-        if let Some(gems) = state.pending_login_gems.take() {
-            state.card_state.gems += gems;
-        }
-        state.login_bonus.today_claimed = true;
-        save::save_game(state);
-        return true;
-    }
-    if let Some(bonus) = state.pending_recovery_bonus.take() {
-        state.money += bonus;
-        save::save_game(state);
-        return true;
-    }
-    false
 }

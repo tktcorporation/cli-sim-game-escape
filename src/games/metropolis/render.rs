@@ -402,6 +402,7 @@ fn tile_spans(
 
 // ── 1-wide cell (narrow) ────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn tile_span_1(
     tile: &Tile,
     x: usize,
@@ -643,6 +644,7 @@ fn tile_char_1(b: Building) -> char {
 
 // ── 2-wide cell (wide) ──────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn tile_spans_2(
     tile: &Tile,
     x: usize,

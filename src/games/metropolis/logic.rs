@@ -857,7 +857,7 @@ fn white_collar_capacity_within(
                 continue;
             }
             let (nx, ny) = (nx as usize, ny as usize);
-            if matches!(city.tile(nx as usize, ny as usize), Tile::Built(Building::Office))
+            if matches!(city.tile(nx, ny), Tile::Built(Building::Office))
                 && workshop_is_active_with(city, nx, ny, connected)
             {
                 total += OFFICE_CAPACITY_CENTS;
@@ -3164,9 +3164,9 @@ mod tests {
         assert_eq!((tx, ty), (cx, cy));
     }
 
-    /// Outpost 派遣のテストは AI 評価関数 (`placement_value`) のテスト経由で
-    /// 担保される (旧 dispatch_outpost / best_outpost_placement は AI 統合により廃止)。
-    /// 「saturation 時に Outpost が高評価になる」性質は `placement_value_*` テストで確認。
+    // Outpost 派遣のテストは AI 評価関数 (`placement_value`) のテスト経由で
+    // 担保される。`saturation 時に Outpost が高評価になる` 性質は
+    // `placement_value_*` テストで確認している。
 
     /// Rock セルは隣接 Outpost が無いと start_construction が false を返す。
     #[test]

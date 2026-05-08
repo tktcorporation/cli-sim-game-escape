@@ -730,7 +730,7 @@ mod tests {
             for x in 0..32 {
                 if let Some(id) = cs.hit_test(x, y) {
                     assert!(
-                        id < CARD_EQUIP_BASE + 15 || id >= CARD_BACK,
+                        !(CARD_EQUIP_BASE + 15..CARD_BACK).contains(&id),
                         "no card row with display offset >= CARDS_VISIBLE expected (got id={id})"
                     );
                 }

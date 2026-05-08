@@ -416,6 +416,7 @@ mod tests {
 
     /// 中央コア (Manhattan 距離 ≤ 5) には Rock が出ない。
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn rock_does_not_appear_in_core() {
         for s in 0..8u64 {
             let layer = generate(s.wrapping_mul(0xA5A5));
@@ -443,6 +444,7 @@ mod tests {
     /// rebels-in-the-sky 的な「壁の存在感」を保証する。
     /// 64×32 マップでは d=14 が「外側 9 割岩」帯の入り口。
     #[test]
+    #[allow(clippy::needless_range_loop)]
     fn rock_is_dense_at_boundary() {
         let mut total = 0;
         let mut rocks = 0;

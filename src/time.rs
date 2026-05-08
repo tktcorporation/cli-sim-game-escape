@@ -126,7 +126,7 @@ mod tests {
             total += gt.update(i as f64 * 16.667);
         }
         // Should be approximately 10 ticks (1 second at 10 ticks/sec)
-        assert!(total >= 9 && total <= 11, "expected ~10 ticks, got {}", total);
+        assert!((9..=11).contains(&total), "expected ~10 ticks, got {}", total);
     }
 
     #[test]
