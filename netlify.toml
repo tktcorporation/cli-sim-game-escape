@@ -1,6 +1,10 @@
 [build]
   command = "bash ./build.sh"
   publish = "dist"
+  # ビルド成果物 (dist/) に影響しないファイルだけが変わったコミットでは
+  # ビルドをスキップする。git diff が exit 0 (差分なし) ならスキップ。
+  # CACHED_COMMIT_REF は前回成功時の SHA。初回ビルド時は未定義のため fallback。
+  ignore = "git diff --quiet ${CACHED_COMMIT_REF:-HEAD~1} ${COMMIT_REF:-HEAD} -- ':!*.md' ':!docs/' ':!.github/' ':!.claude/' ':!tests/' ':!.gitignore' ':!.devcontainer/' ':!.devenv.json' ':!.mise.toml' ':!.mcp.json'"
 
 [build.environment]
   RUSTUP_HOME = "/opt/buildhome/.rustup"
