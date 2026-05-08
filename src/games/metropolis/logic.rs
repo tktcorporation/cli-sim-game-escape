@@ -1288,9 +1288,7 @@ pub fn gather_house_neighborhood_with(
         }
         match city.tile(nx as usize, ny as usize) {
             Tile::Built(Building::Road) => n_road_adj += 1,
-            Tile::Built(Building::Factory) | Tile::Built(Building::Refinery) => {
-                factory_smoke_penalty = true
-            }
+            Tile::Built(Building::Factory) => factory_smoke_penalty = true,
             _ => {}
         }
     }
@@ -1317,7 +1315,15 @@ pub fn gather_house_neighborhood_with(
                 }
                 Tile::Built(Building::Workshop) if manhattan <= 5 => n_workshop_within_5 += 1,
                 Tile::Built(Building::Factory) if manhattan <= 5 => n_workshop_within_5 += 2,
-                Tile::Built(Building::Refinery) if manhattan <= 5 => n_workshop_within_5 += 4,
+                Tile::Built(Building::Refinery) if manhattan <= 5 => {
+                    n_workshop_within_5 += 4;
+                    // Refinery の煙害は半径 2 タイル (Factory の倍) に及ぶ。
+                    // `synergy_income_value` の Refinery アームと同じ半径で評価する
+                    // ことで、AI の placement 評価と実シミュレーションの Tier 判定を一致させる。
+                    if manhattan <= 2 {
+                        factory_smoke_penalty = true;
+                    }
+                }
                 Tile::Built(Building::Office) if manhattan <= 5 => n_office_within_5 += 1,
                 Tile::Built(Building::Headquarters) if manhattan <= 5 => {
                     n_office_within_5 += 3;
@@ -3929,6 +3935,46 @@ mod tests {
         };
         // Highrise 条件を満たすが煙害で Apartment に降格。
         assert_eq!(house_tier_for(stats), HouseTier::Apartment);
+    }
+
+    /// Refinery は Factory の 2 倍半径 (manhattan 距離 2 以内) で煙害を出す。
+    /// 4-近傍ループだけで判定すると距離 2 を取りこぼし、AI の placement 評価
+    /// (`synergy_income_value` は manh<=2 で smoke flag を立てる) と実シミュレーションの
+    /// Tier 判定が乖離するため、外側スキャンで距離 2 を拾う。
+    #[test]
+    fn refinery_smoke_penalty_reaches_distance_two() {
+        let mut city = City::new();
+        for x in 0..8 {
+            place_edge_road(&mut city, x);
+        }
+        // (3, 1) に House を置き、(3, 3) (Manhattan 距離 2) に Refinery を配置。
+        // 4-近傍に煙害源は無いが Refinery が距離 2 にあるので penalty が立つこと。
+        city.set_tile(3, 1, Tile::Built(Building::House));
+        city.set_tile(3, 3, Tile::Built(Building::Refinery));
+        let connected = compute_edge_connected_roads(&city);
+        let stats = gather_house_neighborhood_with(&city, 3, 1, &connected);
+        assert!(
+            stats.factory_smoke_penalty,
+            "Refinery at manhattan distance 2 should trigger smoke penalty"
+        );
+    }
+
+    /// Refinery が距離 3 以上離れていれば煙害は届かない (上限ガード)。
+    #[test]
+    fn refinery_smoke_penalty_does_not_reach_distance_three() {
+        let mut city = City::new();
+        for x in 0..8 {
+            place_edge_road(&mut city, x);
+        }
+        city.set_tile(3, 1, Tile::Built(Building::House));
+        // Manhattan 距離 3 = (3, 4)
+        city.set_tile(3, 4, Tile::Built(Building::Refinery));
+        let connected = compute_edge_connected_roads(&city);
+        let stats = gather_house_neighborhood_with(&city, 3, 1, &connected);
+        assert!(
+            !stats.factory_smoke_penalty,
+            "Refinery at manhattan distance 3 should NOT trigger smoke penalty"
+        );
     }
 
     /// Mall は Shop 2 つぶんの経済密度寄与 (n_shop_within_5 += 2)。
