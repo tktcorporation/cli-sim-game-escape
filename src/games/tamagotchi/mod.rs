@@ -235,6 +235,20 @@ mod tests {
     }
 
     #[test]
+    fn pet_pane_click_while_dead_is_no_op() {
+        // 死亡中はペット領域タップで誤って世代を進めない。render 側で
+        // ACT_PET 登録を抑制しているが、万一 stale な ACT_PET イベントが
+        // 配送されても logic::pet は alive 限定 no-op なので影響しない。
+        let mut g = TamagotchiGame::new();
+        g.handle_input(&click(ACT_HATCH));
+        g.state.stage = state::Stage::Dead;
+        g.state.generation = 2;
+        g.handle_input(&click(ACT_PET));
+        assert!(g.state.is_dead());
+        assert_eq!(g.state.generation, 2);
+    }
+
+    #[test]
     fn space_during_death_is_no_op() {
         // 死亡直後の連打事故を防ぐため、Space は dead 状態で世代を進めない。
         let mut g = TamagotchiGame::new();

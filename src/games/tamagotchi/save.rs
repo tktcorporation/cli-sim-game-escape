@@ -9,9 +9,10 @@ use super::state::{Stage, Stats, TamaState};
 #[cfg(any(target_arch = "wasm32", test))]
 const SAVE_VERSION: u32 = 1;
 
-/// ロード時に許容する最小バージョン。これより古い save は破棄して新規開始。
-/// 現在は v1 のみだが、将来フィールドを追加する場合 `serde(default)` で
-/// 後方互換を取りつつここを据え置けば既存プレイヤーの世代記録を残せる。
+/// ロード時に許容する最小バージョン。これより古い save は破棄。
+/// 将来フィールドを追加して SAVE_VERSION を bump しても、`serde(default)` が
+/// 旧 save の欠落フィールドを埋めてくれるので、ここを据え置けば既存プレイヤーの
+/// 世代記録 (best_age_ticks / generation) は失われない。
 #[cfg(target_arch = "wasm32")]
 const MIN_COMPATIBLE_VERSION: u32 = 1;
 
