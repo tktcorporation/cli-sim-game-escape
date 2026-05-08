@@ -45,46 +45,55 @@ pub enum Tile {
 
 /// Buildings the AI can place.
 ///
-/// **経済チェーン**: Road (インフラ) → House (人口) → Workshop (生産) →
-/// Shop (販売)。Workshop は House と Shop の中間層として機能し、隣接
-/// House の住民を雇って稼ぐ。Workshop が近くにあると House は Apartment に
-/// 育つ (`logic::house_tier_for` の判定で `n_workshop_within_5` が寄与)。
+/// **経済チェーン (3 段)**:
+///   Road (インフラ) → House (人口・需要源) → Workshop / Shop (供給源) →
+///   Factory / Mall / Office (上位供給) → Park (文化触媒)
 ///
-/// `Park` は経済チェーンと並行する「文化レイヤー」: 直接の収入は無く、
-/// 周囲の House を Apartment / Highrise に育てる触媒として機能する
-/// (`logic::house_tier_for` で `n_park_within_4` が寄与)。緑地保護派の
-/// Eco 戦略 + 高級住宅街を狙う Tier 4 プレイで真価を発揮する。
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// 需給システム上の役割:
+///   - **Workshop / Factory**: 雇用供給。House の働き手 (人口/2) を吸収する。
+///   - **Shop / Mall**: 商業供給。House の消費需要 (人口) を吸収する。
+///   - **Office**: ホワイトカラー雇用供給。Highrise 化を促進する触媒。
+///   - **Park**: 文化供給。直接収入はなく Highrise 化の最終条件を満たすため。
+///
+/// 上位建物 (Factory/Mall/Office) は基本建物よりコストが高く、供給キャパシティと
+/// 収入上限が大きい。`logic::compute_supply` / `compute_demand_at` がここを参照。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Building {
     /// Connector: enables shops to be supplied.
     Road,
-    /// Adds population.
+    /// Adds population.  Tier (Cottage/Apartment/Highrise) is a derived value
+    /// computed from neighborhood + demand-supply ratio in `logic::house_tier_for`.
     House,
-    /// 工房。隣接 House (労働力) と Road 接続が必要。Shop より早期に開けて
-    /// 「家 → 職場」の経済段階を担当する。
+    /// 工房 (基礎雇用)。隣接 House (労働力) と Road 接続が必要。
     Workshop,
-    /// Generates cash, but only if it has at least one road neighbor AND
-    /// at least one house within Manhattan distance 3 (a "customer base").
+    /// 工場 (Workshop 上位)。雇用キャパシティが Workshop の約 3 倍。
+    /// 隣接 House の Tier を 1 段下げる「煙害」デバフを持つため、純経済特化の
+    /// プレイヤーが住宅地から離して配置する判断を強いる。
+    Factory,
+    /// 商店 (基礎商業)。Road 接続 + 距離 3 以内 House で活性。
     Shop,
-    /// 公園。直接の収入は無いが、周囲 4 マス以内の House を Apartment 化
-    /// する経済刺激源として機能する (Workshop / Shop と同等の Tier 上昇寄与)。
-    /// 道路接続不要 — 緑地として独立配置可能。
+    /// 大型商業 (Shop 上位)。商業キャパシティが Shop の約 3 倍で、
+    /// Apartment / Highrise 住人にプレミアム需要を返す (= 高 Tier 街区で真価)。
+    Mall,
+    /// オフィスビル。ホワイトカラー雇用を供給し、周囲 House を Highrise 化
+    /// する触媒。Park の経済版に近い役割で「成熟街区を Highrise に押し上げる」
+    /// ための後半ピース。
+    Office,
+    /// 公園 (文化触媒)。直接収入なし。Highrise 化の最終条件である「文化需要
+    /// 充足」を担う。道路接続不要。
     Park,
     /// **開拓機材** — 隣接する Rock セルの整地を可能にする特殊建物。
-    /// AI (Tier 4/5) が `placement_value` で判定して自分で建てる
-    /// (saturation 時に既存 Empty の value が下がり Outpost の future_potential
-    /// が相対勝ちする設計)。プレイヤーは戦略選択でしか派遣ペースを変えられない。
-    /// 高価 ($600)、長時間建設 (600 ticks = 60 sec)。
-    /// 一度設置すると周囲 4-近傍の Rock を順次破砕できるようになる。
+    /// AI (Tier 4/5) が `placement_value` で判定して自分で建てる。
     Outpost,
 }
 
 impl Building {
     /// One-time build cost in cash.
     ///
-    /// バランス: Workshop は Shop より安く ($100 vs $150) 早期に開ける。
-    /// Park は安め ($80) で「街並み演出」として気軽に置けるが、
-    /// 直接収入が無い分、純粋投資としては効率が悪い (= Highrise 化の触媒専用)。
+    /// バランス階段 (基礎 → 上位):
+    ///   - Workshop $100 → Factory $300 (3x): 雇用キャパが 3 倍
+    ///   - Shop $150 → Mall $400 (~2.7x): 商業キャパが 3 倍
+    ///   - Office $250: 単独枠 (Highrise 化の触媒、Mall と Factory の中間価格)
     pub fn cost(self) -> i64 {
         match self {
             Building::Road => 10,
@@ -92,19 +101,28 @@ impl Building {
             Building::Park => 80,
             Building::Workshop => 100,
             Building::Shop => 150,
+            Building::Office => 250,
+            Building::Factory => 300,
+            Building::Mall => 400,
             Building::Outpost => 600,
         }
     }
 
     /// Ticks needed to finish construction.
+    ///
+    /// 上位建物は Build 時間も比例して長く、$/sec の即時 ROI で見ると基礎建物が
+    /// 序盤有利・上位建物が中盤以降に開く流れ。
     pub fn build_ticks(self) -> u32 {
         match self {
             Building::Road => 30,        // 3 sec
             Building::House => 100,      // 10 sec
-            Building::Park => 80,        // 8 sec — 短め (整地+植栽だけ)
-            Building::Workshop => 150,   // 15 sec — Shop より少し短い
+            Building::Park => 80,        // 8 sec
+            Building::Workshop => 150,   // 15 sec
             Building::Shop => 200,       // 20 sec
-            Building::Outpost => 600,    // 60 sec — 重機の搬入・組立・試運転
+            Building::Office => 220,     // 22 sec — オフィスは内装に時間
+            Building::Factory => 280,    // 28 sec — 重工業は搬入が長い
+            Building::Mall => 320,       // 32 sec — 大型商業
+            Building::Outpost => 600,    // 60 sec
         }
     }
 
@@ -371,6 +389,13 @@ pub struct City {
     /// 一時状態 (永続化しない、タブ切替時にリセット)。
     pub panel_scroll: Cell<u16>,
 
+    /// `population()` の per-frame メモ化キャッシュ。Tier 連動の精密集計は
+    /// O(houses + GRID²) と重いため、render が同 frame 内で複数回呼ぶケースで
+    /// 再計算を避ける。`None` の時に算出 → 次回までキャッシュ。
+    /// grid を変更する操作 (set_tile / 建設完成 / 撤去 / 整地完了 / save ロード)
+    /// では invalidate して `None` に戻す。
+    pub population_cache: Cell<Option<u32>>,
+
     /// タブ復帰時のオフライン進行ボーナス通知。`Some` の間は `render` が
     /// 中央モーダルを上書き描画し、`handle_input` が通常操作をブロックして
     /// 任意の入力で `None` に戻す。
@@ -466,8 +491,15 @@ impl City {
             cam_y,
             selected_cell: None,
             panel_scroll: Cell::new(0),
+            population_cache: Cell::new(None),
             pending_offline_welcome: None,
         }
+    }
+
+    /// grid 構造を変更した時にキャッシュ済み人口を無効化する。
+    /// `set_tile` / 建設完成 / 撤去 / 整地 / セーブロード のあとで呼ぶ。
+    pub fn invalidate_population_cache(&self) {
+        self.population_cache.set(None);
     }
 
     /// カメラを (dx, dy) だけ移動。`GRID_W - VIEW_W` を上限にクランプ。
@@ -515,6 +547,7 @@ impl City {
     #[cfg(test)]
     pub fn set_tile(&mut self, x: usize, y: usize, t: Tile) {
         self.grid[y][x] = t;
+        self.invalidate_population_cache();
     }
 
     /// How many constructions are currently active.
@@ -555,9 +588,23 @@ impl City {
         n
     }
 
-    /// Population from finished houses.  Each House holds 5.
+    /// Tier 連動の正確な人口 (Apartment 12 / Highrise 30 を反映)。
+    ///
+    /// 内部で edge-connectivity BFS と全 House の Tier 評価を走らせる O(houses + GRID²)
+    /// 計算を伴うが、`population_cache` で per-frame メモ化しているため
+    /// 同 frame 内で複数回呼んでも 1 度しか走らない。grid を変更した後は
+    /// `invalidate_population_cache()` を呼ぶ規約。
+    ///
+    /// UI のバナー / Status / 詳細表示と AI Tier 2/3 の人口ゲートはすべて
+    /// この値を参照する。`detect_tier_advance` の閾値判定もここを通るため、
+    /// 表示と進化判定が常に一致する。
     pub fn population(&self) -> u32 {
-        self.count_built(Building::House) * 5
+        if let Some(p) = self.population_cache.get() {
+            return p;
+        }
+        let p = super::logic::tier_aware_population(self);
+        self.population_cache.set(Some(p));
+        p
     }
 
     /// Convenience: 指定セルの地形。境界外は Plain 扱い。

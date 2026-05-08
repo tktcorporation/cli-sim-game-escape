@@ -130,7 +130,7 @@ fn tier1_random(city: &mut City) -> AiAction {
 /// 整理する」という greedy 流の発想を反映。普通の状況では撤去しない。
 fn tier2_greedy(city: &mut City) -> AiAction {
     let roll = (city.next_rand() % 100) as u32;
-    let kind = if roll < 50 {
+    let mut kind = if roll < 50 {
         Building::House
     } else if roll < 80 {
         Building::Road
@@ -138,17 +138,34 @@ fn tier2_greedy(city: &mut City) -> AiAction {
         Building::Shop
     };
 
+    // Tier 2 でも需給を満たすため、人口が伸びた時に Workshop / Mall を
+    // 確率的に選ぶ。Shop だけでは需給連動の収入カーブが頭打ちになる。
+    if matches!(kind, Building::Shop) {
+        let houses = city.count_built(Building::House);
+        let pop = city.population();
+        if pop >= 100 && houses >= 12 && city.cash >= Building::Mall.cost() * 2 {
+            kind = Building::Mall;
+        } else if houses >= 5 && city.cash >= Building::Workshop.cost()
+            && (city.next_rand() % 10) < 4
+        {
+            kind = Building::Workshop;
+        }
+    }
+
     if city.cash < kind.cost() {
         return AiAction::Idle;
     }
 
-    // Same savings + customer-base protections as Tier 1 — Tier 2 is
-    // smarter about *where* it places things, not about *what economy*
-    // to build.
     if !matches!(kind, Building::House) && city.cash < Building::House.cost() {
         return AiAction::Idle;
     }
     if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 {
+        return AiAction::Idle;
+    }
+    if matches!(kind, Building::Mall) && city.count_built(Building::House) < 6 {
+        return AiAction::Idle;
+    }
+    if matches!(kind, Building::Workshop) && city.count_built(Building::House) < 2 {
         return AiAction::Idle;
     }
 
@@ -285,13 +302,34 @@ fn tier3_road_planner(city: &mut City) -> AiAction {
     let house_pct = 100 - road_pct - shop_pct; // 合計 100 を厳守
 
     let roll = (city.next_rand() % 100) as u32;
-    let kind = if roll < house_pct {
+    let mut kind = if roll < house_pct {
         Building::House
     } else if roll < house_pct + road_pct {
         Building::Road
     } else {
         Building::Shop
     };
+
+    // Tier 3 でも需給連動に追従するための「上位建物アップグレード」:
+    // 街区が育ったら Shop の代わりに Mall を、雇用が必要なら Workshop / Factory を、
+    // Highrise 化を狙うなら Office を選ぶ。Tier 3 が `placement_value` を持たない
+    // 中で、人口節目に応じた建物選択で Tier 4 との差を縮める。
+    if matches!(kind, Building::Shop) {
+        let pop = city.population();
+        let houses = city.count_built(Building::House);
+        if pop >= 80 && houses >= 12 && city.cash >= Building::Mall.cost() * 2 {
+            // 大型商業の出番。
+            kind = Building::Mall;
+        } else if matches!(city.strategy, Strategy::Income) && houses >= 5
+            && city.cash >= Building::Workshop.cost()
+        {
+            // Income 戦略は商業だけでなく雇用 (Workshop) も並行投資。
+            // Workshop は Shop 半額、shop_pct のうち約 30% を Workshop に振る。
+            if (city.next_rand() % 10) < 3 {
+                kind = Building::Workshop;
+            }
+        }
+    }
 
     if city.cash < kind.cost() {
         return AiAction::Idle;
@@ -300,6 +338,12 @@ fn tier3_road_planner(city: &mut City) -> AiAction {
         return AiAction::Idle;
     }
     if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 {
+        return AiAction::Idle;
+    }
+    if matches!(kind, Building::Mall) && city.count_built(Building::House) < 6 {
+        return AiAction::Idle;
+    }
+    if matches!(kind, Building::Workshop) && city.count_built(Building::House) < 2 {
         return AiAction::Idle;
     }
 
@@ -311,7 +355,10 @@ fn tier3_road_planner(city: &mut City) -> AiAction {
         // Outpost も AI は建てないが網羅性のため。
         Building::House
         | Building::Shop
+        | Building::Mall
         | Building::Workshop
+        | Building::Factory
+        | Building::Office
         | Building::Park
         | Building::Outpost => (0..GRID_H)
             .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
@@ -396,11 +443,20 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
         if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 {
             return false;
         }
+        if matches!(kind, Building::Mall) && city.count_built(Building::House) < 6 {
+            return false;
+        }
         if matches!(kind, Building::Workshop) && city.count_built(Building::House) < 2 {
             return false;
         }
-        // savings protection: 高コスト建物 (Workshop/Shop/Park) を建てたら
-        // House を建てる原資を割る場合は避ける。Outpost は飽和時専用なので例外。
+        if matches!(kind, Building::Factory) && city.count_built(Building::House) < 5 {
+            return false;
+        }
+        if matches!(kind, Building::Office) && city.count_built(Building::House) < 4 {
+            return false;
+        }
+        // savings protection: 高コスト建物を建てたら House を建てる原資を割る
+        // 場合は避ける。Outpost は飽和時専用なので例外。
         if !matches!(kind, Building::House | Building::Outpost)
             && (virtual_cash - cost) < house_cost
         {
@@ -487,7 +543,10 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
         Building::House,
         Building::Road,
         Building::Workshop,
+        Building::Factory,
         Building::Shop,
+        Building::Mall,
+        Building::Office,
         Building::Park,
     ];
     for &(x, y) in &regular {
@@ -659,7 +718,16 @@ fn simulate_second_step_value(
         if matches!(k2, Building::Shop) && virt.count_built(Building::House) < 3 {
             return false;
         }
+        if matches!(k2, Building::Mall) && virt.count_built(Building::House) < 6 {
+            return false;
+        }
         if matches!(k2, Building::Workshop) && virt.count_built(Building::House) < 2 {
+            return false;
+        }
+        if matches!(k2, Building::Factory) && virt.count_built(Building::House) < 5 {
+            return false;
+        }
+        if matches!(k2, Building::Office) && virt.count_built(Building::House) < 4 {
             return false;
         }
         if !matches!(k2, Building::House | Building::Outpost)
@@ -724,6 +792,7 @@ fn clone_city_for_lookahead(city: &City) -> City {
         cam_y: city.cam_y,
         selected_cell: None,
         panel_scroll: std::cell::Cell::new(0),
+        population_cache: std::cell::Cell::new(None),
         pending_offline_welcome: None,
     }
 }
