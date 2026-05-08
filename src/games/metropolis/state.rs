@@ -525,6 +525,7 @@ impl City {
             return None;
         }
         // cents/sec = (Δ$ * 100) * TICKS_PER_SEC / Δticks
+        // Δ$ は撤去・建設で減ると負になる。i64 セマンティクスで符号は保たれる。
         let cents_diff = self.cash.saturating_sub(c0).saturating_mul(100);
         Some(cents_diff.saturating_mul(TICKS_PER_SEC as i64) / dt_ticks)
     }

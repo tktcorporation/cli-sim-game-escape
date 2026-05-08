@@ -1411,7 +1411,7 @@ pub fn demolish_at(city: &mut City, x: usize, y: usize) -> bool {
 ///
 /// 短い (例: 30 秒) ほど AI は積極的に撤去する。長い (例: 120 秒) ほど慎重。
 /// 90 秒は「中央 ($50) の撤去は 1 軒分の余剰 income で回収できる」程度の
-/// 慎重さ。これより短いと AI が中央を頻繁に整理して thrash が再発する。
+/// 慎重さ。短すぎると AI が中央を頻繁に整理して撤去/再建ループに陥る。
 const DEMO_PAYBACK_SECS: i64 = 90;
 
 /// 撤去価値 (cents/sec 単位、`auto_demolish_target` と AI 評価の両方が参照)。
