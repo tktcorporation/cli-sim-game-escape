@@ -584,6 +584,8 @@ fn extract_save(state: &City) -> SaveData {
         selected_cell: _,
         // 右パネル縦スクロール (UI 状態、再ロード後はリセット)。
         panel_scroll: _,
+        // ROI 表示用の cash サンプル (一時状態、再ロード後はリセット)。
+        cash_history: _,
     } = state;
 
     let mut tiles = Vec::with_capacity(GRID_W * GRID_H);

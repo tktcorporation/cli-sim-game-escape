@@ -17,7 +17,7 @@ pub enum AiAction {
     /// 撤去。全 Tier の AI が生成する:
     ///   - Tier 1: 5% 確率で `auto_demolish_target` を試す
     ///   - Tier 2: 隣接候補が枯渇した時のみ
-    ///   - Tier 3: 機能不全 (score >= 200) を build より優先撤去
+    ///   - Tier 3: 機能不全 (demolish_value >= 80 cents/sec) を build より優先撤去
     ///   - Tier 4/5: `placement_value` (build) と `demolish_value` を 1 つの
     ///     max 選択に統合し、撤去価値が勝った時に生成
     ///
@@ -261,10 +261,11 @@ fn is_empty_next_to_building(city: &City, x: usize, y: usize) -> bool {
 /// inactive Shop / Workshop / 役目を終えた Outpost) なら撤去を build より
 /// 優先する。「道路網優先」の思想と整合: 網の中に dead 建物があれば取り除く。
 fn tier3_road_planner(city: &mut City) -> AiAction {
-    // 機能不全建物 (score >= 200, = inactive Shop 相当) があれば優先撤去。
-    // 網の整理を先回り — Tier 3 の特徴付け。reserve ガード必須。
+    // 機能不全建物 (score >= 80 cents/sec, = 中央付近の inactive Shop 相当) が
+    // あれば優先撤去。網の整理を先回り — Tier 3 の特徴付け。reserve ガード必須。
+    // 閾値は demolish_value の cents/sec 単位で「中央のはっきりミス」に相当する強度。
     if let Some((dx, dy, score)) = super::logic::auto_demolish_target(city) {
-        if score >= 200 && can_afford_demolish(city, dx, dy) {
+        if score >= 80 && can_afford_demolish(city, dx, dy) {
             return AiAction::Demolish { x: dx, y: dy };
         }
     }
@@ -724,6 +725,7 @@ fn clone_city_for_lookahead(city: &City) -> City {
         cam_y: city.cam_y,
         selected_cell: None,
         panel_scroll: std::cell::Cell::new(0),
+        cash_history: std::collections::VecDeque::new(),
     }
 }
 

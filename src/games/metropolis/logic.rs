@@ -624,6 +624,8 @@ fn accrue_income(city: &mut City) {
         city.last_payout_amount = income;
         city.last_payout_tick = city.tick;
     }
+    // 累積後の cash を 1 秒間隔で記録 — 10s ROI の元データ。
+    city.record_cash_sample();
     // Codex review #103 P1 対策: payout flash 検出ループは shop の数だけ
     // BFS を再計算していた。connected を 1 度だけ計算して shop_is_active_with
     // を使う (= shop 数 N に対し O(GRID_W*GRID_H) → O(N) の差は実質ゼロだが、
@@ -1387,38 +1389,39 @@ pub fn demolish_at(city: &mut City, x: usize, y: usize) -> bool {
 
 // ── 撤去評価関数 (AI が `placement_value` と並べて比較) ─────────────
 //
-// `demolish_value` が「撤去すれば街が改善する量」を返し、AI (`ai::decide`) が
-// `placement_value` の最良候補と直接比較する。値の大小だけが意味を持つ
-// 相対スコア (cents/sec とは厳密には揃わないが、cost_penalty を /10 にする
-// ことで「中央のミスは即撤去 / 外周は滅多に撤去しない」という直感に
-// 沿う挙動になる)。
+// `demolish_value` は cents/sec 単位。`placement_value` と同じ天秤で
+// 直接比較できる (= AI は max(build_value, demolish_value) で action を選ぶ)。
 //
-// 「無駄な建物」の定義:
-//   1. 機能不全 (inactive Shop / Workshop, Road 接続無し House)
-//   2. 役目を終えた (Outpost で周囲に Rock が無い、孤立 Road, House 無し Park)
-//   3. 老朽化 (寿命が尽きて income が大きく目減りしている)
+// 評価式:
+//   demolish_value = max(0, best_replacement - current_income)  // 改善ポテンシャル
+//                  + functional_bonus                            // 明らかに無駄な建物への加点
+//                  + aging_bonus                                 // 老朽建物の建て替えボーナス
+//                  - demolish_cost * 100 / DEMO_PAYBACK_SECS     // 撤去コストの amortize
 //
-// 中央 ($50) のミスは coast_penalty 5 で撤去価値が大きく残るが、外周 ($2050)
-// では penalty 205 で機能不全 +250 でも余裕は +45 しかない。プレイヤーが
-// 「外側に建てる前に再考しろ」と誘導される設計。
+// **「同じものを建て直すだけの撤去」は自然に負の評価になる** のがポイント:
+// 例えば inactive Shop を撤去しても周辺条件 (road 接続) が変わらなければ、
+// best_replacement の Shop 候補も inactive (income 0) になる。
+// improvement = 0 のため demolish cost が単に引かれるだけで、AI は撤去を見送る。
+//
+// 一方、中央のミス (= 周りに資源がない場所の建物) は best_replacement に
+// 別 kind が選ばれて improvement が出る、または functional_bonus と aging_bonus
+// で底上げされ、撤去が正当化される。
 
-/// 撤去価値 (`auto_demolish_target` と AI 評価の両方が参照)。
+/// 撤去コストの amortize 期間 (秒)。撤去 → 別の建物を建て直して回収する期間の目安。
 ///
-/// **正の値** = 撤去で街の状態を改善できる量、
+/// 短い (例: 30 秒) ほど AI は積極的に撤去する。長い (例: 120 秒) ほど慎重。
+/// 90 秒は「中央 ($50) の撤去は 1 軒分の余剰 income で回収できる」程度の
+/// 慎重さ。これより短いと AI が中央を頻繁に整理して thrash が再発する。
+const DEMO_PAYBACK_SECS: i64 = 90;
+
+/// 撤去価値 (cents/sec 単位、`auto_demolish_target` と AI 評価の両方が参照)。
+///
+/// **正の値** = 撤去で街の cents/sec が改善する量、
 /// **i64::MIN** = 撤去対象外 (Empty / Construction セル等)。
 /// 0 やマイナス = 撤去すべきでない (機能してる建物 / コスト負け)。
 ///
-/// 設計: 各 building に「機能不全なら +X」の固定加点を載せ、老朽化建物には
-/// aging recovery 加点を足し、最後に `demolish_cost / 10` を引く。
-/// 単位は無次元のスコアだが、Tier 4/5 の AI は `placement_value` (cents/sec)
-/// と直接比較して action を選ぶ。スケールが厳密に一致しないため、Build と
-/// Demolish の選好は cost_penalty の係数とこの加点値の組み合わせで決まる。
-///
-/// **AI 統合**: Tier 4/5 はこの値を `placement_value` と並べて max 選択する。
-/// 中央のミス (= cost_penalty が小さい inactive Shop など) は build を上回り
-/// やすく、外周は coast_penalty が膨らむため build/idle が勝つ。
-/// 全 Tier の AI が `decide()` 経由で参照 (Tier 1-3 はトリガー限定の撤去、
-/// Tier 4/5 は build と同時比較)。`auto_demolish_target_with` がこの値の最大を選ぶ。
+/// `placement_value` と同じ単位で返すことで、AI は両者を直接比較して
+/// max を取れる (= `tier4_value_search` の build vs demolish 選択)。
 pub fn demolish_value(city: &City, x: usize, y: usize, connected: &[Vec<bool>]) -> i64 {
     let kind = match city.tile(x, y) {
         Tile::Built(b) => *b,
@@ -1427,51 +1430,69 @@ pub fn demolish_value(city: &City, x: usize, y: usize, connected: &[Vec<bool>]) 
 
     let edge_ok = is_building_edge_connected(connected, x, y);
 
-    let mut score: i64 = 0;
-    match kind {
+    // 「明らかに無駄な建物」への functional_bonus と「機能している」フラグを同時に算出。
+    // 機能している建物 (Road が街に組み込まれている、Shop が活性、等) は撤去対象外で
+    // improvement_potential も 0 とする。これは `best_replacement_value` が「Road を
+    // 取り除いて House に置き換える」シナリオを過大評価する誤差を抑える役割もある
+    // (Road を抜くと周辺 House の edge connectivity が失われるが、connected 配列は
+    // 撤去前のもので評価されるため)。
+    let mut functional_bonus: i64 = 0;
+    let is_functional = match kind {
         Building::Shop => {
-            if !shop_is_active_with(city, x, y, connected) {
-                score += 250;
+            let active = shop_is_active_with(city, x, y, connected);
+            if !active {
+                functional_bonus += 60;
             }
+            active
         }
         Building::Workshop => {
-            if !workshop_is_active_with(city, x, y, connected) {
-                score += 200;
+            let active = workshop_is_active_with(city, x, y, connected);
+            if !active {
+                functional_bonus += 50;
             }
+            active
         }
         Building::Outpost => {
             // 役目を終えた Outpost (周囲 4-近傍に Rock が無い) は撤去候補。
-            if count_rock_neighbors(city, x, y) == 0 {
-                score += 300;
+            let has_rock = count_rock_neighbors(city, x, y) > 0;
+            if !has_rock {
+                functional_bonus += 80;
             }
+            has_rock
         }
         Building::House => {
-            // edge 未接続 Cottage は収入半減のため撤去価値が上昇。
-            // 完全孤立 (Road も House 隣接も無し) は更に追加。
+            // edge 未接続 Cottage は収入半減 + 完全孤立は更に問題。
             let stats = gather_house_neighborhood_with(city, x, y, connected);
             if !edge_ok {
-                score += 60;
+                functional_bonus += 20;
             }
-            if stats.n_road_adj == 0 && stats.n_house_within_3 == 0 {
-                score += 80;
+            let isolated = stats.n_road_adj == 0 && stats.n_house_within_3 == 0;
+            if isolated {
+                functional_bonus += 30;
             }
+            edge_ok && !isolated
         }
         Building::Road => {
             // 行き止まりの孤立 Road (隣接 Built が 0)。
-            if !has_any_neighbor_built(city, x, y) {
-                score += 60;
+            let has_neighbor = has_any_neighbor_built(city, x, y);
+            if !has_neighbor {
+                functional_bonus += 25;
             }
+            has_neighbor
         }
         Building::Park => {
             // Park は Manhattan 4 以内に House が無いと触媒として機能しない。
-            if !has_house_within(city, x, y, 4) {
-                score += 100;
+            let supported = has_house_within(city, x, y, 4);
+            if !supported {
+                functional_bonus += 35;
             }
+            supported
         }
-    }
+    };
 
     // 老朽化ボーナス: 寿命が尽きた建物は「再建すれば収入が回復する」候補。
     // 不老建物 (Park/Road) は age 関係なく加点しない (= 永続資産扱い)。
+    let mut aging_bonus: i64 = 0;
     if city.built_at_tick[y][x] != 0 {
         let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
         let tier_opt = if matches!(kind, Building::House) {
@@ -1485,20 +1506,115 @@ pub fn demolish_value(city: &City, x: usize, y: usize, connected: &[Vec<bool>]) 
         let lifespan = lifespan_x100(kind, tier_opt);
         let factor = aging_factor_per_mille(age, lifespan);
         if factor <= 600 {
-            score += 80;
+            aging_bonus += 30;
         } else if factor <= 750 {
-            score += 30;
+            aging_bonus += 10;
         }
     }
 
-    if score == 0 {
-        return i64::MIN;
-    }
+    // 改善ポテンシャル: このセルを空にして再構築した時の最良 placement_value から
+    // 現在の cell income を引いた cents/sec。同種を建て直すだけで条件が変わらない
+    // (周辺の road が無いまま、houses が無いまま、等) なら 0 近くに収束し、撤去は
+    // 割に合わなくなる。これが「撤去 → 同じものを再建」を抑制するキーロジック。
+    //
+    // 機能している建物では 0 に固定。`best_replacement_value` は connected を
+    // 撤去前の状態で評価するため、Road / 接続 House を別 kind に置き換えた時の
+    // edge connectivity 喪失を見逃して improvement を過大評価する誤差を防ぐ。
+    let improvement = if is_functional {
+        0
+    } else {
+        let cur_income = cell_current_income_cents(city, x, y, connected);
+        let best_repl = best_replacement_value(city, x, y, kind, connected);
+        (best_repl - cur_income).max(0)
+    };
 
-    // コスト割引: 中央 ($50) → -5、外周 ($2050) → -205。
-    // d² 曲線が外周を強くガードし、AI が「外周建物を気軽に撤去」しないようにする。
-    let cost_penalty = demolish_cost(x, y) / 10;
-    score - cost_penalty
+    // 撤去コストの amortize: 60 秒で回収できる前提で cents/sec に換算して減算。
+    // 中央 ($50) → 83 cents/sec、d=5 ($175) → 292、d=10 ($550) → 916。
+    // 外周ほど撤去がペイしなくなるため AI は外周建物を温存する。
+    let demo_cost_amort = demolish_cost(x, y) * 100 / DEMO_PAYBACK_SECS;
+
+    let value = improvement + functional_bonus + aging_bonus - demo_cost_amort;
+    if value <= 0 {
+        i64::MIN
+    } else {
+        value
+    }
+}
+
+/// (x, y) のセルが現在生み出している cents/sec を返す。Built でなければ 0。
+/// `compute_income_per_sec` のセル単位版 — 撤去価値計算で「失う収入」を測る。
+fn cell_current_income_cents(city: &City, x: usize, y: usize, connected: &[Vec<bool>]) -> i64 {
+    let kind = match city.tile(x, y) {
+        Tile::Built(b) => *b,
+        _ => return 0,
+    };
+    let tier_opt = if matches!(kind, Building::House) {
+        let target = house_tier_for(gather_house_neighborhood_with(city, x, y, connected));
+        let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
+        Some(effective_house_tier(target, age))
+    } else {
+        None
+    };
+    let base_cents: i64 = match kind {
+        Building::House => {
+            let tier = tier_opt.expect("house has tier");
+            let raw = match tier {
+                HouseTier::Cottage => 50,
+                HouseTier::Apartment => 150,
+                HouseTier::Highrise => 300,
+            };
+            if !is_building_edge_connected(connected, x, y) {
+                raw / 2
+            } else {
+                raw
+            }
+        }
+        Building::Workshop if workshop_is_active_with(city, x, y, connected) => 100,
+        Building::Shop if shop_is_active_with(city, x, y, connected) => 200,
+        _ => 0,
+    };
+    if base_cents == 0 || city.built_at_tick[y][x] == 0 {
+        return base_cents;
+    }
+    let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
+    let factor = aging_factor_per_mille(age, lifespan_x100(kind, tier_opt)) as i64;
+    (base_cents * factor) / 1000
+}
+
+/// (x, y) を空にした時、そこに建てうる最良の建物の `placement_value` (cents/sec)。
+/// `current_kind` 以外も含めて全種類を試し、max を取る。Outpost は Rock 隣接時のみ
+/// 候補に乗る (placement_value_assume_empty の future_potential が 0 になるため
+/// 自然と落ちる)。
+fn best_replacement_value(
+    city: &City,
+    x: usize,
+    y: usize,
+    current_kind: Building,
+    connected: &[Vec<bool>],
+) -> i64 {
+    let candidates = [
+        Building::House,
+        Building::Road,
+        Building::Workshop,
+        Building::Shop,
+        Building::Park,
+        Building::Outpost,
+    ];
+    let mut best: i64 = 0;
+    for &k in &candidates {
+        let v = placement_value_assume_empty(city, x, y, k, connected);
+        if v == i64::MIN {
+            continue;
+        }
+        if v > best {
+            best = v;
+        }
+    }
+    // 「現状維持できる」リファレンス: 同じ kind を建てた時の評価。
+    // 撤去 → 同種建て直しで improvement = 0 になる前提を担保するため、
+    // best には current_kind の評価も含めておく (= 上のループで含まれている)。
+    let _ = current_kind;
+    best
 }
 
 /// `demolish_value` のオンデマンド版 (BFS 1 回)。
@@ -1683,6 +1799,22 @@ pub fn placement_value(
     if !matches!(city.tile(x, y), Tile::Empty) {
         return i64::MIN;
     }
+    placement_value_assume_empty(city, x, y, kind, connected)
+}
+
+/// `placement_value` の Empty 前提を外した版。撤去評価 (`demolish_value`) が
+/// 「このセルを空にしたら何を建てるのが最善か」を測るために使う。
+///
+/// 注意: 既存建物が Road の場合 `connected` は demolish 後の正しい値ではない
+/// (= 道路撤去で edge connectivity が崩れるケースを過大評価しうる)。
+/// 現実の AI は孤立 Road しか撤去候補に乗せないため許容範囲。
+pub(super) fn placement_value_assume_empty(
+    city: &City,
+    x: usize,
+    y: usize,
+    kind: Building,
+    connected: &[Vec<bool>],
+) -> i64 {
     let terrain = city.terrain_at(x, y);
     if !terrain.buildable() {
         return i64::MIN;
@@ -1951,10 +2083,11 @@ fn future_potential_value(
                 }
                 connected[ny as usize][nx as usize]
             });
-            // /4 ディスカウント: Outpost は cost $600 を回収するのに「Rock 解禁 →
-            // 整地 → 建設」と 2-3 ステップ必要。即時 income と等価に評価すると
-            // 30 min で 70 機材派遣して cash 枯渇する (実機ベンチで観測)。
-            let base = n_rock * FUTURE_CELL_EXPECTATION_CENTS / 4;
+            // /3 ディスカウント: Outpost は cost $600 + Rock 整地 + 建設で 2-3 step
+            // 必要なため即時 income と等価には扱えない。一方で、飽和時の唯一の
+            // 拡張手段としては /4 だと弱すぎ AI が選ばない (= 中央 demolish/rebuild
+            // ループに陥る)。中庸の /3 で「飽和した時の自然な選択肢」になる強度。
+            let base = n_rock * FUTURE_CELL_EXPECTATION_CENTS / 3;
             if near_edge_road {
                 base * 12 / 10
             } else {
@@ -2631,9 +2764,9 @@ mod tests {
         assert_eq!((tx, ty), (cx, cy));
     }
 
-    /// Outpost 派遣のテストは AI 評価関数 (`placement_value`) のテスト経由で
-    /// 担保される (旧 dispatch_outpost / best_outpost_placement は AI 統合により廃止)。
-    /// 「saturation 時に Outpost が高評価になる」性質は `placement_value_*` テストで確認。
+    // Outpost 派遣のテストは AI 評価関数 (`placement_value`) のテスト経由で
+    // 担保される。saturation 時に Outpost が高評価になる性質は `placement_value_*`
+    // テストで確認。
 
     /// Rock セルは隣接 Outpost が無いと start_construction が false を返す。
     #[test]
@@ -2814,13 +2947,14 @@ mod tests {
         );
     }
 
-    /// 老朽化した Cottage は wastefulness_score が加算され、撤去候補になりやすい。
-    /// Phase 3 創設街路 (中央列) を回避するため +5 ずらした孤立位置を使う
-    /// (= !edge_ok で +60、孤立 House で +80、合計 140 が cost penalty を上回る)。
+    /// 孤立 Cottage は wastefulness_score が positive で撤去候補になる。
+    /// 中央寄り (d=2) の位置で評価 — DEMO_PAYBACK_SECS=90 のもとで
+    /// functional_bonus と improvement_potential が demo cost を上回る。
+    /// 創設街路 (中央列 cx) を避けて cx+2 (= 隣接 Road も無し) を使う。
     #[test]
     fn aged_cottage_becomes_demolish_candidate() {
         let mut city = City::new();
-        let cx = GRID_W / 2 + 5;
+        let cx = GRID_W / 2 + 2;
         let cy = GRID_H / 2;
         // 完全孤立した House を置く (隣接 Road も House も無い)。
         city.set_tile(cx, cy, Tile::Built(Building::House));
