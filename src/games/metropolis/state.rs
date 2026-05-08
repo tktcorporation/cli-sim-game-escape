@@ -6,6 +6,7 @@
 //! the game is still progressing.
 
 use std::cell::Cell;
+use std::collections::VecDeque;
 
 /// **マップ全体**の幅 / 高さ (内部データの寸法)。
 /// 表示は `VIEW_W × VIEW_H` の窓 (viewport) に切り取る。
@@ -389,6 +390,13 @@ pub struct City {
     /// 一時状態 (永続化しない、タブ切替時にリセット)。
     pub panel_scroll: Cell<u16>,
 
+    /// 直近の cash サンプル `(tick, cash)`。1 秒ごと (= 10 tick ごと) に push し、
+    /// 12 サンプル (= 12 秒) 保持する。10 秒前との差分を取って「実 cash 増減レート」
+    /// を算出する用途。撤去や建設のキャッシュ流出も含むため、`compute_income_per_sec`
+    /// (理論値) との乖離が thrash の見える化になる。
+    /// 一時状態 (永続化しない、リロード後はリセット)。
+    pub cash_history: VecDeque<(u64, i64)>,
+
     /// `population()` の per-frame メモ化キャッシュ。Tier 連動の精密集計は
     /// O(houses + GRID²) と重いため、render が同 frame 内で複数回呼ぶケースで
     /// 再計算を避ける。`None` の時に算出 → 次回までキャッシュ。
@@ -491,6 +499,7 @@ impl City {
             cam_y,
             selected_cell: None,
             panel_scroll: Cell::new(0),
+            cash_history: VecDeque::new(),
             population_cache: Cell::new(None),
             pending_offline_welcome: None,
         }
@@ -528,6 +537,51 @@ impl City {
         if self.events.len() > MAX_EVENTS {
             self.events.truncate(MAX_EVENTS);
         }
+    }
+
+    /// 1 秒ごとに現在の cash をサンプリングして履歴に積む。直近 12 秒分のみ保持。
+    /// `tick % TICKS_PER_SEC == 0` のタイミングだけ呼ぶ前提
+    /// (1 秒間隔より高頻度に積むとウィンドウ秒数とサンプル数が乖離する)。
+    pub fn record_cash_sample(&mut self) {
+        debug_assert!(
+            self.tick.is_multiple_of(TICKS_PER_SEC as u64),
+            "record_cash_sample must be called once per simulated second",
+        );
+        const KEEP_SAMPLES: usize = 12;
+        self.cash_history.push_back((self.tick, self.cash));
+        while self.cash_history.len() > KEEP_SAMPLES {
+            self.cash_history.pop_front();
+        }
+    }
+
+    /// 直近 `window_secs` 秒の cash 増減レート (cents/sec)。サンプル不足なら None。
+    /// 撤去コストや建設コストも含む実効レート ─ 理論 income との乖離が thrash の指標。
+    ///
+    /// **戻り値は cents/sec**。$1/sec = 100。整数除算で sub-dollar の差が常に 0 に
+    /// 丸められないよう cents 解像度で持つ。$ 表示は呼出側で /100 して整形する。
+    ///
+    /// `target_tick` (= `self.tick - window_secs * TICKS_PER_SEC`) 以降で最古の
+    /// サンプルを基準に diff を取る。サンプルが target_tick より古いものしかない場合は
+    /// その最古サンプルを使うので、起動直後でも「ある期間の平均」を返せる。
+    pub fn cash_flow_per_sec_cents(&self, window_secs: u64) -> Option<i64> {
+        let target_tick = self.tick.saturating_sub(window_secs * TICKS_PER_SEC as u64);
+        let pivot = self
+            .cash_history
+            .iter()
+            .find(|(t, _)| *t >= target_tick)
+            .or_else(|| self.cash_history.front());
+        let (t0, c0) = match pivot {
+            Some(&(t, c)) => (t, c),
+            None => return None,
+        };
+        let dt_ticks = self.tick.saturating_sub(t0) as i64;
+        if dt_ticks <= 0 {
+            return None;
+        }
+        // cents/sec = (Δ$ * 100) * TICKS_PER_SEC / Δticks
+        // Δ$ は撤去・建設で減ると負になる。i64 セマンティクスで符号は保たれる。
+        let cents_diff = self.cash.saturating_sub(c0).saturating_mul(100);
+        Some(cents_diff.saturating_mul(TICKS_PER_SEC as i64) / dt_ticks)
     }
 
     /// xorshift64* — small, deterministic, good enough for placement noise.

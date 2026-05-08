@@ -60,7 +60,9 @@ save_cache() {
   if [ -d "$src" ]; then
     echo "💾 Saving $name cache..."
     mkdir -p "$dest"
-    rsync -a --delete "$@" "$src/" "$dest/"
+    # `--delete-excluded` がないと excluded パスが既存 cache から消えない
+    # (例: 過去ビルドで保存された target/**/incremental が永続的に残留する)。
+    rsync -a --delete --delete-excluded "$@" "$src/" "$dest/"
   fi
 }
 
