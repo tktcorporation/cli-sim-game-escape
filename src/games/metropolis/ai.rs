@@ -499,7 +499,10 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
             top.push((x, y, Building::Outpost, v));
         }
         top.sort_by(|a, b| b.3.cmp(&a.3));
-        top.truncate(12);
+        // 上位 6 候補に絞る (旧 12)。lookahead の CPU 負荷を半減し、Tier 5 の
+        // 1 tick あたり計算量を抑えることで Build スループットを Tier 4 に近づける。
+        // 6 でも `road→house` のような典型シナリオは拾える幅。
+        top.truncate(6);
 
         // 各 top 候補に 2 手目 value を加算。
         // 2 手目候補は仮想着工した世界 (`virt`) で動的に再計算する。
