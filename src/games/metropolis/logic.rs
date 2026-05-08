@@ -288,10 +288,10 @@ fn terrain_name(t: super::terrain::Terrain) -> &'static str {
 /// Let the AI place at most one new construction per tick per free worker.
 /// We cap at `free_workers` per tick to avoid unrealistic burst placement.
 ///
-/// **Demolish action** (Tier 4/5 のみ生成): worker を消費せず実行する。
-/// 撤去はワーカーを使わない事務的アクションなので、cash さえあれば
-/// その tick 内で一回処理する。`placements_left` カウンタには影響させず、
-/// 後続の Build 候補に worker を渡す。
+/// **Demolish action** も Build と同じく 1 worker を消費する。worker を
+/// 消費しないと「Demolish が tick あたり最高評価のまま続く」状況で 1 tick
+/// 内に attempts (= worker×2) 回の連続撤去が走り、cash が一気に枯渇する。
+/// 1 worker 1 アクションに揃えることで「1 tick 1 撤去」を保つ。
 fn drive_ai(city: &mut City) {
     let mut placements_left = city.free_workers();
     let mut attempts = placements_left.saturating_mul(2).max(1);
@@ -304,9 +304,10 @@ fn drive_ai(city: &mut City) {
                 }
             }
             AiAction::Demolish { x, y } => {
-                // 撤去はワーカー不要。`placements_left` に影響させずに次の loop へ。
-                // 失敗 (cash 不足等) なら break して busy-loop を防ぐ。
-                if !demolish_at(city, x, y) {
+                if demolish_at(city, x, y) {
+                    placements_left -= 1;
+                } else {
+                    // 失敗 (cash 不足等) なら break して busy-loop を防ぐ。
                     break;
                 }
             }

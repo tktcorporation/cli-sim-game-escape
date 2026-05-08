@@ -23,6 +23,9 @@ pub enum AiAction {
     ///
     /// 全経路で `can_afford_demolish` (= cost + min_cash_reserve) を満たすか
     /// 確認してから生成される。デフレ螺旋ガード。
+    ///
+    /// `drive_ai` 側では Build と同じく 1 worker を消費する (= 1 tick 1 撤去
+    /// 上限)。撤去が連続発火して cash が一気に枯渇するのを防ぐため。
     Demolish {
         x: usize,
         y: usize,
