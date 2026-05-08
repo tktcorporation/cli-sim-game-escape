@@ -558,6 +558,8 @@ fn extract_save(state: &City) -> SaveData {
         last_payout_tick: _,
         // 選択中セル (UI 状態、再ロード後はリセット)。
         selected_cell: _,
+        // 人口キャッシュ (per-frame メモ化、ロード時は再計算でよい)。
+        population_cache: _,
         // 右パネル縦スクロール (UI 状態、再ロード後はリセット)。
         panel_scroll: _,
     } = state;
@@ -726,6 +728,9 @@ fn apply_save(state: &mut City, save: &GameSave) {
             *v = 0;
         }
     }
+    // 旧 grid のままだったキャッシュをクリア。次回 population() 呼び出しで
+    // ロード後の Tier 連動人口が計算される。
+    state.invalidate_population_cache();
 }
 
 /// localStorage を取得する。WASM 環境のみ。

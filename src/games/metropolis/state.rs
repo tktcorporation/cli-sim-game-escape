@@ -388,6 +388,13 @@ pub struct City {
     /// `&City` で渡る render 内で clamp する都合で `Cell` を採用。
     /// 一時状態 (永続化しない、タブ切替時にリセット)。
     pub panel_scroll: Cell<u16>,
+
+    /// `population()` の per-frame メモ化キャッシュ。Tier 連動の精密集計は
+    /// O(houses + GRID²) と重いため、render が同 frame 内で複数回呼ぶケースで
+    /// 再計算を避ける。`None` の時に算出 → 次回までキャッシュ。
+    /// grid を変更する操作 (set_tile / 建設完成 / 撤去 / 整地完了 / save ロード)
+    /// では invalidate して `None` に戻す。
+    pub population_cache: Cell<Option<u32>>,
 }
 
 pub const MAX_EVENTS: usize = 8;
@@ -463,7 +470,14 @@ impl City {
             cam_y,
             selected_cell: None,
             panel_scroll: Cell::new(0),
+            population_cache: Cell::new(None),
         }
+    }
+
+    /// grid 構造を変更した時にキャッシュ済み人口を無効化する。
+    /// `set_tile` / 建設完成 / 撤去 / 整地 / セーブロード のあとで呼ぶ。
+    pub fn invalidate_population_cache(&self) {
+        self.population_cache.set(None);
     }
 
     /// カメラを (dx, dy) だけ移動。`GRID_W - VIEW_W` を上限にクランプ。
@@ -511,6 +525,7 @@ impl City {
     #[cfg(test)]
     pub fn set_tile(&mut self, x: usize, y: usize, t: Tile) {
         self.grid[y][x] = t;
+        self.invalidate_population_cache();
     }
 
     /// How many constructions are currently active.
@@ -551,18 +566,23 @@ impl City {
         n
     }
 
-    /// Population from finished houses (concise approximation).
+    /// Tier 連動の正確な人口 (Apartment 12 / Highrise 30 を反映)。
     ///
-    /// 全 House を Cottage 定員で数える軽量版。`render` の per-frame 表示や
-    /// AI のラフな判断に使う。Tier 連動で「Highrise 化したら街の総人口が
-    /// 爆発する」という設計上の核は、`logic::tier_aware_population` 経由で
-    /// `detect_tier_advance` (= `city_tier_for` の閾値判定) と Status タブ
-    /// 詳細表示など必要箇所だけが利用する。
+    /// 内部で edge-connectivity BFS と全 House の Tier 評価を走らせる O(houses + GRID²)
+    /// 計算を伴うが、`population_cache` で per-frame メモ化しているため
+    /// 同 frame 内で複数回呼んでも 1 度しか走らない。grid を変更した後は
+    /// `invalidate_population_cache()` を呼ぶ規約。
     ///
-    /// この関数は O(houses) で BFS を呼ばないため、レンダーホットパスでも
-    /// 安全に複数回呼べる。
+    /// UI のバナー / Status / 詳細表示と AI Tier 2/3 の人口ゲートはすべて
+    /// この値を参照する。`detect_tier_advance` の閾値判定もここを通るため、
+    /// 表示と進化判定が常に一致する。
     pub fn population(&self) -> u32 {
-        self.count_built(Building::House) * super::logic::house_capacity(super::logic::HouseTier::Cottage)
+        if let Some(p) = self.population_cache.get() {
+            return p;
+        }
+        let p = super::logic::tier_aware_population(self);
+        self.population_cache.set(Some(p));
+        p
     }
 
     /// Convenience: 指定セルの地形。境界外は Plain 扱い。

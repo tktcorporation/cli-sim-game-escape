@@ -196,6 +196,10 @@ fn step_one_tick(city: &mut City) {
     drive_ai(city);
     accrue_income(city);
     detect_tier_advance(city);
+    // tick の最後でキャッシュをクリアし、次 tick / 次 frame の最初の参照で
+    // 再計算させる。grid 個別変更箇所も invalidate するが、この一括クリアは
+    // 「他で漏れてもここで必ず無効化される」セーフティネット。
+    city.invalidate_population_cache();
     city.tick = city.tick.wrapping_add(1);
 }
 
@@ -750,8 +754,18 @@ fn population_within(pop_map: &[Vec<u32>], x: usize, y: usize, radius: i32) -> u
     total
 }
 
-/// 半径内の商業供給キャパシティ合計 (cents/sec 単位)。Shop = 200, Mall = 600。
-fn commercial_capacity_within(city: &City, x: usize, y: usize, radius: i32) -> i64 {
+/// 半径内の **active な** 商業供給キャパシティ合計 (cents/sec 単位)。
+///
+/// inactive Shop/Mall (= 隣接 Road 未接続 or 半径 3 House 無し) は供給ゼロなので
+/// 按分対象から除外する。これを含めると「機能不全の Mall を 1 軒置いただけで
+/// 周囲の active Shop の収入が薄まる」非直感的な挙動になる。
+fn commercial_capacity_within(
+    city: &City,
+    x: usize,
+    y: usize,
+    radius: i32,
+    connected: &[Vec<bool>],
+) -> i64 {
     let mut total = 0i64;
     for dy in -radius..=radius {
         for dx in -radius..=radius {
@@ -763,18 +777,29 @@ fn commercial_capacity_within(city: &City, x: usize, y: usize, radius: i32) -> i
             if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
                 continue;
             }
-            match city.tile(nx as usize, ny as usize) {
-                Tile::Built(Building::Shop) => total += SHOP_CAPACITY_CENTS,
-                Tile::Built(Building::Mall) => total += MALL_CAPACITY_CENTS,
-                _ => {}
+            let (nx, ny) = (nx as usize, ny as usize);
+            let cap = match city.tile(nx, ny) {
+                Tile::Built(Building::Shop) => SHOP_CAPACITY_CENTS,
+                Tile::Built(Building::Mall) => MALL_CAPACITY_CENTS,
+                _ => continue,
+            };
+            if shop_is_active_with(city, nx, ny, connected) {
+                total += cap;
             }
         }
     }
     total
 }
 
-/// 半径内の雇用供給キャパシティ合計 (cents/sec 単位)。
-fn employment_capacity_within(city: &City, x: usize, y: usize, radius: i32) -> i64 {
+/// 半径内の **active な** 雇用供給キャパシティ合計 (cents/sec 単位)。
+/// inactive Workshop/Factory/Office は除外 (`commercial_capacity_within` と同思想)。
+fn employment_capacity_within(
+    city: &City,
+    x: usize,
+    y: usize,
+    radius: i32,
+    connected: &[Vec<bool>],
+) -> i64 {
     let mut total = 0i64;
     for dy in -radius..=radius {
         for dx in -radius..=radius {
@@ -786,11 +811,15 @@ fn employment_capacity_within(city: &City, x: usize, y: usize, radius: i32) -> i
             if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
                 continue;
             }
-            match city.tile(nx as usize, ny as usize) {
-                Tile::Built(Building::Workshop) => total += WORKSHOP_CAPACITY_CENTS,
-                Tile::Built(Building::Factory) => total += FACTORY_CAPACITY_CENTS,
-                Tile::Built(Building::Office) => total += OFFICE_CAPACITY_CENTS,
-                _ => {}
+            let (nx, ny) = (nx as usize, ny as usize);
+            let cap = match city.tile(nx, ny) {
+                Tile::Built(Building::Workshop) => WORKSHOP_CAPACITY_CENTS,
+                Tile::Built(Building::Factory) => FACTORY_CAPACITY_CENTS,
+                Tile::Built(Building::Office) => OFFICE_CAPACITY_CENTS,
+                _ => continue,
+            };
+            if workshop_is_active_with(city, nx, ny, connected) {
+                total += cap;
             }
         }
     }
@@ -829,7 +858,7 @@ fn commercial_income_cents(
     }
     let local_pop = population_within(pop_map, x, y, 5) as i64;
     let demand = local_pop * PURCHASE_POWER_PER_CAPITA;
-    let total_capacity = commercial_capacity_within(city, x, y, 5);
+    let total_capacity = commercial_capacity_within(city, x, y, 5, connected);
     if total_capacity <= 0 {
         return 0;
     }
@@ -855,7 +884,7 @@ fn employment_income_cents(
     }
     let local_pop = population_within(pop_map, x, y, 5) as i64;
     let demand = local_pop * demand_per_capita;
-    let total_capacity = employment_capacity_within(city, x, y, 5);
+    let total_capacity = employment_capacity_within(city, x, y, 5, connected);
     if total_capacity <= 0 {
         return 0;
     }
@@ -2129,7 +2158,7 @@ fn commercial_demand_aware_value(
     }
     let local_pop = count_houses_within_radius_as_cottage(city, x, y, 5);
     let demand = local_pop * PURCHASE_POWER_PER_CAPITA;
-    let total_capacity = commercial_capacity_within(city, x, y, 5) + my_capacity;
+    let total_capacity = commercial_capacity_within(city, x, y, 5, connected) + my_capacity;
     let share = demand * my_capacity / total_capacity.max(1);
     share.min(my_capacity)
 }
@@ -2151,7 +2180,7 @@ fn employment_demand_aware_value(
     }
     let local_pop = count_houses_within_radius_as_cottage(city, x, y, 5);
     let demand = local_pop * demand_per_capita;
-    let total_capacity = employment_capacity_within(city, x, y, 5) + my_capacity;
+    let total_capacity = employment_capacity_within(city, x, y, 5, connected) + my_capacity;
     let share = demand * my_capacity / total_capacity.max(1);
     share.min(my_capacity)
 }
@@ -3328,6 +3357,39 @@ mod tests {
         };
         // economic_density = 1 (Shop) + 1 (Office) = 2 → Highrise 条件達成。
         assert_eq!(house_tier_for(stats), HouseTier::Highrise);
+    }
+
+    /// inactive な Mall (Road 未接続 / 顧客圏外) は周囲 Shop の収入を薄めない。
+    /// 機能不全建物が capacity 按分で active 建物の取り分を奪う問題への回帰テスト。
+    #[test]
+    fn inactive_mall_does_not_dilute_active_shop() {
+        let mut city = City::new();
+        for x in 0..10 {
+            place_edge_road(&mut city, x);
+        }
+        // 縦 Road で active Shop の接続を確保。
+        city.set_tile(0, 1, Tile::Built(Building::Road));
+        city.set_tile(0, 2, Tile::Built(Building::Road));
+        for x in 1..6 {
+            city.set_tile(x, 1, Tile::Built(Building::House));
+        }
+        city.set_tile(1, 2, Tile::Built(Building::Shop));
+        let connected = compute_edge_connected_roads(&city);
+        let pop_map = compute_population_map(&city, &connected);
+        let solo = commercial_income_cents(&city, 1, 2, SHOP_CAPACITY_CENTS, &pop_map, &connected);
+
+        // (5, 5) に Road 未接続 + 半径 3 House 無しの inactive Mall を置く。
+        // active Shop の取り分が薄まらないことを担保。
+        city.set_tile(5, 5, Tile::Built(Building::Mall));
+        let connected = compute_edge_connected_roads(&city);
+        let pop_map = compute_population_map(&city, &connected);
+        let with_inactive_mall =
+            commercial_income_cents(&city, 1, 2, SHOP_CAPACITY_CENTS, &pop_map, &connected);
+        assert_eq!(
+            solo, with_inactive_mall,
+            "Inactive Mall should not affect active Shop income: solo={} after_inactive_mall={}",
+            solo, with_inactive_mall
+        );
     }
 
     /// 統合テスト: Factory を House の隣接に置くと、`compute_income_per_sec`
