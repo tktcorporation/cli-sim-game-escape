@@ -816,6 +816,13 @@ pub fn load_game(state: &mut City) -> bool {
     let now_ms = wall_clock_ms_to_u64(js_sys::Date::now());
     let income_per_sec = super::logic::compute_income_per_sec(state);
     if let Some(bonus) = offline_bonus(save_data.game.last_save_wall_ms, now_ms, income_per_sec) {
+        // ロールバック用にミューテーション前の値をスナップショットする。
+        // `saturating_sub(bonus_cash)` での復元は、`saturating_add` が i64::MAX に
+        // クランプされていた場合に元値より小さくなる (= near-max balance を破壊する)。
+        // 直接スナップショットを書き戻すことで原状回復を保証する。
+        let pre_cash = state.cash;
+        let pre_cash_earned_total = state.cash_earned_total;
+
         state.cash = state.cash.saturating_add(bonus.bonus_cash);
         state.cash_earned_total = state.cash_earned_total.saturating_add(bonus.bonus_cash);
         state.push_event(make_offline_event_message(&bonus));
@@ -823,14 +830,16 @@ pub fn load_game(state: &mut City) -> bool {
         // 閉じて autosave (30秒間隔) が走らないと、次回ロードで同じオフライン
         // 期間が再算定され二重支給になるため。
         //
-        // 保存に失敗 (localStorage 容量超過 / disable 等) した場合は state 側の
-        // 加算をロールバックする — 二重支給を防ぐため次回ロードでもう一度
-        // 算定し直す方が安全 (失敗ケースは元々 cash 永続化も壊れているので、
-        // ボーナスを引っ込めても体感的な損失は最小)。
+        // 保存に失敗 (localStorage 容量超過 / disable 等) した場合は state を
+        // 完全ロールバック — 二重支給を防ぐため次回ロードでもう一度算定し直す
+        // 方が安全 (失敗ケースは元々 cash 永続化も壊れているので、ボーナスを
+        // 引っ込めても体感的な損失は最小)。
         if !save_game(state) {
-            state.cash = state.cash.saturating_sub(bonus.bonus_cash);
-            state.cash_earned_total = state.cash_earned_total.saturating_sub(bonus.bonus_cash);
+            state.cash = pre_cash;
+            state.cash_earned_total = pre_cash_earned_total;
             // push_event は先頭挿入なので index 0 を取り除けば直前のメッセージが消える。
+            // events が `MAX_EVENTS` で truncate されていた場合、末尾の最古エントリは
+            // 復元されないが、UI ログのみの軽微な劣化として許容する。
             if !state.events.is_empty() {
                 state.events.remove(0);
             }
