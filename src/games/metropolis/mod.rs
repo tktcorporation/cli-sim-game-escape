@@ -70,6 +70,10 @@ pub const ACT_SCROLL_DOWN: u16 = 23;
 pub const ACT_PANEL_SCROLL_UP: u16 = 24;
 pub const ACT_PANEL_SCROLL_DOWN: u16 = 25;
 
+/// オフライン進行ボーナス通知モーダルを閉じる click target ID。
+/// モーダル領域全体を `Clickable` で wrap してこの ID を登録する。
+pub const ACT_DISMISS_OFFLINE_WELCOME: u16 = 30;
+
 /// 1 回のスクロールで動かすセル数。視野の 1/8 (32/8 = 4) で「ちょっとずつ
 /// 動かす」感じ。短すぎると到達まで連打、長すぎると見落とすバランス。
 const SCROLL_STEP: i32 = 4;
@@ -87,6 +91,16 @@ pub struct MetropolisGame {
     pub state: City,
     /// オートセーブまでの残り tick 数。`save::AUTOSAVE_INTERVAL` から減算。
     save_countdown: u32,
+    /// 直近の tick で観測した wall-clock (ms since epoch)。タブをバックグラウンド
+    /// にして戻ってきた時に、この値と現在時刻の gap を見てオフライン進行ボーナスを
+    /// 支給する。in-memory のみで永続化はしない (永続化は autosave 側の
+    /// `last_save_wall_ms` でカバー済み)。
+    ///
+    /// `requestAnimationFrame` はタブ非表示で実質停止するため、tick の delta だけ
+    /// では「裏で経過した時間」を取り戻せない (`time.rs` の clamp が 500ms で打ち切る)。
+    /// `Date.now()` は連続的に進むので、tick 経由の gap 検出に使う。
+    #[cfg(target_arch = "wasm32")]
+    last_wall_ms: u64,
 }
 
 impl MetropolisGame {
@@ -118,6 +132,10 @@ impl MetropolisGame {
         Self {
             state,
             save_countdown: save::AUTOSAVE_INTERVAL,
+            // load_game 直後の wall-clock を起点にする。これにより load_game 内で
+            // 既にボーナス済みの期間を tick 側で二重支給することはない。
+            #[cfg(target_arch = "wasm32")]
+            last_wall_ms: save::wall_clock_now_ms(),
         }
     }
 }
@@ -134,6 +152,15 @@ impl Game for MetropolisGame {
     }
 
     fn handle_input(&mut self, event: &InputEvent) -> bool {
+        // オフライン進行ボーナス通知モーダル表示中は通常操作をブロックし、
+        // 任意のクリック / キーで閉じる。プレイヤーに「ボーナスを受け取った」
+        // 認知を一度だけ強制するための関所。閉じても Events タブに同内容が
+        // 残るため、振り返りは可能。
+        if self.state.pending_offline_welcome.is_some() {
+            self.state.pending_offline_welcome = None;
+            return true;
+        }
+
         // マップセルのクリック (action_id >= ACT_GRID_CELL_BASE) は
         // `selected_cell` を更新する。Status タブでその施設の詳細を表示する。
         if let InputEvent::Click(_, id) = event {
@@ -253,6 +280,29 @@ impl Game for MetropolisGame {
     }
 
     fn tick(&mut self, delta_ticks: u32) {
+        // タブ復帰時のオフライン進行ボーナス。`requestAnimationFrame` がバック
+        // グラウンドで停止していた間、`delta_ticks` は `time.rs` の clamp で
+        // 最大 5 tick (500ms) しか進まないため、wall-clock の gap で実時間を
+        // 検出してボーナス支給する。`OFFLINE_MIN_SECS (60秒)` 未満の gap では
+        // `apply_offline_bonus_with_persist` が None を返すので、通常プレイ中は
+        // 副作用ゼロ。
+        //
+        // `last_wall_ms` を毎 tick で更新するのは、tick が連続して呼ばれている
+        // = タブが visible である状態を表すため。バックグラウンドで rAF が止まれば
+        // tick も呼ばれず last_wall_ms が据え置かれて、復帰時の最初の tick で
+        // 正しい gap (= 不在時間) が観測される。
+        #[cfg(target_arch = "wasm32")]
+        {
+            // 戻り値は state に反映済み or ロールバック済みなので捨てる。
+            // 計測起点は支給有無 / save 成否いずれの outcome でも `now_ms` に進める:
+            // 進めないと、save 失敗ロールバック後にゲームが進行し続けた foreground
+            // 時間が、次回 retry で「オフライン」として誤って二重支給される。
+            // localStorage の失敗は通常持続的なので、取りこぼしの確率は低く、
+            // 二重支給を防ぐ方が体験への悪影響が小さい。
+            let _ = save::apply_offline_bonus_with_persist(&mut self.state, self.last_wall_ms);
+            self.last_wall_ms = save::wall_clock_now_ms();
+        }
+
         logic::tick(&mut self.state, delta_ticks);
 
         // オートセーブ。カウンタ更新自体は常に実行 (フィールドが

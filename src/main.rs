@@ -29,13 +29,14 @@ pub const MENU_SELECT_CAFE: u16 = 5;
 pub const MENU_SELECT_ABYSS: u16 = 6;
 pub const MENU_SELECT_GODFIELD: u16 = 7;
 pub const MENU_SELECT_METROPOLIS: u16 = 8;
-pub const MENU_SELECT_SETTINGS: u16 = 9;
-pub const MENU_SCROLL_UP: u16 = 10;
-pub const MENU_SCROLL_DOWN: u16 = 11;
+pub const MENU_SELECT_TAMAGOTCHI: u16 = 9;
+pub const MENU_SELECT_SETTINGS: u16 = 10;
+pub const MENU_SCROLL_UP: u16 = 11;
+pub const MENU_SCROLL_DOWN: u16 = 12;
 pub const BACK_TO_MENU: u16 = 65535;
 
-/// Last valid index of the main menu cards (8 games + settings → 0..=8).
-const MENU_LAST_INDEX: u8 = 8;
+/// Last valid index of the main menu cards (9 games + settings → 0..=9).
+const MENU_LAST_INDEX: u8 = 9;
 
 /// Cursor → menu action, used for the A button on the main menu.
 enum MenuPick {
@@ -53,6 +54,7 @@ fn menu_pick_for(idx: u8) -> MenuPick {
         5 => MenuPick::Game(GameChoice::Abyss),
         6 => MenuPick::Game(GameChoice::Godfield),
         7 => MenuPick::Game(GameChoice::Metropolis),
+        8 => MenuPick::Game(GameChoice::Tamagotchi),
         _ => MenuPick::Settings,
     }
 }
@@ -64,6 +66,7 @@ const SETTINGS_CONFIRM_YES: u16 = 12;
 const SETTINGS_CONFIRM_NO: u16 = 13;
 const SETTINGS_RESET_ABYSS: u16 = 14;
 const SETTINGS_RESET_METROPOLIS: u16 = 15;
+const SETTINGS_RESET_TAMAGOTCHI: u16 = 16;
 
 /// Use `elementFromPoint` to find which grid cell was clicked.
 ///
@@ -281,7 +284,10 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 InputEvent::Key('8') | InputEvent::Click(_, MENU_SELECT_METROPOLIS) => {
                     Some(MenuPick::Game(GameChoice::Metropolis))
                 }
-                InputEvent::Key('9') | InputEvent::Click(_, MENU_SELECT_SETTINGS) => {
+                InputEvent::Key('9') | InputEvent::Click(_, MENU_SELECT_TAMAGOTCHI) => {
+                    Some(MenuPick::Game(GameChoice::Tamagotchi))
+                }
+                InputEvent::Key('0') | InputEvent::Click(_, MENU_SELECT_SETTINGS) => {
                     Some(MenuPick::Settings)
                 }
                 // A button (' ' / Enter via main.rs key map) confirms the
@@ -355,6 +361,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     InputEvent::Key('4') | InputEvent::Click(_, SETTINGS_RESET_METROPOLIS) => {
                         *confirm_reset = Some(GameChoice::Metropolis);
                     }
+                    InputEvent::Key('5') | InputEvent::Click(_, SETTINGS_RESET_TAMAGOTCHI) => {
+                        *confirm_reset = Some(GameChoice::Tamagotchi);
+                    }
                     InputEvent::Key('q') | InputEvent::Click(_, BACK_TO_MENU) => {
                         *state = AppState::Menu { scroll: 0, selected: 0 };
                     }
@@ -384,6 +393,7 @@ fn perform_reset(game: &GameChoice) {
         GameChoice::Career => games::career::save::delete_save(),
         GameChoice::Abyss => games::abyss::save::delete_save(),
         GameChoice::Metropolis => games::metropolis::save::delete_save(),
+        GameChoice::Tamagotchi => games::tamagotchi::save::delete_save(),
         _ => {}
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -562,6 +572,7 @@ fn render_menu(
         ("深淵潜行 (Abyss Idle)", "自動戦闘で深層を目指す放置型ローグダンジョン", MENU_SELECT_ABYSS, '▶'),
         ("神の戦場 (God Field)", "4人で戦うターン制カードバトルロイヤル", MENU_SELECT_GODFIELD, '▶'),
         ("Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶'),
+        ("たまごっち", "卵から育てて寿命を伸ばす育成ゲーム", MENU_SELECT_TAMAGOTCHI, '▶'),
         ("設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙'),
     ];
 
@@ -810,6 +821,18 @@ fn render_settings_main(
     );
 
     cl.push(Line::from(""));
+
+    // たまごっち
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
+            Span::styled("たまごっち", Style::default().fg(Color::White)),
+            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
+        ]),
+        SETTINGS_RESET_TAMAGOTCHI,
+    );
+
+    cl.push(Line::from(""));
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
         " ※ Tiny Factory / Dungeon Dive は",
@@ -843,6 +866,7 @@ fn render_confirm_dialog(
         GameChoice::Cafe => "廃墟カフェ復興記",
         GameChoice::Abyss => "深淵潜行",
         GameChoice::Metropolis => "Idle Metropolis",
+        GameChoice::Tamagotchi => "たまごっち",
         _ => "Unknown",
     };
 

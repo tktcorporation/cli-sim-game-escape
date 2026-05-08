@@ -395,6 +395,27 @@ pub struct City {
     /// grid を変更する操作 (set_tile / 建設完成 / 撤去 / 整地完了 / save ロード)
     /// では invalidate して `None` に戻す。
     pub population_cache: Cell<Option<u32>>,
+
+    /// タブ復帰時のオフライン進行ボーナス通知。`Some` の間は `render` が
+    /// 中央モーダルを上書き描画し、`handle_input` が通常操作をブロックして
+    /// 任意の入力で `None` に戻す。
+    ///
+    /// idle ゲームの「気付かないうちに増えた」を防ぐためのプレイヤー確認用
+    /// 一時状態 (永続化しない)。Events ログにも同内容が残るので「閉じてしまうと
+    /// 二度と確認できない」課題はそちらでカバーする。
+    pub pending_offline_welcome: Option<PendingOfflineWelcome>,
+}
+
+/// オフライン進行ボーナス通知モーダルの表示データ。
+///
+/// `save::apply_offline_bonus` で `OfflineBonus` から構築される。`save` の型を
+/// `state` に直接持たせると `state -> save` の逆向き依存になるため、表示に必要な
+/// 値だけを切り出した独立 struct として持つ。
+#[derive(Clone, Debug)]
+pub struct PendingOfflineWelcome {
+    pub elapsed_secs: u64,
+    pub bonus_cash: i64,
+    pub capped: bool,
 }
 
 pub const MAX_EVENTS: usize = 8;
@@ -471,6 +492,7 @@ impl City {
             selected_cell: None,
             panel_scroll: Cell::new(0),
             population_cache: Cell::new(None),
+            pending_offline_welcome: None,
         }
     }
 

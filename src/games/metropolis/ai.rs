@@ -793,6 +793,7 @@ fn clone_city_for_lookahead(city: &City) -> City {
         selected_cell: None,
         panel_scroll: std::cell::Cell::new(0),
         population_cache: std::cell::Cell::new(None),
+        pending_offline_welcome: None,
     }
 }
 
