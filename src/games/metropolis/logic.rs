@@ -201,13 +201,42 @@ fn step_one_tick(city: &mut City) {
 
 /// ティア境界を跨いだら演出をトリガー。AI 撤去で人口が一時的に減ることは
 /// あるが、`detect_tier_advance` は上昇遷移時のみフラッシュを焚く。
+///
+/// 閾値判定は **Tier 込みの正確な人口** で行う (Apartment/Highrise の
+/// 定員 boost を反映)。1 tick に 1 度しか呼ばれない経路なので BFS コストは
+/// 許容範囲。`City::population()` は軽量 Cottage 概算なのでここでは使わない。
 fn detect_tier_advance(city: &mut City) {
-    let now = city_tier_for(city.population());
+    let now = city_tier_for(tier_aware_population(city));
     if now > city.last_observed_tier {
         city.tier_flash_until = city.tick + TIER_FLASH_TICKS;
         city.push_event(format!("🎊 街が「{}」に成長しました!", now.jp()));
         city.last_observed_tier = now;
     }
+}
+
+/// Tier 連動の精密人口集計 (Apartment 12 / Highrise 30 を反映)。
+///
+/// 内部で edge-connectivity BFS と全 House の Tier 評価を走らせるため
+/// O(houses + GRID²) と重い。**呼び出しは tick あたり数回までに抑える**:
+///   - `detect_tier_advance` (1 tick に 1 度)
+///   - render の Status タブ詳細 (1 frame に 1 度、必要なら自前でキャッシュ)
+///   - シミュレータベンチ (テスト用)
+///
+/// `City::population()` (Cottage 固定の軽量概算) と分離することで、
+/// レンダーの header / banner など毎 frame で参照される箇所を軽量に保つ。
+pub fn tier_aware_population(city: &City) -> u32 {
+    let connected = compute_edge_connected_roads(city);
+    let mut total = 0u32;
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            if !matches!(city.tile(x, y), Tile::Built(Building::House)) {
+                continue;
+            }
+            let tier = effective_tier_at_with(city, x, y, &connected);
+            total += house_capacity(tier);
+        }
+    }
+    total
 }
 
 /// Decrement every Construction / Clearing tile; promote them when finished.
@@ -2168,13 +2197,15 @@ fn synergy_income_value(
     connected: &[Vec<bool>],
 ) -> i64 {
     let mut delta_cents = 0i64;
-    // 影響範囲: kind ごとに Manhattan 距離。
+    // 影響範囲: kind ごとに Manhattan 距離。House を半径 5 にしているのは、
+    // `house_tier_for` の `local_population` が距離 5 以内で集計するため
+    // (= 新規 House を置くと距離 5 以内の周囲 House の需給ゲートが厳しくなる)。
     let radius: i32 = match kind {
         Building::Workshop | Building::Factory => 5,
         Building::Shop | Building::Mall => 5,
         Building::Office => 5,
         Building::Park => 4,
-        Building::House => 3,
+        Building::House => 5,
         Building::Road => 1,
         Building::Outpost => return 0,
     };
@@ -2204,6 +2235,13 @@ fn synergy_income_value(
                     let manh = ((nx as i32 - x as i32).abs() + (ny as i32 - y as i32).abs()) as u32;
                     if manh <= 3 {
                         after.n_house_within_3 += 1;
+                    }
+                    // 新規 House は周囲半径 5 以内 House の需給ゲートを
+                    // 圧迫する (local_population +Cottage 4)。これを反映しないと
+                    // AI が「人口閾値ぎりぎりの場所に追加 House を建てる」
+                    // 過大評価になる。
+                    if manh <= 5 {
+                        after.local_population += house_capacity(HouseTier::Cottage);
                     }
                 }
                 Building::Workshop => after.n_workshop_within_5 += 1,
@@ -3224,14 +3262,17 @@ mod tests {
         assert!(house_capacity(HouseTier::Apartment) < house_capacity(HouseTier::Highrise));
     }
 
-    /// City::population は Tier 連動で計算される。
+    /// `tier_aware_population` は Tier 連動で計算される。
     /// Cottage 4 + Apartment 12 + Highrise 30 が単純合算される。
+    /// `City::population()` (Cottage 概算) との対比で Tier-aware 版が
+    /// レンダーホットパスから分離されている設計を担保する。
     #[test]
     fn population_reflects_tier_capacity() {
         let mut city = City::new();
-        // Cottage 1 軒のみ。Apartment 化条件を満たさず age=0。
         city.set_tile(0, 0, Tile::Built(Building::House));
+        // 軽量版とTier-aware版は age=0 (Cottage 扱い) では一致する。
         assert_eq!(city.population(), house_capacity(HouseTier::Cottage));
+        assert_eq!(tier_aware_population(&city), house_capacity(HouseTier::Cottage));
     }
 
     /// 需給ゲート: 局所人口が増えると Apartment 化に必要な経済密度が上がる。

@@ -551,26 +551,18 @@ impl City {
         n
     }
 
-    /// Population from finished houses, **Tier-aware**.
+    /// Population from finished houses (concise approximation).
     ///
-    /// 各 House の実効 Tier を `logic::effective_tier_at_with` で計算し、
-    /// Tier ごとの定員 (Cottage 4 / Apartment 12 / Highrise 30) を合計する。
-    /// これにより「街が育つと人口が一気に伸びる」体感が出る。
+    /// 全 House を Cottage 定員で数える軽量版。`render` の per-frame 表示や
+    /// AI のラフな判断に使う。Tier 連動で「Highrise 化したら街の総人口が
+    /// 爆発する」という設計上の核は、`logic::tier_aware_population` 経由で
+    /// `detect_tier_advance` (= `city_tier_for` の閾値判定) と Status タブ
+    /// 詳細表示など必要箇所だけが利用する。
     ///
-    /// 内部で edge connectivity BFS を 1 度走らせるため呼び出し O(N + houses)。
+    /// この関数は O(houses) で BFS を呼ばないため、レンダーホットパスでも
+    /// 安全に複数回呼べる。
     pub fn population(&self) -> u32 {
-        let connected = super::logic::compute_edge_connected_roads(self);
-        let mut total = 0u32;
-        for y in 0..GRID_H {
-            for x in 0..GRID_W {
-                if !matches!(self.tile(x, y), Tile::Built(Building::House)) {
-                    continue;
-                }
-                let tier = super::logic::effective_tier_at_with(self, x, y, &connected);
-                total += super::logic::house_capacity(tier);
-            }
-        }
-        total
+        self.count_built(Building::House) * super::logic::house_capacity(super::logic::HouseTier::Cottage)
     }
 
     /// Convenience: 指定セルの地形。境界外は Plain 扱い。
