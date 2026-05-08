@@ -31,3 +31,17 @@ opt-level = "s"
 lto = "thin"
 # Strip debug info from release builds
 strip = "debuginfo"
+
+# 依存クレート (ratatui / ratzilla / proptest など) は dev / test でも最適化する。
+# 自プロジェクト側は debug のまま残してインクリメンタルビルドの速さを保つ。
+# 注意: 依存の初回 (cold) ビルドは数十秒〜数分長くなる。trunk serve 含む。
+# Swatinem/rust-cache@v2 が CI/dev の両方でこれをキャッシュする想定。
+[profile.dev.package."*"]
+opt-level = 3
+
+# `cargo test` は simulator (metropolis / cafe / abyss) の tick ループに支配される。
+# 自プロジェクト側も opt-level=3 にすると debug 比 10-20x 速くなる。
+# debug = 2 (test profile のデフォルト) は維持しているので file:line は出るが、
+# inline 展開で stack frame が消える / local variable が optimize out される DX コストはある。
+[profile.test]
+opt-level = 3
