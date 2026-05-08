@@ -1338,6 +1338,10 @@ fn render_tab_panel(
         PanelTab::Events => log_list(state),
         PanelTab::World => world_list(state),
     };
+    // スマホでパネル領域内のスワイプを panel scroll (J/K) に振り分けるため、
+    // 現在のパネル content 領域を window.metropolisPanelRect に export する。
+    // index.html の touch/wheel ハンドラがこの値を見て swipe キーを切り替える。
+    export_panel_rect_to_js(v[1]);
     let mut cs = click_state.borrow_mut();
     ScrollableTab::new(
         list,
@@ -1347,6 +1351,29 @@ fn render_tab_panel(
     )
     .render(f, v[1], &mut cs);
 }
+
+/// パネル領域 (cell 座標) を `window.metropolisPanelRect` に export する。
+/// index.html の touch/wheel ハンドラが「タッチ開始位置がこの矩形内か」を判定
+/// して、パネル内なら J/K (panel scroll)、それ以外なら j/k (viewport scroll)
+/// を dispatch する。これでスマホでもパネルがスワイプで動かせる。
+///
+/// metropolis のレンダーが呼ばれない時 (他ゲーム選択中) は更新されないので、
+/// JS 側は「rect が無い / 古い」場合は viewport scroll にフォールバックする。
+#[cfg(target_arch = "wasm32")]
+fn export_panel_rect_to_js(area: Rect) {
+    use js_sys::{Object, Reflect};
+    use web_sys::wasm_bindgen::JsValue;
+    let Some(win) = web_sys::window() else { return };
+    let obj = Object::new();
+    let _ = Reflect::set(&obj, &"x".into(), &JsValue::from(area.x));
+    let _ = Reflect::set(&obj, &"y".into(), &JsValue::from(area.y));
+    let _ = Reflect::set(&obj, &"w".into(), &JsValue::from(area.width));
+    let _ = Reflect::set(&obj, &"h".into(), &JsValue::from(area.height));
+    let _ = Reflect::set(&win, &"metropolisPanelRect".into(), &obj);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn export_panel_rect_to_js(_area: Rect) {}
 
 fn tab_style(active: bool) -> Style {
     if active {
