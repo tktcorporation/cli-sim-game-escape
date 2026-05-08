@@ -2,9 +2,13 @@
   command = "bash ./build.sh"
   publish = "dist"
   # ビルド成果物 (dist/) に影響しないファイルだけが変わったコミットでは
-  # ビルドをスキップする。git diff が exit 0 (差分なし) ならスキップ。
-  # CACHED_COMMIT_REF は前回成功時の SHA。初回ビルド時は未定義のため fallback。
-  ignore = "git diff --quiet ${CACHED_COMMIT_REF:-HEAD~1} ${COMMIT_REF:-HEAD} -- ':!*.md' ':!docs/' ':!.github/' ':!.claude/' ':!tests/' ':!.gitignore' ':!.devcontainer/' ':!.devenv.json' ':!.mise.toml' ':!.mcp.json'"
+  # ビルドをスキップする。`ignore` は exit 0 でスキップ、それ以外でビルド実行。
+  #
+  # cacheless build (新環境 / cache clear 直後) では Netlify は
+  # CACHED_COMMIT_REF に COMMIT_REF と同じ SHA を入れる。同じ ref 同士の
+  # diff は差分 0 → exit 0 → ソース変更があってもスキップされてしまう。
+  # `-z` で未設定を、`=` で同値を弾き、その場合は `exit 1` で必ずビルドする。
+  ignore = "if [ -z \"$CACHED_COMMIT_REF\" ] || [ \"$CACHED_COMMIT_REF\" = \"$COMMIT_REF\" ]; then exit 1; fi; git diff --quiet \"$CACHED_COMMIT_REF\" \"$COMMIT_REF\" -- ':!*.md' ':!docs/' ':!.github/' ':!.claude/' ':!tests/' ':!.gitignore' ':!.devcontainer/' ':!.devenv.json' ':!.mise.toml' ':!.mcp.json'"
 
 [build.environment]
   RUSTUP_HOME = "/opt/buildhome/.rustup"
