@@ -65,9 +65,19 @@ pub const ACT_SCROLL_RIGHT: u16 = 21;
 pub const ACT_SCROLL_UP: u16 = 22;
 pub const ACT_SCROLL_DOWN: u16 = 23;
 
+/// 右パネル (タブ内コンテンツ) の縦スクロール。スマホ等の浅い縦幅で
+/// Manager / Status の下端が見切れる問題への対応。▲/▼ ボタンと大文字 J/K で発火。
+/// ビューポートスクロール (小文字 j/k = ACT_SCROLL_*) とは別系統。
+pub const ACT_PANEL_SCROLL_UP: u16 = 24;
+pub const ACT_PANEL_SCROLL_DOWN: u16 = 25;
+
 /// 1 回のスクロールで動かすセル数。視野の 1/8 (32/8 = 4) で「ちょっとずつ
 /// 動かす」感じ。短すぎると到達まで連打、長すぎると見落とすバランス。
 const SCROLL_STEP: i32 = 4;
+
+/// 右パネル縦スクロールの 1 回ぶん (visual rows)。短すぎると連打が必要、
+/// 長すぎると行き過ぎる。Manager の最大行数 (~10) に対して 2 行送りが妥当。
+const PANEL_SCROLL_STEP: i32 = 2;
 
 /// マップセルのクリック識別子の起点。`base + row * VIEW_W + col` で
 /// ビューポート相対座標を u16 に詰め込む。`ClickableGrid::decode` で逆引き。
@@ -171,6 +181,9 @@ impl Game for MetropolisGame {
                 'j' => ACT_SCROLL_DOWN,
                 'k' => ACT_SCROLL_UP,
                 'l' => ACT_SCROLL_RIGHT,
+                // 大文字 J/K で右パネル縦スクロール (タブ内容を上下に動かす)。
+                'J' => ACT_PANEL_SCROLL_DOWN,
+                'K' => ACT_PANEL_SCROLL_UP,
                 _ => return false,
             },
         };
@@ -195,19 +208,19 @@ impl Game for MetropolisGame {
             ACT_HIRE_WORKER => logic::hire_worker(&mut self.state),
             ACT_UPGRADE_AI => logic::upgrade_ai(&mut self.state),
             ACT_TAB_STATUS => {
-                self.state.panel_tab = PanelTab::Status;
+                switch_tab(&mut self.state, PanelTab::Status);
                 true
             }
             ACT_TAB_MANAGER => {
-                self.state.panel_tab = PanelTab::Manager;
+                switch_tab(&mut self.state, PanelTab::Manager);
                 true
             }
             ACT_TAB_EVENTS => {
-                self.state.panel_tab = PanelTab::Events;
+                switch_tab(&mut self.state, PanelTab::Events);
                 true
             }
             ACT_TAB_WORLD => {
-                self.state.panel_tab = PanelTab::World;
+                switch_tab(&mut self.state, PanelTab::World);
                 true
             }
             ACT_SCROLL_LEFT => {
@@ -224,6 +237,14 @@ impl Game for MetropolisGame {
             }
             ACT_SCROLL_DOWN => {
                 self.state.scroll_camera(0, SCROLL_STEP);
+                true
+            }
+            ACT_PANEL_SCROLL_UP => {
+                self.state.scroll_panel(-PANEL_SCROLL_STEP);
+                true
+            }
+            ACT_PANEL_SCROLL_DOWN => {
+                self.state.scroll_panel(PANEL_SCROLL_STEP);
                 true
             }
             _ => false,
@@ -247,6 +268,16 @@ impl Game for MetropolisGame {
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
         render::render(&self.state, f, area, click_state);
     }
+}
+
+/// タブ切替時にパネルの縦スクロールを先頭にリセットする。
+/// タブごとにコンテンツの長さが大きく異なるため、前のタブで深くスクロール
+/// していると新しいタブで「いきなり下端」が表示されて違和感が出る。
+fn switch_tab(city: &mut City, tab: PanelTab) {
+    if city.panel_tab != tab {
+        city.panel_scroll.set(0);
+    }
+    city.panel_tab = tab;
 }
 
 /// Strategy 切替時の共通処理。`logic::strategy_info` を引いて
@@ -311,6 +342,54 @@ mod tests {
         let before = g.state.tick;
         g.tick(50);
         assert_eq!(g.state.tick, before + 50);
+    }
+
+    /// 大文字 J / K で右パネルだけが動き、ビューポート (cam_x/cam_y) には
+    /// 影響しない (= 小文字 j/k と完全に独立した系統)。
+    #[test]
+    fn panel_scroll_keys_move_panel_not_camera() {
+        let mut g = MetropolisGame::new();
+        let cam_before = (g.state.cam_x, g.state.cam_y);
+        assert_eq!(g.state.panel_scroll.get(), 0);
+
+        assert!(g.handle_input(&InputEvent::Key('J')));
+        assert!(g.state.panel_scroll.get() > 0, "J should scroll panel down");
+        assert_eq!(
+            (g.state.cam_x, g.state.cam_y),
+            cam_before,
+            "J should not move viewport camera"
+        );
+
+        let after_down = g.state.panel_scroll.get();
+        assert!(g.handle_input(&InputEvent::Key('K')));
+        assert!(
+            g.state.panel_scroll.get() < after_down,
+            "K should scroll panel up"
+        );
+    }
+
+    /// タブを切替えるとパネル縦スクロールが先頭に戻る。長い Status タブで
+    /// 下までスクロールしてから Manager に切替えた時に、いきなり下端が
+    /// 表示される違和感を避けるため。
+    #[test]
+    fn tab_switch_resets_panel_scroll() {
+        let mut g = MetropolisGame::new();
+        g.state.panel_scroll.set(5);
+        // 同じタブへの切替は no-op (= scroll 維持)。
+        g.handle_input(&InputEvent::Key('2')); // Manager (default)
+        assert_eq!(g.state.panel_scroll.get(), 5);
+        // 別タブへ切り替えるとリセット。
+        g.handle_input(&InputEvent::Key('1')); // Status
+        assert_eq!(g.state.panel_scroll.get(), 0);
+    }
+
+    /// スクロール位置は 0 未満にならない (= 上端で止まる)。
+    #[test]
+    fn panel_scroll_clamps_to_zero_at_top() {
+        let mut g = MetropolisGame::new();
+        // すでに 0 から上に動かそうとしても 0 のまま。
+        assert!(g.handle_input(&InputEvent::Key('K')));
+        assert_eq!(g.state.panel_scroll.get(), 0);
     }
 
     /// 戦略を切り替えただけで `auto_strategy_actions` が tick から発火し、

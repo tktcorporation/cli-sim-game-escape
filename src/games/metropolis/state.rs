@@ -5,6 +5,8 @@
 //! purpose, so we need a balance simulator (see `simulator.rs`) to confirm
 //! the game is still progressing.
 
+use std::cell::Cell;
+
 /// **マップ全体**の幅 / 高さ (内部データの寸法)。
 /// 表示は `VIEW_W × VIEW_H` の窓 (viewport) に切り取る。
 /// 64×32 = 2048 セル — 32×16 (旧) の 4 倍の建設余地を持つ。
@@ -361,6 +363,12 @@ pub struct City {
     /// Status タブで「選択した施設の情報」を表示するために使う。
     /// 一時状態 (永続化しない、リロード後はリセット)。
     pub selected_cell: Option<(usize, usize)>,
+
+    /// 右パネルタブ内コンテンツの縦スクロールオフセット (visual rows)。
+    /// スマホ等の浅い縦幅で Manager 全行が入り切らない時に下まで届かせる。
+    /// `&City` で渡る render 内で clamp する都合で `Cell` を採用。
+    /// 一時状態 (永続化しない、タブ切替時にリセット)。
+    pub panel_scroll: Cell<u16>,
 }
 
 pub const MAX_EVENTS: usize = 8;
@@ -435,6 +443,7 @@ impl City {
             cam_x,
             cam_y,
             selected_cell: None,
+            panel_scroll: Cell::new(0),
         }
     }
 
@@ -447,6 +456,15 @@ impl City {
         let ny = (self.cam_y as i32 + dy).clamp(0, max_y as i32);
         self.cam_x = nx as usize;
         self.cam_y = ny as usize;
+    }
+
+    /// 右パネルを縦に動かす。`delta` は visual row 単位の符号付き量。
+    /// 上限は render 内の `clamp_panel_scroll` が再度クランプするため、ここでは
+    /// 下限 0 のみ保証する (実際の content_h を知るのは render なので)。
+    pub fn scroll_panel(&mut self, delta: i32) {
+        let cur = self.panel_scroll.get() as i32;
+        let next = (cur + delta).max(0) as u16;
+        self.panel_scroll.set(next);
     }
 
     /// Record a new AI activity entry, keeping the log bounded.
