@@ -42,8 +42,10 @@ use super::terrain::Terrain;
 ///       既存配列の再解釈ができない (旧 index 32 = 旧 (0,1) が、新 GRID_W=64
 ///       では (32,0) に化ける)。v3 以前のセーブは安全に再マップできない
 ///       ため `MIN_COMPATIBLE_VERSION = 4` でロード拒否し、新規開始を促す。
+///   v6: `last_save_wall_ms` 追加 (オフライン進行ボーナス用 wall-clock 計測)。
+///       旧データは default 0 → 「初回計測」扱いでボーナス未発動になる。
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 5;
+const SAVE_VERSION: u32 = 6;
 
 /// 互換性を維持できる最小バージョン。破壊的変更で +1。
 /// v1-v3 はフィールド追加だけだったが、v4 でマップ寸法が変わったので
@@ -60,6 +62,120 @@ const STORAGE_KEY: &str = "metropolis_save";
 
 /// オートセーブ間隔 (tick数)。10 ticks/sec × 30秒 = 300 ticks。
 pub const AUTOSAVE_INTERVAL: u32 = 300;
+
+// ── オフライン進行ボーナス ──────────────────────────────────────
+//
+// プレイヤーが離れている間も街が動いている「ふり」をして、戻ってきた時に
+// 推定収入を一括加算する idle 系の定番機構。実シミュレーションは走らせず、
+// セーブ時の収入見積もり × 経過秒 × 効率係数で十分な体験が出る。
+//
+// **設計判断 (簡易見積もり方式)**:
+//   - 街並みは離れている間に育たない (= 戻ってきた時の見た目は変わらない)
+//   - cash だけが「お留守番中の家賃」として加算される
+//   - リアルタイム再生の「街が育つのを眺める」コア体験を温存しつつ、
+//     離れがちな idle プレイヤーに小さな達成感を返す
+
+/// オフライン報酬の対象とする経過時間の上限 (秒)。
+/// 4 時間 = 14400 秒。1日1〜2回戻ってくるサイクルを想定し、
+/// 「離れすぎても全部回収できる」状況を避けてオンライン誘導を残す。
+#[cfg(any(target_arch = "wasm32", test))]
+pub const MAX_OFFLINE_SECS: u64 = 4 * 60 * 60;
+
+/// ボーナス発動の最低経過時間 (秒)。ページリロードや短時間のタブ切替で
+/// 「30秒オフラインでした」のような無意味なメッセージが出るのを防ぐ。
+#[cfg(any(target_arch = "wasm32", test))]
+pub const OFFLINE_MIN_SECS: u64 = 60;
+
+/// オフライン中の効率係数 (% 単位)。100 = オンライン同等、< 100 でオンライン優遇。
+/// 70% は idle 系のいわゆる「セーフバイアス」値。
+#[cfg(any(target_arch = "wasm32", test))]
+pub const OFFLINE_EFFICIENCY_PCT: u32 = 70;
+
+/// オフラインボーナスの計算結果。`offline_bonus` の戻り値。
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OfflineBonus {
+    /// 実際の経過秒 (上限カット前)。表示メッセージで使う。
+    pub elapsed_secs: u64,
+    /// 報酬計算に使った秒数 = `min(elapsed_secs, MAX_OFFLINE_SECS)`。
+    pub credited_secs: u64,
+    /// 加算するキャッシュ。
+    pub bonus_cash: i64,
+    /// 上限で打ち切られたか (= elapsed > credited)。メッセージ分岐用。
+    pub capped: bool,
+}
+
+/// オフライン進行ボーナスを算出する純関数。
+///
+/// 戻り値が `None` のケース (= ボーナス無し / 表示しない):
+/// - `last_save_ms == 0`: 旧セーブまたは初回 (計測開始前)
+/// - `now_ms <= last_save_ms`: 時計逆行 (TZ変更等)
+/// - `elapsed_secs < OFFLINE_MIN_SECS`: ページリロード等の短時間
+/// - `income_per_sec <= 0`: まだ街が収入を出していない
+/// - 計算上のボーナスが 0 円
+#[cfg(any(target_arch = "wasm32", test))]
+pub fn offline_bonus(last_save_ms: u64, now_ms: u64, income_per_sec: i64) -> Option<OfflineBonus> {
+    if last_save_ms == 0 || now_ms <= last_save_ms {
+        return None;
+    }
+    let elapsed_secs = (now_ms - last_save_ms) / 1000;
+    if elapsed_secs < OFFLINE_MIN_SECS {
+        return None;
+    }
+    if income_per_sec <= 0 {
+        return None;
+    }
+    let credited_secs = elapsed_secs.min(MAX_OFFLINE_SECS);
+    let bonus_cash = (credited_secs as i64)
+        .saturating_mul(income_per_sec)
+        .saturating_mul(OFFLINE_EFFICIENCY_PCT as i64)
+        / 100;
+    if bonus_cash <= 0 {
+        return None;
+    }
+    Some(OfflineBonus {
+        elapsed_secs,
+        credited_secs,
+        bonus_cash,
+        capped: elapsed_secs > credited_secs,
+    })
+}
+
+/// 経過秒を「2時間13分」「45分」のような日本語表現にする。
+/// `secs >= OFFLINE_MIN_SECS (60)` を前提に、0分表記は出さない。
+#[cfg(any(target_arch = "wasm32", test))]
+pub fn format_offline_duration(secs: u64) -> String {
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    if h == 0 {
+        format!("{}分", m.max(1))
+    } else if m == 0 {
+        format!("{}時間", h)
+    } else {
+        format!("{}時間{}分", h, m)
+    }
+}
+
+/// イベントログ 1 行を生成する。`load_game` 側でフォーマットを散らかさない。
+#[cfg(any(target_arch = "wasm32", test))]
+fn make_offline_event_message(bonus: &OfflineBonus) -> String {
+    if bonus.capped {
+        format!(
+            "🌙 オフライン {} (上限{}まで回収) — +${} ({}%効率)",
+            format_offline_duration(bonus.elapsed_secs),
+            format_offline_duration(MAX_OFFLINE_SECS),
+            bonus.bonus_cash,
+            OFFLINE_EFFICIENCY_PCT,
+        )
+    } else {
+        format!(
+            "🌙 オフライン {} — +${} ({}%効率)",
+            format_offline_duration(bonus.elapsed_secs),
+            bonus.bonus_cash,
+            OFFLINE_EFFICIENCY_PCT,
+        )
+    }
+}
 
 // ── タイル / 建物 / 地形 のシリアライズ用エンコーディング ────
 //
@@ -365,6 +481,11 @@ struct GameSave {
     /// ずれるが、`scroll_camera` で補正可能。
     cam_x: u32,
     cam_y: u32,
+
+    /// v6 以降: 前回セーブ時の wall-clock (Date.now(), ms since epoch)。
+    /// 次回ロード時にオフライン経過秒の算出に使う。
+    /// 0 は「未計測」(旧データまたは非 WASM 環境) で、`offline_bonus` が None を返す。
+    last_save_wall_ms: u64,
 }
 
 /// `City` の全フィールドを「永続化対象 / 一時状態 (transient)」の 2 群に
@@ -454,6 +575,10 @@ fn extract_save(state: &City) -> SaveData {
             built_at_tick: built_at_buf,
             cam_x: *cam_x as u32,
             cam_y: *cam_y as u32,
+            // 実際の wall-clock 注入は `save_game` が行う (WASM 専用 IO のため
+            // `extract_save` は純粋に保つ)。テスト経由の roundtrip では呼び側で
+            // 必要に応じて上書きする。
+            last_save_wall_ms: 0,
         },
     }
 }
@@ -489,6 +614,10 @@ fn apply_save(state: &mut City, save: &GameSave) {
         built_at_tick,
         cam_x,
         cam_y,
+        // City state には保持せず、`load_game` 側で `save_data.game.last_save_wall_ms`
+        // を直接読み出してオフラインボーナス算出に使う。ここでは束縛だけして
+        // 「フィールド追加に気付ける」運用を維持する。
+        last_save_wall_ms: _,
     } = save;
 
     state.world_seed = *world_seed;
@@ -589,7 +718,9 @@ pub fn save_game(state: &City) {
         Some(s) => s,
         None => return,
     };
-    let save = extract_save(state);
+    let mut save = extract_save(state);
+    // セーブ瞬間の wall-clock を記録。次回ロード時の経過秒算出に使う。
+    save.game.last_save_wall_ms = js_sys::Date::now() as u64;
     let json = match serde_json::to_string(&save) {
         Ok(j) => j,
         Err(e) => {
@@ -652,6 +783,17 @@ pub fn load_game(state: &mut City) -> bool {
         );
     }
     apply_save(state, &save_data.game);
+
+    // オフライン進行ボーナス: 前回セーブから現在までの経過時間に応じて
+    // 推定収入を一括加算。`compute_income_per_sec` は state ロード後に評価して
+    // 「戻ってきた時の街の実力」を反映する。
+    let now_ms = js_sys::Date::now() as u64;
+    let income_per_sec = super::logic::compute_income_per_sec(state);
+    if let Some(bonus) = offline_bonus(save_data.game.last_save_wall_ms, now_ms, income_per_sec) {
+        state.cash = state.cash.saturating_add(bonus.bonus_cash);
+        state.cash_earned_total = state.cash_earned_total.saturating_add(bonus.bonus_cash);
+        state.push_event(make_offline_event_message(&bonus));
+    }
     true
 }
 
@@ -847,5 +989,132 @@ mod tests {
         assert_eq!(city.cash, 0); // GameSave::default
         assert_eq!(city.tick, 0);
         assert_eq!(city.workers, 1); // クランプ後
+    }
+
+    // ── オフライン進行ボーナス ───────────────────────────────
+
+    /// 上限内の経過時間: 全額 70% 効率で支給。
+    #[test]
+    fn offline_bonus_under_cap() {
+        let last = 1_700_000_000_000u64;
+        let elapsed_secs = 2 * 3600 + 30 * 60; // 2h30m
+        let now = last + elapsed_secs * 1000;
+        let bonus = offline_bonus(last, now, 5).expect("bonus expected");
+        assert_eq!(bonus.elapsed_secs, elapsed_secs);
+        assert_eq!(bonus.credited_secs, elapsed_secs);
+        assert!(!bonus.capped);
+        // 9000 sec * $5 * 70% = $31500
+        assert_eq!(bonus.bonus_cash, 31_500);
+    }
+
+    /// 上限超え: credited_secs が MAX_OFFLINE_SECS でクランプされ capped=true。
+    #[test]
+    fn offline_bonus_capped_at_max() {
+        let last = 1_700_000_000_000u64;
+        let elapsed_secs = 12 * 3600; // 12h (cap=4h)
+        let now = last + elapsed_secs * 1000;
+        let bonus = offline_bonus(last, now, 5).expect("bonus expected");
+        assert_eq!(bonus.elapsed_secs, elapsed_secs);
+        assert_eq!(bonus.credited_secs, MAX_OFFLINE_SECS);
+        assert!(bonus.capped);
+        // 14400 sec * $5 * 70% = $50400
+        assert_eq!(bonus.bonus_cash, 50_400);
+    }
+
+    /// 短時間 (60秒未満) はリロード扱いでボーナス無し。
+    #[test]
+    fn offline_bonus_below_threshold_returns_none() {
+        let last = 1_700_000_000_000u64;
+        // 30秒 — OFFLINE_MIN_SECS=60 の下。
+        assert!(offline_bonus(last, last + 30_000, 5).is_none());
+        // 59秒も発動しない (境界)。
+        assert!(offline_bonus(last, last + 59_000, 5).is_none());
+        // 60秒ちょうどで発動する。
+        assert!(offline_bonus(last, last + 60_000, 5).is_some());
+    }
+
+    /// 時計が逆行している (TZ 変更等) 場合はボーナスなし。
+    #[test]
+    fn offline_bonus_clock_skew_returns_none() {
+        let last = 1_700_000_000_000u64;
+        assert!(offline_bonus(last, last - 1, 5).is_none());
+        assert!(offline_bonus(last, last, 5).is_none());
+    }
+
+    /// 旧データ (last_save_ms=0) ではボーナスなし — 計測開始扱い。
+    #[test]
+    fn offline_bonus_uninitialized_returns_none() {
+        assert!(offline_bonus(0, 1_700_000_000_000u64, 5).is_none());
+    }
+
+    /// 街がまだ収入を出していない場合はボーナスなし (= 0円メッセージを抑止)。
+    #[test]
+    fn offline_bonus_zero_or_negative_income_returns_none() {
+        let last = 1_700_000_000_000u64;
+        let now = last + 2 * 3600 * 1000;
+        assert!(offline_bonus(last, now, 0).is_none());
+        assert!(offline_bonus(last, now, -5).is_none());
+    }
+
+    /// 最小ケース: 60秒・1ドル/sec の境界で 70% 効率が ($1 * 60 * 70 / 100 = 42) で
+    /// 整数除算の loss を含めて期待値どおり返ってくることを確認する。
+    /// (income > 0 + elapsed >= MIN_SECS なら必ず正の bonus が出るという不変)。
+    #[test]
+    fn offline_bonus_smallest_valid_case_returns_42() {
+        let last = 1_700_000_000_000u64;
+        let now = last + 60_000;
+        let bonus = offline_bonus(last, now, 1).expect("bonus expected");
+        assert_eq!(bonus.bonus_cash, 42);
+    }
+
+    /// 経過時間表示の整形: 分のみ / 時間ちょうど / 時間+分。
+    #[test]
+    fn format_offline_duration_cases() {
+        assert_eq!(format_offline_duration(60), "1分");
+        assert_eq!(format_offline_duration(125), "2分");
+        assert_eq!(format_offline_duration(3600), "1時間");
+        assert_eq!(format_offline_duration(3660), "1時間1分");
+        assert_eq!(format_offline_duration(7200), "2時間");
+        assert_eq!(format_offline_duration(7320), "2時間2分");
+        assert_eq!(format_offline_duration(MAX_OFFLINE_SECS), "4時間");
+    }
+
+    /// メッセージは上限到達の有無で文言が分かれる。
+    #[test]
+    fn offline_event_message_capped_vs_uncapped() {
+        let under = OfflineBonus {
+            elapsed_secs: 3600,
+            credited_secs: 3600,
+            bonus_cash: 1234,
+            capped: false,
+        };
+        let msg = make_offline_event_message(&under);
+        assert!(msg.contains("オフライン 1時間"));
+        assert!(msg.contains("$1234"));
+        assert!(!msg.contains("上限"));
+
+        let over = OfflineBonus {
+            elapsed_secs: 12 * 3600,
+            credited_secs: MAX_OFFLINE_SECS,
+            bonus_cash: 5678,
+            capped: true,
+        };
+        let msg = make_offline_event_message(&over);
+        assert!(msg.contains("12時間"));
+        assert!(msg.contains("上限4時間"));
+        assert!(msg.contains("$5678"));
+    }
+
+    /// `last_save_wall_ms` がシリアライズを通って読み戻せる。
+    #[test]
+    fn last_save_wall_ms_roundtrips_through_json() {
+        let original = City::new();
+        let mut save = extract_save(&original);
+        // extract_save は 0 を入れる (wall-clock 注入は save_game の責務)。
+        assert_eq!(save.game.last_save_wall_ms, 0);
+        save.game.last_save_wall_ms = 1_700_000_000_000;
+        let json = serde_json::to_string(&save).unwrap();
+        let loaded: SaveData = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.game.last_save_wall_ms, 1_700_000_000_000);
     }
 }
