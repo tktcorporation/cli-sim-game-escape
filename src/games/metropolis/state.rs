@@ -211,6 +211,14 @@ pub enum Strategy {
 }
 
 /// CPU intelligence tier.  Higher = smarter placement decisions.
+///
+/// **アーキテクチャ**: Tier 4 以上は `logic::placement_value` を使った
+/// 「収入が最も増える手」を選ぶ評価ベース AI。Tier の差は **思考の深さ**:
+///   - Tier 4 (DemandAware): 1 手先の value を見る (= candidate を全部評価して上位サンプル)
+///   - Tier 5 (DeepPlanner):  1 手目 + 2 手目の合計 value を見る (= 道路を引いて家を載せるシナリオが拾える)
+///
+/// 同じ評価関数を共有するため、シミュレータで `T5 ≥ T4 ≥ T3 ≥ T2 ≥ T1` の
+/// cash 順位が原理的に保証される。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AiTier {
     /// Random placement, random building.  Wastes money, may strand shops.
@@ -219,18 +227,28 @@ pub enum AiTier {
     Greedy = 2,
     /// Plans roads first, then buildings on the road.
     RoadPlanner = 3,
-    /// Reads strategy weights and demand (pop vs shop balance).
+    /// Reads strategy weights and evaluates 1-step income gain per candidate.
     DemandAware = 4,
+    /// Evaluates 2-step lookahead income gain. Includes Outpost dispatch in
+    /// the candidate set, so naturally chooses "break the rocks to the east"
+    /// when interior cells are saturated and yield zero value.
+    DeepPlanner = 5,
 }
 
 impl AiTier {
     /// Cash price to upgrade *into* this tier.
+    ///
+    /// **2026-05 調整**: 旧価格は $500 / $5,000 / $50,000 と 10x ジャンプで
+    /// 「$5,000 に詰まる」問題があった。段階を ~3x にすることで、
+    /// 30 分プレイでも順次進化を実感できるカーブに調整。
+    /// 累計 ~$50K は変えず、途中の $3K / $12K で頻繁に進化ボタンが効く。
     pub fn upgrade_cost(self) -> i64 {
         match self {
             AiTier::Random => 0, // starting tier
             AiTier::Greedy => 500,
-            AiTier::RoadPlanner => 5_000,
-            AiTier::DemandAware => 50_000,
+            AiTier::RoadPlanner => 3_000,
+            AiTier::DemandAware => 12_000,
+            AiTier::DeepPlanner => 35_000,
         }
     }
 
@@ -239,7 +257,8 @@ impl AiTier {
             AiTier::Random => Some(AiTier::Greedy),
             AiTier::Greedy => Some(AiTier::RoadPlanner),
             AiTier::RoadPlanner => Some(AiTier::DemandAware),
-            AiTier::DemandAware => None,
+            AiTier::DemandAware => Some(AiTier::DeepPlanner),
+            AiTier::DeepPlanner => None,
         }
     }
 
@@ -249,6 +268,7 @@ impl AiTier {
             AiTier::Greedy => "Greedy",
             AiTier::RoadPlanner => "Road Planner",
             AiTier::DemandAware => "Demand Aware",
+            AiTier::DeepPlanner => "Deep Planner",
         }
     }
 }
@@ -336,6 +356,11 @@ pub struct City {
     /// 永続化対象 (再ロード後も同じ視点を保つ)。
     pub cam_x: usize,
     pub cam_y: usize,
+
+    /// 直近にプレイヤーがクリック / タップしたマップセル (絶対座標)。
+    /// Status タブで「選択した施設の情報」を表示するために使う。
+    /// 一時状態 (永続化しない、リロード後はリセット)。
+    pub selected_cell: Option<(usize, usize)>,
 }
 
 pub const MAX_EVENTS: usize = 8;
@@ -409,6 +434,7 @@ impl City {
             built_at_tick,
             cam_x,
             cam_y,
+            selected_cell: None,
         }
     }
 

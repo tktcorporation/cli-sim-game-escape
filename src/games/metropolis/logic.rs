@@ -335,12 +335,16 @@ pub struct StrategyInfo {
     /// 1 行の意図説明。Manager タブのボタン下にこのまま出す。
     pub tagline: &'static str,
     /// AI が建物種別を引く時の重み (合計 100 を厳守)。
+    /// AI が建物種別を引く時の重み (合計 100 を厳守)。
+    ///
+    /// **注意**: Tier 4 以上は `placement_value` 評価ベースなのでこの重みは
+    /// 直接参照しない。Tier 3 (RoadPlanner) と Status パネルの「戦略内訳」
+    /// 表示でのみ使われる。Park の重みは「strategy_bias」側に統合済み
+    /// (= 評価ベース AI が Eco の時に Park を選びやすくなる)。
     pub house_pct: u32,
     pub road_pct: u32,
     pub workshop_pct: u32,
     pub shop_pct: u32,
-    /// 公園の重み。0 だと AI は Park を建てない。Eco 戦略のみ非ゼロ。
-    pub park_pct: u32,
     /// 建設速度ボーナス (%)。+20 = 建設 20% 短縮、-10 = 10% 延長。
     pub speed_bonus_pct: i32,
     /// 収入ペナルティ (%)。-20 = 収入 20% 減、0 = 通常。
@@ -358,7 +362,6 @@ pub fn strategy_info(s: Strategy) -> StrategyInfo {
             road_pct: 20,
             workshop_pct: 0,
             shop_pct: 10,
-            park_pct: 0,
             speed_bonus_pct: 0,
             income_penalty_pct: 0,
         },
@@ -369,7 +372,6 @@ pub fn strategy_info(s: Strategy) -> StrategyInfo {
             road_pct: 22,
             workshop_pct: 13,
             shop_pct: 35,
-            park_pct: 0,
             speed_bonus_pct: 0,
             income_penalty_pct: 0,
         },
@@ -380,7 +382,6 @@ pub fn strategy_info(s: Strategy) -> StrategyInfo {
             road_pct: 50,
             workshop_pct: 0,
             shop_pct: 15,
-            park_pct: 0,
             speed_bonus_pct: 20,
             income_penalty_pct: -20,
         },
@@ -391,12 +392,10 @@ pub fn strategy_info(s: Strategy) -> StrategyInfo {
             road_pct: 25,
             workshop_pct: 0,
             shop_pct: 25,
-            // Eco 戦略の固有要素: Park を 10% 確率で建てる。
-            // 公園が増えると周囲の House が Apartment/Highrise に育ちやすくなり、
-            // 「森を残しても街は育つ」というキャラ付けが完成する。
-            park_pct: 10,
             // 副作用は「ゆっくり育てる」を表現する負の建設速度と僅かな収入ボーナス。
             // ボーナスは正の `income_penalty_pct = +5` として扱う (関数側で 100+5)。
+            // Park を建てる傾向は `strategy_bias(Eco, Park) = +60` で
+            // 評価ベース AI に統合済み。
             speed_bonus_pct: -10,
             income_penalty_pct: 5,
         },
@@ -448,9 +447,8 @@ pub fn strategy_thought_verb(s: Strategy, kind: Building) -> &'static str {
 //
 // ## 数値の意味
 //
-// - `outpost_dispatch_period_ticks` (None = 自動拡張しない):
-//   この間隔で `dispatch_outpost` を試行。Outpost 自体の建設時間が 60 sec
-//   (= 600 ticks) なので、これより短くすると同時建設が積み上がる。
+// **Phase A 以降**: Outpost 派遣は AI 評価関数 (`placement_value`) に統合済み。
+// このセクションは撤去周期のみを扱う。
 //
 // - `auto_demolish_period_ticks` (None = 自動撤去しない):
 //   この間隔で `auto_demolish` を試行。短くすると無駄な建物を即排除する
@@ -465,9 +463,12 @@ pub fn strategy_thought_verb(s: Strategy, kind: Building) -> &'static str {
 // 確定させた。変更時は同テストで回帰を確認すること。
 
 /// 自動運用の方針 (Strategy ごとの周期と予算ガード)。
+///
+/// **Outpost 派遣は廃止** — AI 自身が `placement_value` で Outpost を選ぶため、
+/// ハードコード周期は不要になった (= 賢い AI ほど自然に外を拡張する設計)。
+/// 撤去だけがここに残る (= 老朽化 / 機能不全の garbage collection)。
 #[derive(Clone, Copy, Debug)]
 pub struct AutomationPolicy {
-    pub outpost_dispatch_period_ticks: Option<u32>,
     pub auto_demolish_period_ticks: Option<u32>,
     pub min_cash_reserve: i64,
 }
@@ -483,71 +484,32 @@ pub struct AutomationPolicy {
 /// 自動派遣が永遠に発火しない。$200-500 程度が実機テストでバランス良い。
 pub fn automation_policy(s: Strategy) -> AutomationPolicy {
     match s {
-        // 成長: 人口拡張のために土地が要る → 拡張は最速ペース、撤去は控えめ。
-        // 戦略の主役 (人口) を支えるため、4 戦略中で最も短い拡張周期にする。
-        // **Phase 1 調整**: 拡張・撤去とも周期をほぼ半減し「街がぐにゃぐにゃ
-        // 動く」感を出す。10 分でマップが埋まり止まる現象を防ぐ。
+        // 成長: 人口拡張のために土地が要る → 撤去は控えめ。
         Strategy::Growth => AutomationPolicy {
-            outpost_dispatch_period_ticks: Some(300),
             auto_demolish_period_ticks: Some(450),
             min_cash_reserve: 250,
         },
-        // 収入: 効率最大化 = 無駄な建物を積極排除。拡張は控えめ。
+        // 収入: 効率最大化 = 無駄な建物を積極排除。
         Strategy::Income => AutomationPolicy {
-            outpost_dispatch_period_ticks: Some(800),
             auto_demolish_period_ticks: Some(400),
             min_cash_reserve: 400,
         },
-        // 技術投資: 建設+20% を活かす + 道路網重視。拡張は中庸 (= 道路を
-        // 既存域内で太く張ることに比重を置く)。Growth より遅い周期にして
-        // 「Growth は土地で攻める / Tech は道路網で攻める」差別化を担保。
+        // 技術投資: 建設+20% を活かす + 老朽更新も標準。
         Strategy::Tech => AutomationPolicy {
-            outpost_dispatch_period_ticks: Some(500),
             auto_demolish_period_ticks: Some(400),
             min_cash_reserve: 350,
         },
-        // 環境配慮: 緑も岩も残す。自動拡張・撤去とも無し。
-        // 「緑地を保護し、既存の市域で完結する」キャラクター。
-        // プレイヤーが Eco を選ぶ = 「広げない、潰さない、ゆっくり育てる」を
-        // 全面に押し出すための明確な選択肢にする。
+        // 環境配慮: 撤去周期は控えめ (老朽化更新のみ)。
+        // 「緑地を保護し、既存の市域でゆっくり更新する」キャラクター。
+        // **Phase A**: 旧仕様で `None` だったが、Forest soft penalty 化で
+        // saturation 時に AI が森を切らずに進行可能になっても、撤去経路を
+        // 全く持たないと老朽化した街区が永続して詰まる (レビュー指摘 #1)。
+        // 控えめな周期 (900 tick = 90 sec) で老朽建物の世代交代だけ行う。
         Strategy::Eco => AutomationPolicy {
-            outpost_dispatch_period_ticks: None,
-            auto_demolish_period_ticks: None,
+            auto_demolish_period_ticks: Some(900),
             min_cash_reserve: 200,
         },
     }
-}
-
-/// マップが「飽和」しているか — buildable な Empty セル比率が低いと true。
-/// 飽和状態では `auto_strategy_actions` が撤去の周期判定を緩め、より
-/// 積極的に撤去を進めて空きを作る (= プレイヤーがマップ満杯で止まる現象を防ぐ)。
-///
-/// **判定基準**: 建設可能 Empty セル数 < buildable 全体の 12%。
-/// (Empty + Built + Construction + Clearing) のうち、地形が `buildable()` で
-/// `needs_outpost()` でも隣接 Outpost があり建てられる Empty を「真の空き」とする。
-pub fn map_is_saturated(city: &City) -> bool {
-    let mut buildable_total = 0u32;
-    let mut empty_buildable = 0u32;
-    for y in 0..GRID_H {
-        for x in 0..GRID_W {
-            let t = city.terrain_at(x, y);
-            if !t.buildable() {
-                continue;
-            }
-            // Rock は隣接 Outpost が無いと「アクセス不可」なので除外。
-            if t.needs_outpost() && !has_outpost_neighbor(city, x, y) {
-                continue;
-            }
-            buildable_total += 1;
-            if matches!(city.tile(x, y), Tile::Empty) {
-                empty_buildable += 1;
-            }
-        }
-    }
-    if buildable_total == 0 {
-        return false;
-    }
-    empty_buildable * 100 < buildable_total * 12
 }
 
 /// `step_one_tick` から毎 tick 呼ばれる自動運用ハブ。
@@ -562,53 +524,30 @@ pub fn auto_strategy_actions(city: &mut City) {
         return;
     }
     let policy = automation_policy(city.strategy);
-    let saturated = map_is_saturated(city);
 
-    if let Some(period) = policy.outpost_dispatch_period_ticks {
-        // 飽和時は周期の半分でも発火 (= マップを広げて詰まり解消)。
-        let effective_period = if saturated { period / 2 } else { period };
-        let due = city.tick.saturating_sub(city.last_outpost_dispatch_tick)
-            >= effective_period as u64
-            || city.last_outpost_dispatch_tick == 0;
-        // 同時に複数の Outpost を建てない (= 1 基ずつ確実に建てて Rock を
-        // 解禁してから次へ進める)。
-        let outpost_in_progress = city.cells().any(|(_, _, t)| {
-            matches!(t, Tile::Construction { target: Building::Outpost, .. })
-        });
-        // Outpost 建設は 60 sec ワーカー占有 = 1-worker プレイヤーは時間の
-        // 半分以上を Outpost に取られて家が建たなくなる。雇用 (>= 2 worker)
-        // が「自動拡張アンロック」の役割を持つ設計。プレイヤーが [W] で
-        // ワーカーを増やすことに具体的な意味が生まれる。
-        if due
-            && city.workers >= 2
-            && !outpost_in_progress
-            && city.free_workers() > 0
-            && city.cash >= Building::Outpost.cost() + policy.min_cash_reserve
-            && dispatch_outpost(city)
-        {
-            city.last_outpost_dispatch_tick = city.tick;
-        }
-    }
+    // **Outpost 派遣は AI 評価 (placement_value) に統合済み**。
+    //   Tier 4+ は `placement_value` で Outpost を candidate に含めて自分で
+    //   選ぶため、ここでハードコード周期で派遣する必要は無い。
+    //   Tier 1-3 は「賢くないので外を割れない」階層感を維持する。
+    //
+    // 撤去だけは別軸 (= state mutation を伴う garbage collection) として残す。
+    // 老朽化 / 機能不全のクリーンアップは AI の placement_value の対象外なので。
+
     if let Some(period) = policy.auto_demolish_period_ticks {
-        // **飽和アクセラレーション**: マップが詰まっている時は撤去周期を
-        // 1/3 にし、さらに 1 tick で複数件まで撤去する。「全部埋まって何も
-        // 動かない」現象の根本対策。
-        let effective_period = if saturated { period / 3 } else { period };
-        let max_per_tick = if saturated { 3 } else { 1 };
+        // 撤去候補が大量に見つかる (= 老朽化が進んだ街) ほど 1 tick で複数件処理する。
+        // 旧 saturation accelerator は廃止: AI が自然に外を割るので、saturation 時に
+        // 内部を急いで掃除する必要はない。標準周期で淡々と老朽建物を更新する。
         let due = city.tick.saturating_sub(city.last_auto_demolish_tick)
-            >= effective_period as u64
+            >= period as u64
             || city.last_auto_demolish_tick == 0;
         if due {
-            for _ in 0..max_per_tick {
-                let Some((tx, ty, _score)) = auto_demolish_target(city) else {
-                    break;
-                };
-                if city.cash < demolish_cost(tx, ty) + policy.min_cash_reserve {
-                    break;
-                }
-                if !auto_demolish(city) {
-                    break;
-                }
+            let Some((tx, ty, _score)) = auto_demolish_target(city) else {
+                return;
+            };
+            if city.cash < demolish_cost(tx, ty) + policy.min_cash_reserve {
+                return;
+            }
+            if auto_demolish(city) {
                 city.last_auto_demolish_tick = city.tick;
             }
         }
@@ -707,6 +646,12 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
         ticks_remaining: ticks,
     };
     city.buildings_started += 1;
+    // Outpost 派遣統計: AI が `placement_value` 経由で Outpost を選んだ時にも
+    // カウントされるよう、start_construction でフックする (= 旧 dispatch_outpost
+    // の責務を吸収)。
+    if matches!(kind, Building::Outpost) {
+        city.outposts_dispatched_total = city.outposts_dispatched_total.saturating_add(1);
+    }
     // Tier 4 (DemandAware) のみ Strategy に基づく動詞を表示。
     // 低 Tier は戦略を読まない設計なので、汎用の「着工」を出す方が誠実。
     // この差自体が「上位 AI ほど目的を持って動いている」演出にもなる。
@@ -1402,6 +1347,26 @@ pub(super) fn shop_is_active_with(
     false
 }
 
+/// (x, y) の 4-近傍に指定 terrain があるか。Outpost 候補絞り込みなど用。
+pub(super) fn has_terrain_neighbor(
+    city: &City,
+    x: usize,
+    y: usize,
+    target: super::terrain::Terrain,
+) -> bool {
+    for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+        let nx = x as i32 + dx;
+        let ny = y as i32 + dy;
+        if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+            continue;
+        }
+        if city.terrain_at(nx as usize, ny as usize) == target {
+            return true;
+        }
+    }
+    false
+}
+
 fn has_neighbor_kind(city: &City, x: usize, y: usize, kind: Building) -> bool {
     let dirs: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
     for (dx, dy) in dirs {
@@ -1698,86 +1663,8 @@ pub fn auto_demolish(city: &mut City) -> bool {
     demolish_at(city, x, y)
 }
 
-/// 開拓機材 (Outpost) を派遣する。
-///
-/// **配置ロジック (idle ゲームの哲学に沿って自動)**:
-///   1. 既存の建物 (Built / Construction) に隣接する Empty セル
-///   2. かつ自身の 4-近傍に Rock セルがある (= 設置すれば実際に Rock が解禁される)
-///   3. のうち、最もスコアが高いものを選ぶ
-///
-/// スコア = 解禁できる Rock 数 (近傍の Rock 数)。
-/// これで「街の境界の岩壁の前」に自動配置される。
-///
-/// プレイヤー視点: 「機材派遣ボタンを押す → AI が良い場所に置いてくれる」。
-/// Idle Metropolis の「CPU が考える、プレイヤーは方向だけ」哲学に整合。
-pub fn dispatch_outpost(city: &mut City) -> bool {
-    let cost = Building::Outpost.cost();
-    if city.cash < cost {
-        return false;
-    }
-
-    let Some((bx, by)) = best_outpost_placement(city) else {
-        return false;
-    };
-
-    if !start_construction(city, bx, by, Building::Outpost) {
-        return false;
-    }
-    city.outposts_dispatched_total = city.outposts_dispatched_total.saturating_add(1);
-    let unlocked = count_rock_neighbors(city, bx, by);
-    city.push_event(format!(
-        "🚧 ({},{}) 開拓機材を自動派遣 — 周囲 {} 岩盤を解禁予定",
-        bx, by, unlocked
-    ));
-    true
-}
-
-/// `dispatch_outpost` の候補探索。最も多くの Rock を解禁できる Empty セルを返す。
-///
-/// 「街の連続性」要件は Manhattan 距離 2 (= 4-近傍 + その近傍) で見る。AI が
-/// 4-近傍を埋め切るスピードに対し、距離 2 のバッファを持たせることで Empty
-/// Plain な候補が安定して残る。距離 2 でも「街から数歩」の位置なので、Rock
-/// 解禁後に AI が自然に拡張してくる位置として妥当。
-fn best_outpost_placement(city: &City) -> Option<(usize, usize)> {
-    let mut best: Option<(usize, usize, u32)> = None;
-    for y in 0..GRID_H {
-        for x in 0..GRID_W {
-            if !matches!(city.tile(x, y), Tile::Empty) {
-                continue;
-            }
-            // 機材は **整地不要セル (Plain)** にしか置かない。Forest/Wasteland を
-            // 候補に入れると `dispatch_outpost` → `start_construction` のフローで
-            // 整地だけ走って Outpost が建たない silent failure になる
-            // (Codex review #100: P1)。
-            let terrain = city.terrain_at(x, y);
-            if !terrain.buildable() || terrain.needs_clearing() {
-                continue;
-            }
-            // 既存建造物 (Built or Construction) から Manhattan 距離 2 以内に
-            // 居ること = 街の周辺に居る。距離 1 (4-近傍) だと AI のフロンティア
-            // 拡張で候補がすぐ消える。
-            if !has_built_within_distance(city, x, y, 4) {
-                continue;
-            }
-            // 近傍 Rock 数 = 解禁スコア。
-            let unlocked = count_rock_neighbors(city, x, y);
-            if unlocked == 0 {
-                continue;
-            }
-            let better = match best {
-                None => true,
-                Some((_, _, prev)) => unlocked > prev,
-            };
-            if better {
-                best = Some((x, y, unlocked));
-            }
-        }
-    }
-    best.map(|(x, y, _)| (x, y))
-}
-
 /// (x, y) から Manhattan 距離 dist 以内に Built/Construction セルが存在するか。
-fn has_built_within_distance(city: &City, x: usize, y: usize, dist: i32) -> bool {
+pub(super) fn has_built_within_distance(city: &City, x: usize, y: usize, dist: i32) -> bool {
     let xi = x as i32;
     let yi = y as i32;
     for dy in -dist..=dist {
@@ -1817,6 +1704,362 @@ fn count_rock_neighbors(city: &City, x: usize, y: usize) -> u32 {
         }
     }
     n
+}
+
+// ── Placement Value (評価ベース AI の中核) ──────────────────────
+//
+// 「この候補に kind を建てると、シティ全体の income/sec がどれだけ増えそうか」
+// を **cents 単位** で見積もる純関数。Tier 4 以上の AI はこの値を最大化する
+// 候補を選ぶ。saturation 時に Outpost が高評価になり「自然に外の岩場を割る」
+// という挙動は、この関数の論理から導かれる (= ハードコード分岐ではない)。
+//
+// 評価軸:
+//   1. 直接稼働 income — その建物が tick 1 から稼ぐ cents/sec
+//   2. シナジー — 周囲の既存 House を Tier 上げる (Apartment/Highrise 化) 影響
+//   3. 将来潜在 — 道路/Outpost が解禁する Empty buildable cells の期待 income
+//   4. 戦略バイアス — Strategy ごとの好みを軽く乗せる
+//   5. ROI — kind.cost() を引いて「コスト見合いか」を反映
+//
+// 戻り値は cents (= 100 倍した日割り income)。10 は + $0.1/sec 相当の評価。
+//
+// **Outpost 自動派遣の自然発生**:
+//   中央エリアが満杯 → House/Shop 候補は cost 高く synergy も既存 saturated で
+//   value が小さい / 0。一方 Outpost は周囲 Rock 数 × 期待 House income の
+//   future が乗るので相対的に高評価 → AI は Outpost を自分で選ぶ。
+//   「拡張周期」のような外付けタイミングが不要になる。
+
+/// Workshop / Shop / House の典型 income 期待値 (cents/sec)。
+///
+/// 将来潜在 (= 「ここに Empty buildable cell を作っておくと、後で何かが
+/// 建つだろう」) の期待値計算に使うラフな mid-Tier 想定値。
+///
+/// **設計意図**: 将来潜在を「即時 income」と等価に扱うと AI が Outpost / Road を
+/// 過剰選択する (= 30 min で 70 機材派遣して cash 枯渇) ため、controlled に discount。
+/// Road は /3、Outpost は /4 で割って `direct + synergy` との拮抗を狙う。
+const FUTURE_CELL_EXPECTATION_CENTS: i64 = 80; // 約 $0.8/sec — Cottage と Apartment の中間
+
+/// 候補建設の収入評価 (cents/sec 単位)。**評価ベース AI の唯一の真実。**
+///
+/// `connected` は `compute_edge_connected_roads` の結果。
+pub fn placement_value(
+    city: &City,
+    x: usize,
+    y: usize,
+    kind: Building,
+    connected: &[Vec<bool>],
+) -> i64 {
+    if !matches!(city.tile(x, y), Tile::Empty) {
+        return i64::MIN;
+    }
+    let terrain = city.terrain_at(x, y);
+    if !terrain.buildable() {
+        return i64::MIN;
+    }
+    if terrain.needs_outpost() && !has_outpost_neighbor(city, x, y) {
+        return i64::MIN;
+    }
+    // 整地必要セルは「整地+建設で 2 倍時間がかかる」ペナルティ。
+    // 候補としては残すが評価を下げる (= Plain 候補があればそちらを選ぶ)。
+    let clearing_penalty: i64 = if terrain.needs_clearing() { -30 } else { 0 };
+
+    let direct = direct_income_value(city, x, y, kind, connected);
+    let synergy = synergy_income_value(city, x, y, kind, connected);
+    let future = future_potential_value(city, x, y, kind, connected);
+    let bias = strategy_bias(city.strategy, kind);
+
+    // Eco 戦略は Forest セルを避けたいが、saturation 時に AI を完全 idle にすると
+    // 「外を割れない、撤去もしない」二重死角になる (レビュー指摘 #1)。soft penalty
+    // で「他に選択肢があれば森を残し、無ければ仕方なく切る」挙動に。
+    let eco_forest_penalty = if matches!(city.strategy, Strategy::Eco)
+        && matches!(terrain, super::terrain::Terrain::Forest)
+    {
+        -100
+    } else {
+        0
+    };
+
+    // ROI: cost を「秒単価」相当に換算して引く。cost $100 → -2 cents/sec
+    // (= 50 秒で回収できると評価値ゼロ)。Outpost ($600) は -12、
+    // House ($40) は -0.8 ≈ 0 に近い。
+    let roi_penalty = kind.cost() / 50;
+
+    direct + synergy + future + bias + clearing_penalty + eco_forest_penalty - roi_penalty
+}
+
+/// 1. 直接 income — 建物が tick 1 から稼ぐ cents/sec。
+///
+/// House: edge_connected なら 50 (Cottage)、未接続なら 25 (半減)。
+///        ※ Apartment/Highrise への昇格は dwell time が必要なので即時は Cottage 想定。
+/// Workshop: 隣接 House + edge-connected で 100。
+/// Shop: edge-connected + 距離 3 以内 House で 200。
+/// その他 (Road/Park/Outpost): 0。
+fn direct_income_value(
+    city: &City,
+    x: usize,
+    y: usize,
+    kind: Building,
+    connected: &[Vec<bool>],
+) -> i64 {
+    match kind {
+        Building::House => {
+            // House は配置の連結性で income が決まる。
+            // (この時点では「将来 Apartment 化するか」は synergy 側で見る)
+            let edge = is_building_edge_connected(connected, x, y);
+            // House は隣接 Road が無いと活性化しない事実上の前提があるが、
+            // SOFT ルールで Cottage も生きるので 25 を最低保証。
+            if edge {
+                50
+            } else {
+                25
+            }
+        }
+        Building::Workshop => {
+            let has_house = has_neighbor_kind(city, x, y, Building::House);
+            let edge = is_building_edge_connected(connected, x, y);
+            if !(has_house && edge) {
+                return 0;
+            }
+            // 雇用バランス: Workshop 1 つにつき 2 House 雇用 (= 1:2 ratio)。
+            //
+            // **設計上の妥協** (レビュー指摘 #6): `count_built` は完成済み建物
+            // のみカウント。同 tick で `drive_ai` が複数 placement をシリアル
+            // 実行する場合 (= worker > 1)、相互の数えあげは反映されない。
+            // 実害は小さく (= 1 tick 1 worker のみ厳密)、次 tick で正しく収束する。
+            let houses = city.count_built(Building::House) as i64;
+            let workshops = city.count_built(Building::Workshop) as i64;
+            let supported = houses / 2;
+            let surplus = (workshops + 1) - supported;
+            if surplus > 0 {
+                (100 - surplus * 50).max(0)
+            } else {
+                100
+            }
+        }
+        Building::Shop => {
+            let edge = is_building_edge_connected(connected, x, y);
+            let near_house = has_house_within(city, x, y, 3);
+            if !(edge && near_house) {
+                return 0;
+            }
+            // 顧客バランス: 1 Shop につき 3 House の顧客基盤 (= 1:3 ratio)。
+            // surplus (= 過剰 Shop 数) が出ると激減、ゼロ近くなる。
+            // これで AI は「houses が増えてから shops を増やす」3:1 周期を作る。
+            let houses = city.count_built(Building::House) as i64;
+            let shops = city.count_built(Building::Shop) as i64;
+            let supported = houses / 3;
+            let surplus = (shops + 1) - supported;
+            if surplus > 0 {
+                (200 - surplus * 80).max(0)
+            } else {
+                200
+            }
+        }
+        Building::Park | Building::Road | Building::Outpost => 0,
+    }
+}
+
+/// 2. シナジー — 周囲の既存 House の Tier が上昇しうる場合の income 増分。
+///
+/// `kind` が House/Workshop/Shop/Park/Road の時、それぞれの近傍 House の
+/// `HouseNeighborhood` がどう変わり、Tier が変化するかを試算する。
+/// ただし dwell time は無視 (= 「将来 Apartment になりうるなら +100」と楽観)。
+fn synergy_income_value(
+    city: &City,
+    x: usize,
+    y: usize,
+    kind: Building,
+    connected: &[Vec<bool>],
+) -> i64 {
+    let mut delta_cents = 0i64;
+    // 影響範囲: kind ごとに Manhattan 距離。
+    let radius: i32 = match kind {
+        Building::Workshop | Building::Shop => 5,
+        Building::Park => 4,
+        Building::House => 3, // 近隣 House として周囲 House にカウントされる
+        Building::Road => 1,  // 隣接 House の n_road_adj に寄与
+        Building::Outpost => return 0,
+    };
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx.abs() + dy.abs() > radius {
+                continue;
+            }
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                continue;
+            }
+            let (nx, ny) = (nx as usize, ny as usize);
+            if (nx, ny) == (x, y) {
+                continue;
+            }
+            if !matches!(city.tile(nx, ny), Tile::Built(Building::House)) {
+                continue;
+            }
+            // 既存 House (nx, ny) の現状 / 仮想 stats を比較。
+            let cur = gather_house_neighborhood_with(city, nx, ny, connected);
+            let mut after = cur;
+            // kind を (x, y) に置いた時の stats 変化。
+            match kind {
+                Building::House => {
+                    let manh = ((nx as i32 - x as i32).abs() + (ny as i32 - y as i32).abs()) as u32;
+                    if manh <= 3 {
+                        after.n_house_within_3 += 1;
+                    }
+                }
+                Building::Workshop => after.n_workshop_within_5 += 1,
+                Building::Shop => after.n_shop_within_5 += 1,
+                Building::Park => after.n_park_within_4 += 1,
+                Building::Road => {
+                    let manh = ((nx as i32 - x as i32).abs() + (ny as i32 - y as i32).abs()) as u32;
+                    if manh == 1 {
+                        after.n_road_adj += 1;
+                    }
+                }
+                Building::Outpost => {}
+            }
+            let cur_tier = house_tier_for(cur);
+            let new_tier = house_tier_for(after);
+            if new_tier > cur_tier {
+                let cur_inc = match cur_tier {
+                    HouseTier::Cottage => 50,
+                    HouseTier::Apartment => 150,
+                    HouseTier::Highrise => 300,
+                };
+                let new_inc = match new_tier {
+                    HouseTier::Cottage => 50,
+                    HouseTier::Apartment => 150,
+                    HouseTier::Highrise => 300,
+                };
+                delta_cents += new_inc - cur_inc;
+            }
+        }
+    }
+    delta_cents
+}
+
+/// 3. 将来潜在 — Road / Outpost が解禁する empty buildable cells の期待 income。
+///
+/// Road: 隣接 4-近傍の Empty buildable cells × 期待 cell income。
+///       「道路を引くと、その隣に家を建てられるようになる」価値。
+///       既に edge-connected ならボーナス。
+/// Outpost: 4-近傍の Rock セル数 × 期待 cell income。Rock 解禁分。
+fn future_potential_value(
+    city: &City,
+    x: usize,
+    y: usize,
+    kind: Building,
+    connected: &[Vec<bool>],
+) -> i64 {
+    match kind {
+        Building::Road => {
+            // 既に edge-connected な道路に隣接していれば、新道路も即 edge-connected。
+            // 隣接 Empty buildable cells の数 × 期待値の半分 (将来発生する income なので割引)。
+            //
+            // **マップ端の Road は edge-connected の seed**: 候補位置 (x, y) 自身が
+            // マップ端にある場合は、建てれば即 BFS seed として機能する。
+            // ループ不変条件なので事前に評価する (レビュー指摘 #5)。
+            let at_map_edge = x == 0 || y == 0 || x == GRID_W - 1 || y == GRID_H - 1;
+            let mut potential_cells = 0i64;
+            let mut connects_to_edge =
+                is_building_edge_connected(connected, x, y) || at_map_edge;
+            for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                    continue;
+                }
+                let (nx, ny) = (nx as usize, ny as usize);
+                match city.tile(nx, ny) {
+                    Tile::Empty => {
+                        let t = city.terrain_at(nx, ny);
+                        if t.buildable()
+                            && (!t.needs_outpost() || has_outpost_neighbor(city, nx, ny))
+                        {
+                            potential_cells += 1;
+                        }
+                    }
+                    Tile::Built(Building::Road) => {
+                        if connected[ny][nx] {
+                            connects_to_edge = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // 孤立 Road (隣接 Built 0 + edge 未接続) は「将来何にも繋がらない」候補。
+            // potential_cells = 0 なら下の式で 0、connects_to_edge = false で割引。
+            // /3 ディスカウント: 将来潜在は割引しないと AI が道路を過剰選択する。
+            let raw = potential_cells * FUTURE_CELL_EXPECTATION_CENTS / 3;
+            if connects_to_edge {
+                raw
+            } else {
+                // 未接続道路は半減。完全孤立 (0) なら 0。
+                raw / 2
+            }
+        }
+        Building::Outpost => {
+            // Outpost は近傍 Rock を解禁する。Rock 解禁後はそのセルが建設可能になり、
+            // 期待 income が乗る。Rock 数が多いほど評価高 = 飽和時に外周岩場が選ばれる。
+            let n_rock = count_rock_neighbors(city, x, y) as i64;
+            if n_rock == 0 {
+                return 0;
+            }
+            // 「街と繋がっていない外周」だと建てても住人が来ない。
+            // Manhattan 距離 4 以内に Built セルがある場所のみ評価。
+            if !has_built_within_distance(city, x, y, 4) {
+                return 0;
+            }
+            // 隣接 4 方向に edge-connected road があれば +20% (解禁後すぐ繋げられる)。
+            let near_edge_road = [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dy)| {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                    return false;
+                }
+                connected[ny as usize][nx as usize]
+            });
+            // /4 ディスカウント: Outpost は cost $600 を回収するのに「Rock 解禁 →
+            // 整地 → 建設」と 2-3 ステップ必要。即時 income と等価に評価すると
+            // 30 min で 70 機材派遣して cash 枯渇する (実機ベンチで観測)。
+            let base = n_rock * FUTURE_CELL_EXPECTATION_CENTS / 4;
+            if near_edge_road {
+                base * 12 / 10
+            } else {
+                base
+            }
+        }
+        // House/Workshop/Shop/Park は future cell potential ゼロ (synergy / direct でカバー)。
+        _ => 0,
+    }
+}
+
+/// 4. 戦略バイアス — Strategy ボタンの「好み」を評価値に乗せる。
+///
+/// `strategy_info` の重み比率を直接使う代わりに、各 kind に「Strategy が
+/// 優先するなら +N、嫌うなら -M」を返す形にすることで、評価ベース AI でも
+/// 戦略の効果が出るようにする。
+///
+/// 効き方は弱め (合計で ±50 cents/sec 程度)。Strategy で建物選好が変わっても
+/// 評価関数の主軸 (income/sec の真の予測) は崩さない。
+fn strategy_bias(s: Strategy, kind: Building) -> i64 {
+    match (s, kind) {
+        // 成長: House を最優先、Shop は弱め (= 商業を建てない pop-only キャラ)
+        (Strategy::Growth, Building::House) => 40,
+        (Strategy::Growth, Building::Road) => 10,
+        (Strategy::Growth, Building::Shop) => -20, // 控えめに
+        // 収入: 商業 + 必要な住宅。1:3 ratio を保ちつつ Shop を強くプッシュ
+        (Strategy::Income, Building::Shop) => 50,
+        (Strategy::Income, Building::Workshop) => 25,
+        (Strategy::Income, Building::House) => 25, // 顧客基盤として house も伸ばす
+        // 技術: 道路網拡大を最優先
+        (Strategy::Tech, Building::Road) => 40,
+        (Strategy::Tech, Building::House) => 10,
+        // 環境: Park ボーナス
+        (Strategy::Eco, Building::Park) => 60,
+        (Strategy::Eco, Building::House) => 20,
+        _ => 0,
+    }
 }
 
 /// Try to upgrade the AI brain.  Returns true on success.
@@ -2456,113 +2699,9 @@ mod tests {
         assert_eq!((tx, ty), (cx, cy));
     }
 
-    /// dispatch_outpost: 隣接 Rock がある建物境界を見つけて Outpost 着工する。
-    /// Phase A: `best_outpost_placement` が Manhattan 距離 4 以内まで
-    /// 候補を広げたため、特定セルへの厳密 assert はやめて「グリッド上の
-    /// どこかに Outpost Construction が始まる」という不変条件のみ確認する。
-    #[test]
-    fn dispatch_outpost_places_at_boundary() {
-        let mut city = City::new();
-        city.cash = 1_000;
-        let cx = GRID_W / 2;
-        let cy = GRID_H / 2;
-        city.terrain[cy][cx] = super::super::terrain::Terrain::Plain;
-        city.set_tile(cx, cy, Tile::Built(Building::House));
-        city.terrain[cy][cx + 1] = super::super::terrain::Terrain::Plain;
-        city.terrain[cy][cx + 2] = super::super::terrain::Terrain::Rock;
-
-        let ok = dispatch_outpost(&mut city);
-        assert!(ok, "outpost dispatch should succeed");
-        let any_outpost_construction = (0..GRID_H).any(|y| {
-            (0..GRID_W).any(|x| {
-                matches!(
-                    city.tile(x, y),
-                    Tile::Construction {
-                        target: Building::Outpost,
-                        ..
-                    }
-                )
-            })
-        });
-        assert!(
-            any_outpost_construction,
-            "an Outpost Construction tile should exist after dispatch"
-        );
-        assert!(city.cash < 1_000, "cash should be spent");
-    }
-
-    /// 機材設置場所が無い時は false を返してサイレントに帰る。
-    /// 旧仕様では失敗イベントログを出していたが、tick 駆動の自動発火に移行した
-    /// ため log spam を避けてサイレント化した。
-    /// Phase 3 で創設街路が入ったので、テストは明示的にグリッドを空にする。
-    #[test]
-    fn dispatch_outpost_fails_when_no_boundary() {
-        let mut city = City::new();
-        city.cash = 1_000;
-        // 創設街路を消去して「既存建物 0」状態を再現。
-        for y in 0..GRID_H {
-            for x in 0..GRID_W {
-                city.set_tile(x, y, Tile::Empty);
-            }
-        }
-        let events_before = city.events.len();
-        // 既存建物無し → has_any_built_neighbor の候補ゼロ
-        let result = dispatch_outpost(&mut city);
-        assert!(!result, "no boundary should fail dispatch");
-        // cash は減っていない。
-        assert_eq!(city.cash, 1_000);
-        // 失敗時はイベントを増やさない (サイレント)。
-        assert_eq!(city.events.len(), events_before);
-    }
-
-    /// Codex review #100 P1 回帰: Forest セルを Outpost 候補から除外する。
-    ///
-    /// 以前は Forest/Wasteland も候補に入っていたため、`start_construction` が
-    /// 整地ブランチに入って $15 だけ消費し Outpost を建てない silent failure が
-    /// 発生していた。修正後は Forest 隣接でも Plain 候補があればそちらを選ぶ。
-    #[test]
-    fn dispatch_outpost_skips_forest_candidates() {
-        let mut city = City::new();
-        city.cash = 10_000;
-        let cx = GRID_W / 2;
-        let cy = GRID_H / 2;
-        // 中央 House → 隣 Plain (左) と隣 Forest (右) を候補に。両側に Rock を配置。
-        city.terrain[cy][cx] = super::super::terrain::Terrain::Plain;
-        city.set_tile(cx, cy, Tile::Built(Building::House));
-        // 左: Plain + 隣 Rock
-        city.terrain[cy][cx - 1] = super::super::terrain::Terrain::Plain;
-        city.terrain[cy][cx - 2] = super::super::terrain::Terrain::Rock;
-        // 右: Forest + 隣 Rock (旧バグでは候補になっていた)
-        city.terrain[cy][cx + 1] = super::super::terrain::Terrain::Forest;
-        city.terrain[cy][cx + 2] = super::super::terrain::Terrain::Rock;
-        // Forest 上には更に Rock を増やしてスコアを上げ、旧バグで Forest が
-        // 優先されることを再現しやすくする。
-        if cy + 1 < GRID_H {
-            city.terrain[cy + 1][cx + 1] = super::super::terrain::Terrain::Rock;
-        }
-
-        let placement = best_outpost_placement(&city).expect("should find a Plain candidate");
-        // Forest セル (cx+1, cy) は候補に入れてはならない (silent failure 回避)。
-        assert_ne!(
-            placement,
-            (cx + 1, cy),
-            "Forest cell must not be selected for Outpost placement"
-        );
-        // 配置先の terrain は Plain であること (= Outpost が直接着工可能)。
-        let (px, py) = placement;
-        assert_eq!(
-            city.terrain[py][px],
-            super::super::terrain::Terrain::Plain,
-            "placement {:?} should be on Plain terrain",
-            placement
-        );
-
-        assert!(dispatch_outpost(&mut city));
-        assert!(matches!(
-            city.tile(px, py),
-            Tile::Construction { target: Building::Outpost, .. }
-        ));
-    }
+    /// Outpost 派遣のテストは AI 評価関数 (`placement_value`) のテスト経由で
+    /// 担保される (旧 dispatch_outpost / best_outpost_placement は AI 統合により廃止)。
+    /// 「saturation 時に Outpost が高評価になる」性質は `placement_value_*` テストで確認。
 
     /// Rock セルは隣接 Outpost が無いと start_construction が false を返す。
     #[test]
