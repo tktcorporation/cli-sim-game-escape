@@ -14,6 +14,13 @@ pub enum AiAction {
         y: usize,
         kind: Building,
     },
+    /// 撤去 (Tier 4/5 のみ生成)。Tier 1-3 は周期撤去で `auto_strategy_actions`
+    /// が処理する。AI が build と同じ `cents/sec` 天秤で「壊す方が得」と判定した
+    /// 時に生成される。
+    Demolish {
+        x: usize,
+        y: usize,
+    },
     Idle,
 }
 
@@ -45,7 +52,18 @@ pub fn decide(city: &mut City) -> AiAction {
 /// Distribution is biased 60% House / 25% Road / 15% Shop so the player
 /// usually sees a population grow before shops appear, even though the
 /// AI doesn't *understand* why.
+///
+/// **Demolish 統合**: 5% の確率で `auto_demolish_target` を試す。ダム性を
+/// 維持するため賢い判断はせず、「機能不全建物が見つかった時にぼんやり撤去
+/// する」だけ。Tier 階層感を保ちつつ街が完全 saturate しても抜け道を持つ。
 fn tier1_random(city: &mut City) -> AiAction {
+    // Demolish 試行 (5% 確率)。ヒットしなければ Build に進む。
+    if city.next_rand().is_multiple_of(20) {
+        if let Some(action) = try_random_demolish(city) {
+            return action;
+        }
+    }
+
     // Pick building kind by weighted roll
     let roll = (city.next_rand() % 100) as u32;
     let kind = if roll < 60 {
@@ -97,6 +115,10 @@ fn tier1_random(city: &mut City) -> AiAction {
 /// Same building-kind roll, but picks an Empty cell that is **adjacent**
 /// (4-connected) to an existing built tile.  Falls back to a random empty
 /// cell if no adjacent option exists (early game).
+///
+/// **Demolish 統合**: 隣接 Empty 候補が枯渇 (= 街が周辺まで埋まった) 時に
+/// `auto_demolish_target` を試す。ダム性は維持しつつ「街が満杯になったら
+/// 整理する」という greedy 流の発想を反映。普通の状況では撤去しない。
 fn tier2_greedy(city: &mut City) -> AiAction {
     let roll = (city.next_rand() % 100) as u32;
     let kind = if roll < 50 {
@@ -136,6 +158,10 @@ fn tier2_greedy(city: &mut City) -> AiAction {
     }
 
     if candidates.is_empty() {
+        // 候補枯渇 = 街が周辺まで埋まった。ここで撤去を試す = 「整理して空ける」。
+        if let Some(action) = try_random_demolish(city) {
+            return action;
+        }
         return tier1_random(city);
     }
     let pick = (city.next_rand() as usize) % candidates.len();
@@ -221,7 +247,19 @@ fn is_empty_next_to_building(city: &City, x: usize, y: usize) -> bool {
 /// House/Road/Shop の中で Strategy 寄りに `±10%` 揺らす。プレイヤーが
 /// $5,000 で Tier 3 にアップグレードした時に「戦略ボタンが効く」実感が
 /// 出る程度の弱い反映で、Tier 4 ($50,000) との価値差は維持する。
+///
+/// **Demolish 統合**: 機能不全建物が一定スコア以上 (= 道路網に組み込めない
+/// inactive Shop / Workshop / 役目を終えた Outpost) なら撤去を build より
+/// 優先する。「道路網優先」の思想と整合: 網の中に dead 建物があれば取り除く。
 fn tier3_road_planner(city: &mut City) -> AiAction {
+    // 機能不全建物 (score >= 200, = inactive Shop 相当) があれば優先撤去。
+    // 網の整理を先回り — Tier 3 の特徴付け。
+    if let Some((dx, dy, score)) = super::logic::auto_demolish_target(city) {
+        if score >= 200 && city.cash >= super::logic::demolish_cost(dx, dy) {
+            return AiAction::Demolish { x: dx, y: dy };
+        }
+    }
+
     // ベース 50/30/20 (House/Road/Shop) を Strategy で「気持ち程度」偏らせる。
     // Workshop は Tier 3 では建てない (= 0%) ので、Strategy::Income の
     // workshop 重みは無視。
@@ -285,6 +323,19 @@ fn tier3_road_planner(city: &mut City) -> AiAction {
     let pick = (city.next_rand() as usize) % candidates.len();
     let (x, y) = candidates[pick];
     AiAction::Build { x, y, kind }
+}
+
+/// Tier 1-3 共用の Demolish ヘルパー。`auto_demolish_target` の結果 (score 入り)
+/// を Demolish action として返す。cash 不足や候補無しなら None。
+///
+/// 各 Tier は呼び出し側で「いつ呼ぶか」(発火確率 / 候補枯渇時 / score 閾値) を
+/// 制御することで階層差を表現する。本ヘルパー自体は単純なラッパー。
+fn try_random_demolish(city: &City) -> Option<AiAction> {
+    let (dx, dy, _score) = super::logic::auto_demolish_target(city)?;
+    if city.cash < super::logic::demolish_cost(dx, dy) {
+        return None;
+    }
+    Some(AiAction::Demolish { x: dx, y: dy })
 }
 
 /// Tier 4 / 5 共用の評価ベース placement search。
@@ -429,9 +480,9 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
     }
 
     // depth=2 (Tier 5): top-1 の (x,y,kind) を採用する代わりに、上位 K (=12) を抽出して
-    // それぞれに 2 手目評価を加算し、合計最大を選ぶ。
+    // それぞれに 2 手目評価を加算し、合計最大を選ぶ。`best` を best2 で上書きしてから
+    // 後続の Demolish 比較に進む (= depth=2 でも Demolish action が出せる)。
     if depth >= 2 {
-        // 1 手目の上位 K 候補を集める (= ガードは consider と同じ passes_guards を使う)。
         let mut top: Vec<(usize, usize, Building, i64)> = Vec::new();
         for &(x, y) in &regular {
             for &kind in normal_kinds {
@@ -451,30 +502,61 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
         top.truncate(12);
 
         // 各 top 候補に 2 手目 value を加算。
-        // **重要** (Codex P1 指摘): 2 手目候補は仮想着工した世界 (`virt`) で
-        // 動的に再計算する必要がある。1 手目時点の `regular`/`outpost` に縛ると、
-        // 「道路を置いた結果新たに Built 隣接になったセル」を取りこぼし、
-        // Tier 5 の主軸シナリオ (road-then-build) が読めなくなる。
-        let mut best2: Option<(usize, usize, Building, i64)> = None;
+        // 2 手目候補は仮想着工した世界 (`virt`) で動的に再計算する。
+        // 1 手目時点の `regular`/`outpost` に縛ると、「道路を置いた結果新たに
+        // Built 隣接になったセル」を取りこぼす。
+        //
+        // **重要**: Demolish との比較は 1 手目 value (v1) で行う。Build の選定
+        // にだけ 2 手目込み total を使い、(x, y, kind) を決めた後 Tuple の
+        // value 欄には v1 を載せる。total を載せると Demolish 候補が永遠に
+        // 勝てなくなり、Tier 5 で撤去が走らなくなって街が膠着する。
+        let mut best2: Option<(usize, usize, Building, i64, i64)> = None; // (..., v1, total)
         for &(x, y, kind, v1) in &top {
             let v2 = simulate_second_step_value(city, x, y, kind, normal_kinds);
             let total = v1 + v2;
             let better = match best2 {
                 None => true,
-                Some((_, _, _, prev)) => total > prev,
+                Some((_, _, _, _, prev)) => total > prev,
             };
             if better {
-                best2 = Some((x, y, kind, total));
+                best2 = Some((x, y, kind, v1, total));
             }
         }
-        if let Some((x, y, kind, _)) = best2 {
-            return AiAction::Build { x, y, kind };
+        if let Some((x, y, kind, v1, _)) = best2 {
+            best = Some((x, y, kind, v1));
         }
     }
 
-    match best {
-        Some((x, y, kind, _)) => AiAction::Build { x, y, kind },
-        None => AiAction::Idle,
+    // Demolish 候補: `auto_demolish_target_with` で score (= 機能不全 + 老朽化
+    // − cost_penalty) が最大のものを取得。Tier 4/5 共に 1 手目相当の評価で
+    // 取得し、上の Build best (= Tier 5 でも v1) と公平に比較する。
+    let demolish_best = super::logic::auto_demolish_target_with(city, &connected);
+
+    let best_build_value = best.map(|(_, _, _, v)| v);
+    let best_demo_value = demolish_best.map(|(_, _, v)| v);
+
+    match (best_build_value, best_demo_value) {
+        (Some(bv), Some(dv)) if dv > bv => {
+            let (dx, dy, _) = demolish_best.unwrap();
+            if city.cash >= super::logic::demolish_cost(dx, dy) {
+                AiAction::Demolish { x: dx, y: dy }
+            } else {
+                AiAction::Idle
+            }
+        }
+        (Some(_), _) => {
+            let (x, y, kind, _) = best.unwrap();
+            AiAction::Build { x, y, kind }
+        }
+        (None, Some(_)) => {
+            let (dx, dy, _) = demolish_best.unwrap();
+            if city.cash >= super::logic::demolish_cost(dx, dy) {
+                AiAction::Demolish { x: dx, y: dy }
+            } else {
+                AiAction::Idle
+            }
+        }
+        (None, None) => AiAction::Idle,
     }
 }
 
