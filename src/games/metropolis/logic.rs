@@ -690,7 +690,7 @@ fn accrue_income(city: &mut City) {
     }
 }
 
-// ── 需給ベースの per-tile 収入計算 (Phase A: 需給システム) ────────────
+// ── 需給ベースの per-tile 収入計算 ────────────────────────────────────
 //
 // Shop / Mall / Workshop / Factory / Office の収入は **近隣人口の需要** を
 // **キャパシティで按分** した値になる。ユーザー要望の「人口が増えても店舗が
@@ -1044,7 +1044,7 @@ pub enum HouseLevel {
 /// 街が育つ実感を「数字でも見せる」ための主要パラメータ。Tier が上がる時の
 /// 倍率を 3x にすることで、Highrise 化が「街が爆発的に膨らむ瞬間」になる。
 ///
-/// - Cottage:   4 人  (旧仕様の固定 5 を微調整 — 育てる旨味を作る)
+/// - Cottage:   4 人 (基準)
 /// - Apartment: 12 人 (Cottage の 3x)
 /// - Highrise:  30 人 (Cottage の 7.5x)
 pub fn house_capacity(tier: HouseTier) -> u32 {
@@ -3253,7 +3253,7 @@ mod tests {
         );
     }
 
-    // ── 需給システム / 新建物 (Phase A 拡張) のテスト群 ────────────
+    // ── 需給システム / 新建物のテスト群 ─────────────────────────────
 
     /// House Tier ごとの定員が単調増加 (Cottage < Apartment < Highrise)。
     #[test]
@@ -3328,6 +3328,41 @@ mod tests {
         };
         // economic_density = 1 (Shop) + 1 (Office) = 2 → Highrise 条件達成。
         assert_eq!(house_tier_for(stats), HouseTier::Highrise);
+    }
+
+    /// 統合テスト: Factory を House の隣接に置くと、`compute_income_per_sec`
+    /// 経由の家賃収入が下がる。`gather_house_neighborhood_with` →
+    /// `house_tier_for` → `apply_smoke_penalty` → `compute_income_per_sec`
+    /// のパイプライン全体で煙害が反映されることを確認する。
+    #[test]
+    fn factory_smoke_penalty_reduces_house_income_end_to_end() {
+        let mut city = City::new();
+        // edge-connected な Road を上端に並べ、House を Apartment 化条件下に置く。
+        for x in 0..6 {
+            place_edge_road(&mut city, x);
+        }
+        for x in 0..3 {
+            city.set_tile(x, 1, Tile::Built(Building::House));
+        }
+        // Apartment 化条件: Road 1+ + 経済密度 1+ → Workshop を半径 5 内に置く。
+        city.set_tile(2, 2, Tile::Built(Building::Workshop));
+        // age を Apartment dwell まで進める。
+        city.tick = 600;
+        for x in 0..3 {
+            city.built_at_tick[1][x] = 0;
+        }
+        let income_clean = compute_income_per_sec(&city);
+
+        // Factory を House (0,1) の隣接に置くと煙害発動 → Apartment が Cottage に降格。
+        city.set_tile(0, 2, Tile::Built(Building::Factory));
+        city.built_at_tick[2][0] = city.tick; // Factory 完成済み扱い
+        let income_with_smoke = compute_income_per_sec(&city);
+
+        assert!(
+            income_with_smoke < income_clean,
+            "Factory smoke should reduce neighbor House income end-to-end: clean={} smoke={}",
+            income_clean, income_with_smoke
+        );
     }
 
     /// 隣接 Factory の煙害で Tier が 1 段下がる。
