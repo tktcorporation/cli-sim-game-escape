@@ -184,6 +184,17 @@ pub fn apply_offline_bonus(
     last_ms: u64,
     now_ms: u64,
 ) -> Option<OfflineBonus> {
+    // gap が `OFFLINE_MIN_SECS` 未満 / 時計逆行 / 未計測のケースを income 計算前に
+    // 早期リターンで弾く。`MetropolisGame::tick` から 10Hz で呼ばれる経路で、
+    // 99.9% は通常プレイの短い gap (1 tick = 100ms) なので、`compute_income_per_sec`
+    // の全グリッド edge-connectivity BFS (~2048 セル) を毎フレーム走らせるのを避ける。
+    // 同じ条件は `offline_bonus` 内部でも判定されるが、income 計算の前で弾くことに意味がある。
+    if last_ms == 0 || now_ms <= last_ms {
+        return None;
+    }
+    if (now_ms - last_ms) / 1000 < OFFLINE_MIN_SECS {
+        return None;
+    }
     let income_per_sec = super::logic::compute_income_per_sec(state);
     let bonus = offline_bonus(last_ms, now_ms, income_per_sec)?;
     state.cash = state.cash.saturating_add(bonus.bonus_cash);
@@ -843,8 +854,9 @@ pub fn load_game(state: &mut City) -> bool {
 
     // 初回ロード時のオフライン進行ボーナス。前回セーブから現在までの経過時間に
     // 応じて推定収入を一括加算する。`compute_income_per_sec` は state ロード後に
-    // 評価して「戻ってきた時の街の実力」を反映する。
-    apply_offline_bonus_with_persist(state, save_data.game.last_save_wall_ms);
+    // 評価して「戻ってきた時の街の実力」を反映する。bonus の値自体は state に
+    // 反映済みなので呼び出し側は捨てる。
+    let _ = apply_offline_bonus_with_persist(state, save_data.game.last_save_wall_ms);
     true
 }
 
@@ -857,7 +869,11 @@ pub fn load_game(state: &mut City) -> bool {
 ///
 /// 保存失敗 (localStorage 容量超過 / disable 等) は元々 cash 永続化も壊れている
 /// ケースなので、ボーナスを引っ込めても体感的な損失は最小。
+///
+/// 戻り値は呼び出し側の意図 (`load_game` / `tick` が値を活用しないこと) を明示するため
+/// `#[must_use]` で握り、捨てる時は `let _ =` で書かせる。
 #[cfg(target_arch = "wasm32")]
+#[must_use]
 pub fn apply_offline_bonus_with_persist(state: &mut City, last_ms: u64) -> Option<OfflineBonus> {
     let now_ms = wall_clock_now_ms();
 

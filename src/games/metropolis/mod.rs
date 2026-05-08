@@ -280,7 +280,8 @@ impl Game for MetropolisGame {
         // 正しい gap (= 不在時間) が観測される。
         #[cfg(target_arch = "wasm32")]
         {
-            save::apply_offline_bonus_with_persist(&mut self.state, self.last_wall_ms);
+            // 戻り値は state に反映済みなので捨てる (`#[must_use]` 明示用に `let _`)。
+            let _ = save::apply_offline_bonus_with_persist(&mut self.state, self.last_wall_ms);
             self.last_wall_ms = save::wall_clock_now_ms();
         }
 
