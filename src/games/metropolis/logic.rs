@@ -1524,12 +1524,12 @@ pub fn demolish_value(city: &City, x: usize, y: usize, connected: &[Vec<bool>]) 
         0
     } else {
         let cur_income = cell_current_income_cents(city, x, y, connected);
-        let best_repl = best_replacement_value(city, x, y, kind, connected);
+        let best_repl = best_replacement_value(city, x, y, connected);
         (best_repl - cur_income).max(0)
     };
 
-    // 撤去コストの amortize: 60 秒で回収できる前提で cents/sec に換算して減算。
-    // 中央 ($50) → 83 cents/sec、d=5 ($175) → 292、d=10 ($550) → 916。
+    // 撤去コストの amortize: DEMO_PAYBACK_SECS で回収できる前提で cents/sec 換算。
+    // 中央 ($50) → 約 55 cents/sec、d=5 ($175) → 約 194、d=10 ($550) → 約 611。
     // 外周ほど撤去がペイしなくなるため AI は外周建物を温存する。
     let demo_cost_amort = demolish_cost(x, y) * 100 / DEMO_PAYBACK_SECS;
 
@@ -1581,17 +1581,10 @@ fn cell_current_income_cents(city: &City, x: usize, y: usize, connected: &[Vec<b
     (base_cents * factor) / 1000
 }
 
-/// (x, y) を空にした時、そこに建てうる最良の建物の `placement_value` (cents/sec)。
-/// `current_kind` 以外も含めて全種類を試し、max を取る。Outpost は Rock 隣接時のみ
-/// 候補に乗る (placement_value_assume_empty の future_potential が 0 になるため
-/// 自然と落ちる)。
-fn best_replacement_value(
-    city: &City,
-    x: usize,
-    y: usize,
-    current_kind: Building,
-    connected: &[Vec<bool>],
-) -> i64 {
+/// (x, y) を空にした時そこに建てうる最良の建物の `placement_value` (cents/sec)。
+/// 全 kind を試し、最大値を返す (= 同 kind の再建も含むので「撤去 → 同種建て直しで
+/// improvement = 0」の挙動が自然に出る)。下限は 0 (= 何も建てないなら 0)。
+fn best_replacement_value(city: &City, x: usize, y: usize, connected: &[Vec<bool>]) -> i64 {
     let candidates = [
         Building::House,
         Building::Road,
@@ -1610,10 +1603,6 @@ fn best_replacement_value(
             best = v;
         }
     }
-    // 「現状維持できる」リファレンス: 同じ kind を建てた時の評価。
-    // 撤去 → 同種建て直しで improvement = 0 になる前提を担保するため、
-    // best には current_kind の評価も含めておく (= 上のループで含まれている)。
-    let _ = current_kind;
     best
 }
 

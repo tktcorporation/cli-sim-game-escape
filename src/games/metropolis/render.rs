@@ -1509,12 +1509,14 @@ fn status_list(state: &City) -> ClickableList<'static> {
 
     // 10s ROI 行 — 撤去 / 建設コストも含む実効キャッシュ増減レート。
     // 理論 income (`+$X/s`) との差で「thrash でいくら失っているか」が見える。
-    // サンプルが貯まる前は "—" を出して情報の有無を区別する。
-    let roi_10s = state.cash_flow_per_sec(10);
-    let (roi_text, roi_color) = match roi_10s {
-        Some(v) if v >= income => (format!("+${}/s", v), Color::LightGreen),
-        Some(v) if v >= 0 => (format!("+${}/s", v), Color::Yellow),
-        Some(v) => (format!("-${}/s", v.abs()), Color::LightRed),
+    // サンプル不足の起動直後は "—" を出して情報の有無を区別。窓は最大 10 秒で
+    // それ未満のサンプルしか無い時はその範囲の平均を出す ("≤10s avg")。
+    let roi_cents = state.cash_flow_per_sec_cents(10);
+    let income_cents = income.saturating_mul(100);
+    let (roi_text, roi_color) = match roi_cents {
+        Some(v) if v >= income_cents => (format!("+${}/s", v / 100), Color::LightGreen),
+        Some(v) if v >= 0 => (format!("+${}/s", v / 100), Color::Yellow),
+        Some(v) => (format!("-${}/s", v.unsigned_abs() / 100), Color::LightRed),
         None => ("—".to_string(), Color::DarkGray),
     };
     lines.push(Line::from(vec![
@@ -1524,7 +1526,7 @@ fn status_list(state: &City) -> ClickableList<'static> {
             Style::default().fg(roi_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            "  (10s avg)",
+            "  (≤10s avg)",
             Style::default().fg(Color::DarkGray),
         ),
     ]));
