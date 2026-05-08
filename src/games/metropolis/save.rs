@@ -45,8 +45,10 @@ use super::terrain::Terrain;
 ///   v5: `AiTier::DeepPlanner` (= 数値 5) 追加。
 ///   v6: `last_save_wall_ms` 追加 (オフライン進行ボーナス用 wall-clock 計測)。
 ///       旧データは default 0 → 「初回計測」扱いでボーナス未発動になる。
+///   v7: `Building::Factory` / `Building::Mall` / `Building::Office` 追加。
+///       新数値 (6/7/8) を割り当て。旧データには出現しないので互換性維持。
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 6;
+const SAVE_VERSION: u32 = 7;
 
 /// 互換性を維持できる最小バージョン。破壊的変更で +1。
 /// v1-v3 はフィールド追加だけだったが、v4 でマップ寸法が変わったので
@@ -79,17 +81,14 @@ pub const AUTOSAVE_INTERVAL: u32 = 300;
 /// オフライン報酬の対象とする経過時間の上限 (秒)。
 /// 4 時間 = 14400 秒。1日1〜2回戻ってくるサイクルを想定し、
 /// 「離れすぎても全部回収できる」状況を避けてオンライン誘導を残す。
-#[cfg(any(target_arch = "wasm32", test))]
 pub const MAX_OFFLINE_SECS: u64 = 4 * 60 * 60;
 
 /// ボーナス発動の最低経過時間 (秒)。ページリロードや短時間のタブ切替で
 /// 「30秒オフラインでした」のような無意味なメッセージが出るのを防ぐ。
-#[cfg(any(target_arch = "wasm32", test))]
 pub const OFFLINE_MIN_SECS: u64 = 60;
 
 /// オフライン中の効率係数 (% 単位)。100 = オンライン同等、< 100 でオンライン優遇。
 /// 70% は idle 系のいわゆる「セーフバイアス」値。
-#[cfg(any(target_arch = "wasm32", test))]
 pub const OFFLINE_EFFICIENCY_PCT: u32 = 70;
 
 /// オフラインボーナスの計算結果。`offline_bonus` の戻り値。
@@ -150,7 +149,6 @@ pub fn offline_bonus(last_save_ms: u64, now_ms: u64, income_per_sec: i64) -> Opt
 /// 切り捨てで両者が同じ "X時間" に化ける) は「オフライン 4時間 (上限4時間まで回収)」
 /// のような同表記が並ぶ。実害はほぼ無い (ボーナスは正しく支払われる) ので
 /// 表記の修正は行わない。
-#[cfg(any(target_arch = "wasm32", test))]
 pub fn format_offline_duration(secs: u64) -> String {
     debug_assert!(
         secs >= OFFLINE_MIN_SECS,
@@ -200,6 +198,11 @@ pub fn apply_offline_bonus(
     state.cash = state.cash.saturating_add(bonus.bonus_cash);
     state.cash_earned_total = state.cash_earned_total.saturating_add(bonus.bonus_cash);
     state.push_event(make_offline_event_message(&bonus));
+    state.pending_offline_welcome = Some(super::state::PendingOfflineWelcome {
+        elapsed_secs: bonus.elapsed_secs,
+        bonus_cash: bonus.bonus_cash,
+        capped: bonus.capped,
+    });
     Some(bonus)
 }
 
@@ -244,6 +247,9 @@ mod codes {
     pub const BUILDING_SHOP: u8 = 3;
     pub const BUILDING_PARK: u8 = 4;
     pub const BUILDING_OUTPOST: u8 = 5;
+    pub const BUILDING_FACTORY: u8 = 6;
+    pub const BUILDING_MALL: u8 = 7;
+    pub const BUILDING_OFFICE: u8 = 8;
 
     pub const TERRAIN_PLAIN: u8 = 0;
     pub const TERRAIN_FOREST: u8 = 1;
@@ -285,6 +291,9 @@ fn building_to_u8(b: Building) -> u8 {
         Building::Shop => BUILDING_SHOP,
         Building::Park => BUILDING_PARK,
         Building::Outpost => BUILDING_OUTPOST,
+        Building::Factory => BUILDING_FACTORY,
+        Building::Mall => BUILDING_MALL,
+        Building::Office => BUILDING_OFFICE,
     }
 }
 
@@ -297,6 +306,9 @@ fn building_from_u8(v: u8) -> Option<Building> {
         BUILDING_SHOP => Some(Building::Shop),
         BUILDING_PARK => Some(Building::Park),
         BUILDING_OUTPOST => Some(Building::Outpost),
+        BUILDING_FACTORY => Some(Building::Factory),
+        BUILDING_MALL => Some(Building::Mall),
+        BUILDING_OFFICE => Some(Building::Office),
         _ => None,
     }
 }
@@ -582,10 +594,14 @@ fn extract_save(state: &City) -> SaveData {
         last_payout_tick: _,
         // 選択中セル (UI 状態、再ロード後はリセット)。
         selected_cell: _,
+        // 人口キャッシュ (per-frame メモ化、ロード時は再計算でよい)。
+        population_cache: _,
         // 右パネル縦スクロール (UI 状態、再ロード後はリセット)。
         panel_scroll: _,
         // ROI 表示用の cash サンプル (一時状態、再ロード後はリセット)。
         cash_history: _,
+        // オフライン進行ボーナス通知モーダル (タップで dismissal、再ロード後はリセット)。
+        pending_offline_welcome: _,
     } = state;
 
     let mut tiles = Vec::with_capacity(GRID_W * GRID_H);
@@ -752,6 +768,9 @@ fn apply_save(state: &mut City, save: &GameSave) {
             *v = 0;
         }
     }
+    // 旧 grid のままだったキャッシュをクリア。次回 population() 呼び出しで
+    // ロード後の Tier 連動人口が計算される。
+    state.invalidate_population_cache();
 }
 
 /// localStorage を取得する。WASM 環境のみ。
@@ -902,6 +921,10 @@ pub fn apply_offline_bonus_with_persist(state: &mut City, last_ms: u64) -> Optio
         if !state.events.is_empty() {
             state.events.remove(0);
         }
+        // `apply_offline_bonus` がセットした welcome モーダルもロールバック。
+        // 残しておくとプレイヤーは受け取っていない金額を見ることになり、
+        // 次の入力が dismiss gate に吸われる。
+        state.pending_offline_welcome = None;
         web_sys::console::warn_1(
             &"Idle Metropolis: オフラインボーナスを保存失敗のためロールバック".into(),
         );
@@ -1282,6 +1305,14 @@ mod tests {
         assert_eq!(city.cash_earned_total, pre_earned + 5040);
         assert_eq!(city.events.len(), pre_event_count + 1);
         assert!(city.events[0].contains("オフライン"));
+
+        let welcome = city
+            .pending_offline_welcome
+            .as_ref()
+            .expect("welcome modal payload expected");
+        assert_eq!(welcome.bonus_cash, 5040);
+        assert_eq!(welcome.elapsed_secs, bonus.elapsed_secs);
+        assert_eq!(welcome.capped, bonus.capped);
     }
 
     /// gap < OFFLINE_MIN_SECS の短時間では None を返し、state は完全未変更。
@@ -1305,6 +1336,7 @@ mod tests {
         assert_eq!(city.cash, pre_cash);
         assert_eq!(city.cash_earned_total, pre_earned);
         assert_eq!(city.events.len(), pre_event_count);
+        assert!(city.pending_offline_welcome.is_none());
     }
 
     /// 街がまだ無収入 (= 空の City) の場合は None を返し state は未変更。

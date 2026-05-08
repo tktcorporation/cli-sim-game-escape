@@ -70,6 +70,10 @@ pub const ACT_SCROLL_DOWN: u16 = 23;
 pub const ACT_PANEL_SCROLL_UP: u16 = 24;
 pub const ACT_PANEL_SCROLL_DOWN: u16 = 25;
 
+/// オフライン進行ボーナス通知モーダルを閉じる click target ID。
+/// モーダル領域全体を `Clickable` で wrap してこの ID を登録する。
+pub const ACT_DISMISS_OFFLINE_WELCOME: u16 = 30;
+
 /// 1 回のスクロールで動かすセル数。視野の 1/8 (32/8 = 4) で「ちょっとずつ
 /// 動かす」感じ。短すぎると到達まで連打、長すぎると見落とすバランス。
 const SCROLL_STEP: i32 = 4;
@@ -148,6 +152,15 @@ impl Game for MetropolisGame {
     }
 
     fn handle_input(&mut self, event: &InputEvent) -> bool {
+        // オフライン進行ボーナス通知モーダル表示中は通常操作をブロックし、
+        // 任意のクリック / キーで閉じる。プレイヤーに「ボーナスを受け取った」
+        // 認知を一度だけ強制するための関所。閉じても Events タブに同内容が
+        // 残るため、振り返りは可能。
+        if self.state.pending_offline_welcome.is_some() {
+            self.state.pending_offline_welcome = None;
+            return true;
+        }
+
         // マップセルのクリック (action_id >= ACT_GRID_CELL_BASE) は
         // `selected_cell` を更新する。Status タブでその施設の詳細を表示する。
         if let InputEvent::Click(_, id) = event {

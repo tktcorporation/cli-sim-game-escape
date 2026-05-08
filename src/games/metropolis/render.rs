@@ -28,25 +28,26 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ratzilla::ratatui::layout::{Constraint, Direction as LayoutDir, Layout, Rect};
+use ratzilla::ratatui::layout::{Alignment, Constraint, Direction as LayoutDir, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::text::{Line, Span};
-use ratzilla::ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratzilla::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::ClickState;
-use crate::widgets::{ClickableGrid, ClickableList, ScrollableTab, TabBar};
+use crate::widgets::{Clickable, ClickableGrid, ClickableList, ScrollableTab, TabBar};
 
 use super::logic;
+use super::save::{format_offline_duration, MAX_OFFLINE_SECS, OFFLINE_EFFICIENCY_PCT};
 use super::state::{
-    city_tier_for, next_tier_threshold, AiTier, Building, City, CityTier, PanelTab, Strategy,
-    Tile, GRID_H, GRID_W, PAYOUT_FLASH_TICKS, VIEW_H, VIEW_W,
+    city_tier_for, next_tier_threshold, AiTier, Building, City, CityTier, PanelTab,
+    PendingOfflineWelcome, Strategy, Tile, GRID_H, GRID_W, PAYOUT_FLASH_TICKS, VIEW_H, VIEW_W,
 };
 use super::terrain::Terrain;
 use super::{
-    ACT_HIRE_WORKER, ACT_PANEL_SCROLL_DOWN, ACT_PANEL_SCROLL_UP, ACT_STRATEGY_ECO,
-    ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH, ACT_TAB_EVENTS, ACT_TAB_MANAGER,
-    ACT_TAB_STATUS, ACT_TAB_WORLD, ACT_UPGRADE_AI,
+    ACT_DISMISS_OFFLINE_WELCOME, ACT_HIRE_WORKER, ACT_PANEL_SCROLL_DOWN, ACT_PANEL_SCROLL_UP,
+    ACT_STRATEGY_ECO, ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH, ACT_TAB_EVENTS,
+    ACT_TAB_MANAGER, ACT_TAB_STATUS, ACT_TAB_WORLD, ACT_UPGRADE_AI,
 };
 
 /// Wide layout が必要とする最小幅。
@@ -65,6 +66,11 @@ pub fn render(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<
         render_narrow(state, f, area, click_state);
     } else {
         render_wide(state, f, area, click_state);
+    }
+    // 通常レイアウトの上にオーバーレイで重ねる。`Clear` widget で配下を白紙化
+    // してから描画するため、背景の建物表示などとは独立した見た目になる。
+    if let Some(welcome) = state.pending_offline_welcome.as_ref() {
+        render_offline_welcome_overlay(welcome, f, area, click_state);
     }
 }
 
@@ -544,6 +550,59 @@ fn tile_span_1(
             };
             Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg))
         }
+        Tile::Built(Building::Factory) => {
+            // 工場: Workshop の上位 — 煙が大きく立ち上る `F` 字。
+            let active = logic::workshop_is_active_with(state, x, y, connected);
+            let phase = (tick / 3) as usize % 4;
+            let ch = if active {
+                ['F', 'f', 'F', '#'][phase]
+            } else {
+                'F'
+            };
+            let (fg, bg) = if active {
+                (Color::Red, Color::Rgb(80, 25, 20))
+            } else {
+                (Color::DarkGray, Color::Rgb(40, 40, 40))
+            };
+            Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD))
+        }
+        Tile::Built(Building::Mall) => {
+            // 商業ビル: ★ + ネオン点滅。
+            let active = logic::shop_is_active_with(state, x, y, connected);
+            let bright = (tick / 3).is_multiple_of(2);
+            let ch = if active {
+                if bright { 'M' } else { 'm' }
+            } else {
+                'M'
+            };
+            let (fg, bg) = if active {
+                (Color::LightYellow, Color::Rgb(110, 70, 0))
+            } else {
+                (Color::DarkGray, Color::Rgb(50, 50, 50))
+            };
+            let mods = if bright && active {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            };
+            Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg).add_modifier(mods))
+        }
+        Tile::Built(Building::Office) => {
+            // オフィス: 高層ガラス。窓灯りが夜に点く。
+            let active = logic::workshop_is_active_with(state, x, y, connected);
+            let night = matches!(logic::day_phase(tick), logic::DayPhase::Night);
+            let ch = if night && active { 'O' } else { 'o' };
+            let (fg, bg) = if active {
+                if night {
+                    (Color::LightYellow, Color::Rgb(20, 30, 80))
+                } else {
+                    (Color::LightCyan, Color::Rgb(30, 40, 70))
+                }
+            } else {
+                (Color::DarkGray, Color::Rgb(40, 40, 50))
+            };
+            Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD))
+        }
         Tile::Built(Building::Park) => {
             // 1-wide: 公園は花/蝶を 1 文字でゆらす。夜は蛍。
             let (ch, fg) = park_glyph_1wide(tick);
@@ -573,9 +632,12 @@ fn tile_char_1(b: Building) -> char {
         Building::Road => '+',
         Building::House => 'H',
         Building::Workshop => 'W',
+        Building::Factory => 'F',
         Building::Shop => 'S',
+        Building::Mall => 'M',
+        Building::Office => 'O',
         Building::Park => 'P',
-        Building::Outpost => 'O',
+        Building::Outpost => 'X',
     }
 }
 
@@ -774,6 +836,75 @@ fn tile_spans_2(
                 (Color::DarkGray, Color::Rgb(40, 40, 40))
             };
             vec![Span::styled(glyph, Style::default().fg(fg).bg(bg))]
+        }
+        Tile::Built(Building::Factory) => {
+            // 工場: 大きい煙突 2 本 + 太い本体。Workshop よりダイナミックな煙アニメ。
+            let active = logic::workshop_is_active_with(state, x, y, connected);
+            let phase = (tick / 3) as usize % 4;
+            let smoke = if active {
+                ['▆', '▅', '▄', '▃'][phase]
+            } else {
+                '▁'
+            };
+            let body = if active { '▣' } else { '▢' };
+            let glyph = format!("{}{}", smoke, body);
+            let (fg, bg) = if active {
+                (Color::Red, Color::Rgb(80, 25, 20))
+            } else {
+                (Color::DarkGray, Color::Rgb(40, 40, 40))
+            };
+            vec![Span::styled(
+                glyph,
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            )]
+        }
+        Tile::Built(Building::Mall) => {
+            // 商業ビル: ★ + ネオン。Shop の上位らしい派手な色合い。
+            let active = logic::shop_is_active_with(state, x, y, connected);
+            let bright = (tick / 3).is_multiple_of(2);
+            if !active {
+                vec![Span::styled(
+                    "★$".to_string(),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .bg(Color::Rgb(50, 50, 50)),
+                )]
+            } else {
+                let glyph = if bright { "★$" } else { "✦$" };
+                let bg = Color::Rgb(110, 70, 0);
+                let mods = if bright {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                };
+                vec![Span::styled(
+                    glyph.to_string(),
+                    Style::default().fg(Color::LightYellow).bg(bg).add_modifier(mods),
+                )]
+            }
+        }
+        Tile::Built(Building::Office) => {
+            // オフィス: 高層ガラス窓 — 昼はシアン、夜は黄色 (窓灯り)。
+            let active = logic::workshop_is_active_with(state, x, y, connected);
+            let night = matches!(logic::day_phase(tick), logic::DayPhase::Night);
+            let glyph = if active {
+                if night { "▮▮" } else { "▭▭" }
+            } else {
+                "▭▭"
+            };
+            let (fg, bg) = if active {
+                if night {
+                    (Color::LightYellow, Color::Rgb(20, 30, 80))
+                } else {
+                    (Color::LightCyan, Color::Rgb(30, 40, 70))
+                }
+            } else {
+                (Color::DarkGray, Color::Rgb(40, 40, 50))
+            };
+            vec![Span::styled(
+                glyph.to_string(),
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            )]
         }
         Tile::Built(Building::Park) => {
             // 公園: 2-wide 右側の文字を「蝶/花/蛍」のアニメで動かす。
@@ -1090,7 +1221,10 @@ fn construction_color(b: Building) -> Color {
         Building::Road => Color::Yellow,
         Building::House => Color::LightGreen,
         Building::Workshop => Color::LightRed,
+        Building::Factory => Color::Red,
         Building::Shop => Color::LightCyan,
+        Building::Mall => Color::LightYellow,
+        Building::Office => Color::LightCyan,
         Building::Park => Color::LightGreen,
         Building::Outpost => Color::LightYellow,
     }
@@ -1101,7 +1235,10 @@ fn built_color(b: Building) -> Color {
         Building::Road => Color::Gray,
         Building::House => Color::Green,
         Building::Workshop => Color::LightRed,
+        Building::Factory => Color::Red,
         Building::Shop => Color::Yellow,
+        Building::Mall => Color::LightYellow,
+        Building::Office => Color::LightCyan,
         Building::Park => Color::LightGreen,
         Building::Outpost => Color::LightYellow,
     }
@@ -1112,7 +1249,10 @@ fn built_2wide_glyph(b: Building) -> &'static str {
         Building::Road => "══",
         Building::House => "▟▙",
         Building::Workshop => "˚⊞",
+        Building::Factory => "▆▣",
         Building::Shop => "$$",
+        Building::Mall => "★$",
+        Building::Office => "▮▮",
         Building::Park => "❀✿",
         Building::Outpost => "◐⚒",
     }
@@ -1650,6 +1790,7 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                 let tier = logic::effective_tier_at_with(state, x, y, &connected);
                 let stats = logic::gather_house_neighborhood_with(state, x, y, &connected);
                 let target_tier = logic::house_tier_for(stats);
+                let cap = logic::house_capacity(tier);
                 out.push(Line::from(vec![
                     Span::styled(" 段階 ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
@@ -1657,24 +1798,39 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                         Style::default().fg(Color::LightGreen),
                     ),
                     Span::styled(
-                        format!(" → 目標 {:?}", target_tier),
+                        format!(" 定員{}人 → 目標 {:?}", cap, target_tier),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]));
                 out.push(Line::from(vec![Span::styled(
                     format!(
-                        " 道路{}/工房{}/店舗{}/家{}/公園{} {}",
+                        " 道路{}/工房{}/店舗{}/職場{}/家{}/公園{} {}",
                         stats.n_road_adj,
                         stats.n_workshop_within_5,
                         stats.n_shop_within_5,
+                        stats.n_office_within_5,
                         stats.n_house_within_3,
                         stats.n_park_within_4,
                         if stats.edge_connected { "🌐" } else { "🚷" },
                     ),
                     Style::default().fg(Color::DarkGray),
                 )]));
+                if stats.factory_smoke_penalty {
+                    out.push(Line::from(vec![Span::styled(
+                        " ⚠ 隣接 Factory の煙害で Tier -1",
+                        Style::default().fg(Color::LightRed),
+                    )]));
+                }
+                out.push(Line::from(vec![Span::styled(
+                    format!(
+                        " 周辺人口 {}人 (需給ゲート閾値 +{})",
+                        stats.local_population,
+                        stats.local_population / 30,
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )]));
             }
-            Building::Shop => {
+            Building::Shop | Building::Mall => {
                 let level = logic::shop_level_with(state, x, y, &connected);
                 out.push(Line::from(vec![
                     Span::styled(" 賑わい ", Style::default().fg(Color::DarkGray)),
@@ -1684,7 +1840,7 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                     ),
                 ]));
             }
-            Building::Workshop => {
+            Building::Workshop | Building::Factory | Building::Office => {
                 let active = logic::workshop_is_active_with(state, x, y, &connected);
                 out.push(Line::from(vec![
                     Span::styled(" 稼働 ", Style::default().fg(Color::DarkGray)),
@@ -1850,7 +2006,10 @@ fn building_name_for(b: Building) -> &'static str {
         Building::Road => "道路",
         Building::House => "住宅",
         Building::Workshop => "工房",
+        Building::Factory => "工場",
         Building::Shop => "店舗",
+        Building::Mall => "商業ビル",
+        Building::Office => "オフィス",
         Building::Park => "公園",
         Building::Outpost => "開拓機材",
     }
@@ -1872,7 +2031,10 @@ fn building_icon(b: Building) -> &'static str {
         Building::Road => "🛣",
         Building::House => "🏠",
         Building::Workshop => "🔧",
+        Building::Factory => "🏭",
         Building::Shop => "🏪",
+        Building::Mall => "🏬",
+        Building::Office => "🏢",
         Building::Park => "🌳",
         Building::Outpost => "⚒",
     }
@@ -2151,6 +2313,85 @@ fn strategy_label(s: Strategy) -> &'static str {
         Strategy::Tech => "技術",
         Strategy::Eco => "環境",
     }
+}
+
+// ── Offline welcome overlay ────────────────────────────────
+
+/// 中央に重ねる「おかえりなさい」モーダル。
+///
+/// `Clear` で背景を白紙化してから `Clickable` で wrap した `Paragraph` を
+/// 上書き描画することで、配下の grid / panel と独立した見た目になる。
+/// クリック対象は box 全体に登録されており、領域内のどこをタップしても
+/// `ACT_DISMISS_OFFLINE_WELCOME` が発火する。
+fn render_offline_welcome_overlay(
+    welcome: &PendingOfflineWelcome,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    // モーダルサイズ。横は読みやすさ重視で最大 48 col、画面が狭い時は
+    // area.width を上限に縮める。縦 9 行 = ボーダー2 + 余白2 + 本文5。
+    let modal_w = area.width.min(48);
+    let modal_h: u16 = 9;
+    if modal_w < 16 || area.height < modal_h {
+        // 画面が極端に狭い時はモーダル省略。Events ログが残るので情報は失われない。
+        return;
+    }
+    let x = area.x + (area.width - modal_w) / 2;
+    let y = area.y + (area.height - modal_h) / 2;
+    let modal_area = Rect::new(x, y, modal_w, modal_h);
+
+    let duration = format_offline_duration(welcome.elapsed_secs);
+    let detail = if welcome.capped {
+        format!(
+            "上限{}まで回収 ({}%効率)",
+            format_offline_duration(MAX_OFFLINE_SECS),
+            OFFLINE_EFFICIENCY_PCT
+        )
+    } else {
+        format!("{}%効率", OFFLINE_EFFICIENCY_PCT)
+    };
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "🌙 おかえりなさい",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("オフライン {} の収益", duration),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            format!("+${}", welcome.bonus_cash),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            detail,
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "▶ タップして閉じる",
+            Style::default().fg(Color::Cyan),
+        )),
+    ];
+
+    let para = Paragraph::new(lines).alignment(Alignment::Center).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Double)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(" ボーナス受領 "),
+    );
+
+    f.render_widget(Clear, modal_area);
+    let mut cs = click_state.borrow_mut();
+    Clickable::new(para, ACT_DISMISS_OFFLINE_WELCOME).render(f, modal_area, &mut cs);
 }
 
 #[cfg(test)]
