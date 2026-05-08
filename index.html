@@ -164,14 +164,15 @@
       });
     })();
 
-    // Touch handler: tap / swipe を区別して、tap → mousedown、swipe → keydown(j/k)
-    // を発火する state machine。
+    // Touch / wheel handler: スワイプ・ホイールを keydown に変換する state
+    // machine。タップは mousedown 経由で ratzilla に流す。
     //
-    // - tap: touchstart から touchend までに大きな移動がない → 既存通り
-    //   synthetic mousedown を発火 (ratzilla の on_mouse_event ハンドラで処理)
-    // - swipe: 縦方向に SWIPE_THRESHOLD px 以上動いたら swipe モード突入。
-    //   ROW_HEIGHT_PX ごとに 'j'/'k' KeyboardEvent を dispatch (abyss render
-    //   の SCROLL_UP/SCROLL_DOWN action に相当)。
+    // metropolis は「マップ (上 or 左) と操作パネル (下 or 右)」が同じ <pre>
+    // 内に同居するため、スワイプの開始位置がパネル領域なら panel scroll
+    // (大文字 J/K)、それ以外 (= マップ領域) なら viewport scroll (j/k) と
+    // 動的に振り分ける。Rust 側が `window.metropolisPanelRect` (cell 座標)
+    // を毎フレーム書き出し、JS 側はそれと比較する。他ゲーム (cafe / abyss)
+    // は rect を書き出さないので常に j/k フォールバック。
     //
     // 重要:
     // - mousedown 発火を touchstart→touchend に遅延させたのは、swipe 中に誤って
@@ -188,12 +189,49 @@
       var lastY = null;
       var isSwipe = false;
       var swipeAccum = 0;
+      var swipeTargetIsPanel = false;  // touchstart 時に確定、touchmove で参照
+
+      // metropolis 以外のゲーム (cafe / abyss など) に切り替えた時に古い
+      // rect が残ると、その範囲のスワイプが J/K に化けて他ゲームのスクロール
+      // を奪う。Rust 側が毎フレーム `updatedAt` (performance.now()) を更新する
+      // ので、N ms 以上更新が無ければ stale とみなして無視する。
+      // metropolis は 10 ticks/sec (= 100ms 間隔) で render するため、500ms の
+      // しきい値は「フレーム遅延の許容」と「ゲーム切替の即時無効化」のバランス。
+      var PANEL_RECT_STALE_MS = 500;
+
+      // タッチ位置 (clientX, clientY) が metropolis のパネル領域内かを判定。
+      // rect が無い / stale / `<pre>` が無い場合は false。
+      function isPointInMetropolisPanel(clientX, clientY) {
+        var rect = window.metropolisPanelRect;
+        if (!rect) return false;
+        var now = (performance && performance.now) ? performance.now() : 0;
+        if (typeof rect.updatedAt !== 'number'
+            || now - rect.updatedAt > PANEL_RECT_STALE_MS) {
+          return false;
+        }
+        var pre = document.querySelector('pre');
+        if (!pre) return false;
+        var pr = pre.getBoundingClientRect();
+        if (pr.width <= 0 || pr.height <= 0) return false;
+        var text = pre.textContent || '';
+        var lines = text.split('\n');
+        var cols = lines[0] ? lines[0].length : 0;
+        var rows = lines.length;
+        if (cols <= 0 || rows <= 0) return false;
+        var cellW = pr.width / cols;
+        var cellH = pr.height / rows;
+        var col = Math.floor((clientX - pr.left) / cellW);
+        var row = Math.floor((clientY - pr.top) / cellH);
+        return col >= rect.x && col < rect.x + rect.w
+            && row >= rect.y && row < rect.y + rect.h;
+      }
 
       document.addEventListener('touchstart', function(e) {
         if (e.touches.length !== 1) {
           startX = startY = lastY = null;
           isSwipe = false;
           swipeAccum = 0;
+          swipeTargetIsPanel = false;
           return;
         }
         var t = e.touches[0];
@@ -202,6 +240,7 @@
         lastY = t.clientY;
         isSwipe = false;
         swipeAccum = 0;
+        swipeTargetIsPanel = isPointInMetropolisPanel(t.clientX, t.clientY);
         // ここでは preventDefault しても OK だが、swipe 後の touchend に
         // mousedown を遅延させるため、ここではまだ何もしない。
         e.preventDefault();
@@ -222,14 +261,20 @@
           // bounce 抑制
           e.preventDefault();
           // 増分 (lastY → 現在 Y) を累積し、ROW_HEIGHT_PX ごとに key dispatch。
-          // 上スワイプ (指上に動かす = clientY 減少) → 下にスクロールしたい = 'j'。
-          // 下スワイプ → 上スクロール = 'k'。
+          // 上スワイプ (指上に動かす = clientY 減少) → 下にスクロールしたい。
+          // panel 開始のスワイプは大文字 J/K (panel scroll)、それ以外は j/k。
           var delta = lastY - t.clientY;
           swipeAccum += delta;
           while (Math.abs(swipeAccum) >= ROW_HEIGHT_PX) {
-            var key = swipeAccum > 0 ? 'j' : 'k';
+            var down = swipeAccum > 0;
+            var key;
+            if (swipeTargetIsPanel) {
+              key = down ? 'J' : 'K';
+            } else {
+              key = down ? 'j' : 'k';
+            }
             document.dispatchEvent(new KeyboardEvent('keydown', { key: key, bubbles: true }));
-            swipeAccum -= (swipeAccum > 0 ? ROW_HEIGHT_PX : -ROW_HEIGHT_PX);
+            swipeAccum -= (down ? ROW_HEIGHT_PX : -ROW_HEIGHT_PX);
           }
           lastY = t.clientY;
         }
@@ -250,13 +295,22 @@
         startX = startY = lastY = null;
         isSwipe = false;
         swipeAccum = 0;
+        swipeTargetIsPanel = false;
       }, { passive: false });
 
       // マウスホイール: デスクトップでも自然にスクロールできるように。
-      // deltaY > 0 (下回転) → 'j' (下スクロール)、< 0 → 'k' (上スクロール)。
+      // ホイール位置が metropolis パネル内なら J/K (panel scroll)、
+      // それ以外なら j/k (viewport scroll) を dispatch。
       document.addEventListener('wheel', function(e) {
         if (e.deltaY === 0) return;
-        var key = e.deltaY > 0 ? 'j' : 'k';
+        var inPanel = isPointInMetropolisPanel(e.clientX, e.clientY);
+        var down = e.deltaY > 0;
+        var key;
+        if (inPanel) {
+          key = down ? 'J' : 'K';
+        } else {
+          key = down ? 'j' : 'k';
+        }
         document.dispatchEvent(new KeyboardEvent('keydown', { key: key, bubbles: true }));
         // ページ全体のスクロールを抑制 (grid は viewport 同サイズなので不要)。
         e.preventDefault();

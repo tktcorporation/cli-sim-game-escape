@@ -37,13 +37,12 @@ use state::{City, PanelTab, Strategy};
 // These are click/key actions on the manager panel.  Keep them stable —
 // they're persisted through Click events keyed by `ClickScope::Game(...)`.
 //
-// Phase A (撤去・開拓の完全自動化) で ID 7/8/9 (旧 DISPATCH_OUTPOST /
-// TOGGLE_DEMOLISH / AUTO_DEMOLISH) と DEMOLISH_CELL_BASE (1000+) を撤去。
-// 戦略を選んだ後の挙動はすべて `logic::auto_strategy_actions` が tick から
-// 自動実行する。プレイヤー操作は戦略 / 雇用 / CPU 進化 / タブだけ。
+// 7-9 と 1000 番台 (旧 DEMOLISH_CELL_BASE) は再利用可能な ID 範囲。
+// プレイヤー操作は戦略 / 雇用 / CPU 進化 / タブだけで、撤去・開拓判断は
+// すべて AI (`ai::decide`) が `placement_value` / `demolish_value` 経由で行う。
 pub const ACT_STRATEGY_GROWTH: u16 = 1;
 pub const ACT_STRATEGY_INCOME: u16 = 2;
-/// 旧 `ACT_STRATEGY_BALANCED` の枠を流用。Tech 戦略 (建設速度 +20% / 収入 -20%)。
+/// Tech 戦略 (建設速度 +20% / 収入 -20%)。
 /// 数値 ID は永続クリックスコープのため変更しない。
 pub const ACT_STRATEGY_TECH: u16 = 3;
 pub const ACT_HIRE_WORKER: u16 = 4;
@@ -65,15 +64,23 @@ pub const ACT_SCROLL_RIGHT: u16 = 21;
 pub const ACT_SCROLL_UP: u16 = 22;
 pub const ACT_SCROLL_DOWN: u16 = 23;
 
+/// 右パネル (タブ内コンテンツ) の縦スクロール。スマホ等の浅い縦幅で
+/// Manager / Status の下端が見切れる問題への対応。▲/▼ ボタンと大文字 J/K で発火。
+/// ビューポートスクロール (小文字 j/k = ACT_SCROLL_*) とは別系統。
+pub const ACT_PANEL_SCROLL_UP: u16 = 24;
+pub const ACT_PANEL_SCROLL_DOWN: u16 = 25;
+
 /// 1 回のスクロールで動かすセル数。視野の 1/8 (32/8 = 4) で「ちょっとずつ
 /// 動かす」感じ。短すぎると到達まで連打、長すぎると見落とすバランス。
 const SCROLL_STEP: i32 = 4;
 
+/// 右パネル縦スクロールの 1 回ぶん (visual rows)。短すぎると連打が必要、
+/// 長すぎると行き過ぎる。Manager の最大行数 (~10) に対して 2 行送りが妥当。
+const PANEL_SCROLL_STEP: i32 = 2;
+
 /// マップセルのクリック識別子の起点。`base + row * VIEW_W + col` で
 /// ビューポート相対座標を u16 に詰め込む。`ClickableGrid::decode` で逆引き。
-/// 1000 番台はかつて DEMOLISH_CELL_BASE で使っていたが Phase A の自動撤去で
-/// 廃止済みなので再利用可能。VIEW_W * VIEW_H = 32*16 = 512 < 1000 なので
-/// 既存 ID 1-23 とも衝突しない。
+/// VIEW_W * VIEW_H = 32*16 = 512 < 1000 なので既存 action ID と衝突しない。
 pub const ACT_GRID_CELL_BASE: u16 = 1000;
 
 pub struct MetropolisGame {
@@ -145,7 +152,11 @@ impl Game for MetropolisGame {
                         } else {
                             self.state.selected_cell = Some((abs_x, abs_y));
                             // 選択時は Status タブにフォーカス (= 詳細を見せる)。
-                            self.state.panel_tab = PanelTab::Status;
+                            // `switch_tab` 経由で `panel_scroll` を 0 リセット
+                            // しないと、Manager で深くスクロールしていた時に
+                            // Status が stale offset で開いて選択セル詳細が
+                            // 見切れる。
+                            switch_tab(&mut self.state, PanelTab::Status);
                         }
                         return true;
                     }
@@ -171,6 +182,9 @@ impl Game for MetropolisGame {
                 'j' => ACT_SCROLL_DOWN,
                 'k' => ACT_SCROLL_UP,
                 'l' => ACT_SCROLL_RIGHT,
+                // 大文字 J/K で右パネル縦スクロール (タブ内容を上下に動かす)。
+                'J' => ACT_PANEL_SCROLL_DOWN,
+                'K' => ACT_PANEL_SCROLL_UP,
                 _ => return false,
             },
         };
@@ -195,19 +209,19 @@ impl Game for MetropolisGame {
             ACT_HIRE_WORKER => logic::hire_worker(&mut self.state),
             ACT_UPGRADE_AI => logic::upgrade_ai(&mut self.state),
             ACT_TAB_STATUS => {
-                self.state.panel_tab = PanelTab::Status;
+                switch_tab(&mut self.state, PanelTab::Status);
                 true
             }
             ACT_TAB_MANAGER => {
-                self.state.panel_tab = PanelTab::Manager;
+                switch_tab(&mut self.state, PanelTab::Manager);
                 true
             }
             ACT_TAB_EVENTS => {
-                self.state.panel_tab = PanelTab::Events;
+                switch_tab(&mut self.state, PanelTab::Events);
                 true
             }
             ACT_TAB_WORLD => {
-                self.state.panel_tab = PanelTab::World;
+                switch_tab(&mut self.state, PanelTab::World);
                 true
             }
             ACT_SCROLL_LEFT => {
@@ -224,6 +238,14 @@ impl Game for MetropolisGame {
             }
             ACT_SCROLL_DOWN => {
                 self.state.scroll_camera(0, SCROLL_STEP);
+                true
+            }
+            ACT_PANEL_SCROLL_UP => {
+                self.state.scroll_panel(-PANEL_SCROLL_STEP);
+                true
+            }
+            ACT_PANEL_SCROLL_DOWN => {
+                self.state.scroll_panel(PANEL_SCROLL_STEP);
                 true
             }
             _ => false,
@@ -247,6 +269,16 @@ impl Game for MetropolisGame {
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
         render::render(&self.state, f, area, click_state);
     }
+}
+
+/// タブ切替時にパネルの縦スクロールを先頭にリセットする。
+/// タブごとにコンテンツの長さが大きく異なるため、前のタブで深くスクロール
+/// していると新しいタブで「いきなり下端」が表示されて違和感が出る。
+fn switch_tab(city: &mut City, tab: PanelTab) {
+    if city.panel_tab != tab {
+        city.panel_scroll.set(0);
+    }
+    city.panel_tab = tab;
 }
 
 /// Strategy 切替時の共通処理。`logic::strategy_info` を引いて
@@ -313,24 +345,75 @@ mod tests {
         assert_eq!(g.state.tick, before + 50);
     }
 
-    /// 戦略を切り替えただけで `auto_strategy_actions` が tick から発火し、
-    /// 撤去・開拓を自動で進める (= 旧 `[D]` `[O]` `[X]` ボタン廃止後の保証)。
+    /// 大文字 J / K で右パネルだけが動き、ビューポート (cam_x/cam_y) には
+    /// 影響しない (= 小文字 j/k と完全に独立した系統)。
     #[test]
-    fn auto_strategy_actions_run_without_manual_buttons() {
-        use state::{Building, Tile, GRID_H, GRID_W};
+    fn panel_scroll_keys_move_panel_not_camera() {
         let mut g = MetropolisGame::new();
-        // 大量の現金と中央に inactive Shop を置く: 自動撤去のターゲット。
+        let cam_before = (g.state.cam_x, g.state.cam_y);
+        assert_eq!(g.state.panel_scroll.get(), 0);
+
+        assert!(g.handle_input(&InputEvent::Key('J')));
+        assert!(g.state.panel_scroll.get() > 0, "J should scroll panel down");
+        assert_eq!(
+            (g.state.cam_x, g.state.cam_y),
+            cam_before,
+            "J should not move viewport camera"
+        );
+
+        let after_down = g.state.panel_scroll.get();
+        assert!(g.handle_input(&InputEvent::Key('K')));
+        assert!(
+            g.state.panel_scroll.get() < after_down,
+            "K should scroll panel up"
+        );
+    }
+
+    /// タブを切替えるとパネル縦スクロールが先頭に戻る。長い Status タブで
+    /// 下までスクロールしてから Manager に切替えた時に、いきなり下端が
+    /// 表示される違和感を避けるため。
+    #[test]
+    fn tab_switch_resets_panel_scroll() {
+        let mut g = MetropolisGame::new();
+        g.state.panel_scroll.set(5);
+        // 同じタブへの切替は no-op (= scroll 維持)。
+        g.handle_input(&InputEvent::Key('2')); // Manager (default)
+        assert_eq!(g.state.panel_scroll.get(), 5);
+        // 別タブへ切り替えるとリセット。
+        g.handle_input(&InputEvent::Key('1')); // Status
+        assert_eq!(g.state.panel_scroll.get(), 0);
+    }
+
+    /// スクロール位置は 0 未満にならない (= 上端で止まる)。
+    #[test]
+    fn panel_scroll_clamps_to_zero_at_top() {
+        let mut g = MetropolisGame::new();
+        // すでに 0 から上に動かそうとしても 0 のまま。
+        assert!(g.handle_input(&InputEvent::Key('K')));
+        assert_eq!(g.state.panel_scroll.get(), 0);
+    }
+
+    /// AI が中央の inactive Shop を自分で撤去対象に選ぶ (= drive_ai が
+    /// `AiAction::Demolish` を生成して `demolish_at` を呼ぶ経路の sanity check)。
+    /// Tier 4 (`DemandAware`) は `placement_value` と `demolish_value` を比較し、
+    /// 機能不全建物は build より高評価 → 即撤去される決定論的経路。
+    #[test]
+    fn drive_ai_demolishes_inactive_shop() {
+        use state::{AiTier, Building, Tile, GRID_H, GRID_W};
+        let mut g = MetropolisGame::new();
         g.state.cash = 50_000;
         g.state.workers = 4;
-        g.state.strategy = Strategy::Income; // 撤去頻度の高い戦略
+        g.state.strategy = Strategy::Income;
+        g.state.ai_tier = AiTier::DemandAware;
         let cx = GRID_W / 2;
         let cy = GRID_H / 2;
         g.state.set_tile(cx, cy, Tile::Built(Building::Shop));
-        // Income の auto_demolish_period_ticks = 450。500 tick 進めれば 1 回は発火。
-        g.tick(500);
+        // 数 tick で Demolish action が選ばれて発火する (周期発火ではないので
+        // 大きな tick 数は不要)。
+        g.tick(20);
         assert!(
             matches!(g.state.tile(cx, cy), Tile::Empty),
-            "auto_demolish should have removed the inactive Shop"
+            "AI (Tier 4) should select the inactive Shop for Demolish"
         );
     }
 }

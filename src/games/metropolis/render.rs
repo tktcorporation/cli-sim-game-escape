@@ -35,7 +35,7 @@ use ratzilla::ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::ClickState;
-use crate::widgets::{Clickable, ClickableGrid, TabBar};
+use crate::widgets::{ClickableGrid, ClickableList, ScrollableTab, TabBar};
 
 use super::logic;
 use super::state::{
@@ -44,8 +44,9 @@ use super::state::{
 };
 use super::terrain::Terrain;
 use super::{
-    ACT_HIRE_WORKER, ACT_STRATEGY_ECO, ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH,
-    ACT_TAB_EVENTS, ACT_TAB_MANAGER, ACT_TAB_STATUS, ACT_TAB_WORLD, ACT_UPGRADE_AI,
+    ACT_HIRE_WORKER, ACT_PANEL_SCROLL_DOWN, ACT_PANEL_SCROLL_UP, ACT_STRATEGY_ECO,
+    ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH, ACT_TAB_EVENTS, ACT_TAB_MANAGER,
+    ACT_TAB_STATUS, ACT_TAB_WORLD, ACT_UPGRADE_AI,
 };
 
 /// Wide layout が必要とする最小幅。
@@ -1328,14 +1329,60 @@ fn render_tab_panel(
         bar.render(f, v[0], &mut cs);
     }
 
-    // 内容。
-    match state.panel_tab {
-        PanelTab::Status => render_status(state, f, v[1]),
-        PanelTab::Manager => render_buttons(state, f, v[1], click_state),
-        PanelTab::Events => render_log(state, f, v[1]),
-        PanelTab::World => render_world(state, f, v[1]),
-    }
+    // 4 タブを共通の `ScrollableTab` primitive に乗せる。Cafe / Abyss と
+    // 同じスクロール挙動 (overflow 時のみ ▲▼ 列を予約 / clamp の自動書き戻し)
+    // を共有することで、game ごとに scroll 実装を再発明しない。
+    let list = match state.panel_tab {
+        PanelTab::Status => status_list(state),
+        PanelTab::Manager => manager_list(state),
+        PanelTab::Events => log_list(state),
+        PanelTab::World => world_list(state),
+    };
+    // スマホでパネル領域内のスワイプを panel scroll (J/K) に振り分けるため、
+    // 現在のパネル content 領域を window.metropolisPanelRect に export する。
+    // index.html の touch/wheel ハンドラがこの値を見て swipe キーを切り替える。
+    export_panel_rect_to_js(v[1]);
+    let mut cs = click_state.borrow_mut();
+    ScrollableTab::new(
+        list,
+        &state.panel_scroll,
+        ACT_PANEL_SCROLL_UP,
+        ACT_PANEL_SCROLL_DOWN,
+    )
+    .render(f, v[1], &mut cs);
 }
+
+/// パネル領域 (cell 座標) と「rect の鮮度」を `window.metropolisPanelRect`
+/// に export する。index.html の touch/wheel ハンドラが「タッチ開始位置が
+/// この矩形内か」を判定して、パネル内なら J/K (panel scroll)、それ以外なら
+/// j/k (viewport scroll) を dispatch する。
+///
+/// `updatedAt` (= `performance.now()` ミリ秒) を載せることで、JS 側は
+/// 「最後の更新から N ms 以上経った rect」を stale とみなし無視できる。
+/// これがないと metropolis から他ゲーム (cafe / abyss など) に切り替えた
+/// 後も古い rect が残り、その範囲のスワイプが J/K に化けて他ゲームの
+/// scrolling を奪う。metropolis 自身は毎フレーム render するので fresh
+/// な rect が継続更新される。
+#[cfg(target_arch = "wasm32")]
+fn export_panel_rect_to_js(area: Rect) {
+    use js_sys::{Object, Reflect};
+    use web_sys::wasm_bindgen::JsValue;
+    let Some(win) = web_sys::window() else { return };
+    let now_ms = win
+        .performance()
+        .map(|p| p.now())
+        .unwrap_or(0.0);
+    let obj = Object::new();
+    let _ = Reflect::set(&obj, &"x".into(), &JsValue::from(area.x));
+    let _ = Reflect::set(&obj, &"y".into(), &JsValue::from(area.y));
+    let _ = Reflect::set(&obj, &"w".into(), &JsValue::from(area.width));
+    let _ = Reflect::set(&obj, &"h".into(), &JsValue::from(area.height));
+    let _ = Reflect::set(&obj, &"updatedAt".into(), &JsValue::from(now_ms));
+    let _ = Reflect::set(&win, &"metropolisPanelRect".into(), &obj);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn export_panel_rect_to_js(_area: Rect) {}
 
 fn tab_style(active: bool) -> Style {
     if active {
@@ -1353,7 +1400,7 @@ fn tab_style(active: bool) -> Style {
 // シード値と地形比率を表示。「マイクラ感」を演出する場所で、後で
 // 「シード入力 → リジェネ」も加えやすいようここに集約。
 
-fn render_world(state: &City, f: &mut Frame, area: Rect) {
+fn world_list(state: &City) -> ClickableList<'static> {
     let mut counts = [0u32; 5];
     for row in &state.terrain {
         for t in row {
@@ -1369,7 +1416,7 @@ fn render_world(state: &City, f: &mut Frame, area: Rect) {
     let total = (GRID_W * GRID_H).max(1) as u32;
     let pct = |c: u32| (c * 100) / total;
 
-    let lines: Vec<Line> = vec![
+    let lines: Vec<Line<'static>> = vec![
         Line::from(vec![
             Span::styled("SEED ", Style::default().fg(Color::DarkGray)),
             Span::styled(
@@ -1406,8 +1453,11 @@ fn render_world(state: &City, f: &mut Frame, area: Rect) {
             Style::default().fg(Color::DarkGray),
         )),
     ];
-
-    f.render_widget(Paragraph::new(lines), area);
+    let mut cl = ClickableList::new();
+    for line in lines {
+        cl.push(line);
+    }
+    cl
 }
 
 // ── Status panel ────────────────────────────────────────────
@@ -1423,10 +1473,7 @@ fn is_payout_flash_active(state: &City) -> bool {
         && state.tick.saturating_sub(state.last_payout_tick) < PAYOUT_FLASH_TICKS
 }
 
-fn render_status(state: &City, f: &mut Frame, area: Rect) {
-    // タブの外側 Block が既に枠を提供するため、ここでは描画のみ。
-    let inner = area;
-
+fn status_list(state: &City) -> ClickableList<'static> {
     let income = logic::compute_income_per_sec(state);
     let pop = state.population();
     let active = state.active_constructions();
@@ -1482,7 +1529,7 @@ fn render_status(state: &City, f: &mut Frame, area: Rect) {
     ]));
 
     // 作業員バー (busy=▰ / free=▱)
-    lines.push(Line::from(worker_bar_spans(state, inner.width)));
+    lines.push(Line::from(worker_bar_spans(state)));
 
     // 累計 + 経過秒
     lines.push(Line::from(vec![
@@ -1514,7 +1561,11 @@ fn render_status(state: &City, f: &mut Frame, area: Rect) {
     lines.push(Line::from(""));
     lines.extend(worker_status_lines(state));
 
-    f.render_widget(Paragraph::new(lines), inner);
+    let mut cl = ClickableList::new();
+    for line in lines {
+        cl.push(line);
+    }
+    cl
 }
 
 /// 選択中セルの詳細を Status パネルに 4-6 行で表示する。
@@ -1891,7 +1942,7 @@ fn strategy_weight_bar(info: &logic::StrategyInfo) -> Vec<Span<'static>> {
     spans
 }
 
-fn worker_bar_spans(state: &City, _max_width: u16) -> Vec<Span<'static>> {
+fn worker_bar_spans(state: &City) -> Vec<Span<'static>> {
     let busy = state.active_constructions();
     let total = state.workers;
     let free = total.saturating_sub(busy);
@@ -1928,65 +1979,29 @@ fn worker_bar_spans(state: &City, _max_width: u16) -> Vec<Span<'static>> {
 
 // ── Manager panel (buttons) ─────────────────────────────────
 
-fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
-    // タブの外側 Block が既に枠を提供するため、ここでは中身のみ。
-    let inner_area = area;
+/// Manager タブを `ClickableList` 1 本に詰め込む。各 Strategy ボタン /
+/// 雇用 / CPU 進化はクリック可能行 (`push_clickable`)、タグラインや自動
+/// 運用ステータスは表示専用の行 (`push`)。共通スクロールレイヤがこの list
+/// を `wrap=false` で描画し、行単位でクリック領域を登録するので
+/// 「下まで見えない & 押せない」問題が一気に解決する。
+fn manager_list(state: &City) -> ClickableList<'static> {
+    let mut cl = ClickableList::new();
 
-    // 行構成: [GRW][CSH][TEC][ECO] 4 ボタン → タグライン 1 行 →
-    // 雇用 → AI Upgrade。Eco 追加で 4 行になったが、タブパネル下端が
-    // 余っているので問題ない。
-    let rows = Layout::default()
-        .direction(LayoutDir::Vertical)
-        .constraints([
-            Constraint::Length(1), // [GRW]
-            Constraint::Length(1), // [CSH]
-            Constraint::Length(1), // [TEC]
-            Constraint::Length(1), // [ECO]
-            Constraint::Length(1), // 選択中タグライン
-            Constraint::Length(1), // 雇用
-            Constraint::Length(1), // AI 進化
-            Constraint::Length(1), // 自動運用ステータス
-            Constraint::Min(0),
-        ])
-        .split(inner_area);
-
-    let mut cs = click_state.borrow_mut();
-
-    button_row(
-        f,
-        rows[0],
-        &mut cs,
+    cl.push_clickable(
+        strategy_button_line("[G] [GRW] 成長重視", state.strategy == Strategy::Growth, Color::Green),
         ACT_STRATEGY_GROWTH,
-        "[G] [GRW] 成長重視",
-        state.strategy == Strategy::Growth,
-        Color::Green,
     );
-    button_row(
-        f,
-        rows[1],
-        &mut cs,
+    cl.push_clickable(
+        strategy_button_line("[I] [CSH] 収入重視", state.strategy == Strategy::Income, Color::Yellow),
         ACT_STRATEGY_INCOME,
-        "[I] [CSH] 収入重視",
-        state.strategy == Strategy::Income,
-        Color::Yellow,
     );
-    button_row(
-        f,
-        rows[2],
-        &mut cs,
+    cl.push_clickable(
+        strategy_button_line("[T] [TEC] 技術投資", state.strategy == Strategy::Tech, Color::Cyan),
         ACT_STRATEGY_TECH,
-        "[T] [TEC] 技術投資",
-        state.strategy == Strategy::Tech,
-        Color::Cyan,
     );
-    button_row(
-        f,
-        rows[3],
-        &mut cs,
+    cl.push_clickable(
+        strategy_button_line("[E] [ECO] 環境配慮", state.strategy == Strategy::Eco, Color::LightGreen),
         ACT_STRATEGY_ECO,
-        "[E] [ECO] 環境配慮",
-        state.strategy == Strategy::Eco,
-        Color::LightGreen,
     );
 
     // 選択中 Strategy のタグライン (1 行)。
@@ -2012,17 +2027,25 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
         suffix.push(')');
         tag_spans.push(Span::styled(suffix, Style::default().fg(Color::DarkGray)));
     }
-    f.render_widget(Paragraph::new(Line::from(tag_spans)), rows[4]);
+    cl.push(Line::from(tag_spans));
 
+    // 雇用ボタン。
     let hire_cost = logic::hire_worker_cost(state.workers);
-    let (hire_label, hire_color) = match hire_cost {
-        Some(c) if state.cash >= c => (format!("[W] ▰ 作業員雇用 (${})", c), Color::White),
-        Some(c) => (format!("[W] ▰ 作業員雇用 (${})", c), Color::DarkGray),
-        None => ("[W] ▰ 作業員MAX到達".to_string(), Color::DarkGray),
+    let (hire_label, hire_color, hire_clickable) = match hire_cost {
+        Some(c) if state.cash >= c => {
+            (format!("[W] ▰ 作業員雇用 (${})", c), Color::White, true)
+        }
+        Some(c) => (format!("[W] ▰ 作業員雇用 (${})", c), Color::DarkGray, true),
+        None => ("[W] ▰ 作業員MAX到達".to_string(), Color::DarkGray, false),
     };
-    let p = Paragraph::new(Span::styled(hire_label, Style::default().fg(hire_color)));
-    Clickable::new(p, ACT_HIRE_WORKER).render(f, rows[5], &mut cs);
+    let hire_line = Line::from(Span::styled(hire_label, Style::default().fg(hire_color)));
+    if hire_clickable {
+        cl.push_clickable(hire_line, ACT_HIRE_WORKER);
+    } else {
+        cl.push(hire_line);
+    }
 
+    // CPU 進化ボタン (or 最大到達表示)。
     if let Some(next) = state.ai_tier.next() {
         let color = if state.cash >= next.upgrade_cost() {
             Color::Magenta
@@ -2035,47 +2058,31 @@ fn render_buttons(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefC
             next.name(),
             next.upgrade_cost()
         );
-        let p = Paragraph::new(Span::styled(label, Style::default().fg(color)));
-        Clickable::new(p, ACT_UPGRADE_AI).render(f, rows[6], &mut cs);
+        cl.push_clickable(
+            Line::from(Span::styled(label, Style::default().fg(color))),
+            ACT_UPGRADE_AI,
+        );
     } else {
-        let p = Paragraph::new(Span::styled(
+        cl.push(Line::from(Span::styled(
             "[U] [IV] CPU最大Tier到達",
             Style::default().fg(Color::DarkGray),
-        ));
-        f.render_widget(p, rows[6]);
+        )));
     }
 
-    // 自動運用ステータス — 戦略に応じた撤去周期を表示。
-    // **Outpost 派遣は AI 評価関数 (placement_value) に統合済み**:
-    // 賢い AI ほど saturation 時に自然に外の岩場を選ぶため、ここでの
-    // ハードコード周期は不要。撤去だけが garbage collection として残る。
+    // 自動運用ステータス — 撤去判断は AI が `placement_value` と
+    // `demolish_value` を比較して即時実行。表示は予備金ガードのみ
+    // (= AI が撤去後に手元に残す cash 下限。デフレ螺旋ガード)。
     let policy = logic::automation_policy(state.strategy);
-    let demolish_txt = policy
-        .auto_demolish_period_ticks
-        .map(|p| format!("撤去{}s", p / 10))
-        .unwrap_or_else(|| "撤去なし".to_string());
-    let auto_label = format!(
-        " 🤖 自動運用: {} / 予備${}",
-        demolish_txt, policy.min_cash_reserve
-    );
-    f.render_widget(
-        Paragraph::new(Span::styled(
-            auto_label,
-            Style::default().fg(Color::DarkGray),
-        )),
-        rows[7],
-    );
+    let auto_label = format!(" 🤖 撤去判断: AI / 予備${}", policy.min_cash_reserve);
+    cl.push(Line::from(Span::styled(
+        auto_label,
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    cl
 }
 
-fn button_row(
-    f: &mut Frame,
-    area: Rect,
-    cs: &mut ClickState,
-    action_id: u16,
-    label: &str,
-    selected: bool,
-    accent: Color,
-) {
+fn strategy_button_line(label: &str, selected: bool, accent: Color) -> Line<'static> {
     let style = if selected {
         Style::default()
             .fg(accent)
@@ -2083,22 +2090,21 @@ fn button_row(
     } else {
         Style::default().fg(accent)
     };
-    let p = Paragraph::new(Span::styled(label.to_string(), style));
-    Clickable::new(p, action_id).render(f, area, cs);
+    Line::from(Span::styled(label.to_string(), style))
 }
 
 // ── AI activity log ─────────────────────────────────────────
 
-fn render_log(state: &City, f: &mut Frame, area: Rect) {
-    // タブの外側 Block が既に枠を提供するため、タイトル風の 1 行を内側に。
+fn log_list(state: &City) -> ClickableList<'static> {
     let spinner_chars = ['◐', '◓', '◑', '◒'];
     let spinner = spinner_chars[((state.tick / 2) % spinner_chars.len() as u64) as usize];
     let header = format!("{} AI {} 履歴", spinner, ai_tier_icon(state.ai_tier));
 
-    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+    let mut cl = ClickableList::new();
+    cl.push(Line::from(Span::styled(
         header,
         Style::default().fg(Color::Magenta),
-    ))];
+    )));
     for (i, e) in state.events.iter().enumerate() {
         let style = if i == 0 {
             Style::default()
@@ -2109,10 +2115,9 @@ fn render_log(state: &City, f: &mut Frame, area: Rect) {
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        lines.push(Line::from(Span::styled(e.clone(), style)));
+        cl.push(Line::from(Span::styled(e.clone(), style)));
     }
-
-    f.render_widget(Paragraph::new(lines), area);
+    cl
 }
 
 fn strategy_label(s: Strategy) -> &'static str {
@@ -2378,5 +2383,93 @@ mod tests {
                 render(&city, f, Rect::new(0, 0, 100, 30), &cs);
             })
             .unwrap();
+    }
+
+    /// スマホ想定の浅い縦幅 (Manager の content area が 3 行しか取れない)
+    /// で、最初は ▼ ボタンだけが表示される (= 続きがあることを伝える)。
+    /// content が見切れてもパニックしない。
+    #[test]
+    fn narrow_panel_shows_down_arrow_when_overflow() {
+        let mut city = City::new();
+        city.panel_tab = PanelTab::Manager;
+        // 28 col × 28 row の極狭ターミナル。banner 4 + grid 18 = 22 を引くと
+        // パネルは最大 6 行 (枠 2 + tab 1 + content 3)。Manager は 8 行あるので
+        // content overflow が起きる。
+        let mut terminal = Terminal::new(TestBackend::new(28, 28)).unwrap();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        terminal
+            .draw(|f| {
+                render(&city, f, Rect::new(0, 0, 28, 28), &cs);
+            })
+            .unwrap();
+        let registered: Vec<u16> = cs.borrow().targets.iter().map(|t| t.action_id).collect();
+        assert!(
+            registered.contains(&ACT_PANEL_SCROLL_DOWN),
+            "▼ scroll target should be registered when content overflows; got {:?}",
+            registered
+        );
+        // まだスクロールしていないので ▲ は出ない。
+        assert!(
+            !registered.contains(&ACT_PANEL_SCROLL_UP),
+            "▲ should not register at scroll=0; got {:?}",
+            registered
+        );
+    }
+
+    /// スクロールダウン後は ▲ も登録され、最下端まで降りると ▼ が消える。
+    /// `scroll_panel` で深いオフセットを設定 → `ScrollableTab` 内部の
+    /// clamp で max_scroll に揃えられて write-back される連携テスト。
+    #[test]
+    fn scroll_clamp_and_arrow_visibility() {
+        let mut city = City::new();
+        city.panel_tab = PanelTab::Manager;
+        // 大きめにスクロールを入れて clamp を強制。
+        city.panel_scroll.set(99);
+
+        let mut terminal = Terminal::new(TestBackend::new(28, 28)).unwrap();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        terminal
+            .draw(|f| {
+                render(&city, f, Rect::new(0, 0, 28, 28), &cs);
+            })
+            .unwrap();
+        // clamp が走って scroll は max_scroll に揃う。max_scroll は content_h と
+        // area_h 次第で具体値はテストで固定しないが、ゼロにはならないはず。
+        let scroll = city.panel_scroll.get();
+        assert!(scroll > 0, "clamp should keep scroll > 0 when overflow exists");
+        let registered: Vec<u16> = cs.borrow().targets.iter().map(|t| t.action_id).collect();
+        assert!(
+            registered.contains(&ACT_PANEL_SCROLL_UP),
+            "▲ should appear after scrolling down"
+        );
+        // 最下端まで来ているので ▼ は消える (clamp 後 scroll == max_scroll)。
+        assert!(
+            !registered.contains(&ACT_PANEL_SCROLL_DOWN),
+            "▼ should disappear at bottom"
+        );
+    }
+
+    /// Wide layout (= パネル領域が広い) で Manager 全行が収まる時は
+    /// スクロールボタンが一切登録されない (= 不要な UI を出さない)。
+    #[test]
+    fn wide_layout_hides_scroll_arrows_when_no_overflow() {
+        let mut city = City::new();
+        city.panel_tab = PanelTab::Manager;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        terminal
+            .draw(|f| {
+                render(&city, f, Rect::new(0, 0, 120, 40), &cs);
+            })
+            .unwrap();
+        let registered: Vec<u16> = cs.borrow().targets.iter().map(|t| t.action_id).collect();
+        assert!(
+            !registered.contains(&ACT_PANEL_SCROLL_UP),
+            "▲ should not appear when content fits"
+        );
+        assert!(
+            !registered.contains(&ACT_PANEL_SCROLL_DOWN),
+            "▼ should not appear when content fits"
+        );
     }
 }

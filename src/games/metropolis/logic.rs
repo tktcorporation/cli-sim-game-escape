@@ -190,11 +190,8 @@ pub fn tick(city: &mut City, delta_ticks: u32) {
 
 fn step_one_tick(city: &mut City) {
     advance_construction(city);
-    // auto を drive_ai より先に動かす理由: drive_ai は free_workers をすべて
-    // 埋めてしまうので、その後で auto を回すと Outpost 派遣の発火ウィンドウ
-    // (`tick % period == 0` の単一 tick) がほぼ常に free_workers=0 で外れる。
-    // 先に auto が 1 ワーカーを Outpost に予約しておくことで、戦略の意図
-    // (拡張する / 撤去する) が確実に成立する。
+    // `auto_strategy_actions` は no-op (互換 stub)。撤去判断は AI が
+    // `decide()` 経由で `placement_value` と `demolish_value` を比較して行う。
     auto_strategy_actions(city);
     drive_ai(city);
     accrue_income(city);
@@ -202,8 +199,8 @@ fn step_one_tick(city: &mut City) {
     city.tick = city.tick.wrapping_add(1);
 }
 
-/// ティア境界を跨いだら演出をトリガー。降格 (建物撤去等で人口減) は
-/// 現状ありえない (撤去機能なし) ので、上昇のみ検出する。
+/// ティア境界を跨いだら演出をトリガー。AI 撤去で人口が一時的に減ることは
+/// あるが、`detect_tier_advance` は上昇遷移時のみフラッシュを焚く。
 fn detect_tier_advance(city: &mut City) {
     let now = city_tier_for(city.population());
     if now > city.last_observed_tier {
@@ -290,9 +287,13 @@ fn terrain_name(t: super::terrain::Terrain) -> &'static str {
 
 /// Let the AI place at most one new construction per tick per free worker.
 /// We cap at `free_workers` per tick to avoid unrealistic burst placement.
+///
+/// **Demolish action** も Build と同じく 1 worker を消費する。worker を
+/// 消費しないと「Demolish が tick あたり最高評価のまま続く」状況で 1 tick
+/// 内に attempts (= worker×2) 回の連続撤去が走り、cash が一気に枯渇する。
+/// 1 worker 1 アクションに揃えることで「1 tick 1 撤去」を保つ。
 fn drive_ai(city: &mut City) {
     let mut placements_left = city.free_workers();
-    // Limit AI calls per tick so we don't loop forever if it keeps idling.
     let mut attempts = placements_left.saturating_mul(2).max(1);
     while placements_left > 0 && attempts > 0 {
         attempts -= 1;
@@ -300,6 +301,14 @@ fn drive_ai(city: &mut City) {
             AiAction::Build { x, y, kind } => {
                 if start_construction(city, x, y, kind) {
                     placements_left -= 1;
+                }
+            }
+            AiAction::Demolish { x, y } => {
+                if demolish_at(city, x, y) {
+                    placements_left -= 1;
+                } else {
+                    // 失敗 (cash 不足等) なら break して busy-loop を防ぐ。
+                    break;
                 }
             }
             AiAction::Idle => break,
@@ -439,120 +448,47 @@ pub fn strategy_thought_verb(s: Strategy, kind: Building) -> &'static str {
     }
 }
 
-// ── 自動運用ポリシー (Phase A 撤去 / 開拓の完全自動化) ─────────────
+// ── 自動運用ポリシー (Strategy ごとの撤去 cash 余力) ───────────────
 //
-// プレイヤーが選んだ Strategy に応じて、CPU が「いつ Outpost を派遣するか /
-// いつ撤去判断を走らせるか / どこまで現金を予備に取っておくか」を自動決定する。
-// 撤去・開拓の手動ボタンは廃止され、すべてここを起点に tick 駆動で発火する。
+// 撤去判断は AI (`ai::decide`) が `placement_value` と `demolish_value` を
+// 同じ天秤で行う。本セクションが提供するのは「撤去後 cash がこの予備金を
+// 下回るなら撤去を見送る」というガードのみ。これがないと cash $50 →
+// 中央のミス建物を撤去 → cash $0 → 次 tick の build を全て idle、の
+// デフレ螺旋に陥り得る。
 //
-// ## 数値の意味
-//
-// **Phase A 以降**: Outpost 派遣は AI 評価関数 (`placement_value`) に統合済み。
-// このセクションは撤去周期のみを扱う。
-//
-// - `auto_demolish_period_ticks` (None = 自動撤去しない):
-//   この間隔で `auto_demolish` を試行。短くすると無駄な建物を即排除する
-//   「効率最大化」キャラ、長くすると「のんびり放置」キャラ。
-//
-// - `min_cash_reserve`:
-//   この額より下になる行動 (Outpost 派遣 / 撤去) は控える。drive_ai が建物を
-//   建てる原資を残すためのガード。Outpost コスト ($600) + 余裕 = 戦略次第。
-//
-// 数値はシミュレーター (simulator.rs `automation_*` 群) で 30min ベンチを
-// 走らせて「成長する / cash が貯まる / Rock が解禁される」を観測しながら
-// 確定させた。変更時は同テストで回帰を確認すること。
+// Strategy ごとの reserve は「キャラ付け」を数字で表現する:
+//   - 守備的な戦略 (Growth/Eco) は予備金を厚めに → cash 枯渇しにくい
+//   - 攻撃的な戦略 (Income) はやや薄めに → 撤去再建をテンポ良く回す
 
-/// 自動運用の方針 (Strategy ごとの周期と予算ガード)。
-///
-/// **Outpost 派遣は廃止** — AI 自身が `placement_value` で Outpost を選ぶため、
-/// ハードコード周期は不要になった (= 賢い AI ほど自然に外を拡張する設計)。
-/// 撤去だけがここに残る (= 老朽化 / 機能不全の garbage collection)。
+/// 撤去判断時の cash 予備金ガード。AI が demolish action を出す前に
+/// `cash >= demolish_cost(x, y) + min_cash_reserve` を満たすか確認する。
 #[derive(Clone, Copy, Debug)]
 pub struct AutomationPolicy {
-    pub auto_demolish_period_ticks: Option<u32>,
+    /// 撤去後に手元に残しておく cash 下限。これを割る撤去は見送られる。
     pub min_cash_reserve: i64,
 }
 
-/// 戦略ごとの自動運用設定。`auto_strategy_actions` が毎 tick 参照する。
-///
-/// シミュレータ (`automation_drives_outposts_and_demolitions`) で 4-worker
-/// DemandAware で 30 min 動かして「全戦略が拡張可能戦略では Outpost を
-/// 1 基以上派遣する」を担保しながら値を確定した。
-///
-/// `min_cash_reserve` は **drive_ai が建物を建て終えた後の余裕**。
-/// drive_ai が貪欲にキャッシュを消費するため、リザーブを大きくしすぎると
-/// 自動派遣が永遠に発火しない。$200-500 程度が実機テストでバランス良い。
+/// 戦略ごとの撤去予備金ガード。AI と Manager タブの両方が参照する。
 pub fn automation_policy(s: Strategy) -> AutomationPolicy {
     match s {
-        // 成長: 人口拡張のために土地が要る → 撤去は控えめ。
-        Strategy::Growth => AutomationPolicy {
-            auto_demolish_period_ticks: Some(450),
-            min_cash_reserve: 250,
-        },
-        // 収入: 効率最大化 = 無駄な建物を積極排除。
-        Strategy::Income => AutomationPolicy {
-            auto_demolish_period_ticks: Some(400),
-            min_cash_reserve: 400,
-        },
-        // 技術投資: 建設+20% を活かす + 老朽更新も標準。
-        Strategy::Tech => AutomationPolicy {
-            auto_demolish_period_ticks: Some(400),
-            min_cash_reserve: 350,
-        },
-        // 環境配慮: 撤去周期は控えめ (老朽化更新のみ)。
-        // 「緑地を保護し、既存の市域でゆっくり更新する」キャラクター。
-        // **Phase A**: 旧仕様で `None` だったが、Forest soft penalty 化で
-        // saturation 時に AI が森を切らずに進行可能になっても、撤去経路を
-        // 全く持たないと老朽化した街区が永続して詰まる (レビュー指摘 #1)。
-        // 控えめな周期 (900 tick = 90 sec) で老朽建物の世代交代だけ行う。
-        Strategy::Eco => AutomationPolicy {
-            auto_demolish_period_ticks: Some(900),
-            min_cash_reserve: 200,
-        },
+        // Growth: 人口拡張に資金を残したいので予備金厚め。
+        Strategy::Growth => AutomationPolicy { min_cash_reserve: 250 },
+        // Income: 撤去再建を積極的に回す = 予備金は薄め。
+        Strategy::Income => AutomationPolicy { min_cash_reserve: 400 },
+        // Tech: 建設+20% を活かしたいので House cost 程度を残す。
+        Strategy::Tech => AutomationPolicy { min_cash_reserve: 350 },
+        // Eco: 既存街区の更新がメインなので慎重に。
+        Strategy::Eco => AutomationPolicy { min_cash_reserve: 200 },
     }
 }
 
-/// `step_one_tick` から毎 tick 呼ばれる自動運用ハブ。
+/// `step_one_tick` から毎 tick 呼ばれる no-op (互換性のため残置)。
 ///
-/// **クールダウン方式**: 「最後に成功した tick + period」を過ぎていれば毎 tick
-/// 試行する。`tick % period == 0` の単一 tick 発火だと、その瞬間に
-/// `free_workers == 0` だった場合に取り逃がす (DemandAware は drive_ai が
-/// 直前にワーカーを埋めるため発生しがち)。クールダウン方式なら、条件が
-/// 揃った最初の tick で発火するので戦略の意図が必ず実行される。
-pub fn auto_strategy_actions(city: &mut City) {
-    if city.tick == 0 {
-        return;
-    }
-    let policy = automation_policy(city.strategy);
-
-    // **Outpost 派遣は AI 評価 (placement_value) に統合済み**。
-    //   Tier 4+ は `placement_value` で Outpost を candidate に含めて自分で
-    //   選ぶため、ここでハードコード周期で派遣する必要は無い。
-    //   Tier 1-3 は「賢くないので外を割れない」階層感を維持する。
-    //
-    // 撤去だけは別軸 (= state mutation を伴う garbage collection) として残す。
-    // 老朽化 / 機能不全のクリーンアップは AI の placement_value の対象外なので。
-
-    if let Some(period) = policy.auto_demolish_period_ticks {
-        // 撤去候補が大量に見つかる (= 老朽化が進んだ街) ほど 1 tick で複数件処理する。
-        // 旧 saturation accelerator は廃止: AI が自然に外を割るので、saturation 時に
-        // 内部を急いで掃除する必要はない。標準周期で淡々と老朽建物を更新する。
-        let due = city.tick.saturating_sub(city.last_auto_demolish_tick)
-            >= period as u64
-            || city.last_auto_demolish_tick == 0;
-        if due {
-            let Some((tx, ty, _score)) = auto_demolish_target(city) else {
-                return;
-            };
-            if city.cash < demolish_cost(tx, ty) + policy.min_cash_reserve {
-                return;
-            }
-            if auto_demolish(city) {
-                city.last_auto_demolish_tick = city.tick;
-            }
-        }
-    }
-}
+/// 旧仕様では戦略ごとの周期で撤去を発火していたが、AI 自身が
+/// `placement_value` と `demolish_value` を同じ天秤で比較するように
+/// なったため不要。`step_one_tick` の呼び出し点を変えずに済むよう
+/// 関数だけ残してある。次回大幅リファクタ時に呼び出し側ごと削除可。
+pub fn auto_strategy_actions(_city: &mut City) {}
 
 /// セルが「AI が即着工できる」状態か。
 ///
@@ -1449,55 +1385,44 @@ pub fn demolish_at(city: &mut City, x: usize, y: usize) -> bool {
     true
 }
 
-// ── AI 撤去判断 (Phase A: 完全自動化) ───────────────────────────
+// ── 撤去評価関数 (AI が `placement_value` と並べて比較) ─────────────
 //
-// Idle Metropolis の哲学「CPU が街を作る、プレイヤーは方向だけ」に沿って、
-// 撤去判断も CPU 側に委譲する。`auto_strategy_actions` から戦略ごとの
-// 周期 (`automation_policy(s).auto_demolish_period_ticks`) で発火し、
-// **最も無駄な建物**を 1 つ選んで撤去する。手動撤去ボタン / モードは
-// すべて廃止されたため、プレイヤーは戦略選択でしか撤去挙動を変えられない。
+// `demolish_value` が「撤去すれば街が改善する量」を返し、AI (`ai::decide`) が
+// `placement_value` の最良候補と直接比較する。値の大小だけが意味を持つ
+// 相対スコア (cents/sec とは厳密には揃わないが、cost_penalty を /10 にする
+// ことで「中央のミスは即撤去 / 外周は滅多に撤去しない」という直感に
+// 沿う挙動になる)。
 //
-// ## 評価関数の設計
+// 「無駄な建物」の定義:
+//   1. 機能不全 (inactive Shop / Workshop, Road 接続無し House)
+//   2. 役目を終えた (Outpost で周囲に Rock が無い、孤立 Road, House 無し Park)
+//   3. 老朽化 (寿命が尽きて income が大きく目減りしている)
 //
-// 「無駄な建物」の定義は複数あり得る:
-//   1. 機能不全 (inactive Shop / Workshop)
-//   2. 役目を終えた (Outpost で周囲に Rock がもう無い)
-//   3. 戦略的にミスマッチ (Cottage in core, でも income に貢献している…)
-//
-// すべて足し合わせた **wastefulness score** から **demolish_cost / 10** を引いた
-// 値を「撤去で得をする度合い」とし、最大値の建物を選ぶ。負の値しか出ない場合
-// (= どの撤去も損) は何もしない。
-//
-// この設計だと:
-// - 中央のミスは積極的に撤去される (cost 安い)
-// - 外周の建設ミスは滅多に撤去されない (cost 高い、d² 曲線が AI を萎縮させる)
-//   → プレイヤーが「外側に建てる前に再考しろ」と誘導される
+// 中央 ($50) のミスは coast_penalty 5 で撤去価値が大きく残るが、外周 ($2050)
+// では penalty 205 で機能不全 +250 でも余裕は +45 しかない。プレイヤーが
+// 「外側に建てる前に再考しろ」と誘導される設計。
 
-/// 撤去候補の優先度スコア (高いほど撤去すべき)。
+/// 撤去価値 (`auto_demolish_target` と AI 評価の両方が参照)。
 ///
-/// **正の値** = wasted potential、**負の値** = useful asset。
-/// `auto_demolish` が「最大スコア > 0」の建物を 1 つ選んで取り壊す。
+/// **正の値** = 撤去で街の状態を改善できる量、
+/// **i64::MIN** = 撤去対象外 (Empty / Construction セル等)。
+/// 0 やマイナス = 撤去すべきでない (機能してる建物 / コスト負け)。
 ///
-/// 設計判断: スコアの絶対値は重要でなく、**相対順位**のみが意味を持つ。
-/// バランス調整時はここの数字を弄る。
-/// `wastefulness_score_with` のオンデマンド版。テスト用 (BFS 1 回)。
-#[cfg(test)]
-fn wastefulness_score(city: &City, x: usize, y: usize) -> Option<i64> {
-    let connected = compute_edge_connected_roads(city);
-    wastefulness_score_with(city, x, y, &connected)
-}
-
-/// `wastefulness_score` の BFS 共有版。`auto_demolish_target` が全セルを
-/// 走査する時の BFS 重複を回避する (BFS = O(N), 全セルで呼ぶと O(N²) になる)。
-fn wastefulness_score_with(
-    city: &City,
-    x: usize,
-    y: usize,
-    connected: &[Vec<bool>],
-) -> Option<i64> {
+/// 設計: 各 building に「機能不全なら +X」の固定加点を載せ、老朽化建物には
+/// aging recovery 加点を足し、最後に `demolish_cost / 10` を引く。
+/// 単位は無次元のスコアだが、Tier 4/5 の AI は `placement_value` (cents/sec)
+/// と直接比較して action を選ぶ。スケールが厳密に一致しないため、Build と
+/// Demolish の選好は cost_penalty の係数とこの加点値の組み合わせで決まる。
+///
+/// **AI 統合**: Tier 4/5 はこの値を `placement_value` と並べて max 選択する。
+/// 中央のミス (= cost_penalty が小さい inactive Shop など) は build を上回り
+/// やすく、外周は coast_penalty が膨らむため build/idle が勝つ。
+/// 全 Tier の AI が `decide()` 経由で参照 (Tier 1-3 はトリガー限定の撤去、
+/// Tier 4/5 は build と同時比較)。`auto_demolish_target_with` がこの値の最大を選ぶ。
+pub fn demolish_value(city: &City, x: usize, y: usize, connected: &[Vec<bool>]) -> i64 {
     let kind = match city.tile(x, y) {
         Tile::Built(b) => *b,
-        _ => return None,
+        _ => return i64::MIN,
     };
 
     let edge_ok = is_building_edge_connected(connected, x, y);
@@ -1505,7 +1430,6 @@ fn wastefulness_score_with(
     let mut score: i64 = 0;
     match kind {
         Building::Shop => {
-            // 非アクティブ Shop は最大の無駄 (edge 未接続もここに含まれる)。
             if !shop_is_active_with(city, x, y, connected) {
                 score += 250;
             }
@@ -1517,15 +1441,13 @@ fn wastefulness_score_with(
         }
         Building::Outpost => {
             // 役目を終えた Outpost (周囲 4-近傍に Rock が無い) は撤去候補。
-            // 周囲に Rock があるならまだ仕事中なので score 0 (== 撤去しない)。
             if count_rock_neighbors(city, x, y) == 0 {
                 score += 300;
             }
         }
         Building::House => {
-            // House はほぼ常に有用 — 唯一例外は「孤立 Cottage」(Road 接続無し)。
-            // Phase 2: edge 未接続の Cottage は収入半減のため、撤去価値が
-            // 上昇 (+60)。完全孤立 (Road 接続も House 隣接も無い) は更に追加。
+            // edge 未接続 Cottage は収入半減のため撤去価値が上昇。
+            // 完全孤立 (Road も House 隣接も無し) は更に追加。
             let stats = gather_house_neighborhood_with(city, x, y, connected);
             if !edge_ok {
                 score += 60;
@@ -1535,7 +1457,7 @@ fn wastefulness_score_with(
             }
         }
         Building::Road => {
-            // 行き止まりの孤立 Road (隣接 Built が 0)。実害は小さいが見た目が悪い。
+            // 行き止まりの孤立 Road (隣接 Built が 0)。
             if !has_any_neighbor_built(city, x, y) {
                 score += 60;
             }
@@ -1548,17 +1470,11 @@ fn wastefulness_score_with(
         }
     }
 
-    // 老朽化ボーナス: 寿命が尽きた (= aging factor が下限の 500‰ 付近) 建物は
-    // 「再建すれば収入が回復する」候補。とくに Tier が低いまま放置された
-    // Cottage / inactive な Shop / Workshop は積極的に世代交代したい。
-    // 不老建物 (Park/Road) は age 関係なくスコア加算しない (= 永続資産扱い)。
+    // 老朽化ボーナス: 寿命が尽きた建物は「再建すれば収入が回復する」候補。
+    // 不老建物 (Park/Road) は age 関係なく加点しない (= 永続資産扱い)。
     if city.built_at_tick[y][x] != 0 {
         let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
         let tier_opt = if matches!(kind, Building::House) {
-            // BFS 重複回避: connected を渡す `_with` 版を使う。
-            // wastefulness_score_with は `connected` 引数で呼ばれているのに、
-            // ここだけ素の `gather_house_neighborhood` を呼ぶと BFS が再計算
-            // されてしまう (Codex review #103 P1)。
             Some(effective_house_tier(
                 house_tier_for(gather_house_neighborhood_with(city, x, y, connected)),
                 age,
@@ -1568,8 +1484,6 @@ fn wastefulness_score_with(
         };
         let lifespan = lifespan_x100(kind, tier_opt);
         let factor = aging_factor_per_mille(age, lifespan);
-        // 寿命下限 (=500‰) に達した建物は再建価値あり。
-        // 750..1000 の中間域では加点しない (= 「まだ働ける」ので維持)。
         if factor <= 600 {
             score += 80;
         } else if factor <= 750 {
@@ -1578,16 +1492,26 @@ fn wastefulness_score_with(
     }
 
     if score == 0 {
-        return None;
+        return i64::MIN;
     }
 
-    // コスト割引: 撤去には金がかかる。コスト/10 をスコアから引く。
-    // 中央 ($50) なら -5、外周 ($2050) なら -205。
-    // → 同じ「inactive Shop」でも、中央なら net +245、外周なら net +45。
-    //   外周は大幅にスコアが落ちるが、まだプラスなので最後の手段として撤去対象に
-    //   なり得る。AI が外周を「やむなく撤去」する挙動が出る。
+    // コスト割引: 中央 ($50) → -5、外周 ($2050) → -205。
+    // d² 曲線が外周を強くガードし、AI が「外周建物を気軽に撤去」しないようにする。
     let cost_penalty = demolish_cost(x, y) / 10;
-    Some(score - cost_penalty)
+    score - cost_penalty
+}
+
+/// `demolish_value` のオンデマンド版 (BFS 1 回)。
+/// テスト互換性のため旧名を残す。
+#[cfg(test)]
+fn wastefulness_score(city: &City, x: usize, y: usize) -> Option<i64> {
+    let connected = compute_edge_connected_roads(city);
+    let v = demolish_value(city, x, y, &connected);
+    if v == i64::MIN {
+        None
+    } else {
+        Some(v)
+    }
 }
 
 fn has_any_neighbor_built(city: &City, x: usize, y: usize) -> bool {
@@ -1620,38 +1544,46 @@ fn has_house_within(city: &City, x: usize, y: usize, dist: u32) -> bool {
     false
 }
 
-/// 全 Built タイルから最高スコアの撤去候補を返す。
+/// 全 Built タイルから最高 `demolish_value` の撤去候補を返す。
 ///
-/// 戻り値: `(x, y, score)`。何も無い時は None。
-/// ここで返ってくる候補は「スコア > 0 かつコストを引いてもプラス」のもの限定。
+/// 戻り値: `(x, y, value)` (value = cents/sec 単位)。撤去価値プラスの候補が
+/// 無い時は None。
 pub fn auto_demolish_target(city: &City) -> Option<(usize, usize, i64)> {
-    // BFS は 1 度だけ。`wastefulness_score` を全セルで呼ぶと O(N²) BFS に
-    // なって 64×32 マップでは tick あたり数百万操作になる。
     let connected = compute_edge_connected_roads(city);
+    auto_demolish_target_with(city, &connected)
+}
+
+/// `auto_demolish_target` の BFS 共有版。AI 側が既に
+/// `compute_edge_connected_roads` を計算済みの場合に再計算を避けて呼べる。
+pub fn auto_demolish_target_with(
+    city: &City,
+    connected: &[Vec<bool>],
+) -> Option<(usize, usize, i64)> {
     let mut best: Option<(usize, usize, i64)> = None;
     for y in 0..GRID_H {
         for x in 0..GRID_W {
-            if let Some(score) = wastefulness_score_with(city, x, y, &connected) {
-                if score <= 0 {
-                    continue;
-                }
-                let better = match best {
-                    None => true,
-                    Some((_, _, prev)) => score > prev,
-                };
-                if better {
-                    best = Some((x, y, score));
-                }
+            let v = demolish_value(city, x, y, connected);
+            if v == i64::MIN || v <= 0 {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some((_, _, prev)) => v > prev,
+            };
+            if better {
+                best = Some((x, y, v));
             }
         }
     }
     best
 }
 
-/// AI に撤去判断を一任する。最高スコアの建物を 1 つ撤去する。
-/// 候補が無い / 現金不足の時は **無音で false** を返す (tick 駆動の自動発火
-/// から呼ばれるためログ spam を避ける)。成功時は `demolish_at` 内で
-/// "🗑 ... を撤去" のイベントが既に記録される。
+/// AI に撤去判断を一任する (テスト用)。最高スコアの建物を 1 つ撤去する。
+/// 候補が無い / 現金不足の時は **無音で false** を返す。
+///
+/// 本番では `ai::decide` が `AiAction::Demolish` を返した時に `drive_ai` が
+/// `demolish_at` を直接呼ぶため、本ヘルパーは経路に乗らない。テスト用に残す。
+#[cfg(test)]
 pub fn auto_demolish(city: &mut City) -> bool {
     let Some((x, y, _score)) = auto_demolish_target(city) else {
         return false;

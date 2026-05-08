@@ -5,6 +5,8 @@
 //! purpose, so we need a balance simulator (see `simulator.rs`) to confirm
 //! the game is still progressing.
 
+use std::cell::Cell;
+
 /// **マップ全体**の幅 / 高さ (内部データの寸法)。
 /// 表示は `VIEW_W × VIEW_H` の窓 (viewport) に切り取る。
 /// 64×32 = 2048 セル — 32×16 (旧) の 4 倍の建設余地を持つ。
@@ -69,8 +71,9 @@ pub enum Building {
     /// 道路接続不要 — 緑地として独立配置可能。
     Park,
     /// **開拓機材** — 隣接する Rock セルの整地を可能にする特殊建物。
-    /// `auto_strategy_actions` が戦略ごとの周期で自動派遣する (Phase A
-    /// 完全自動化)。プレイヤーは戦略選択でしか派遣ペースを変えられない。
+    /// AI (Tier 4/5) が `placement_value` で判定して自分で建てる
+    /// (saturation 時に既存 Empty の value が下がり Outpost の future_potential
+    /// が相対勝ちする設計)。プレイヤーは戦略選択でしか派遣ペースを変えられない。
     /// 高価 ($600)、長時間建設 (600 ticks = 60 sec)。
     /// 一度設置すると周囲 4-近傍の Rock を順次破砕できるようになる。
     Outpost,
@@ -299,16 +302,16 @@ pub struct City {
     /// ティア進化フラッシュが消える tick。`tick < value` の間バナーを光らせる。
     pub tier_flash_until: u64,
 
-    /// 直近で `auto_strategy_actions` が成功裏に Outpost を派遣した tick。
-    /// `tick - this >= period` のクールダウン判定に使う。0 = 未着手。
-    /// 永続化対象 (戦略の自動運用ペースをロード後も保つ)。
+    /// 旧周期撤去のクールダウン用フィールド (現在 dead state)。AI 統合で
+    /// `auto_strategy_actions` が no-op になったため値を読む production code
+    /// は無いが、save schema v2 互換のため field と (de)serialize 経路は残す。
+    /// 次回 schema bump 時に削除候補。
     pub last_outpost_dispatch_tick: u64,
-    /// 直近で `auto_strategy_actions` が自動撤去を成功させた tick。
-    /// 0 = 未着手。永続化対象。
+    /// 旧周期撤去用フィールド (現在 dead state、save 互換のため残置)。
+    /// 詳細は `last_outpost_dispatch_tick` の説明参照。
     pub last_auto_demolish_tick: u64,
-    /// Outpost が累計で何回自動派遣されたか (= `dispatch_outpost` 成功回数)。
-    /// 各 Outpost は Rock を解禁し尽くすと役目を終え auto_demolish の対象に
-    /// なるため、`count_built(Outpost)` だけでは生涯派遣数が分からない。
+    /// Outpost の累計建設回数。`count_built(Outpost)` は撤去で減るので
+    /// 「これまでに何基建てたか」の生涯統計はこちらに加算する。
     /// 戦略の挙動 (どのくらい拡張に投資したか) を測る統計用。永続化対象。
     pub outposts_dispatched_total: u64,
 
@@ -361,6 +364,12 @@ pub struct City {
     /// Status タブで「選択した施設の情報」を表示するために使う。
     /// 一時状態 (永続化しない、リロード後はリセット)。
     pub selected_cell: Option<(usize, usize)>,
+
+    /// 右パネルタブ内コンテンツの縦スクロールオフセット (visual rows)。
+    /// スマホ等の浅い縦幅で Manager 全行が入り切らない時に下まで届かせる。
+    /// `&City` で渡る render 内で clamp する都合で `Cell` を採用。
+    /// 一時状態 (永続化しない、タブ切替時にリセット)。
+    pub panel_scroll: Cell<u16>,
 }
 
 pub const MAX_EVENTS: usize = 8;
@@ -435,6 +444,7 @@ impl City {
             cam_x,
             cam_y,
             selected_cell: None,
+            panel_scroll: Cell::new(0),
         }
     }
 
@@ -447,6 +457,15 @@ impl City {
         let ny = (self.cam_y as i32 + dy).clamp(0, max_y as i32);
         self.cam_x = nx as usize;
         self.cam_y = ny as usize;
+    }
+
+    /// 右パネルを縦に動かす。`delta` は visual row 単位の符号付き量。
+    /// 上限は render 内の `ScrollableTab` が content_h に合わせて再度
+    /// クランプするため、ここでは下限 0 と u16 上限の saturate のみ保証する。
+    pub fn scroll_panel(&mut self, delta: i32) {
+        let cur = self.panel_scroll.get() as i32;
+        let next = (cur + delta).clamp(0, u16::MAX as i32) as u16;
+        self.panel_scroll.set(next);
     }
 
     /// Record a new AI activity entry, keeping the log bounded.
