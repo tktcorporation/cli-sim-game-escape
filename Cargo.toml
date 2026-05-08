@@ -31,3 +31,15 @@ opt-level = "s"
 lto = "thin"
 # Strip debug info from release builds
 strip = "debuginfo"
+
+# 依存クレート (ratatui / ratzilla / proptest など) は dev / test でも最適化する。
+# 自プロジェクト側は debug のまま残してインクリメンタルビルドの速さを保つ。
+[profile.dev.package."*"]
+opt-level = 3
+
+# `cargo test` は simulator (metropolis / cafe / abyss) の tick ループに支配される。
+# 自プロジェクト側も opt-level=3 にしておくと debug 比 10-20x 速くなり、
+# 行番号付きの panic backtrace は維持される。
+# (incremental link cost は変わらないので 2回目以降のテストは遅くならない)
+[profile.test]
+opt-level = 3
