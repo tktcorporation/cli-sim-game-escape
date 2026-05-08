@@ -152,9 +152,9 @@ mod tests {
         let seed = 0xC1A5_5EED;
         let span = 1800;
         let cps = [1800];
-        let inc = run_with_strategy(seed, AiTier::DemandAware, Strategy::Income, 1, span, &cps);
-        let tec = run_with_strategy(seed, AiTier::DemandAware, Strategy::Tech, 1, span, &cps);
-        let gro = run_with_strategy(seed, AiTier::DemandAware, Strategy::Growth, 1, span, &cps);
+        let inc = run_with_strategy(seed, AiTier::Planner, Strategy::Income, 1, span, &cps);
+        let tec = run_with_strategy(seed, AiTier::Planner, Strategy::Tech, 1, span, &cps);
+        let gro = run_with_strategy(seed, AiTier::Planner, Strategy::Growth, 1, span, &cps);
 
         let inc_final = inc.last().unwrap();
         let tec_final = tec.last().unwrap();
@@ -226,7 +226,7 @@ mod tests {
         let seed = 0xC1A5_5EED;
         let span = 1800;
         let cps = [1800];
-        let eco = run_with_strategy(seed, AiTier::DemandAware, Strategy::Eco, 1, span, &cps);
+        let eco = run_with_strategy(seed, AiTier::Planner, Strategy::Eco, 1, span, &cps);
         let final_snap = eco.last().unwrap();
         eprintln!(
             "[Eco 30min] cash=${} pop={} built={} (R{} H{} S{})",
@@ -266,11 +266,11 @@ mod tests {
         eprintln!("\n=== Tier 2 ===");
         let s2 = run(seed, AiTier::Greedy, 1, span, &cps);
         eprintln!("\n=== Tier 3 ===");
-        let s3 = run(seed, AiTier::RoadPlanner, 1, span, &cps);
+        let s3 = run(seed, AiTier::Aware, 1, span, &cps);
         eprintln!("\n=== Tier 4 (Income baseline) ===");
-        let s4 = run(seed, AiTier::DemandAware, 1, span, &cps);
+        let s4 = run(seed, AiTier::Planner, 1, span, &cps);
         eprintln!("\n=== Tier 5 (DeepPlanner) ===");
-        let s5 = run(seed, AiTier::DeepPlanner, 1, span, &cps);
+        let s5 = run(seed, AiTier::Master, 1, span, &cps);
 
         let c1 = s1.last().unwrap().cash;
         let c2 = s2.last().unwrap().cash;
@@ -404,7 +404,7 @@ mod tests {
             Strategy::Eco,
         ] {
             let mut city = City::with_seed(seed);
-            city.ai_tier = AiTier::DemandAware;
+            city.ai_tier = AiTier::Planner;
             city.strategy = strategy;
             city.workers = 4;
             logic::tick(&mut city, TICKS_PER_SEC * span);

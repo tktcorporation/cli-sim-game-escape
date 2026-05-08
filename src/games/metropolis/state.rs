@@ -232,29 +232,35 @@ pub enum Strategy {
     Eco,
 }
 
-/// CPU intelligence tier.  Higher = smarter placement decisions.
+/// CPU intelligence tier — 将棋AI 風のレベル設計。
 ///
-/// **アーキテクチャ**: Tier 4 以上は `logic::placement_value` を使った
-/// 「収入が最も増える手」を選ぶ評価ベース AI。Tier の差は **思考の深さ**:
-///   - Tier 4 (DemandAware): 1 手先の value を見る (= candidate を全部評価して上位サンプル)
-///   - Tier 5 (DeepPlanner):  1 手目 + 2 手目の合計 value を見る (= 道路を引いて家を載せるシナリオが拾える)
+/// **強さの源泉**: 将棋エンジンと同じく **評価関数 × 探索深さ** の2軸。
+/// 評価関数 (`logic::evaluate`) は Tier 3 以上で共通、Tier 差は探索深さ +
+/// ノイズ量で作る (= Stockfish Skill Level / ぴよ将棋 と同じ思想)。
 ///
-/// 同じ評価関数を共有するため、シミュレータで `T5 ≥ T4 ≥ T3 ≥ T2 ≥ T1` の
-/// cash 順位が原理的に保証される。
+///   - Tier 1 (Random):  ランダム指し。15級相当。評価関数なし。
+///   - Tier 2 (Greedy):  1手読み + 簡易評価 (駒得のみ) + 30%ノイズ。5級相当。
+///   - Tier 3 (Aware):   1手読み + フル評価 + 5%ノイズ。初段相当。
+///   - Tier 4 (Planner): 2手読み + フル評価。三段相当。
+///   - Tier 5 (Master):  3手読み + フル評価。アマ高段相当。
+///
+/// 「自然な弱さ」設計: 弱い Tier は **視野を狭めることで自然に悪手が出る**。
+/// 明示ブランダー (突然の大悪手) は入れない (=「バカにされた感」を避ける)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AiTier {
-    /// Random placement, random building.  Wastes money, may strand shops.
+    /// 15級: 合法手から完全ランダム選択。評価関数なし。
     Random = 1,
-    /// Builds adjacent to existing tiles.  Has minimal "can I afford it?" sense.
+    /// 5級: 1手読み + 簡易評価 (House 数だけ見る駒得) + 30% ノイズ。
+    /// 「目先の家賃しか見えない」短視眼な弱さ。
     Greedy = 2,
-    /// Plans roads first, then buildings on the road.
-    RoadPlanner = 3,
-    /// Reads strategy weights and evaluates 1-step income gain per candidate.
-    DemandAware = 4,
-    /// Evaluates 2-step lookahead income gain. Includes Outpost dispatch in
-    /// the candidate set, so naturally chooses "break the rocks to the east"
-    /// when interior cells are saturated and yield zero value.
-    DeepPlanner = 5,
+    /// 初段: 1手読み + フル評価関数 (income/sec + Strategy bias) + 5% ノイズ。
+    /// 「考えてるが先は読まない」レベル。
+    Aware = 3,
+    /// 三段: 2手読み + フル評価。「道路を引いて家を建てる」のような
+    /// 1手目+2手目の連携を発見できる。
+    Planner = 4,
+    /// アマ高段: 3手読み + フル評価 + ワイド beam search。長期投資が見える。
+    Master = 5,
 }
 
 impl AiTier {
@@ -268,29 +274,29 @@ impl AiTier {
         match self {
             AiTier::Random => 0, // starting tier
             AiTier::Greedy => 500,
-            AiTier::RoadPlanner => 3_000,
-            AiTier::DemandAware => 12_000,
-            AiTier::DeepPlanner => 35_000,
+            AiTier::Aware => 3_000,
+            AiTier::Planner => 12_000,
+            AiTier::Master => 35_000,
         }
     }
 
     pub fn next(self) -> Option<AiTier> {
         match self {
             AiTier::Random => Some(AiTier::Greedy),
-            AiTier::Greedy => Some(AiTier::RoadPlanner),
-            AiTier::RoadPlanner => Some(AiTier::DemandAware),
-            AiTier::DemandAware => Some(AiTier::DeepPlanner),
-            AiTier::DeepPlanner => None,
+            AiTier::Greedy => Some(AiTier::Aware),
+            AiTier::Aware => Some(AiTier::Planner),
+            AiTier::Planner => Some(AiTier::Master),
+            AiTier::Master => None,
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
-            AiTier::Random => "Random Bot",
+            AiTier::Random => "Random",
             AiTier::Greedy => "Greedy",
-            AiTier::RoadPlanner => "Road Planner",
-            AiTier::DemandAware => "Demand Aware",
-            AiTier::DeepPlanner => "Deep Planner",
+            AiTier::Aware => "Aware",
+            AiTier::Planner => "Planner",
+            AiTier::Master => "Master",
         }
     }
 }

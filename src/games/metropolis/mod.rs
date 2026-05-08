@@ -458,7 +458,7 @@ mod tests {
         g.state.cash = 50_000;
         g.state.workers = 4;
         g.state.strategy = Strategy::Income;
-        g.state.ai_tier = AiTier::DemandAware;
+        g.state.ai_tier = AiTier::Planner;
         // Plain で埋めて Rock を排除 (= Outpost 候補が湧かない決定論的環境)。
         for y in 0..GRID_H {
             for x in 0..GRID_W {

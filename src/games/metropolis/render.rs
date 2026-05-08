@@ -198,9 +198,9 @@ fn ai_tier_icon(t: AiTier) -> &'static str {
     match t {
         AiTier::Random => "[I]",
         AiTier::Greedy => "[II]",
-        AiTier::RoadPlanner => "[III]",
-        AiTier::DemandAware => "[IV]",
-        AiTier::DeepPlanner => "[V]",
+        AiTier::Aware => "[III]",
+        AiTier::Planner => "[IV]",
+        AiTier::Master => "[V]",
     }
 }
 
