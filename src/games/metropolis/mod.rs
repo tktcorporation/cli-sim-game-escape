@@ -152,7 +152,11 @@ impl Game for MetropolisGame {
                         } else {
                             self.state.selected_cell = Some((abs_x, abs_y));
                             // 選択時は Status タブにフォーカス (= 詳細を見せる)。
-                            self.state.panel_tab = PanelTab::Status;
+                            // `switch_tab` 経由で `panel_scroll` を 0 リセット
+                            // しないと、Manager で深くスクロールしていた時に
+                            // Status が stale offset で開いて選択セル詳細が
+                            // 見切れる。
+                            switch_tab(&mut self.state, PanelTab::Status);
                         }
                         return true;
                     }

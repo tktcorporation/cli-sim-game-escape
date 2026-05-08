@@ -1352,23 +1352,32 @@ fn render_tab_panel(
     .render(f, v[1], &mut cs);
 }
 
-/// パネル領域 (cell 座標) を `window.metropolisPanelRect` に export する。
-/// index.html の touch/wheel ハンドラが「タッチ開始位置がこの矩形内か」を判定
-/// して、パネル内なら J/K (panel scroll)、それ以外なら j/k (viewport scroll)
-/// を dispatch する。これでスマホでもパネルがスワイプで動かせる。
+/// パネル領域 (cell 座標) と「rect の鮮度」を `window.metropolisPanelRect`
+/// に export する。index.html の touch/wheel ハンドラが「タッチ開始位置が
+/// この矩形内か」を判定して、パネル内なら J/K (panel scroll)、それ以外なら
+/// j/k (viewport scroll) を dispatch する。
 ///
-/// metropolis のレンダーが呼ばれない時 (他ゲーム選択中) は更新されないので、
-/// JS 側は「rect が無い / 古い」場合は viewport scroll にフォールバックする。
+/// `updatedAt` (= `performance.now()` ミリ秒) を載せることで、JS 側は
+/// 「最後の更新から N ms 以上経った rect」を stale とみなし無視できる。
+/// これがないと metropolis から他ゲーム (cafe / abyss など) に切り替えた
+/// 後も古い rect が残り、その範囲のスワイプが J/K に化けて他ゲームの
+/// scrolling を奪う。metropolis 自身は毎フレーム render するので fresh
+/// な rect が継続更新される。
 #[cfg(target_arch = "wasm32")]
 fn export_panel_rect_to_js(area: Rect) {
     use js_sys::{Object, Reflect};
     use web_sys::wasm_bindgen::JsValue;
     let Some(win) = web_sys::window() else { return };
+    let now_ms = win
+        .performance()
+        .map(|p| p.now())
+        .unwrap_or(0.0);
     let obj = Object::new();
     let _ = Reflect::set(&obj, &"x".into(), &JsValue::from(area.x));
     let _ = Reflect::set(&obj, &"y".into(), &JsValue::from(area.y));
     let _ = Reflect::set(&obj, &"w".into(), &JsValue::from(area.width));
     let _ = Reflect::set(&obj, &"h".into(), &JsValue::from(area.height));
+    let _ = Reflect::set(&obj, &"updatedAt".into(), &JsValue::from(now_ms));
     let _ = Reflect::set(&win, &"metropolisPanelRect".into(), &obj);
 }
 

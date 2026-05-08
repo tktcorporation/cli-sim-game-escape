@@ -191,12 +191,24 @@
       var swipeAccum = 0;
       var swipeTargetIsPanel = false;  // touchstart 時に確定、touchmove で参照
 
+      // metropolis 以外のゲーム (cafe / abyss など) に切り替えた時に古い
+      // rect が残ると、その範囲のスワイプが J/K に化けて他ゲームのスクロール
+      // を奪う。Rust 側が毎フレーム `updatedAt` (performance.now()) を更新する
+      // ので、N ms 以上更新が無ければ stale とみなして無視する。
+      // metropolis は 10 ticks/sec (= 100ms 間隔) で render するため、500ms の
+      // しきい値は「フレーム遅延の許容」と「ゲーム切替の即時無効化」のバランス。
+      var PANEL_RECT_STALE_MS = 500;
+
       // タッチ位置 (clientX, clientY) が metropolis のパネル領域内かを判定。
-      // Rust render が `window.metropolisPanelRect` (cell 座標) を export して
-      // いない (= 他ゲーム選択中) や `<pre>` が無い時は false。
+      // rect が無い / stale / `<pre>` が無い場合は false。
       function isPointInMetropolisPanel(clientX, clientY) {
         var rect = window.metropolisPanelRect;
         if (!rect) return false;
+        var now = (performance && performance.now) ? performance.now() : 0;
+        if (typeof rect.updatedAt !== 'number'
+            || now - rect.updatedAt > PANEL_RECT_STALE_MS) {
+          return false;
+        }
         var pre = document.querySelector('pre');
         if (!pre) return false;
         var pr = pre.getBoundingClientRect();
