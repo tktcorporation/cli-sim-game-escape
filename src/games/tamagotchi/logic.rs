@@ -26,8 +26,6 @@ struct DecayPeriods {
     cleanliness: u32,
 }
 
-/// `tick_once` は Egg / Dead を早期 return で除外しているため、ここに来る
-/// stage は必ず Baby〜Elder のいずれか。`unreachable!()` は防御として残す。
 fn decay_periods(stage: Stage) -> DecayPeriods {
     match stage {
         // 赤ちゃんは手がかかる: hunger は速く減る
@@ -58,7 +56,15 @@ fn decay_periods(stage: Stage) -> DecayPeriods {
             happiness: 120,
             cleanliness: 130,
         },
-        Stage::Egg | Stage::Dead => unreachable!("decay_periods called on inactive stage"),
+        // Egg / Dead は実質「無減衰」を返す。tick_once は早期 return で
+        // 到達しないが、関数を total に保つことで将来の呼び出しが panic
+        // ではなく実害ゼロな挙動になる。`> 0` ガード付きの decrement と
+        // 組み合わさり、最悪でも u32::MAX 周期 (4B+ ticks) で 1 だけ動く。
+        Stage::Egg | Stage::Dead => DecayPeriods {
+            hunger: u32::MAX,
+            happiness: u32::MAX,
+            cleanliness: u32::MAX,
+        },
     }
 }
 
@@ -102,18 +108,18 @@ fn tick_once(state: &mut TamaState) {
 
     state.age_ticks = state.age_ticks.saturating_add(1);
 
-    // Elder までは年齢に応じて自動進行。Elder 以降は age_ticks のまま。
+    // Elder に達したら自動進行を止める。Elder 以降の死は HP 減衰で表現する。
     let next_stage = stage_for_age(state.age_ticks);
     if next_stage != state.stage && state.stage != Stage::Elder {
-        let prev = state.stage;
         state.stage = next_stage;
-        if next_stage != prev {
-            state.add_log(format!("{} に成長した！", next_stage.label()));
-        }
+        state.add_log(format!("{} に成長した！", next_stage.label()));
     }
 
     // ── ステータス減衰 ──
     // 寝てる間は減衰を 1/3 に (周期 ×3)。
+    // 周期は意図的に互いに非整数倍 (60/80/120 など) なので、たまに LCM の
+    // タイミングで複数ステータスが同時に減るのは仕様。ペットが「お昼寝の
+    // 後にいっぺんに不調になる」感覚を演出している。
     let mut periods = decay_periods(state.stage);
     if state.sleeping {
         periods.hunger = periods.hunger.saturating_mul(3);
@@ -134,8 +140,6 @@ fn tick_once(state: &mut TamaState) {
     }
 
     // ── うんち ──
-    // 食事をするとお腹に貯まり、低 cleanliness で漏れる、という細かい
-    // モデルは省略。「清潔度が一定値を切ると周期的に increment」だけ。
     if !state.sleeping
         && state.stats.cleanliness < 60
         && state.total_ticks.is_multiple_of(200)
@@ -145,7 +149,6 @@ fn tick_once(state: &mut TamaState) {
     }
 
     // ── HP 減衰 ──
-    // 「いずれかのステータスが 0 / 老齢」のいずれかで HP が削れる。
     let hp_dmg_period = hp_damage_period(state);
     if let Some(period) = hp_dmg_period {
         if state.total_ticks.is_multiple_of(period as u64) && state.stats.health > 0 {
@@ -304,10 +307,14 @@ pub fn toggle_sleep(state: &mut TamaState) {
         return;
     }
     state.sleeping = !state.sleeping;
-    flash(state, LastAction::Slept);
     if state.sleeping {
+        flash(state, LastAction::Slept);
         state.add_log("zzz... おやすみ");
     } else {
+        // 起きた瞬間に zzz 顔を flash させると顔とログが食い違うので、
+        // 直前の flash を消して通常の表情に戻す。
+        state.last_action = None;
+        state.action_flash = 0;
         state.add_log("ぱちっ。起きた！");
     }
 }
@@ -541,6 +548,31 @@ mod tests {
         tick(&mut s, 1500);
         assert!(s.stats.health > 80);
         assert!(s.stats.health <= 100);
+    }
+
+    #[test]
+    fn start_new_generation_is_no_op_when_alive() {
+        let mut s = alive_state();
+        s.generation = 5;
+        s.stats.hunger = 50;
+        let snapshot_age = s.age_ticks;
+        start_new_generation(&mut s);
+        // 生きてる pet を間違って restart させない。世代も値も据え置き。
+        assert_eq!(s.generation, 5);
+        assert_eq!(s.age_ticks, snapshot_age);
+        assert!(s.is_alive());
+    }
+
+    #[test]
+    fn waking_clears_sleep_face_immediately() {
+        // 起きた瞬間に zzz の表情がフラッシュ残存しないこと。顔/ログの一貫性。
+        let mut s = alive_state();
+        toggle_sleep(&mut s);
+        assert!(matches!(s.last_action, Some(LastAction::Slept)));
+        toggle_sleep(&mut s);
+        // 起床直後 — 寝顔フラッシュは消えている
+        assert!(s.last_action.is_none());
+        assert_eq!(s.action_flash, 0);
     }
 
     #[test]

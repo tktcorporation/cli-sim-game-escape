@@ -9,6 +9,12 @@ use super::state::{Stage, Stats, TamaState};
 #[cfg(any(target_arch = "wasm32", test))]
 const SAVE_VERSION: u32 = 1;
 
+/// ロード時に許容する最小バージョン。これより古い save は破棄して新規開始。
+/// 現在は v1 のみだが、将来フィールドを追加する場合 `serde(default)` で
+/// 後方互換を取りつつここを据え置けば既存プレイヤーの世代記録を残せる。
+#[cfg(target_arch = "wasm32")]
+const MIN_COMPATIBLE_VERSION: u32 = 1;
+
 #[cfg(target_arch = "wasm32")]
 const STORAGE_KEY: &str = "tamagotchi_save";
 
@@ -127,10 +133,13 @@ pub fn load_game(state: &mut TamaState) -> bool {
             return false;
         }
     };
-    if save_data.version != SAVE_VERSION {
+    if save_data.version < MIN_COMPATIBLE_VERSION {
         let _ = storage.remove_item(STORAGE_KEY);
         return false;
     }
+    // 新しい version は `serde(default)` のフォールバックで吸収する想定 —
+    // version が大きい場合に弾くと、別タブで先行プレイした save を消して
+    // しまう事故になる。
     apply_save(state, &save_data.game);
     true
 }
@@ -171,6 +180,26 @@ mod tests {
         assert_eq!(restored.best_age_ticks, 5000);
         assert_eq!(restored.poop_count, 3);
         assert!(restored.sleeping);
+    }
+
+    #[test]
+    fn dead_state_roundtrips() {
+        // 「死亡したまま閉じる → 翌日開く」流れで Dead/best_age が消えないこと。
+        let mut original = TamaState::new();
+        logic::hatch(&mut original);
+        original.age_ticks = 8000;
+        original.best_age_ticks = 8000;
+        original.stage = Stage::Dead;
+        original.generation = 4;
+
+        let saved = extract_save(&original);
+        let mut restored = TamaState::new();
+        apply_save(&mut restored, &saved.game);
+
+        assert_eq!(restored.stage, Stage::Dead);
+        assert_eq!(restored.best_age_ticks, 8000);
+        assert_eq!(restored.generation, 4);
+        assert!(restored.is_dead());
     }
 
     #[test]

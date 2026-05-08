@@ -100,7 +100,7 @@ fn render_stats(state: &TamaState, f: &mut Frame, area: Rect, borders: Borders) 
         hp_color(state.stats.health),
     ));
 
-    let stage_line = Line::from(vec![
+    let mut stage_spans = vec![
         Span::styled(" Stage: ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             state.stage.label(),
@@ -113,16 +113,14 @@ fn render_stats(state: &TamaState, f: &mut Frame, area: Rect, borders: Borders) 
             format_age(state.age_ticks),
             Style::default().fg(Color::White),
         ),
-        if state.sleeping {
-            Span::styled(
-                "   💤 睡眠中",
-                Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
-            )
-        } else {
-            Span::raw("")
-        },
-    ]);
-    lines.push(stage_line);
+    ];
+    if state.sleeping {
+        stage_spans.push(Span::styled(
+            "   💤 睡眠中",
+            Style::default().fg(Color::Blue).add_modifier(Modifier::BOLD),
+        ));
+    }
+    lines.push(Line::from(stage_spans));
 
     let para = Paragraph::new(lines).block(
         Block::default()
@@ -234,15 +232,17 @@ fn render_pet_pane(
     // を実現する。block と para を別々に描画する代わりに、Clickable に
     // block 付き Paragraph を渡して「描画 + クリック領域登録」を 1 回に
     // まとめる (widget primitive 規約)。
+    // 生きてる時はペット領域タップで「なでる」、卵なら孵化。死亡中は領域
+    // タップを reactive にしない — 直前まで連打していたタップが新世代開始を
+    // 誤発火させると「えっ今のペット消えた!?」になるため、リスタートは
+    // 必ず明示的なボタン (ACT_NEW_PET) を経由させる。
     let para_with_block = para.block(block);
-    let action = if state.is_egg() {
-        ACT_HATCH
-    } else if state.is_dead() {
-        ACT_NEW_PET
+    if state.is_dead() {
+        f.render_widget(para_with_block, area);
     } else {
-        ACT_PET
-    };
-    Clickable::new(para_with_block, action).render(f, area, &mut click_state.borrow_mut());
+        let action = if state.is_egg() { ACT_HATCH } else { ACT_PET };
+        Clickable::new(para_with_block, action).render(f, area, &mut click_state.borrow_mut());
+    }
 }
 
 fn pet_art(state: &TamaState) -> Vec<Line<'static>> {
@@ -329,7 +329,7 @@ fn speech_bubble(state: &TamaState) -> Option<String> {
         return Some("(タップして孵化させる)".into());
     }
     if state.is_dead() {
-        return Some("(タップして新しい卵を迎える)".into());
+        return Some("[N] / 下のボタンで新しい卵を迎える".into());
     }
     if state.sleeping {
         return None;
