@@ -728,7 +728,7 @@ fn accrue_income(city: &mut City) {
 /// 各 Built House セルで Tier 込みの定員を埋め、それ以外は 0。これを
 /// `population_within` に渡すと近隣人口の集計が radius² の単純ループで済む。
 #[allow(clippy::needless_range_loop)] // (y,x) 両方で他の grid を index するため enumerate 化はしない
-fn compute_population_map(city: &City, connected: &[Vec<bool>]) -> Vec<Vec<u32>> {
+pub(super) fn compute_population_map(city: &City, connected: &[Vec<bool>]) -> Vec<Vec<u32>> {
     let mut map = vec![vec![0u32; GRID_W]; GRID_H];
     for y in 0..GRID_H {
         for x in 0..GRID_W {
@@ -890,6 +890,91 @@ pub const EMPLOYMENT_DEMAND_PER_CAPITA: i64 = 3;
 /// 1 人当たりホワイトカラー需要 (cents/sec)。Office が吸収する。
 pub const WHITE_COLLAR_DEMAND_PER_CAPITA: i64 = 2;
 
+/// セル単位の老朽化込み収入 (cents/sec)。Built タイル以外は 0。
+///
+/// `compute_income_per_sec` の per-tile 計算を切り出した版。`pop_map` /
+/// `connected` を caller 側で 1 回だけ計算してまとめて使い回す ensure 用。
+/// render の選択セル詳細表示 (selected_cell_lines) でも再利用する。
+pub(super) fn tile_income_cents_with(
+    city: &City,
+    x: usize,
+    y: usize,
+    pop_map: &[Vec<u32>],
+    connected: &[Vec<bool>],
+) -> i64 {
+    let kind = match city.tile(x, y) {
+        Tile::Built(b) => *b,
+        _ => return 0,
+    };
+    let tier_opt = if matches!(kind, Building::House) {
+        let target = house_tier_for(gather_house_neighborhood_with(city, x, y, connected));
+        let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
+        Some(effective_house_tier(target, age))
+    } else {
+        None
+    };
+    let base_cents: i64 = match kind {
+        Building::House => {
+            let tier = tier_opt.expect("house has tier");
+            let raw = match tier {
+                HouseTier::Cottage => 50,
+                HouseTier::Apartment => 150,
+                HouseTier::Highrise => 300,
+            };
+            // House SOFT ルール: 未接続 Cottage は半減 ($0.25/sec)。
+            if !is_building_edge_connected(connected, x, y) {
+                raw / 2
+            } else {
+                raw
+            }
+        }
+        Building::Workshop => employment_income_cents(
+            city,
+            x,
+            y,
+            WORKSHOP_CAPACITY_CENTS,
+            EmploymentClass::Industrial,
+            pop_map,
+            connected,
+        ),
+        Building::Factory => employment_income_cents(
+            city,
+            x,
+            y,
+            FACTORY_CAPACITY_CENTS,
+            EmploymentClass::Industrial,
+            pop_map,
+            connected,
+        ),
+        Building::Office => employment_income_cents(
+            city,
+            x,
+            y,
+            OFFICE_CAPACITY_CENTS,
+            EmploymentClass::WhiteCollar,
+            pop_map,
+            connected,
+        ),
+        Building::Shop => {
+            commercial_income_cents(city, x, y, SHOP_CAPACITY_CENTS, pop_map, connected)
+        }
+        Building::Mall => {
+            commercial_income_cents(city, x, y, MALL_CAPACITY_CENTS, pop_map, connected)
+        }
+        _ => 0,
+    };
+    if base_cents == 0 {
+        return 0;
+    }
+    if city.built_at_tick[y][x] == 0 {
+        base_cents
+    } else {
+        let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
+        let factor = aging_factor_per_mille(age, lifespan_x100(kind, tier_opt)) as i64;
+        (base_cents * factor) / 1000
+    }
+}
+
 /// 商業建物 (Shop / Mall) の per-tile 収入 (cents/sec)。
 ///
 /// 計算: 局所人口の購買力を商業キャパシティで按分し、自身のキャパに掛ける。
@@ -970,100 +1055,13 @@ fn employment_income_cents(
 /// 「Highrise は 6 倍」が本機能の主役。dwell time (5 min) と寿命 (4×) を考えると
 /// 「育てた街区は長く高収入を出す」が成り立つ。
 pub fn compute_income_per_sec(city: &City) -> i64 {
-    let now = city.tick;
     let mut income_cents: i64 = 0;
     let connected = compute_edge_connected_roads(city);
-    // 全 House の Tier を一括スキャンして人口テーブルを作る。商業/雇用建物の
-    // 需給按分 (commercial_income_cents / employment_income_cents) で参照。
     let pop_map = compute_population_map(city, &connected);
 
     for y in 0..GRID_H {
         for x in 0..GRID_W {
-            let kind = match city.tile(x, y) {
-                Tile::Built(b) => *b,
-                _ => continue,
-            };
-            let tier_opt = if matches!(kind, Building::House) {
-                let target =
-                    house_tier_for(gather_house_neighborhood_with(city, x, y, &connected));
-                let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
-                Some(effective_house_tier(target, age))
-            } else {
-                None
-            };
-            let base_cents: i64 = match kind {
-                Building::House => {
-                    let tier = tier_opt.expect("house has tier");
-                    // House Tier ごとの基礎収入 (家賃)。Tier 連動の人口増加と
-                    // 並行して、家賃そのものも Tier で 6 倍まで伸びる。
-                    let raw = match tier {
-                        HouseTier::Cottage => 50,
-                        HouseTier::Apartment => 150,
-                        HouseTier::Highrise => 300,
-                    };
-                    // House SOFT ルール: 未接続 Cottage は半減 ($0.25/sec)。
-                    if !is_building_edge_connected(&connected, x, y) {
-                        raw / 2
-                    } else {
-                        raw
-                    }
-                }
-                Building::Workshop => employment_income_cents(
-                    city,
-                    x,
-                    y,
-                    WORKSHOP_CAPACITY_CENTS,
-                    EmploymentClass::Industrial,
-                    &pop_map,
-                    &connected,
-                ),
-                Building::Factory => employment_income_cents(
-                    city,
-                    x,
-                    y,
-                    FACTORY_CAPACITY_CENTS,
-                    EmploymentClass::Industrial,
-                    &pop_map,
-                    &connected,
-                ),
-                Building::Office => employment_income_cents(
-                    city,
-                    x,
-                    y,
-                    OFFICE_CAPACITY_CENTS,
-                    EmploymentClass::WhiteCollar,
-                    &pop_map,
-                    &connected,
-                ),
-                Building::Shop => commercial_income_cents(
-                    city,
-                    x,
-                    y,
-                    SHOP_CAPACITY_CENTS,
-                    &pop_map,
-                    &connected,
-                ),
-                Building::Mall => commercial_income_cents(
-                    city,
-                    x,
-                    y,
-                    MALL_CAPACITY_CENTS,
-                    &pop_map,
-                    &connected,
-                ),
-                _ => 0,
-            };
-            if base_cents == 0 {
-                continue;
-            }
-            let aged = if city.built_at_tick[y][x] == 0 {
-                base_cents
-            } else {
-                let age = now.saturating_sub(city.built_at_tick[y][x]);
-                let factor = aging_factor_per_mille(age, lifespan_x100(kind, tier_opt)) as i64;
-                (base_cents * factor) / 1000
-            };
-            income_cents += aged;
+            income_cents += tile_income_cents_with(city, x, y, &pop_map, &connected);
         }
     }
 
@@ -1708,7 +1706,7 @@ pub(super) fn has_terrain_neighbor(
     false
 }
 
-fn has_neighbor_kind(city: &City, x: usize, y: usize, kind: Building) -> bool {
+pub(super) fn has_neighbor_kind(city: &City, x: usize, y: usize, kind: Building) -> bool {
     let dirs: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
     for (dx, dy) in dirs {
         let nx = x as i32 + dx;

@@ -1708,17 +1708,79 @@ fn status_list(state: &City) -> ClickableList<'static> {
     cl
 }
 
-/// 選択中セルの詳細を Status パネルに 4-6 行で表示する。
+/// cents/sec を `$X.XX/s` 形式の文字列にする。
+fn format_cents_per_sec(cents: i64) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    let abs = cents.unsigned_abs() as i64;
+    format!("{}${}.{:02}/s", sign, abs / 100, abs % 100)
+}
+
+/// (x, y) を中心とした Manhattan 半径 `radius` 内の Built House 数。
+fn count_houses_within(state: &City, x: usize, y: usize, radius: i32) -> u32 {
+    let mut count = 0u32;
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx.abs() + dy.abs() > radius {
+                continue;
+            }
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                continue;
+            }
+            if matches!(
+                state.tile(nx as usize, ny as usize),
+                Tile::Built(Building::House)
+            ) {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
+/// 商業/雇用建物が停止中の理由を 1 行で出す。
+///
+/// `is_workshop` が true なら Workshop/Factory/Office (隣接 House + 道路接続)、
+/// false なら Shop/Mall (道路接続 + 半径3 House) を判定する。
+fn inactive_reason_lines(
+    state: &City,
+    x: usize,
+    y: usize,
+    connected: &[Vec<bool>],
+    is_workshop: bool,
+) -> Vec<Line<'static>> {
+    let road_ok = logic::is_building_edge_connected(connected, x, y);
+    let demand_ok = if is_workshop {
+        logic::has_neighbor_kind(state, x, y, Building::House)
+    } else {
+        count_houses_within(state, x, y, 3) > 0
+    };
+    let reason = match (road_ok, demand_ok) {
+        (false, false) => " ✗ 幹線道路と近隣 House が両方不足",
+        (false, true) => " ✗ 幹線道路に未接続",
+        (true, false) if is_workshop => " ✗ 隣接 House が無く労働力ゼロ",
+        (true, false) => " ✗ 半径3 以内に House が無い",
+        (true, true) => return Vec::new(),
+    };
+    vec![Line::from(vec![Span::styled(
+        reason,
+        Style::default().fg(Color::LightRed),
+    )])]
+}
+
+/// 選択中セルの詳細を Status パネルに表示する。
 ///
 /// **見せる情報** (Cookie Factory 等の Pure Logic Pattern を踏襲):
-///   - セル種別 (Empty / Construction / Built / Clearing) と建物名
-///   - 地形 (Plain / Forest / Wasteland / Water / Rock)
-///   - 建物個別の状態 (House なら Tier、Shop / Workshop なら活性、Outpost なら Rock 残数)
-///   - 立ってる場合は推定 income (cents/sec → $/sec)
-///   - 道路接続状況 (edge-connected か)
+///   - セル種別 (Empty / Construction / Built / Clearing) と建物名 / 地形
+///   - 建物の役割説明 (何のためにあるか)
+///   - 建物個別の状態 (House の Tier、Shop の賑わい、Workshop の活性 など)
+///   - 推定 per-tile 収入 ($/sec) と上限キャパシティ
+///   - 停止中なら停止理由 (道路未接続 / 隣接 House なし)
+///   - 道路接続状況 / 築年数
 ///
-/// プレイヤーが「なぜここの House が Highrise にならないのか?」を読み解く
-/// 学習の入り口になる。
+/// プレイヤーが「なぜここの House が Highrise にならないのか?」「この
+/// Workshop がいくら稼いでいるのか?」を読み解く学習の入り口になる。
 fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
     let mut out: Vec<Line> = Vec::new();
     out.push(Line::from(vec![Span::styled(
@@ -1734,6 +1796,8 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
     // House/Shop/Workshop 以外の branch では未使用だが、計算コストは僅かなので
     // 全パスで計算しておく方がシンプル。
     let connected = logic::compute_edge_connected_roads(state);
+    // 収入按分の参照テーブル (Workshop/Factory/Office/Shop/Mall の per-tile 収入)。
+    let pop_map = logic::compute_population_map(state, &connected);
 
     // 1 行目: タイル種別
     let kind_label: String = match state.tile(x, y) {
@@ -1779,6 +1843,10 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                     ),
                 ]));
                 out.push(Line::from(vec![Span::styled(
+                    " 効果: 住人を供給 (周辺の Shop / Workshop / Office を活性化)".to_string(),
+                    Style::default().fg(Color::DarkGray),
+                )]));
+                out.push(Line::from(vec![Span::styled(
                     format!(
                         " 道路{}/工房{}/店舗{}/職場{}/家{}/公園{} {}",
                         stats.n_road_adj,
@@ -1797,6 +1865,12 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                         Style::default().fg(Color::LightRed),
                     )]));
                 }
+                if !stats.edge_connected && matches!(tier, logic::HouseTier::Cottage) {
+                    out.push(Line::from(vec![Span::styled(
+                        " ⚠ 道路未接続: 家賃が半減",
+                        Style::default().fg(Color::LightYellow),
+                    )]));
+                }
                 out.push(Line::from(vec![Span::styled(
                     format!(
                         " 周辺人口 {}人 (需給ゲート閾値 +{})",
@@ -1805,19 +1879,75 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                     ),
                     Style::default().fg(Color::DarkGray),
                 )]));
+                let rent = logic::tile_income_cents_with(state, x, y, &pop_map, &connected);
+                out.push(Line::from(vec![
+                    Span::styled(" 家賃 ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format_cents_per_sec(rent),
+                        Style::default().fg(Color::LightGreen),
+                    ),
+                ]));
             }
             Building::Shop | Building::Mall => {
                 let level = logic::shop_level_with(state, x, y, &connected);
+                let active = logic::shop_is_active_with(state, x, y, &connected);
+                let cap_cents = match b {
+                    Building::Shop => logic::SHOP_CAPACITY_CENTS,
+                    _ => logic::MALL_CAPACITY_CENTS,
+                };
                 out.push(Line::from(vec![
                     Span::styled(" 賑わい ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
                         format!("{:?}", level),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(if active { Color::Yellow } else { Color::DarkGray }),
+                    ),
+                    Span::styled(
+                        format!(" (上限 {})", format_cents_per_sec(cap_cents)),
+                        Style::default().fg(Color::DarkGray),
                     ),
                 ]));
+                let role = match b {
+                    Building::Shop => " 効果: 半径3 House の購買力を商品で受ける",
+                    _ => " 効果: 大型商業 (Shop の約3倍キャパ・Apartment/Highrise 向け)",
+                };
+                out.push(Line::from(vec![Span::styled(
+                    role,
+                    Style::default().fg(Color::DarkGray),
+                )]));
+                if active {
+                    let income = logic::tile_income_cents_with(state, x, y, &pop_map, &connected);
+                    let customers = count_houses_within(state, x, y, 3);
+                    out.push(Line::from(vec![
+                        Span::styled(" 収入 ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format_cents_per_sec(income),
+                            Style::default().fg(Color::LightGreen),
+                        ),
+                        Span::styled(
+                            format!(" / 客圏 House {}軒", customers),
+                            Style::default().fg(Color::DarkGray),
+                        ),
+                    ]));
+                } else {
+                    out.extend(inactive_reason_lines(state, x, y, &connected, false));
+                }
             }
             Building::Workshop | Building::Factory | Building::Office => {
                 let active = logic::workshop_is_active_with(state, x, y, &connected);
+                let (cap_cents, role) = match b {
+                    Building::Workshop => (
+                        logic::WORKSHOP_CAPACITY_CENTS,
+                        " 効果: 工業雇用を供給 (近隣 House の労働需要を吸収)",
+                    ),
+                    Building::Factory => (
+                        logic::FACTORY_CAPACITY_CENTS,
+                        " 効果: 工業雇用を大量供給 / 隣接 House の Tier -1 (煙害)",
+                    ),
+                    _ => (
+                        logic::OFFICE_CAPACITY_CENTS,
+                        " 効果: ホワイトカラー雇用を供給 / Highrise 化を促進",
+                    ),
+                };
                 out.push(Line::from(vec![
                     Span::styled(" 稼働 ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
@@ -1828,7 +1958,55 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                             Color::DarkGray
                         }),
                     ),
+                    Span::styled(
+                        format!(" (上限 {})", format_cents_per_sec(cap_cents)),
+                        Style::default().fg(Color::DarkGray),
+                    ),
                 ]));
+                out.push(Line::from(vec![Span::styled(
+                    role,
+                    Style::default().fg(Color::DarkGray),
+                )]));
+                if active {
+                    let income = logic::tile_income_cents_with(state, x, y, &pop_map, &connected);
+                    out.push(Line::from(vec![
+                        Span::styled(" 収入 ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            format_cents_per_sec(income),
+                            Style::default().fg(Color::LightGreen),
+                        ),
+                    ]));
+                } else {
+                    out.extend(inactive_reason_lines(state, x, y, &connected, true));
+                }
+            }
+            Building::Park => {
+                out.push(Line::from(vec![Span::styled(
+                    " 効果: 半径4 の文化触媒 (Highrise 化条件)",
+                    Style::default().fg(Color::LightGreen),
+                )]));
+                out.push(Line::from(vec![Span::styled(
+                    " 直接収入なし / 道路接続不要",
+                    Style::default().fg(Color::DarkGray),
+                )]));
+            }
+            Building::Road => {
+                let edge_connected = connected[y][x];
+                out.push(Line::from(vec![
+                    Span::styled(" 幹線網 ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        if edge_connected { "接続 ✓" } else { "未接続 ✗" },
+                        Style::default().fg(if edge_connected {
+                            Color::LightGreen
+                        } else {
+                            Color::LightYellow
+                        }),
+                    ),
+                ]));
+                out.push(Line::from(vec![Span::styled(
+                    " 効果: 隣接 Shop / Workshop / Factory / Office を活性化",
+                    Style::default().fg(Color::DarkGray),
+                )]));
             }
             Building::Outpost => {
                 let n_rock = (0..4)
@@ -1852,8 +2030,11 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                         Style::default().fg(Color::LightYellow),
                     ),
                 ]));
+                out.push(Line::from(vec![Span::styled(
+                    " 効果: 隣接 Rock を整地可能にする (直接収入なし)",
+                    Style::default().fg(Color::DarkGray),
+                )]));
             }
-            _ => {}
         }
     }
 
