@@ -79,17 +79,14 @@ pub const AUTOSAVE_INTERVAL: u32 = 300;
 /// オフライン報酬の対象とする経過時間の上限 (秒)。
 /// 4 時間 = 14400 秒。1日1〜2回戻ってくるサイクルを想定し、
 /// 「離れすぎても全部回収できる」状況を避けてオンライン誘導を残す。
-#[cfg(any(target_arch = "wasm32", test))]
 pub const MAX_OFFLINE_SECS: u64 = 4 * 60 * 60;
 
 /// ボーナス発動の最低経過時間 (秒)。ページリロードや短時間のタブ切替で
 /// 「30秒オフラインでした」のような無意味なメッセージが出るのを防ぐ。
-#[cfg(any(target_arch = "wasm32", test))]
 pub const OFFLINE_MIN_SECS: u64 = 60;
 
 /// オフライン中の効率係数 (% 単位)。100 = オンライン同等、< 100 でオンライン優遇。
 /// 70% は idle 系のいわゆる「セーフバイアス」値。
-#[cfg(any(target_arch = "wasm32", test))]
 pub const OFFLINE_EFFICIENCY_PCT: u32 = 70;
 
 /// オフラインボーナスの計算結果。`offline_bonus` の戻り値。
@@ -150,7 +147,6 @@ pub fn offline_bonus(last_save_ms: u64, now_ms: u64, income_per_sec: i64) -> Opt
 /// 切り捨てで両者が同じ "X時間" に化ける) は「オフライン 4時間 (上限4時間まで回収)」
 /// のような同表記が並ぶ。実害はほぼ無い (ボーナスは正しく支払われる) ので
 /// 表記の修正は行わない。
-#[cfg(any(target_arch = "wasm32", test))]
 pub fn format_offline_duration(secs: u64) -> String {
     debug_assert!(
         secs >= OFFLINE_MIN_SECS,
@@ -200,6 +196,11 @@ pub fn apply_offline_bonus(
     state.cash = state.cash.saturating_add(bonus.bonus_cash);
     state.cash_earned_total = state.cash_earned_total.saturating_add(bonus.bonus_cash);
     state.push_event(make_offline_event_message(&bonus));
+    state.pending_offline_welcome = Some(super::state::PendingOfflineWelcome {
+        elapsed_secs: bonus.elapsed_secs,
+        bonus_cash: bonus.bonus_cash,
+        capped: bonus.capped,
+    });
     Some(bonus)
 }
 
@@ -584,6 +585,8 @@ fn extract_save(state: &City) -> SaveData {
         selected_cell: _,
         // 右パネル縦スクロール (UI 状態、再ロード後はリセット)。
         panel_scroll: _,
+        // オフライン進行ボーナス通知モーダル (タップで dismissal、再ロード後はリセット)。
+        pending_offline_welcome: _,
     } = state;
 
     let mut tiles = Vec::with_capacity(GRID_W * GRID_H);
@@ -1280,6 +1283,14 @@ mod tests {
         assert_eq!(city.cash_earned_total, pre_earned + 5040);
         assert_eq!(city.events.len(), pre_event_count + 1);
         assert!(city.events[0].contains("オフライン"));
+
+        let welcome = city
+            .pending_offline_welcome
+            .as_ref()
+            .expect("welcome modal payload expected");
+        assert_eq!(welcome.bonus_cash, 5040);
+        assert_eq!(welcome.elapsed_secs, bonus.elapsed_secs);
+        assert_eq!(welcome.capped, bonus.capped);
     }
 
     /// gap < OFFLINE_MIN_SECS の短時間では None を返し、state は完全未変更。
@@ -1303,6 +1314,7 @@ mod tests {
         assert_eq!(city.cash, pre_cash);
         assert_eq!(city.cash_earned_total, pre_earned);
         assert_eq!(city.events.len(), pre_event_count);
+        assert!(city.pending_offline_welcome.is_none());
     }
 
     /// 街がまだ無収入 (= 空の City) の場合は None を返し state は未変更。
