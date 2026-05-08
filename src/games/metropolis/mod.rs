@@ -280,9 +280,16 @@ impl Game for MetropolisGame {
         // 正しい gap (= 不在時間) が観測される。
         #[cfg(target_arch = "wasm32")]
         {
-            // 戻り値は state に反映済みなので捨てる (`#[must_use]` 明示用に `let _`)。
-            let _ = save::apply_offline_bonus_with_persist(&mut self.state, self.last_wall_ms);
-            self.last_wall_ms = save::wall_clock_now_ms();
+            // `last_wall_ms` の更新可否を outcome 別に分岐する。
+            // - Applied / NotEligible: タブ visible の証跡として計測起点を進める。
+            // - PersistFailed: 据え置いて次回 tick で再算定 (transient な save 失敗
+            //   の取りこぼし防止)。
+            match save::apply_offline_bonus_with_persist(&mut self.state, self.last_wall_ms) {
+                save::BonusPersistOutcome::Applied | save::BonusPersistOutcome::NotEligible => {
+                    self.last_wall_ms = save::wall_clock_now_ms();
+                }
+                save::BonusPersistOutcome::PersistFailed => {}
+            }
         }
 
         logic::tick(&mut self.state, delta_ticks);

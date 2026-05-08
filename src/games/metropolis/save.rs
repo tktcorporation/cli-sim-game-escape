@@ -854,10 +854,39 @@ pub fn load_game(state: &mut City) -> bool {
 
     // 初回ロード時のオフライン進行ボーナス。前回セーブから現在までの経過時間に
     // 応じて推定収入を一括加算する。`compute_income_per_sec` は state ロード後に
-    // 評価して「戻ってきた時の街の実力」を反映する。bonus の値自体は state に
-    // 反映済みなので呼び出し側は捨てる。
+    // 評価して「戻ってきた時の街の実力」を反映する。
+    //
+    // どの outcome でも `load_game` の戻り値 (= ロード成功 true) は変わらない:
+    //   - Applied / NotEligible: state は意図通り (支給済み or 完全未変更)
+    //   - PersistFailed: ロールバックされて未支給だが、`last_save_wall_ms` も
+    //     更新されないので次回ロード時に同じオフライン期間が再算定される。
     let _ = apply_offline_bonus_with_persist(state, save_data.game.last_save_wall_ms);
     true
+}
+
+/// `apply_offline_bonus_with_persist` の結果。`MetropolisGame::tick` 側が
+/// `last_wall_ms` の進め方を判断するため、「該当無し」と「save 失敗ロールバック」を
+/// 区別する 3 状態に分離する。
+///
+/// `PersistFailed` の時に呼び出し側が `last_wall_ms` を据え置けば、localStorage の
+/// transient 失敗 (容量逼迫の一時解消等) が回復した次回 tick で同じオフライン期間を
+/// 再算定し直せる。`NotEligible` と同じ `None` で潰すと、回復しても再支給の機会が
+/// 失われて永久に取りこぼす。
+#[cfg(target_arch = "wasm32")]
+#[derive(Debug)]
+#[must_use]
+pub enum BonusPersistOutcome {
+    /// ボーナスを支給し、autosave も成功した。呼び出し側は計測起点を進めて良い。
+    /// 支給額の値自体は state.cash と events に既に反映済み。
+    Applied,
+    /// ボーナス対象なし (gap が短い / 街がまだ無収入 / 時計逆行)。
+    /// state は完全に未変更で、呼び出し側は計測起点を進めて良い (= タブ visible の
+    /// 証跡として通常通り更新)。
+    NotEligible,
+    /// ボーナス対象だが autosave に失敗してロールバック済み。
+    /// 呼び出し側は計測起点を **据え置く** ことで、storage が回復した次回 tick で
+    /// 同じオフライン期間を再算定し直せる。
+    PersistFailed,
 }
 
 /// `apply_offline_bonus` で state を更新したあと autosave を走らせる。
@@ -869,12 +898,11 @@ pub fn load_game(state: &mut City) -> bool {
 ///
 /// 保存失敗 (localStorage 容量超過 / disable 等) は元々 cash 永続化も壊れている
 /// ケースなので、ボーナスを引っ込めても体感的な損失は最小。
-///
-/// 戻り値は呼び出し側の意図 (`load_game` / `tick` が値を活用しないこと) を明示するため
-/// `#[must_use]` で握り、捨てる時は `let _ =` で書かせる。
 #[cfg(target_arch = "wasm32")]
-#[must_use]
-pub fn apply_offline_bonus_with_persist(state: &mut City, last_ms: u64) -> Option<OfflineBonus> {
+pub fn apply_offline_bonus_with_persist(
+    state: &mut City,
+    last_ms: u64,
+) -> BonusPersistOutcome {
     let now_ms = wall_clock_now_ms();
 
     // ロールバック用にミューテーション前の値をスナップショットする。
@@ -884,7 +912,9 @@ pub fn apply_offline_bonus_with_persist(state: &mut City, last_ms: u64) -> Optio
     let pre_cash = state.cash;
     let pre_cash_earned_total = state.cash_earned_total;
 
-    let bonus = apply_offline_bonus(state, last_ms, now_ms)?;
+    if apply_offline_bonus(state, last_ms, now_ms).is_none() {
+        return BonusPersistOutcome::NotEligible;
+    }
 
     if !save_game(state) {
         state.cash = pre_cash;
@@ -898,9 +928,9 @@ pub fn apply_offline_bonus_with_persist(state: &mut City, last_ms: u64) -> Optio
         web_sys::console::warn_1(
             &"Idle Metropolis: オフラインボーナスを保存失敗のためロールバック".into(),
         );
-        return None;
+        return BonusPersistOutcome::PersistFailed;
     }
-    Some(bonus)
+    BonusPersistOutcome::Applied
 }
 
 /// セーブデータを削除する。設定画面の「データをリセット」から呼ばれる。
