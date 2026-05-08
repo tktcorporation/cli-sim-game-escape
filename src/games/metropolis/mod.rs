@@ -447,7 +447,10 @@ mod tests {
     /// AI が中央の inactive Shop を自分で撤去対象に選ぶ (= drive_ai が
     /// `AiAction::Demolish` を生成して `demolish_at` を呼ぶ経路の sanity check)。
     /// Tier 4 (`DemandAware`) は `placement_value` と `demolish_value` を比較し、
-    /// 機能不全建物は build より高評価 → 即撤去される決定論的経路。
+    /// 機能不全建物が他の build 候補より高評価な状況なら撤去を選ぶ。
+    ///
+    /// 撤去判断より Outpost 拡張の方が高 value になる場合があるため、
+    /// テストでは terrain を Plain で固定して Outpost 候補を除外する。
     #[test]
     fn drive_ai_demolishes_inactive_shop() {
         use state::{AiTier, Building, Tile, GRID_H, GRID_W};
@@ -456,6 +459,12 @@ mod tests {
         g.state.workers = 4;
         g.state.strategy = Strategy::Income;
         g.state.ai_tier = AiTier::DemandAware;
+        // Plain で埋めて Rock を排除 (= Outpost 候補が湧かない決定論的環境)。
+        for y in 0..GRID_H {
+            for x in 0..GRID_W {
+                g.state.terrain[y][x] = crate::games::metropolis::terrain::Terrain::Plain;
+            }
+        }
         let cx = GRID_W / 2;
         let cy = GRID_H / 2;
         g.state.set_tile(cx, cy, Tile::Built(Building::Shop));

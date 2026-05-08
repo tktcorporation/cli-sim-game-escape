@@ -598,6 +598,8 @@ fn extract_save(state: &City) -> SaveData {
         population_cache: _,
         // 右パネル縦スクロール (UI 状態、再ロード後はリセット)。
         panel_scroll: _,
+        // ROI 表示用の cash サンプル (一時状態、再ロード後はリセット)。
+        cash_history: _,
         // オフライン進行ボーナス通知モーダル (タップで dismissal、再ロード後はリセット)。
         pending_offline_welcome: _,
     } = state;
