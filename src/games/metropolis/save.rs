@@ -168,6 +168,30 @@ pub fn format_offline_duration(secs: u64) -> String {
     }
 }
 
+/// オフラインボーナスを `state` に適用する低レベル関数 (cash / cash_earned_total
+/// 加算 + events にメッセージ追加)。**永続化はしない** — production では
+/// `apply_offline_bonus_with_persist` 経由で呼ぶことで autosave とロールバックを
+/// まとめて扱える。テスト用にこの pure 操作だけ呼べるよう公開している。
+///
+/// 戻り値: 適用した bonus、または該当無し (gap が短い / 街がまだ無収入 など)。
+///
+/// `compute_income_per_sec` は `state` 反映後に評価して「戻ってきた時点の街の
+/// 実力」を反映する。`offline_bonus` のテストカバレッジで純算ロジックは担保済み
+/// なので、ここでは state mutation 部分のみを単体テストすればよい。
+#[cfg(any(target_arch = "wasm32", test))]
+pub fn apply_offline_bonus(
+    state: &mut City,
+    last_ms: u64,
+    now_ms: u64,
+) -> Option<OfflineBonus> {
+    let income_per_sec = super::logic::compute_income_per_sec(state);
+    let bonus = offline_bonus(last_ms, now_ms, income_per_sec)?;
+    state.cash = state.cash.saturating_add(bonus.bonus_cash);
+    state.cash_earned_total = state.cash_earned_total.saturating_add(bonus.bonus_cash);
+    state.push_event(make_offline_event_message(&bonus));
+    Some(bonus)
+}
+
 /// イベントログ 1 行を生成する。`load_game` 側でフォーマットを散らかさない。
 #[cfg(any(target_arch = "wasm32", test))]
 fn make_offline_event_message(bonus: &OfflineBonus) -> String {
@@ -734,6 +758,13 @@ fn wall_clock_ms_to_u64(v: f64) -> u64 {
     }
 }
 
+/// 現在の wall-clock (`Date.now()`, ms since epoch) を u64 で返す。
+/// 非 finite / 負値は 0 にフォールバックする。
+#[cfg(target_arch = "wasm32")]
+pub fn wall_clock_now_ms() -> u64 {
+    wall_clock_ms_to_u64(js_sys::Date::now())
+}
+
 /// City 状態を localStorage に保存する。成功時 true、失敗時 false (warn 出力済)。
 /// 戻り値は `load_game` 内のオフラインボーナスロールバック判定で使う。
 #[cfg(target_arch = "wasm32")]
@@ -744,7 +775,7 @@ pub fn save_game(state: &City) -> bool {
     };
     let mut save = extract_save(state);
     // セーブ瞬間の wall-clock を記録。次回ロード時の経過秒算出に使う。
-    save.game.last_save_wall_ms = wall_clock_ms_to_u64(js_sys::Date::now());
+    save.game.last_save_wall_ms = wall_clock_now_ms();
     let json = match serde_json::to_string(&save) {
         Ok(j) => j,
         Err(e) => {
@@ -810,45 +841,50 @@ pub fn load_game(state: &mut City) -> bool {
     }
     apply_save(state, &save_data.game);
 
-    // オフライン進行ボーナス: 前回セーブから現在までの経過時間に応じて
-    // 推定収入を一括加算。`compute_income_per_sec` は state ロード後に評価して
-    // 「戻ってきた時の街の実力」を反映する。
-    let now_ms = wall_clock_ms_to_u64(js_sys::Date::now());
-    let income_per_sec = super::logic::compute_income_per_sec(state);
-    if let Some(bonus) = offline_bonus(save_data.game.last_save_wall_ms, now_ms, income_per_sec) {
-        // ロールバック用にミューテーション前の値をスナップショットする。
-        // `saturating_sub(bonus_cash)` での復元は、`saturating_add` が i64::MAX に
-        // クランプされていた場合に元値より小さくなる (= near-max balance を破壊する)。
-        // 直接スナップショットを書き戻すことで原状回復を保証する。
-        let pre_cash = state.cash;
-        let pre_cash_earned_total = state.cash_earned_total;
-
-        state.cash = state.cash.saturating_add(bonus.bonus_cash);
-        state.cash_earned_total = state.cash_earned_total.saturating_add(bonus.bonus_cash);
-        state.push_event(make_offline_event_message(&bonus));
-        // ボーナス適用後は即時セーブして wall-clock を更新する。直後にタブを
-        // 閉じて autosave (30秒間隔) が走らないと、次回ロードで同じオフライン
-        // 期間が再算定され二重支給になるため。
-        //
-        // 保存に失敗 (localStorage 容量超過 / disable 等) した場合は state を
-        // 完全ロールバック — 二重支給を防ぐため次回ロードでもう一度算定し直す
-        // 方が安全 (失敗ケースは元々 cash 永続化も壊れているので、ボーナスを
-        // 引っ込めても体感的な損失は最小)。
-        if !save_game(state) {
-            state.cash = pre_cash;
-            state.cash_earned_total = pre_cash_earned_total;
-            // push_event は先頭挿入なので index 0 を取り除けば直前のメッセージが消える。
-            // events が `MAX_EVENTS` で truncate されていた場合、末尾の最古エントリは
-            // 復元されないが、UI ログのみの軽微な劣化として許容する。
-            if !state.events.is_empty() {
-                state.events.remove(0);
-            }
-            web_sys::console::warn_1(
-                &"Idle Metropolis: オフラインボーナスを保存失敗のためロールバック".into(),
-            );
-        }
-    }
+    // 初回ロード時のオフライン進行ボーナス。前回セーブから現在までの経過時間に
+    // 応じて推定収入を一括加算する。`compute_income_per_sec` は state ロード後に
+    // 評価して「戻ってきた時の街の実力」を反映する。
+    apply_offline_bonus_with_persist(state, save_data.game.last_save_wall_ms);
     true
+}
+
+/// `apply_offline_bonus` で state を更新したあと autosave を走らせる。
+/// 保存失敗時は state を完全ロールバックして「次回また算定し直せる」状態に戻す。
+///
+/// `load_game` (初回ロード時) と `MetropolisGame::tick` (タブ復帰時) の両方から呼ぶ。
+/// ボーナス適用後の即時セーブは二重支給防止 — 直後にタブを閉じて autosave
+/// (30秒間隔) が走らないと、次回ロードで同じオフライン期間が再算定される。
+///
+/// 保存失敗 (localStorage 容量超過 / disable 等) は元々 cash 永続化も壊れている
+/// ケースなので、ボーナスを引っ込めても体感的な損失は最小。
+#[cfg(target_arch = "wasm32")]
+pub fn apply_offline_bonus_with_persist(state: &mut City, last_ms: u64) -> Option<OfflineBonus> {
+    let now_ms = wall_clock_now_ms();
+
+    // ロールバック用にミューテーション前の値をスナップショットする。
+    // `saturating_sub(bonus_cash)` での復元は、`saturating_add` が i64::MAX に
+    // クランプされていた場合に元値より小さくなる (= near-max balance を破壊する)。
+    // 直接スナップショットを書き戻すことで原状回復を保証する。
+    let pre_cash = state.cash;
+    let pre_cash_earned_total = state.cash_earned_total;
+
+    let bonus = apply_offline_bonus(state, last_ms, now_ms)?;
+
+    if !save_game(state) {
+        state.cash = pre_cash;
+        state.cash_earned_total = pre_cash_earned_total;
+        // push_event は先頭挿入なので index 0 を取り除けば直前のメッセージが消える。
+        // events が `MAX_EVENTS` で truncate されていた場合、末尾の最古エントリは
+        // 復元されないが、UI ログのみの軽微な劣化として許容する。
+        if !state.events.is_empty() {
+            state.events.remove(0);
+        }
+        web_sys::console::warn_1(
+            &"Idle Metropolis: オフラインボーナスを保存失敗のためロールバック".into(),
+        );
+        return None;
+    }
+    Some(bonus)
 }
 
 /// セーブデータを削除する。設定画面の「データをリセット」から呼ばれる。
@@ -1195,6 +1231,71 @@ mod tests {
         assert!(msg.contains("12時間"));
         assert!(msg.contains("上限4時間"));
         assert!(msg.contains("$5678"));
+    }
+
+    /// `apply_offline_bonus` は eligible なケースで cash と events を更新する。
+    /// 4 Cottage House を Road でつないだ最小構成で $2/sec の収入源を作り、
+    /// 1 時間ぶんのオフライン報酬 ($2 * 3600s * 70% = $5040) が加算されることを確認する。
+    /// `load_game` (初回ロード) と `MetropolisGame::tick` (タブ復帰) の両方が共有する核ロジック。
+    #[test]
+    fn apply_offline_bonus_credits_state_when_eligible() {
+        let mut city = City::new();
+        for x in 0..4 {
+            city.set_tile(x, 0, Tile::Built(Building::Road));
+        }
+        for x in 0..4 {
+            city.set_tile(x, 1, Tile::Built(Building::House));
+        }
+        let pre_cash = city.cash;
+        let pre_earned = city.cash_earned_total;
+        let pre_event_count = city.events.len();
+
+        let last_ms = 1_700_000_000_000u64;
+        let now_ms = last_ms + 3600 * 1000;
+        let bonus = apply_offline_bonus(&mut city, last_ms, now_ms).expect("bonus expected");
+
+        assert_eq!(bonus.bonus_cash, 5040);
+        assert_eq!(city.cash, pre_cash + 5040);
+        assert_eq!(city.cash_earned_total, pre_earned + 5040);
+        assert_eq!(city.events.len(), pre_event_count + 1);
+        assert!(city.events[0].contains("オフライン"));
+    }
+
+    /// gap < OFFLINE_MIN_SECS の短時間では None を返し、state は完全未変更。
+    /// タブの瞬間切替 (例: 30秒の別タブ閲覧) でボーナスが入らない不変の回帰テスト。
+    #[test]
+    fn apply_offline_bonus_below_threshold_does_not_mutate() {
+        let mut city = City::new();
+        for x in 0..4 {
+            city.set_tile(x, 0, Tile::Built(Building::Road));
+        }
+        for x in 0..4 {
+            city.set_tile(x, 1, Tile::Built(Building::House));
+        }
+        let pre_cash = city.cash;
+        let pre_earned = city.cash_earned_total;
+        let pre_event_count = city.events.len();
+
+        let last_ms = 1_700_000_000_000u64;
+        let now_ms = last_ms + 30_000;
+        assert!(apply_offline_bonus(&mut city, last_ms, now_ms).is_none());
+        assert_eq!(city.cash, pre_cash);
+        assert_eq!(city.cash_earned_total, pre_earned);
+        assert_eq!(city.events.len(), pre_event_count);
+    }
+
+    /// 街がまだ無収入 (= 空の City) の場合は None を返し state は未変更。
+    /// 「最初の建物を建てる前にタブを離した」ケースで意味のないメッセージが出ないことを保証。
+    #[test]
+    fn apply_offline_bonus_zero_income_does_not_mutate() {
+        let mut city = City::new();
+        let pre_cash = city.cash;
+        let pre_event_count = city.events.len();
+        let last_ms = 1_700_000_000_000u64;
+        let now_ms = last_ms + 3600 * 1000;
+        assert!(apply_offline_bonus(&mut city, last_ms, now_ms).is_none());
+        assert_eq!(city.cash, pre_cash);
+        assert_eq!(city.events.len(), pre_event_count);
     }
 
     /// `last_save_wall_ms` がシリアライズを通って読み戻せる。
