@@ -259,6 +259,7 @@ pub fn pixel_x_to_col(click_x: f64, grid_width: f64, terminal_cols: u16) -> Opti
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
 

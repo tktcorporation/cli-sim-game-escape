@@ -387,15 +387,13 @@ mod tests {
 
     #[test]
     fn spark_after_200_pulls() {
-        let mut state = CardState::default();
-        state.banner_pulls = 200;
+        let state = CardState { banner_pulls: 200, ..Default::default() };
         assert!(can_spark(&state));
     }
 
     #[test]
     fn spark_resets_counter() {
-        let mut state = CardState::default();
-        state.banner_pulls = 200;
+        let mut state = CardState { banner_pulls: 200, ..Default::default() };
         execute_spark(&mut state, 20);
         assert_eq!(state.banner_pulls, 0);
     }

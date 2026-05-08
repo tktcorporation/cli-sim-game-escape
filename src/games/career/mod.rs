@@ -433,7 +433,7 @@ mod tests {
         game.handle_input(&click(GO_TRAINING));
         assert_eq!(game.state.screen, Screen::Training);
         // Free self-study via click (index 0)
-        game.handle_input(&click(TRAINING_BASE + 0));
+        game.handle_input(&click(TRAINING_BASE));
         assert_eq!(game.state.knowledge, 2.0);
     }
 

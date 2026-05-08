@@ -24,7 +24,7 @@ mod tests {
             }
             let syn = state.synergy_bonus(&p.kind);
             if let Some(payback) = p.payback_seconds_with_synergy(syn) {
-                let dominated = best.as_ref().map_or(false, |(bp, _)| *bp <= payback);
+                let dominated = best.as_ref().is_some_and(|(bp, _)| *bp <= payback);
                 if !dominated {
                     best = Some((payback, Purchase::Producer(p.kind.clone())));
                 }
@@ -44,7 +44,7 @@ mod tests {
             let cps_gain = estimate_upgrade_cps_gain(state, &upgrade.effect);
             if cps_gain > 0.0 {
                 let payback = upgrade.cost / cps_gain;
-                let dominated = best.as_ref().map_or(false, |(bp, _)| *bp <= payback);
+                let dominated = best.as_ref().is_some_and(|(bp, _)| *bp <= payback);
                 if !dominated {
                     best = Some((payback, Purchase::Upgrade(idx)));
                 }
@@ -53,7 +53,7 @@ mod tests {
                 if let UpgradeEffect::ClickPower(amount) = &upgrade.effect {
                     let cps_gain = amount * 5.0; // assume 5 clicks/sec
                     let payback = upgrade.cost / cps_gain;
-                    let dominated = best.as_ref().map_or(false, |(bp, _)| *bp <= payback);
+                    let dominated = best.as_ref().is_some_and(|(bp, _)| *bp <= payback);
                     if !dominated {
                         best = Some((payback, Purchase::Upgrade(idx)));
                     }

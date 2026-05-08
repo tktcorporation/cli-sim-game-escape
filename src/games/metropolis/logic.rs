@@ -860,7 +860,7 @@ fn white_collar_capacity_within(
                 continue;
             }
             let (nx, ny) = (nx as usize, ny as usize);
-            if matches!(city.tile(nx as usize, ny as usize), Tile::Built(Building::Office))
+            if matches!(city.tile(nx, ny), Tile::Built(Building::Office))
                 && workshop_is_active_with(city, nx, ny, connected)
             {
                 total += OFFICE_CAPACITY_CENTS;

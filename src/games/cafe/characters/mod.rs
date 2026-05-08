@@ -241,8 +241,8 @@ mod tests {
 
     #[test]
     fn character_level_up() {
-        let mut ch = CharacterData::default();
-        ch.stars = 2; // cap = 40
+        // stars = 2 → level cap = 40
+        let mut ch = CharacterData { stars: 2, ..Default::default() };
         let levels = ch.add_exp(500);
         assert!(levels > 0);
         assert!(ch.level > 1);
@@ -250,16 +250,15 @@ mod tests {
 
     #[test]
     fn character_level_cap() {
-        let mut ch = CharacterData::default();
-        ch.stars = 1; // cap = 20
+        // stars = 1 → level cap = 20
+        let mut ch = CharacterData { stars: 1, ..Default::default() };
         ch.add_exp(100_000);
         assert_eq!(ch.level, ch.level_cap());
     }
 
     #[test]
     fn star_promotion() {
-        let mut ch = CharacterData::default();
-        ch.shards = 15;
+        let mut ch = CharacterData { shards: 15, ..Default::default() };
         assert!(ch.try_promote()); // 1→2, costs 10
         assert_eq!(ch.stars, 2);
         assert_eq!(ch.shards, 5);
@@ -267,16 +266,15 @@ mod tests {
 
     #[test]
     fn star_promotion_insufficient_shards() {
-        let mut ch = CharacterData::default();
-        ch.shards = 5;
+        let mut ch = CharacterData { shards: 5, ..Default::default() };
         assert!(!ch.try_promote()); // needs 10
         assert_eq!(ch.stars, 1);
     }
 
     #[test]
     fn skill_unlock_on_promotion() {
-        let mut ch = CharacterData::default();
-        ch.shards = 200; // enough for multiple promotions
+        // 200 shards is enough for multiple promotions.
+        let mut ch = CharacterData { shards: 200, ..Default::default() };
         ch.try_promote(); // 1→2
         assert_eq!(ch.skill_levels[1], 0); // not yet
         ch.try_promote(); // 2→3

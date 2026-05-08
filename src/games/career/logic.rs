@@ -1353,8 +1353,8 @@ mod tests {
     }
 
     fn strat_social_rush(state: &mut CareerState) {
-        if state.social < 12.0 && !state.training_done[2] {
-            if state.money >= 2000.0 { buy_training(state, 2); }
+        if state.social < 12.0 && !state.training_done[2] && state.money >= 2000.0 {
+            buy_training(state, 2);
         }
         if !state.networked { do_networking(state); }
         if state.job != JobKind::Sales && can_apply(state, JobKind::Sales) {
@@ -1368,15 +1368,15 @@ mod tests {
         if state.job == JobKind::Freeter && can_apply(state, JobKind::OfficeClerk) {
             apply_job(state, 1);
         }
-        if state.technical < 12.0 && !state.training_done[1] {
-            if state.money >= 2000.0 { buy_training(state, 1); }
+        if state.technical < 12.0 && !state.training_done[1] && state.money >= 2000.0 {
+            buy_training(state, 1);
         }
         if state.job != JobKind::Programmer && can_apply(state, JobKind::Programmer) {
             apply_job(state, 2);
         }
         // Manager: management 18, social 10
-        if state.management < 18.0 && !state.training_done[3] {
-            if state.money >= 3000.0 { buy_training(state, 3); }
+        if state.management < 18.0 && !state.training_done[3] && state.money >= 3000.0 {
+            buy_training(state, 3);
         }
         if !state.networked { do_networking(state); }
         if state.job != JobKind::Manager && can_apply(state, JobKind::Manager) {
@@ -1390,23 +1390,23 @@ mod tests {
         if state.job == JobKind::Freeter && can_apply(state, JobKind::OfficeClerk) {
             apply_job(state, 1);
         }
-        if state.technical < 12.0 && !state.training_done[1] {
-            if state.money >= 2000.0 { buy_training(state, 1); }
+        if state.technical < 12.0 && !state.training_done[1] && state.money >= 2000.0 {
+            buy_training(state, 1);
         }
         if state.job != JobKind::Programmer && can_apply(state, JobKind::Programmer) {
             apply_job(state, 2);
         }
         // Manager: management 18, social 10
-        if state.management < 18.0 && !state.training_done[3] {
-            if state.money >= 3000.0 { buy_training(state, 3); }
+        if state.management < 18.0 && !state.training_done[3] && state.money >= 3000.0 {
+            buy_training(state, 3);
         }
         if !state.networked { do_networking(state); }
         if state.job != JobKind::Manager && can_apply(state, JobKind::Manager) {
             apply_job(state, 6);
         }
         // Director: management 30, social 18, reputation 25
-        if state.management < 30.0 && !state.training_done[3] {
-            if state.money >= 3000.0 { buy_training(state, 3); }
+        if state.management < 30.0 && !state.training_done[3] && state.money >= 3000.0 {
+            buy_training(state, 3);
         }
         if !state.side_job_done {
             let best = state.technical.max(state.social).max(state.management).max(state.knowledge);
@@ -1418,9 +1418,11 @@ mod tests {
         invest_mixed(state, 50_000.0);
     }
 
+    type StrategyFn = fn(&mut CareerState);
+
     #[test]
     fn balance_simulation() {
-        let strategies: &[(&str, fn(&mut CareerState))] = &[
+        let strategies: &[(&str, StrategyFn)] = &[
             ("Idle", strat_idle),
             ("Tech Rush", strat_tech_rush),
             ("Social Rush", strat_social_rush),
