@@ -1,0 +1,26 @@
+[profile.default]
+# 30 秒で warning、60 秒で SIGTERM。テストが想定外に重くなった時に CI ログだけで気付ける。
+slow-timeout = { period = "30s", terminate-after = 2 }
+# 失敗したテストの出力だけ最後にまとめて表示する。
+failure-output = "immediate-final"
+success-output = "never"
+
+[profile.ci]
+# CI ではフレークの一時的な失敗を retry でカバー。本質的な失敗は3回連続で落ちる。
+retries = 2
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"
+
+# 仕様上 30 秒以上かかる simulator テストは slow-timeout を緩める。
+# それ以外のテストは 60 秒 (default profile の 30s × 2) で SIGTERM される invariant を維持する。
+[[profile.default.overrides]]
+filter = 'test(/automation_drives_outposts_and_demolitions/) | test(/tier1_never_stalls_across_seeds/) | test(/tier_ordering_holds_at_30min/)'
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+# 重い simulator は retry しない。ここで flake るのは現に slow なだけで、
+# retry すると最大 6 分 ×3 = 18 分 CI を浪費する。
+[[profile.ci.overrides]]
+filter = 'test(/automation_drives_outposts_and_demolitions/) | test(/tier1_never_stalls_across_seeds/) | test(/tier_ordering_holds_at_30min/)'
+retries = 0
