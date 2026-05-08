@@ -28,25 +28,26 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ratzilla::ratatui::layout::{Constraint, Direction as LayoutDir, Layout, Rect};
+use ratzilla::ratatui::layout::{Alignment, Constraint, Direction as LayoutDir, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::text::{Line, Span};
-use ratzilla::ratatui::widgets::{Block, BorderType, Borders, Paragraph};
+use ratzilla::ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::ClickState;
-use crate::widgets::{ClickableGrid, ClickableList, ScrollableTab, TabBar};
+use crate::widgets::{Clickable, ClickableGrid, ClickableList, ScrollableTab, TabBar};
 
 use super::logic;
+use super::save::{format_offline_duration, MAX_OFFLINE_SECS, OFFLINE_EFFICIENCY_PCT};
 use super::state::{
-    city_tier_for, next_tier_threshold, AiTier, Building, City, CityTier, PanelTab, Strategy,
-    Tile, GRID_H, GRID_W, PAYOUT_FLASH_TICKS, VIEW_H, VIEW_W,
+    city_tier_for, next_tier_threshold, AiTier, Building, City, CityTier, PanelTab,
+    PendingOfflineWelcome, Strategy, Tile, GRID_H, GRID_W, PAYOUT_FLASH_TICKS, VIEW_H, VIEW_W,
 };
 use super::terrain::Terrain;
 use super::{
-    ACT_HIRE_WORKER, ACT_PANEL_SCROLL_DOWN, ACT_PANEL_SCROLL_UP, ACT_STRATEGY_ECO,
-    ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH, ACT_TAB_EVENTS, ACT_TAB_MANAGER,
-    ACT_TAB_STATUS, ACT_TAB_WORLD, ACT_UPGRADE_AI,
+    ACT_DISMISS_OFFLINE_WELCOME, ACT_HIRE_WORKER, ACT_PANEL_SCROLL_DOWN, ACT_PANEL_SCROLL_UP,
+    ACT_STRATEGY_ECO, ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH, ACT_TAB_EVENTS,
+    ACT_TAB_MANAGER, ACT_TAB_STATUS, ACT_TAB_WORLD, ACT_UPGRADE_AI,
 };
 
 /// Wide layout が必要とする最小幅。
@@ -65,6 +66,11 @@ pub fn render(state: &City, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<
         render_narrow(state, f, area, click_state);
     } else {
         render_wide(state, f, area, click_state);
+    }
+    // 通常レイアウトの上にオーバーレイで重ねる。`Clear` widget で配下を白紙化
+    // してから描画するため、背景の建物表示などとは独立した見た目になる。
+    if let Some(welcome) = state.pending_offline_welcome.as_ref() {
+        render_offline_welcome_overlay(welcome, f, area, click_state);
     }
 }
 
@@ -2127,6 +2133,85 @@ fn strategy_label(s: Strategy) -> &'static str {
         Strategy::Tech => "技術",
         Strategy::Eco => "環境",
     }
+}
+
+// ── Offline welcome overlay ────────────────────────────────
+
+/// 中央に重ねる「おかえりなさい」モーダル。
+///
+/// `Clear` で背景を白紙化してから `Clickable` で wrap した `Paragraph` を
+/// 上書き描画することで、配下の grid / panel と独立した見た目になる。
+/// クリック対象は box 全体に登録されており、領域内のどこをタップしても
+/// `ACT_DISMISS_OFFLINE_WELCOME` が発火する。
+fn render_offline_welcome_overlay(
+    welcome: &PendingOfflineWelcome,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    // モーダルサイズ。横は読みやすさ重視で最大 48 col、画面が狭い時は
+    // area.width を上限に縮める。縦 9 行 = ボーダー2 + 余白2 + 本文5。
+    let modal_w = area.width.min(48);
+    let modal_h: u16 = 9;
+    if modal_w < 16 || area.height < modal_h {
+        // 画面が極端に狭い時はモーダル省略。Events ログが残るので情報は失われない。
+        return;
+    }
+    let x = area.x + (area.width - modal_w) / 2;
+    let y = area.y + (area.height - modal_h) / 2;
+    let modal_area = Rect::new(x, y, modal_w, modal_h);
+
+    let duration = format_offline_duration(welcome.elapsed_secs);
+    let detail = if welcome.capped {
+        format!(
+            "上限{}まで回収 ({}%効率)",
+            format_offline_duration(MAX_OFFLINE_SECS),
+            OFFLINE_EFFICIENCY_PCT
+        )
+    } else {
+        format!("{}%効率", OFFLINE_EFFICIENCY_PCT)
+    };
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(Span::styled(
+            "🌙 おかえりなさい",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("オフライン {} の収益", duration),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            format!("+${}", welcome.bonus_cash),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            detail,
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "▶ タップして閉じる",
+            Style::default().fg(Color::Cyan),
+        )),
+    ];
+
+    let para = Paragraph::new(lines).alignment(Alignment::Center).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Double)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(" ボーナス受領 "),
+    );
+
+    f.render_widget(Clear, modal_area);
+    let mut cs = click_state.borrow_mut();
+    Clickable::new(para, ACT_DISMISS_OFFLINE_WELCOME).render(f, modal_area, &mut cs);
 }
 
 #[cfg(test)]
