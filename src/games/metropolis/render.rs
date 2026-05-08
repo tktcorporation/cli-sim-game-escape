@@ -544,6 +544,59 @@ fn tile_span_1(
             };
             Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg))
         }
+        Tile::Built(Building::Factory) => {
+            // 工場: Workshop の上位 — 煙が大きく立ち上る `F` 字。
+            let active = logic::workshop_is_active_with(state, x, y, connected);
+            let phase = (tick / 3) as usize % 4;
+            let ch = if active {
+                ['F', 'f', 'F', '#'][phase]
+            } else {
+                'F'
+            };
+            let (fg, bg) = if active {
+                (Color::Red, Color::Rgb(80, 25, 20))
+            } else {
+                (Color::DarkGray, Color::Rgb(40, 40, 40))
+            };
+            Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD))
+        }
+        Tile::Built(Building::Mall) => {
+            // 商業ビル: ★ + ネオン点滅。
+            let active = logic::shop_is_active_with(state, x, y, connected);
+            let bright = (tick / 3).is_multiple_of(2);
+            let ch = if active {
+                if bright { 'M' } else { 'm' }
+            } else {
+                'M'
+            };
+            let (fg, bg) = if active {
+                (Color::LightYellow, Color::Rgb(110, 70, 0))
+            } else {
+                (Color::DarkGray, Color::Rgb(50, 50, 50))
+            };
+            let mods = if bright && active {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            };
+            Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg).add_modifier(mods))
+        }
+        Tile::Built(Building::Office) => {
+            // オフィス: 高層ガラス。窓灯りが夜に点く。
+            let active = logic::workshop_is_active_with(state, x, y, connected);
+            let night = matches!(logic::day_phase(tick), logic::DayPhase::Night);
+            let ch = if night && active { 'O' } else { 'o' };
+            let (fg, bg) = if active {
+                if night {
+                    (Color::LightYellow, Color::Rgb(20, 30, 80))
+                } else {
+                    (Color::LightCyan, Color::Rgb(30, 40, 70))
+                }
+            } else {
+                (Color::DarkGray, Color::Rgb(40, 40, 50))
+            };
+            Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD))
+        }
         Tile::Built(Building::Park) => {
             // 1-wide: 公園は花/蝶を 1 文字でゆらす。夜は蛍。
             let (ch, fg) = park_glyph_1wide(tick);
@@ -573,9 +626,12 @@ fn tile_char_1(b: Building) -> char {
         Building::Road => '+',
         Building::House => 'H',
         Building::Workshop => 'W',
+        Building::Factory => 'F',
         Building::Shop => 'S',
+        Building::Mall => 'M',
+        Building::Office => 'O',
         Building::Park => 'P',
-        Building::Outpost => 'O',
+        Building::Outpost => 'X',
     }
 }
 
@@ -774,6 +830,75 @@ fn tile_spans_2(
                 (Color::DarkGray, Color::Rgb(40, 40, 40))
             };
             vec![Span::styled(glyph, Style::default().fg(fg).bg(bg))]
+        }
+        Tile::Built(Building::Factory) => {
+            // 工場: 大きい煙突 2 本 + 太い本体。Workshop よりダイナミックな煙アニメ。
+            let active = logic::workshop_is_active_with(state, x, y, connected);
+            let phase = (tick / 3) as usize % 4;
+            let smoke = if active {
+                ['▆', '▅', '▄', '▃'][phase]
+            } else {
+                '▁'
+            };
+            let body = if active { '▣' } else { '▢' };
+            let glyph = format!("{}{}", smoke, body);
+            let (fg, bg) = if active {
+                (Color::Red, Color::Rgb(80, 25, 20))
+            } else {
+                (Color::DarkGray, Color::Rgb(40, 40, 40))
+            };
+            vec![Span::styled(
+                glyph,
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            )]
+        }
+        Tile::Built(Building::Mall) => {
+            // 商業ビル: ★ + ネオン。Shop の上位らしい派手な色合い。
+            let active = logic::shop_is_active_with(state, x, y, connected);
+            let bright = (tick / 3).is_multiple_of(2);
+            if !active {
+                vec![Span::styled(
+                    "★$".to_string(),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .bg(Color::Rgb(50, 50, 50)),
+                )]
+            } else {
+                let glyph = if bright { "★$" } else { "✦$" };
+                let bg = Color::Rgb(110, 70, 0);
+                let mods = if bright {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                };
+                vec![Span::styled(
+                    glyph.to_string(),
+                    Style::default().fg(Color::LightYellow).bg(bg).add_modifier(mods),
+                )]
+            }
+        }
+        Tile::Built(Building::Office) => {
+            // オフィス: 高層ガラス窓 — 昼はシアン、夜は黄色 (窓灯り)。
+            let active = logic::workshop_is_active_with(state, x, y, connected);
+            let night = matches!(logic::day_phase(tick), logic::DayPhase::Night);
+            let glyph = if active {
+                if night { "▮▮" } else { "▭▭" }
+            } else {
+                "▭▭"
+            };
+            let (fg, bg) = if active {
+                if night {
+                    (Color::LightYellow, Color::Rgb(20, 30, 80))
+                } else {
+                    (Color::LightCyan, Color::Rgb(30, 40, 70))
+                }
+            } else {
+                (Color::DarkGray, Color::Rgb(40, 40, 50))
+            };
+            vec![Span::styled(
+                glyph.to_string(),
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            )]
         }
         Tile::Built(Building::Park) => {
             // 公園: 2-wide 右側の文字を「蝶/花/蛍」のアニメで動かす。
@@ -1090,7 +1215,10 @@ fn construction_color(b: Building) -> Color {
         Building::Road => Color::Yellow,
         Building::House => Color::LightGreen,
         Building::Workshop => Color::LightRed,
+        Building::Factory => Color::Red,
         Building::Shop => Color::LightCyan,
+        Building::Mall => Color::LightYellow,
+        Building::Office => Color::LightCyan,
         Building::Park => Color::LightGreen,
         Building::Outpost => Color::LightYellow,
     }
@@ -1101,7 +1229,10 @@ fn built_color(b: Building) -> Color {
         Building::Road => Color::Gray,
         Building::House => Color::Green,
         Building::Workshop => Color::LightRed,
+        Building::Factory => Color::Red,
         Building::Shop => Color::Yellow,
+        Building::Mall => Color::LightYellow,
+        Building::Office => Color::LightCyan,
         Building::Park => Color::LightGreen,
         Building::Outpost => Color::LightYellow,
     }
@@ -1112,7 +1243,10 @@ fn built_2wide_glyph(b: Building) -> &'static str {
         Building::Road => "══",
         Building::House => "▟▙",
         Building::Workshop => "˚⊞",
+        Building::Factory => "▆▣",
         Building::Shop => "$$",
+        Building::Mall => "★$",
+        Building::Office => "▮▮",
         Building::Park => "❀✿",
         Building::Outpost => "◐⚒",
     }
@@ -1626,6 +1760,7 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                 let tier = logic::effective_tier_at_with(state, x, y, &connected);
                 let stats = logic::gather_house_neighborhood_with(state, x, y, &connected);
                 let target_tier = logic::house_tier_for(stats);
+                let cap = logic::house_capacity(tier);
                 out.push(Line::from(vec![
                     Span::styled(" 段階 ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
@@ -1633,24 +1768,39 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                         Style::default().fg(Color::LightGreen),
                     ),
                     Span::styled(
-                        format!(" → 目標 {:?}", target_tier),
+                        format!(" 定員{}人 → 目標 {:?}", cap, target_tier),
                         Style::default().fg(Color::DarkGray),
                     ),
                 ]));
                 out.push(Line::from(vec![Span::styled(
                     format!(
-                        " 道路{}/工房{}/店舗{}/家{}/公園{} {}",
+                        " 道路{}/工房{}/店舗{}/職場{}/家{}/公園{} {}",
                         stats.n_road_adj,
                         stats.n_workshop_within_5,
                         stats.n_shop_within_5,
+                        stats.n_office_within_5,
                         stats.n_house_within_3,
                         stats.n_park_within_4,
                         if stats.edge_connected { "🌐" } else { "🚷" },
                     ),
                     Style::default().fg(Color::DarkGray),
                 )]));
+                if stats.factory_smoke_penalty {
+                    out.push(Line::from(vec![Span::styled(
+                        " ⚠ 隣接 Factory の煙害で Tier -1",
+                        Style::default().fg(Color::LightRed),
+                    )]));
+                }
+                out.push(Line::from(vec![Span::styled(
+                    format!(
+                        " 周辺人口 {}人 (需給ゲート閾値 +{})",
+                        stats.local_population,
+                        stats.local_population / 30,
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )]));
             }
-            Building::Shop => {
+            Building::Shop | Building::Mall => {
                 let level = logic::shop_level_with(state, x, y, &connected);
                 out.push(Line::from(vec![
                     Span::styled(" 賑わい ", Style::default().fg(Color::DarkGray)),
@@ -1660,7 +1810,7 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                     ),
                 ]));
             }
-            Building::Workshop => {
+            Building::Workshop | Building::Factory | Building::Office => {
                 let active = logic::workshop_is_active_with(state, x, y, &connected);
                 out.push(Line::from(vec![
                     Span::styled(" 稼働 ", Style::default().fg(Color::DarkGray)),
@@ -1826,7 +1976,10 @@ fn building_name_for(b: Building) -> &'static str {
         Building::Road => "道路",
         Building::House => "住宅",
         Building::Workshop => "工房",
+        Building::Factory => "工場",
         Building::Shop => "店舗",
+        Building::Mall => "商業ビル",
+        Building::Office => "オフィス",
         Building::Park => "公園",
         Building::Outpost => "開拓機材",
     }
@@ -1848,7 +2001,10 @@ fn building_icon(b: Building) -> &'static str {
         Building::Road => "🛣",
         Building::House => "🏠",
         Building::Workshop => "🔧",
+        Building::Factory => "🏭",
         Building::Shop => "🏪",
+        Building::Mall => "🏬",
+        Building::Office => "🏢",
         Building::Park => "🌳",
         Building::Outpost => "⚒",
     }

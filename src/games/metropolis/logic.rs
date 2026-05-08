@@ -268,7 +268,10 @@ fn building_name(b: Building) -> &'static str {
         Building::Road => "道路",
         Building::House => "住宅",
         Building::Workshop => "工房",
+        Building::Factory => "工場",
         Building::Shop => "店舗",
+        Building::Mall => "商業ビル",
+        Building::Office => "オフィス",
         Building::Park => "公園",
         Building::Outpost => "開拓機材",
     }
@@ -442,8 +445,23 @@ pub fn strategy_thought_verb(s: Strategy, kind: Building) -> &'static str {
         (Strategy::Tech, Building::Park) => "幹線沿いに緑地帯を配置",
         (Strategy::Eco, Building::Park) => "森を残し公園として開放",
 
-        // Outpost はプレイヤー操作専用 — AI は建てない (= 思考動詞は出ない)。
-        // ただし match 網羅性のため共通文言を入れる (debug 中などに発火した場合)。
+        // 上位建物 (Factory / Mall / Office) は中後盤の主役。戦略ごとの意図を
+        // 明示する文言を入れる。
+        (Strategy::Growth, Building::Factory) => "工業団地を整備",
+        (Strategy::Income, Building::Factory) => "重工業区を稼働",
+        (Strategy::Tech, Building::Factory) => "先端工場を立ち上げ",
+        (Strategy::Eco, Building::Factory) => "環境配慮型の工場を試験設置",
+
+        (Strategy::Growth, Building::Mall) => "近隣商業施設を建設",
+        (Strategy::Income, Building::Mall) => "大型商業ビルを開業",
+        (Strategy::Tech, Building::Mall) => "幹線沿いに商業ビルを開業",
+        (Strategy::Eco, Building::Mall) => "地域密着型商業ビルを建設",
+
+        (Strategy::Growth, Building::Office) => "高層オフィスを整備",
+        (Strategy::Income, Building::Office) => "オフィス区を稼働",
+        (Strategy::Tech, Building::Office) => "テック企業の拠点を設置",
+        (Strategy::Eco, Building::Office) => "緑化オフィスを建設",
+
         (_, Building::Outpost) => "開拓機材を設置",
     }
 }
@@ -644,6 +662,179 @@ fn accrue_income(city: &mut City) {
     }
 }
 
+// ── 需給ベースの per-tile 収入計算 (Phase A: 需給システム) ────────────
+//
+// Shop / Mall / Workshop / Factory / Office の収入は **近隣人口の需要** を
+// **キャパシティで按分** した値になる。ユーザー要望の「人口が増えても店舗が
+// 足りないと…」を表現する核心。
+//
+// 計算式 (per-supplier):
+//   total_demand = sum(local_population × per_capita_demand_cents)
+//   total_capacity = sum(supplier.capacity_cents) for suppliers in radius
+//   my_share = total_demand × my_capacity / total_capacity
+//   my_income = min(my_share, my_capacity)
+//
+// これにより:
+//   - 人口が少ない街区: Shop は上限未達で「客足が薄い」(ShopLevel = Basic)
+//   - 人口が増える: Shop が満員 → さらに Mall を建てる動機が出る
+//   - 過剰店舗: 同範囲に何軒も建てると 1 軒あたりの取り分が減る
+//
+// 集計範囲 = 半径 5 (Manhattan)。範囲外 House の客は来ない / 範囲外 Worker は
+// 通えない、という直感に揃える。
+
+/// `compute_income_per_sec` 内で 1 度だけ計算する per-tile 人口テーブル。
+///
+/// 各 Built House セルで Tier 込みの定員を埋め、それ以外は 0。これを
+/// `population_within` に渡すと近隣人口の集計が radius² の単純ループで済む。
+#[allow(clippy::needless_range_loop)] // (y,x) 両方で他の grid を index するため enumerate 化はしない
+fn compute_population_map(city: &City, connected: &[Vec<bool>]) -> Vec<Vec<u32>> {
+    let mut map = vec![vec![0u32; GRID_W]; GRID_H];
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            if !matches!(city.tile(x, y), Tile::Built(Building::House)) {
+                continue;
+            }
+            let target = house_tier_for(gather_house_neighborhood_with(city, x, y, connected));
+            let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
+            let tier = effective_house_tier(target, age);
+            map[y][x] = house_capacity(tier);
+        }
+    }
+    map
+}
+
+/// 半径 `radius` 内の人口合計 (Manhattan 距離)。
+fn population_within(pop_map: &[Vec<u32>], x: usize, y: usize, radius: i32) -> u32 {
+    let mut total = 0u32;
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx.abs() + dy.abs() > radius {
+                continue;
+            }
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                continue;
+            }
+            total += pop_map[ny as usize][nx as usize];
+        }
+    }
+    total
+}
+
+/// 半径内の商業供給キャパシティ合計 (cents/sec 単位)。Shop = 200, Mall = 600。
+fn commercial_capacity_within(city: &City, x: usize, y: usize, radius: i32) -> i64 {
+    let mut total = 0i64;
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx.abs() + dy.abs() > radius {
+                continue;
+            }
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                continue;
+            }
+            match city.tile(nx as usize, ny as usize) {
+                Tile::Built(Building::Shop) => total += SHOP_CAPACITY_CENTS,
+                Tile::Built(Building::Mall) => total += MALL_CAPACITY_CENTS,
+                _ => {}
+            }
+        }
+    }
+    total
+}
+
+/// 半径内の雇用供給キャパシティ合計 (cents/sec 単位)。
+fn employment_capacity_within(city: &City, x: usize, y: usize, radius: i32) -> i64 {
+    let mut total = 0i64;
+    for dy in -radius..=radius {
+        for dx in -radius..=radius {
+            if dx.abs() + dy.abs() > radius {
+                continue;
+            }
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                continue;
+            }
+            match city.tile(nx as usize, ny as usize) {
+                Tile::Built(Building::Workshop) => total += WORKSHOP_CAPACITY_CENTS,
+                Tile::Built(Building::Factory) => total += FACTORY_CAPACITY_CENTS,
+                Tile::Built(Building::Office) => total += OFFICE_CAPACITY_CENTS,
+                _ => {}
+            }
+        }
+    }
+    total
+}
+
+/// 商業供給キャパシティ (cents/sec) — Shop / Mall の上限収入。
+pub const SHOP_CAPACITY_CENTS: i64 = 200; // $2/sec
+pub const MALL_CAPACITY_CENTS: i64 = 600; // $6/sec
+/// 雇用供給キャパシティ (cents/sec) — Workshop / Factory / Office の上限収入。
+pub const WORKSHOP_CAPACITY_CENTS: i64 = 100; // $1/sec
+pub const FACTORY_CAPACITY_CENTS: i64 = 350; // $3.5/sec
+pub const OFFICE_CAPACITY_CENTS: i64 = 250; // $2.5/sec
+
+/// 1 人当たり購買力 (cents/sec)。商業需要の換算係数。
+pub const PURCHASE_POWER_PER_CAPITA: i64 = 4;
+/// 1 人当たり雇用需要 (cents/sec)。Workshop/Factory が吸収する。
+pub const EMPLOYMENT_DEMAND_PER_CAPITA: i64 = 3;
+/// 1 人当たりホワイトカラー需要 (cents/sec)。Office が吸収する。
+pub const WHITE_COLLAR_DEMAND_PER_CAPITA: i64 = 2;
+
+/// 商業建物 (Shop / Mall) の per-tile 収入 (cents/sec)。
+///
+/// 計算: 局所人口の購買力を商業キャパシティで按分し、自身のキャパに掛ける。
+/// 自身が inactive (edge-connected & 半径 3 House あり) なら 0。
+fn commercial_income_cents(
+    city: &City,
+    x: usize,
+    y: usize,
+    my_capacity: i64,
+    pop_map: &[Vec<u32>],
+    connected: &[Vec<bool>],
+) -> i64 {
+    if !shop_is_active_with(city, x, y, connected) {
+        return 0;
+    }
+    let local_pop = population_within(pop_map, x, y, 5) as i64;
+    let demand = local_pop * PURCHASE_POWER_PER_CAPITA;
+    let total_capacity = commercial_capacity_within(city, x, y, 5);
+    if total_capacity <= 0 {
+        return 0;
+    }
+    let share = demand * my_capacity / total_capacity;
+    share.min(my_capacity)
+}
+
+/// 雇用建物 (Workshop / Factory / Office) の per-tile 収入 (cents/sec)。
+///
+/// `demand_per_capita` は工業 (Workshop/Factory) なら `EMPLOYMENT_DEMAND_PER_CAPITA`、
+/// オフィス (Office) なら `WHITE_COLLAR_DEMAND_PER_CAPITA`。
+fn employment_income_cents(
+    city: &City,
+    x: usize,
+    y: usize,
+    my_capacity: i64,
+    demand_per_capita: i64,
+    pop_map: &[Vec<u32>],
+    connected: &[Vec<bool>],
+) -> i64 {
+    if !workshop_is_active_with(city, x, y, connected) {
+        return 0;
+    }
+    let local_pop = population_within(pop_map, x, y, 5) as i64;
+    let demand = local_pop * demand_per_capita;
+    let total_capacity = employment_capacity_within(city, x, y, 5);
+    if total_capacity <= 0 {
+        return 0;
+    }
+    let share = demand * my_capacity / total_capacity;
+    share.min(my_capacity)
+}
+
 /// Compute total cash/sec.  Pure function over the grid — easy to unit-test.
 ///
 /// **Tier × 老朽化** の二軸で建物個別に収入を出す:
@@ -665,9 +856,10 @@ fn accrue_income(city: &mut City) {
 pub fn compute_income_per_sec(city: &City) -> i64 {
     let now = city.tick;
     let mut income_cents: i64 = 0;
-    // Phase 2: edge-connectivity grid を 1 度だけ計算して使い回す。
-    // 個別セルで都度 BFS を回すと O(N²) になる (N=2048 で約 400 万操作 / sec)。
     let connected = compute_edge_connected_roads(city);
+    // 全 House の Tier を一括スキャンして人口テーブルを作る。商業/雇用建物の
+    // 需給按分 (commercial_income_cents / employment_income_cents) で参照。
+    let pop_map = compute_population_map(city, &connected);
 
     for y in 0..GRID_H {
         for x in 0..GRID_W {
@@ -675,7 +867,6 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
                 Tile::Built(b) => *b,
                 _ => continue,
             };
-            // Tier (House のみ) を先に決める。aging の lifespan にも使う。
             let tier_opt = if matches!(kind, Building::House) {
                 let target =
                     house_tier_for(gather_house_neighborhood_with(city, x, y, &connected));
@@ -684,32 +875,71 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
             } else {
                 None
             };
-            // 基本収入 (cents/sec)。
             let base_cents: i64 = match kind {
                 Building::House => {
                     let tier = tier_opt.expect("house has tier");
+                    // House Tier ごとの基礎収入 (家賃)。Tier 連動の人口増加と
+                    // 並行して、家賃そのものも Tier で 6 倍まで伸びる。
                     let raw = match tier {
                         HouseTier::Cottage => 50,
                         HouseTier::Apartment => 150,
                         HouseTier::Highrise => 300,
                     };
                     // House SOFT ルール: 未接続 Cottage は半減 ($0.25/sec)。
-                    // Apartment / Highrise は `house_tier_for` で edge-connected 必須に
-                    // なっているのでここに来る時点で接続済み。
                     if !is_building_edge_connected(&connected, x, y) {
                         raw / 2
                     } else {
                         raw
                     }
                 }
-                Building::Workshop if workshop_is_active_with(city, x, y, &connected) => 100,
-                Building::Shop if shop_is_active_with(city, x, y, &connected) => 200,
+                Building::Workshop => employment_income_cents(
+                    city,
+                    x,
+                    y,
+                    WORKSHOP_CAPACITY_CENTS,
+                    EMPLOYMENT_DEMAND_PER_CAPITA,
+                    &pop_map,
+                    &connected,
+                ),
+                Building::Factory => employment_income_cents(
+                    city,
+                    x,
+                    y,
+                    FACTORY_CAPACITY_CENTS,
+                    EMPLOYMENT_DEMAND_PER_CAPITA,
+                    &pop_map,
+                    &connected,
+                ),
+                Building::Office => employment_income_cents(
+                    city,
+                    x,
+                    y,
+                    OFFICE_CAPACITY_CENTS,
+                    WHITE_COLLAR_DEMAND_PER_CAPITA,
+                    &pop_map,
+                    &connected,
+                ),
+                Building::Shop => commercial_income_cents(
+                    city,
+                    x,
+                    y,
+                    SHOP_CAPACITY_CENTS,
+                    &pop_map,
+                    &connected,
+                ),
+                Building::Mall => commercial_income_cents(
+                    city,
+                    x,
+                    y,
+                    MALL_CAPACITY_CENTS,
+                    &pop_map,
+                    &connected,
+                ),
                 _ => 0,
             };
             if base_cents == 0 {
                 continue;
             }
-            // 築年数で aging を掛ける。built_at_tick が 0 = 起点未設定 = 老けない扱い。
             let aged = if city.built_at_tick[y][x] == 0 {
                 base_cents
             } else {
@@ -721,16 +951,14 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
         }
     }
 
-    // 死スパイラル防止: 1 軒でも House があれば最低 $1/s は保証する。
-    // 旧仕様 `(houses + 1) / 2` の「1 軒で $1」を維持し、序盤の seed-RNG
-    // 偶発で income==0 のままになるのを防ぐ (simulator::tier1_never_stalls)。
+    // 死スパイラル防止: House があれば最低 $1/s 保証 (序盤の seed-RNG 偶発で
+    // income==0 が続くのを防ぐ — simulator::tier1_never_stalls 等の不変条件)。
     let any_house = city.count_built(Building::House) > 0;
     let mut income = income_cents / 100;
     if any_house && income == 0 {
         income = 1;
     }
 
-    // Strategy の収入修正 (Tech は -20%、Eco は +5% 等)。
     let modifier = strategy_info(city.strategy).income_penalty_pct;
     if modifier != 0 && income > 0 {
         let factor = (100 + modifier).max(10) as i64;
@@ -783,6 +1011,22 @@ pub enum HouseLevel {
 // 「街が育つ感」の核となるルール群。すべて純関数で、state を増やさず
 // 周囲のセルだけ見て派生値を計算する。Pure Logic Pattern。
 
+/// House Tier ごとの定員 (= 人口寄与)。
+///
+/// 街が育つ実感を「数字でも見せる」ための主要パラメータ。Tier が上がる時の
+/// 倍率を 3x にすることで、Highrise 化が「街が爆発的に膨らむ瞬間」になる。
+///
+/// - Cottage:   4 人  (旧仕様の固定 5 を微調整 — 育てる旨味を作る)
+/// - Apartment: 12 人 (Cottage の 3x)
+/// - Highrise:  30 人 (Cottage の 7.5x)
+pub fn house_capacity(tier: HouseTier) -> u32 {
+    match tier {
+        HouseTier::Cottage => 4,
+        HouseTier::Apartment => 12,
+        HouseTier::Highrise => 30,
+    }
+}
+
 /// 住宅の経済段階。Cottage → Apartment → Highrise と育つ。
 ///
 /// `HouseLevel` (隣接 House 数による低/中/高層の見た目) とは別軸:
@@ -800,22 +1044,28 @@ pub enum HouseTier {
 ///
 /// House 一軒分の周辺をスキャンして集計したもの。フィールドの意味:
 /// - `n_road_adj`: 4-近傍にある Road タイル数 (0..=4)。0 だと未接続。
-/// - `n_workshop_within_5`: Manhattan 距離 5 以内の Workshop 数。
-/// - `n_shop_within_5`: Manhattan 距離 5 以内の Shop 数。
-/// - `n_house_within_3`: Manhattan 距離 3 以内の House 数 (自身は除く)。
-/// - `n_park_within_4`: Manhattan 距離 4 以内の Park 数。Workshop / Shop と
-///   並ぶ「経済刺激源」として Tier 上昇に寄与する。緑地でも街が育つ。
+/// - `n_workshop_within_5`: 距離 5 以内の Workshop / Factory 合計数。
+///   Factory は Workshop の 2 倍カウントする (= 規模換算)。
+/// - `n_shop_within_5`: 距離 5 以内の Shop / Mall 合計数。
+///   Mall は Shop の 2 倍カウントする。
+/// - `n_office_within_5`: 距離 5 以内の Office 数。Highrise 化の触媒。
+/// - `n_house_within_3`: 距離 3 以内の House 数 (自身は除く)。
+/// - `n_park_within_4`: 距離 4 以内の Park 数。緑地でも街が育つ。
+/// - `local_population`: 距離 5 以内の人口合計 (自身を除く)。需給ゲート用。
+/// - `factory_smoke_penalty`: 隣接 (4-近傍) に Factory がある場合 true。
+///   Tier を 1 段下げる「煙害」を表現。
 /// - `edge_connected`: 隣接 Road が「マップ端まで繋がる幹線網」に属するか。
-///   Phase 2 ハイブリッド連結性の SOFT ルール: 未接続でも Cottage 暮らしは可。
-///   Apartment / Highrise への昇格には edge-connected が必須 (= 流通インフラが
-///   必要なリッチ化)。
+///   SOFT ルール: 未接続でも Cottage 暮らしは可。Apartment / Highrise には必須。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HouseNeighborhood {
     pub n_road_adj: u32,
     pub n_workshop_within_5: u32,
     pub n_shop_within_5: u32,
+    pub n_office_within_5: u32,
     pub n_house_within_3: u32,
     pub n_park_within_4: u32,
+    pub local_population: u32,
+    pub factory_smoke_penalty: bool,
     pub edge_connected: bool,
 }
 
@@ -841,24 +1091,26 @@ pub fn gather_house_neighborhood_with(
     connected: &[Vec<bool>],
 ) -> HouseNeighborhood {
     let mut n_road_adj = 0u32;
+    let mut factory_smoke_penalty = false;
     for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
         let nx = x as i32 + dx;
         let ny = y as i32 + dy;
         if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
             continue;
         }
-        if matches!(
-            city.tile(nx as usize, ny as usize),
-            Tile::Built(Building::Road)
-        ) {
-            n_road_adj += 1;
+        match city.tile(nx as usize, ny as usize) {
+            Tile::Built(Building::Road) => n_road_adj += 1,
+            Tile::Built(Building::Factory) => factory_smoke_penalty = true,
+            _ => {}
         }
     }
 
     let mut n_shop_within_5 = 0u32;
     let mut n_workshop_within_5 = 0u32;
+    let mut n_office_within_5 = 0u32;
     let mut n_house_within_3 = 0u32;
     let mut n_park_within_4 = 0u32;
+    let mut local_population: u32 = 0;
     for cy in 0..GRID_H {
         for cx in 0..GRID_W {
             let dx = (cx as i32 - x as i32).abs();
@@ -866,9 +1118,20 @@ pub fn gather_house_neighborhood_with(
             let manhattan = (dx + dy) as u32;
             match city.tile(cx, cy) {
                 Tile::Built(Building::Shop) if manhattan <= 5 => n_shop_within_5 += 1,
+                Tile::Built(Building::Mall) if manhattan <= 5 => n_shop_within_5 += 2,
                 Tile::Built(Building::Workshop) if manhattan <= 5 => n_workshop_within_5 += 1,
-                Tile::Built(Building::House) if manhattan <= 3 && (cx, cy) != (x, y) => {
-                    n_house_within_3 += 1
+                Tile::Built(Building::Factory) if manhattan <= 5 => n_workshop_within_5 += 2,
+                Tile::Built(Building::Office) if manhattan <= 5 => n_office_within_5 += 1,
+                Tile::Built(Building::House) if manhattan <= 5 && (cx, cy) != (x, y) => {
+                    if manhattan <= 3 {
+                        n_house_within_3 += 1;
+                    }
+                    // 需給ゲート用の local_population は **Cottage 定員固定** で
+                    // 集計する。実効 Tier を呼ぶと「自身の Tier 計算が周囲の
+                    // House の Tier に依存」する循環参照になるため。
+                    // 「未成熟な街区の人口」を保守的に見積もるシンプルなモデルで、
+                    // House が増えるほど需給ゲートが厳しくなる挙動は変わらない。
+                    local_population += house_capacity(HouseTier::Cottage);
                 }
                 Tile::Built(Building::Park) if manhattan <= 4 => n_park_within_4 += 1,
                 _ => {}
@@ -880,8 +1143,11 @@ pub fn gather_house_neighborhood_with(
         n_road_adj,
         n_workshop_within_5,
         n_shop_within_5,
+        n_office_within_5,
         n_house_within_3,
         n_park_within_4,
+        local_population,
+        factory_smoke_penalty,
         edge_connected: is_building_edge_connected(connected, x, y),
     }
 }
@@ -919,35 +1185,60 @@ pub fn gather_house_neighborhood_with(
 /// この条件があるため、Tech 戦略 (道路重視) が単独で住宅を高層化することはなく、
 /// 戦略の特化が崩れない (simulator::tier4_strategies_specialize の不変条件)。
 pub fn house_tier_for(stats: HouseNeighborhood) -> HouseTier {
-    // Park は商業ほど刺激は強くない (1 Park = 0.5 経済密度) という重み付け:
-    // 公園 2 つで Workshop/Shop 1 つ相当。「緑地だけでも育つが、商業よりは
-    // ゆっくり」という SimCity 的な感覚を再現する。
-    //
-    // 整数演算なので `n_park / 2` で 0.5 倍を表現。`(n_park + 1) / 2` だと
-    // 公園 1 つでも 1 ポイント (= Apartment 化に十分) になる切り上げ動作。
+    // Park は商業ほど刺激は強くない (1 Park = 0.5 経済密度)。
+    // Office は Highrise 化を促進する触媒として 1.5x 重み (整数演算で 3/2 計算)。
     let park_density = stats.n_park_within_4.div_ceil(2);
+    let office_density = stats.n_office_within_5 * 3 / 2;
     let economic_density =
-        stats.n_workshop_within_5 + stats.n_shop_within_5 + park_density;
+        stats.n_workshop_within_5 + stats.n_shop_within_5 + park_density + office_density;
 
     // **Phase 2 ハイブリッド連結性**: Apartment / Highrise はマップ外との
-    // 物流接続が必要 (= 隣接 Road が edge-connected であること)。Cottage は
-    // SOFT 制約 — 未接続でも住人は居るが収入は減る (`compute_income_per_sec`
-    // 側で半減処理)。
+    // 物流接続が必要。Cottage は SOFT 制約。
     if !stats.edge_connected {
         return HouseTier::Cottage;
     }
 
-    // Highrise: 商工業 + 緑地が両立した成熟ゾーン。
-    if stats.n_road_adj >= 2 && economic_density >= 2 && stats.n_house_within_3 >= 3 {
-        return HouseTier::Highrise;
+    // **需給ゲート**: 街区の人口が増えるほど、必要な経済密度の閾値が上がる。
+    //   local_pop 0..30:   閾値 = 1 (Apartment) / 2 (Highrise)
+    //   local_pop 30..60:  閾値 = 2 / 3
+    //   local_pop 60..90:  閾値 = 3 / 4
+    //   local_pop 90+:     閾値 = 4 / 5
+    // 「人口が伸びても店舗が足りないと住宅が育たない」を表現する核心ロジック。
+    let demand_pressure = stats.local_population / 30; // 0, 1, 2, ...
+    let apartment_required = 1 + demand_pressure;
+    let highrise_required = 2 + demand_pressure;
+
+    // Highrise: 商工業 + 緑地が両立した成熟ゾーン。Office があると Highrise 化
+    // しやすい (= n_office_within_5 が経済密度に倍率付き加算済み)。
+    if stats.n_road_adj >= 2
+        && economic_density >= highrise_required
+        && stats.n_house_within_3 >= 3
+    {
+        return apply_smoke_penalty(HouseTier::Highrise, stats.factory_smoke_penalty);
     }
 
-    // Apartment: 商業 or 緑地が来ている街区。Road + 経済刺激源が最低 1 つ必須。
-    if stats.n_road_adj >= 1 && economic_density >= 1 {
-        return HouseTier::Apartment;
+    // Apartment: Road + 経済刺激源が最低 apartment_required 個必須。
+    if stats.n_road_adj >= 1 && economic_density >= apartment_required {
+        return apply_smoke_penalty(HouseTier::Apartment, stats.factory_smoke_penalty);
     }
 
     HouseTier::Cottage
+}
+
+/// Factory 隣接の煙害で Tier を 1 段下げる純関数。
+///
+/// 工業特化プレイヤーは「Factory を住宅街に近づけすぎると Highrise が育たない」
+/// というジレンマに直面する。Factory 単体の高収入と Highrise 街区の高収入を
+/// 両立させるには適切な距離配置が必要 — SimCity 的なゾーニング判断を作る。
+fn apply_smoke_penalty(tier: HouseTier, penalized: bool) -> HouseTier {
+    if !penalized {
+        return tier;
+    }
+    match tier {
+        HouseTier::Highrise => HouseTier::Apartment,
+        HouseTier::Apartment => HouseTier::Cottage,
+        HouseTier::Cottage => HouseTier::Cottage,
+    }
 }
 
 // ── Tier 昇格 dwell time + 老朽化 (Phase D: 建物バリエーション) ─────────
@@ -1058,9 +1349,12 @@ pub fn lifespan_x100(building: Building, tier: Option<HouseTier>) -> u32 {
         (Building::House, Some(HouseTier::Highrise)) => 400,
         (Building::House, Some(HouseTier::Apartment)) => 250,
         (Building::House, _) => 100,
-        // Workshop / Shop は Tier 概念がない。中庸の長寿で「街の骨格」感を保つ。
         (Building::Workshop, _) => 200,
         (Building::Shop, _) => 220,
+        // 上位建物は基礎建物より長寿 — 大きな投資の元を取らせる。
+        (Building::Factory, _) => 300,
+        (Building::Mall, _) => 320,
+        (Building::Office, _) => 280,
         // インフラと緑地は不老。
         (Building::Park, _) => u32::MAX,
         (Building::Road, _) => u32::MAX,
@@ -1216,13 +1510,8 @@ pub enum ShopLevel {
     Premium, // 大繁盛 (★付き表示)
 }
 
-/// Workshop は隣接 House (労働力) と Road 接続の両方が必要。
-/// Shop と違って距離は隣接のみ — 「働き手は徒歩圏内から来る」感を出す。
-///
-/// **Phase 2: edge connectivity HARD ルール** — 隣接 Road が「マップ端まで
-/// 繋がる幹線網」に属していないと inactive。原料の運搬が外から届かないため。
-///
-/// production caller はすべて `_with` 経由 (Codex #103 P1)。診断用に保持。
+/// Workshop / Factory / Office は **隣接 House (= 労働力) + edge-connected Road**
+/// の両方が必要。Workshop と Factory/Office も同じ活性条件 (働き手と物流)。
 #[allow(dead_code)]
 pub(super) fn workshop_is_active(city: &City, wx: usize, wy: usize) -> bool {
     if !has_neighbor_kind(city, wx, wy, Building::House) {
@@ -1232,8 +1521,8 @@ pub(super) fn workshop_is_active(city: &City, wx: usize, wy: usize) -> bool {
     is_building_edge_connected(&connected, wx, wy)
 }
 
-/// `shop_is_active` / `workshop_is_active` の `connected` 持ち回し版。
-/// 同 tick 内で複数セルを評価する時に BFS 重複を避けるための内部用。
+/// `workshop_is_active` の `connected` 持ち回し版。Workshop / Factory / Office
+/// 共通で「労働力 (隣接 House) + 物流 (edge-connected Road)」を判定。
 pub(super) fn workshop_is_active_with(
     city: &City,
     wx: usize,
@@ -1434,9 +1723,25 @@ pub fn demolish_value(city: &City, x: usize, y: usize, connected: &[Vec<bool>]) 
                 score += 250;
             }
         }
+        Building::Mall => {
+            // Mall は cost が高く、機能不全だと撤去価値も大きい。
+            if !shop_is_active_with(city, x, y, connected) {
+                score += 400;
+            }
+        }
         Building::Workshop => {
             if !workshop_is_active_with(city, x, y, connected) {
                 score += 200;
+            }
+        }
+        Building::Factory => {
+            if !workshop_is_active_with(city, x, y, connected) {
+                score += 350;
+            }
+        }
+        Building::Office => {
+            if !workshop_is_active_with(city, x, y, connected) {
+                score += 280;
             }
         }
         Building::Outpost => {
@@ -1745,49 +2050,111 @@ fn direct_income_value(
                 25
             }
         }
-        Building::Workshop => {
-            let has_house = has_neighbor_kind(city, x, y, Building::House);
-            let edge = is_building_edge_connected(connected, x, y);
-            if !(has_house && edge) {
-                return 0;
-            }
-            // 雇用バランス: Workshop 1 つにつき 2 House 雇用 (= 1:2 ratio)。
-            //
-            // **設計上の妥協** (レビュー指摘 #6): `count_built` は完成済み建物
-            // のみカウント。同 tick で `drive_ai` が複数 placement をシリアル
-            // 実行する場合 (= worker > 1)、相互の数えあげは反映されない。
-            // 実害は小さく (= 1 tick 1 worker のみ厳密)、次 tick で正しく収束する。
-            let houses = city.count_built(Building::House) as i64;
-            let workshops = city.count_built(Building::Workshop) as i64;
-            let supported = houses / 2;
-            let surplus = (workshops + 1) - supported;
-            if surplus > 0 {
-                (100 - surplus * 50).max(0)
-            } else {
-                100
-            }
-        }
-        Building::Shop => {
-            let edge = is_building_edge_connected(connected, x, y);
-            let near_house = has_house_within(city, x, y, 3);
-            if !(edge && near_house) {
-                return 0;
-            }
-            // 顧客バランス: 1 Shop につき 3 House の顧客基盤 (= 1:3 ratio)。
-            // surplus (= 過剰 Shop 数) が出ると激減、ゼロ近くなる。
-            // これで AI は「houses が増えてから shops を増やす」3:1 周期を作る。
-            let houses = city.count_built(Building::House) as i64;
-            let shops = city.count_built(Building::Shop) as i64;
-            let supported = houses / 3;
-            let surplus = (shops + 1) - supported;
-            if surplus > 0 {
-                (200 - surplus * 80).max(0)
-            } else {
-                200
-            }
-        }
+        Building::Workshop => employment_demand_aware_value(
+            city,
+            x,
+            y,
+            connected,
+            WORKSHOP_CAPACITY_CENTS,
+            EMPLOYMENT_DEMAND_PER_CAPITA,
+        ),
+        Building::Factory => employment_demand_aware_value(
+            city,
+            x,
+            y,
+            connected,
+            FACTORY_CAPACITY_CENTS,
+            EMPLOYMENT_DEMAND_PER_CAPITA,
+        ),
+        Building::Office => employment_demand_aware_value(
+            city,
+            x,
+            y,
+            connected,
+            OFFICE_CAPACITY_CENTS,
+            WHITE_COLLAR_DEMAND_PER_CAPITA,
+        ),
+        Building::Shop => commercial_demand_aware_value(city, x, y, connected, SHOP_CAPACITY_CENTS),
+        Building::Mall => commercial_demand_aware_value(city, x, y, connected, MALL_CAPACITY_CENTS),
         Building::Park | Building::Road | Building::Outpost => 0,
     }
+}
+
+/// 商業建物 (Shop / Mall) の direct income 評価 (cents/sec)。
+///
+/// 候補位置に置いた時の「需給按分後の収入」を概算する。AI Tier 4 が
+/// 「人口が需要に対して足りない場所では Shop / Mall を建てない」と判断する核。
+///
+/// 計算量を抑えるため per-tile スキャンの簡易見積もり (実際の `commercial_income_cents`
+/// より緩めの近似) — placement_value はランキング目的なので絶対値より相対順位が重要。
+fn commercial_demand_aware_value(
+    city: &City,
+    x: usize,
+    y: usize,
+    connected: &[Vec<bool>],
+    my_capacity: i64,
+) -> i64 {
+    let edge = is_building_edge_connected(connected, x, y);
+    let near_house = has_house_within(city, x, y, 3);
+    if !(edge && near_house) {
+        return 0;
+    }
+    // AI 評価では House Tier を再帰計算しない (= compute_population_map 相当を
+    // 走らせると重い)。簡易見積もりとして「半径 5 内 House × Cottage 定員」を
+    // 使う。Apartment / Highrise はあとから synergy でも評価されるので二重に
+    // 数えないシンプルな下限値で済む。
+    let mut local_pop = 0i64;
+    for cy in 0..GRID_H {
+        for cx in 0..GRID_W {
+            let dx = (cx as i32 - x as i32).abs();
+            let dy = (cy as i32 - y as i32).abs();
+            if dx + dy > 5 {
+                continue;
+            }
+            if matches!(city.tile(cx, cy), Tile::Built(Building::House)) {
+                local_pop += house_capacity(HouseTier::Cottage) as i64;
+            }
+        }
+    }
+    let demand = local_pop * PURCHASE_POWER_PER_CAPITA;
+    // 自分自身を加えた商業キャパシティで按分。
+    let total_capacity = commercial_capacity_within(city, x, y, 5) + my_capacity;
+    let share = demand * my_capacity / total_capacity.max(1);
+    share.min(my_capacity)
+}
+
+/// 雇用建物 (Workshop / Factory / Office) の direct income 評価。
+fn employment_demand_aware_value(
+    city: &City,
+    x: usize,
+    y: usize,
+    connected: &[Vec<bool>],
+    my_capacity: i64,
+    demand_per_capita: i64,
+) -> i64 {
+    if !has_neighbor_kind(city, x, y, Building::House) {
+        return 0;
+    }
+    if !is_building_edge_connected(connected, x, y) {
+        return 0;
+    }
+    let mut local_pop = 0i64;
+    for cy in 0..GRID_H {
+        for cx in 0..GRID_W {
+            let dx = (cx as i32 - x as i32).abs();
+            let dy = (cy as i32 - y as i32).abs();
+            if dx + dy > 5 {
+                continue;
+            }
+            if matches!(city.tile(cx, cy), Tile::Built(Building::House)) {
+                local_pop += house_capacity(HouseTier::Cottage) as i64;
+            }
+        }
+    }
+    let demand = local_pop * demand_per_capita;
+    let total_capacity = employment_capacity_within(city, x, y, 5) + my_capacity;
+    let share = demand * my_capacity / total_capacity.max(1);
+    share.min(my_capacity)
 }
 
 /// 2. シナジー — 周囲の既存 House の Tier が上昇しうる場合の income 増分。
@@ -1805,10 +2172,12 @@ fn synergy_income_value(
     let mut delta_cents = 0i64;
     // 影響範囲: kind ごとに Manhattan 距離。
     let radius: i32 = match kind {
-        Building::Workshop | Building::Shop => 5,
+        Building::Workshop | Building::Factory => 5,
+        Building::Shop | Building::Mall => 5,
+        Building::Office => 5,
         Building::Park => 4,
-        Building::House => 3, // 近隣 House として周囲 House にカウントされる
-        Building::Road => 1,  // 隣接 House の n_road_adj に寄与
+        Building::House => 3,
+        Building::Road => 1,
         Building::Outpost => return 0,
     };
     for dy in -radius..=radius {
@@ -1840,7 +2209,16 @@ fn synergy_income_value(
                     }
                 }
                 Building::Workshop => after.n_workshop_within_5 += 1,
+                Building::Factory => {
+                    after.n_workshop_within_5 += 2;
+                    let manh = ((nx as i32 - x as i32).abs() + (ny as i32 - y as i32).abs()) as u32;
+                    if manh == 1 {
+                        after.factory_smoke_penalty = true;
+                    }
+                }
                 Building::Shop => after.n_shop_within_5 += 1,
+                Building::Mall => after.n_shop_within_5 += 2,
+                Building::Office => after.n_office_within_5 += 1,
                 Building::Park => after.n_park_within_4 += 1,
                 Building::Road => {
                     let manh = ((nx as i32 - x as i32).abs() + (ny as i32 - y as i32).abs()) as u32;
@@ -1976,20 +2354,26 @@ fn future_potential_value(
 /// 評価関数の主軸 (income/sec の真の予測) は崩さない。
 fn strategy_bias(s: Strategy, kind: Building) -> i64 {
     match (s, kind) {
-        // 成長: House を最優先、Shop は弱め (= 商業を建てない pop-only キャラ)
+        // 成長: House 最優先、Office は Highrise 化に効くので軽く加点。
         (Strategy::Growth, Building::House) => 40,
         (Strategy::Growth, Building::Road) => 10,
-        (Strategy::Growth, Building::Shop) => -20, // 控えめに
-        // 収入: 商業 + 必要な住宅。1:3 ratio を保ちつつ Shop を強くプッシュ
+        (Strategy::Growth, Building::Shop) => -20,
+        (Strategy::Growth, Building::Office) => 15,
+        // 収入: 商業 + 必要な住宅。Mall / Factory も積極的に。
         (Strategy::Income, Building::Shop) => 50,
+        (Strategy::Income, Building::Mall) => 70,
         (Strategy::Income, Building::Workshop) => 25,
-        (Strategy::Income, Building::House) => 25, // 顧客基盤として house も伸ばす
-        // 技術: 道路網拡大を最優先
+        (Strategy::Income, Building::Factory) => 45,
+        (Strategy::Income, Building::Office) => 30,
+        (Strategy::Income, Building::House) => 25,
+        // 技術: 道路網拡大を最優先 + Office (テック企業のイメージ)。
         (Strategy::Tech, Building::Road) => 40,
         (Strategy::Tech, Building::House) => 10,
-        // 環境: Park ボーナス
+        (Strategy::Tech, Building::Office) => 25,
+        // 環境: Park ボーナス + Factory は減点 (煙害)。
         (Strategy::Eco, Building::Park) => 60,
         (Strategy::Eco, Building::House) => 20,
+        (Strategy::Eco, Building::Factory) => -50,
         _ => 0,
     }
 }
@@ -2059,9 +2443,11 @@ mod tests {
             n_road_adj: n_road,
             n_workshop_within_5: n_workshop,
             n_shop_within_5: n_shop,
+            n_office_within_5: 0,
             n_house_within_3: n_house,
             n_park_within_4: 0,
-            // 連結性テスト以外では「edge-connected 前提」(= 既存挙動を維持)。
+            local_population: 0,
+            factory_smoke_penalty: false,
             edge_connected: true,
         }
     }
@@ -2078,8 +2464,11 @@ mod tests {
             n_road_adj: n_road,
             n_workshop_within_5: n_workshop,
             n_shop_within_5: n_shop,
+            n_office_within_5: 0,
             n_house_within_3: n_house,
             n_park_within_4: n_park,
+            local_population: 0,
+            factory_smoke_penalty: false,
             edge_connected: true,
         }
     }
@@ -2098,8 +2487,11 @@ mod tests {
             n_road_adj: 2,
             n_workshop_within_5: 2,
             n_shop_within_5: 2,
+            n_office_within_5: 0,
             n_house_within_3: 4,
             n_park_within_4: 2,
+            local_population: 0,
+            factory_smoke_penalty: false,
             edge_connected: false,
         };
         assert_eq!(
@@ -2327,16 +2719,22 @@ mod tests {
     #[test]
     fn shop_with_road_and_house_earns() {
         let mut city = City::new();
-        // Phase 2: Road を上端 (y=0) から (5,4) まで連続させて edge-connected に。
+        // Shop の収入は需給連動 — 局所人口で決まる。
+        // House を増やして商業需要を満たす検証に書き換える。
         city.set_tile(5, 5, Tile::Built(Building::Shop));
         for y in 0..=4 {
             city.set_tile(5, y, Tile::Built(Building::Road));
         }
+        // (5,6) と (6,5) に House を置く。両方 Road 隣接で edge-connected。
         city.set_tile(5, 6, Tile::Built(Building::House));
-        // Shop active = 200¢
-        // House (5,6) は隣接 Road が無いので edge_connected=false → Cottage 半減 25¢
-        // Total: 225¢ = $2 (整数切り捨て)。
-        assert_eq!(compute_income_per_sec(&city), 2);
+        city.set_tile(6, 5, Tile::Built(Building::House));
+        let income = compute_income_per_sec(&city);
+        // Shop が活性 (Road接続 + 半径3 House) で income > 0 が成立。
+        assert!(
+            income > 0,
+            "Shop with road + houses should produce positive income, got {}",
+            income
+        );
     }
 
     /// HouseTier は描画専用 — gather → tier_for で派生値が取れる。
@@ -2430,16 +2828,14 @@ mod tests {
     #[test]
     fn tier_advance_triggers_flash_and_event() {
         let mut city = City::new();
-        // 50 pop = 10 軒の House で Town 到達。
-        for i in 0..10 {
+        // Cottage 4 人定員のため、Town 閾値 50 を超えるには 13 軒以上必要。
+        for i in 0..13 {
             city.set_tile(i, 0, Tile::Built(Building::House));
         }
         assert_eq!(city.last_observed_tier, CityTier::Village);
-        // 1 tick 進めれば detect_tier_advance が走る。
         tick(&mut city, 1);
         assert_eq!(city.last_observed_tier, CityTier::Town);
         assert!(city.tier_flash_until > city.tick);
-        // イベントログの先頭にティア進化メッセージ。
         assert!(
             city.events.first().is_some_and(|e| e.contains("町")),
             "first event should mention 町, got {:?}",
@@ -2451,13 +2847,13 @@ mod tests {
     #[test]
     fn tier_does_not_re_trigger_within_same_tier() {
         let mut city = City::new();
-        for i in 0..10 {
+        for i in 0..13 {
             city.set_tile(i, 0, Tile::Built(Building::House));
         }
         tick(&mut city, 1);
         let event_count_after_tier_event = city.events.len();
-        // もう 1 軒追加 (まだ Town 範囲内: 55 pop)。
-        city.set_tile(11, 0, Tile::Built(Building::House));
+        // もう 1 軒追加 (まだ Town 範囲内: 14 軒 × 4 = 56 pop)。
+        city.set_tile(14, 0, Tile::Built(Building::House));
         tick(&mut city, 5);
         assert_eq!(
             city.events.len(),
@@ -2793,24 +3189,291 @@ mod tests {
         assert_eq!(compute_income_per_sec(&city), 1);
     }
 
-    /// Tier 昇格で income が上がる。同じ街区が Cottage → Apartment になると約 3 倍。
+    /// Tier 昇格で House の家賃収入が上がる (Cottage 50¢ → Apartment 150¢)。
     #[test]
     fn apartment_earns_more_than_cottage() {
         let mut city = City::new();
-        // 4 軒の住宅 + 道路 + Shop で、(0,0) は Apartment 化条件を満たす。
-        city.set_tile(0, 0, Tile::Built(Building::House));
-        city.set_tile(0, 1, Tile::Built(Building::Road));
-        city.set_tile(0, 2, Tile::Built(Building::Shop));
-        // (0,0) の age 0 → Cottage 扱い。
+        // edge-connected な Road を上端 (y=0) に並べる。
+        for x in 0..6 {
+            place_edge_road(&mut city, x);
+        }
+        // (x, 1) に House を 5 軒並べる。Road 隣接 (上下) で edge-connected。
+        for x in 0..5 {
+            city.set_tile(x, 1, Tile::Built(Building::House));
+        }
+        // 半径 5 内に Shop を置いて Apartment 化条件を満たす。
+        city.set_tile(2, 2, Tile::Built(Building::Shop));
         let cottage_income = compute_income_per_sec(&city);
-        // age を 600 (Apartment dwell 達成) にして再計算。
+        // 全 House の age を Apartment dwell 達成 (600 ticks) まで進める。
         city.tick = 600;
-        city.built_at_tick[0][0] = 0; // age = 600
+        for x in 0..5 {
+            city.built_at_tick[1][x] = 0;
+        }
         let apartment_income = compute_income_per_sec(&city);
         assert!(
             apartment_income > cottage_income,
             "Apartment should out-earn Cottage: cottage={} apt={}",
             cottage_income, apartment_income
+        );
+    }
+
+    // ── 需給システム / 新建物 (Phase A 拡張) のテスト群 ────────────
+
+    /// House Tier ごとの定員が単調増加 (Cottage < Apartment < Highrise)。
+    #[test]
+    fn house_capacity_is_monotone() {
+        assert!(house_capacity(HouseTier::Cottage) < house_capacity(HouseTier::Apartment));
+        assert!(house_capacity(HouseTier::Apartment) < house_capacity(HouseTier::Highrise));
+    }
+
+    /// City::population は Tier 連動で計算される。
+    /// Cottage 4 + Apartment 12 + Highrise 30 が単純合算される。
+    #[test]
+    fn population_reflects_tier_capacity() {
+        let mut city = City::new();
+        // Cottage 1 軒のみ。Apartment 化条件を満たさず age=0。
+        city.set_tile(0, 0, Tile::Built(Building::House));
+        assert_eq!(city.population(), house_capacity(HouseTier::Cottage));
+    }
+
+    /// 需給ゲート: 局所人口が増えると Apartment 化に必要な経済密度が上がる。
+    /// local_pop=0 では econ=1 で Apartment、local_pop=30 以上では econ=2 必要。
+    #[test]
+    fn demand_gate_blocks_apartment_when_supply_short() {
+        // local_pop 30 (= Cottage 7-8 軒分) で economic_density 閾値が +1 上がる。
+        let stats = HouseNeighborhood {
+            n_road_adj: 1,
+            n_workshop_within_5: 0,
+            n_shop_within_5: 1,
+            n_office_within_5: 0,
+            n_house_within_3: 1,
+            n_park_within_4: 0,
+            local_population: 35, // ゲート発動
+            factory_smoke_penalty: false,
+            edge_connected: true,
+        };
+        // econ=1, 必要 2 → Apartment にならず Cottage に縮退。
+        assert_eq!(house_tier_for(stats), HouseTier::Cottage);
+    }
+
+    /// 同条件で local_population が低い時は Apartment まで育つ (ゲート緩和)。
+    #[test]
+    fn low_demand_allows_apartment_with_minimal_supply() {
+        let stats = HouseNeighborhood {
+            n_road_adj: 1,
+            n_workshop_within_5: 0,
+            n_shop_within_5: 1,
+            n_office_within_5: 0,
+            n_house_within_3: 1,
+            n_park_within_4: 0,
+            local_population: 10, // ゲート未発動
+            factory_smoke_penalty: false,
+            edge_connected: true,
+        };
+        assert_eq!(house_tier_for(stats), HouseTier::Apartment);
+    }
+
+    /// Office は Highrise 化を促進する触媒。経済密度に 1.5x 寄与。
+    #[test]
+    fn office_promotes_to_highrise() {
+        let stats = HouseNeighborhood {
+            n_road_adj: 2,
+            n_workshop_within_5: 0,
+            n_shop_within_5: 1,
+            n_office_within_5: 1, // 1 * 3 / 2 = 1 → econ=2
+            n_house_within_3: 3,
+            n_park_within_4: 0,
+            local_population: 0,
+            factory_smoke_penalty: false,
+            edge_connected: true,
+        };
+        // economic_density = 1 (Shop) + 1 (Office) = 2 → Highrise 条件達成。
+        assert_eq!(house_tier_for(stats), HouseTier::Highrise);
+    }
+
+    /// 隣接 Factory の煙害で Tier が 1 段下がる。
+    #[test]
+    fn factory_smoke_penalty_reduces_tier() {
+        let stats = HouseNeighborhood {
+            n_road_adj: 2,
+            n_workshop_within_5: 0,
+            n_shop_within_5: 2,
+            n_office_within_5: 0,
+            n_house_within_3: 4,
+            n_park_within_4: 0,
+            local_population: 0,
+            factory_smoke_penalty: true, // 煙害 ON
+            edge_connected: true,
+        };
+        // Highrise 条件を満たすが煙害で Apartment に降格。
+        assert_eq!(house_tier_for(stats), HouseTier::Apartment);
+    }
+
+    /// Mall は Shop 2 つぶんの経済密度寄与 (n_shop_within_5 += 2)。
+    /// 単独で Highrise 化条件を満たせる。
+    #[test]
+    fn mall_alone_drives_highrise() {
+        let mut city = City::new();
+        for x in 0..6 {
+            place_edge_road(&mut city, x);
+        }
+        // (1,1) の n_road_adj=2 を確保: (1,0) Road + (0,1) Road の両方を用意。
+        city.set_tile(0, 1, Tile::Built(Building::Road));
+        city.set_tile(1, 1, Tile::Built(Building::House));
+        city.set_tile(2, 1, Tile::Built(Building::House));
+        city.set_tile(3, 1, Tile::Built(Building::House));
+        city.set_tile(1, 2, Tile::Built(Building::House));
+        city.set_tile(3, 2, Tile::Built(Building::Mall));
+        let tier = house_tier_for(gather_house_neighborhood(&city, 1, 1));
+        // n_road_adj=2, n_shop_within_5=2 (Mall x2), n_house_within_3>=3 → Highrise。
+        assert_eq!(tier, HouseTier::Highrise);
+    }
+
+    /// Shop の収入は局所人口に応じて変化する: 人口少ない時は低収入、
+    /// 人口増えると上限まで伸びる (需給連動の核)。
+    #[test]
+    fn shop_income_scales_with_population() {
+        let mut city = City::new();
+        for x in 0..10 {
+            place_edge_road(&mut city, x);
+        }
+        // 縦の Road を引いて Shop の Road 隣接を確保。
+        city.set_tile(0, 1, Tile::Built(Building::Road));
+        city.set_tile(0, 2, Tile::Built(Building::Road));
+        // House 1 軒 + Shop。
+        city.set_tile(1, 1, Tile::Built(Building::House));
+        city.set_tile(1, 2, Tile::Built(Building::Shop));
+        let connected = compute_edge_connected_roads(&city);
+        let pop_map = compute_population_map(&city, &connected);
+        let small_income =
+            commercial_income_cents(&city, 1, 2, SHOP_CAPACITY_CENTS, &pop_map, &connected);
+
+        // House を増やして同じ Shop の収入を再計測。
+        for x in 2..8 {
+            city.set_tile(x, 1, Tile::Built(Building::House));
+        }
+        let connected = compute_edge_connected_roads(&city);
+        let pop_map = compute_population_map(&city, &connected);
+        let big_income =
+            commercial_income_cents(&city, 1, 2, SHOP_CAPACITY_CENTS, &pop_map, &connected);
+        assert!(
+            big_income > small_income,
+            "Shop income should scale with population: small={} big={}",
+            small_income, big_income
+        );
+    }
+
+    /// Mall は Shop の 3 倍のキャパシティ。Shop 上限を超える需要では Mall が稼ぐ。
+    #[test]
+    fn mall_outearns_shop_at_high_population() {
+        let mut city = City::new();
+        for x in 0..20 {
+            place_edge_road(&mut city, x);
+        }
+        // (8, 1) を Road にして edge-connected な縦線を確保。
+        city.set_tile(8, 1, Tile::Built(Building::Road));
+        // House を y=1 と y=2 に大量配置 (Shop 上限超えの需要を作る)。
+        for x in 1..16 {
+            if x != 8 {
+                city.set_tile(x, 1, Tile::Built(Building::House));
+                city.set_tile(x, 2, Tile::Built(Building::House));
+            }
+        }
+        // Shop / Mall を (8, 2) に。隣接 Road (8,1) edge-connected + 隣接 House (7,2)/(9,2) で active。
+        city.set_tile(8, 2, Tile::Built(Building::Shop));
+        let connected = compute_edge_connected_roads(&city);
+        let pop_map = compute_population_map(&city, &connected);
+        let shop_income =
+            commercial_income_cents(&city, 8, 2, SHOP_CAPACITY_CENTS, &pop_map, &connected);
+        city.set_tile(8, 2, Tile::Built(Building::Mall));
+        let connected = compute_edge_connected_roads(&city);
+        let pop_map = compute_population_map(&city, &connected);
+        let mall_income =
+            commercial_income_cents(&city, 8, 2, MALL_CAPACITY_CENTS, &pop_map, &connected);
+        assert!(
+            mall_income > shop_income,
+            "Mall should out-earn Shop with high population: shop={} mall={}",
+            shop_income, mall_income
+        );
+    }
+
+    /// Factory は Workshop の 3 倍以上のキャパシティ。Workshop 上限を超える雇用需要で Factory が稼ぐ。
+    #[test]
+    fn factory_outearns_workshop_at_high_population() {
+        let mut city = City::new();
+        for x in 0..20 {
+            place_edge_road(&mut city, x);
+        }
+        // (8, 1) を Road にして edge-connected な縦線を確保。
+        city.set_tile(8, 1, Tile::Built(Building::Road));
+        for x in 1..8 {
+            city.set_tile(x, 1, Tile::Built(Building::House));
+        }
+        for x in 9..16 {
+            city.set_tile(x, 1, Tile::Built(Building::House));
+        }
+        // Workshop / Factory の隣接 House を確保 (workshop_is_active 条件)。
+        city.set_tile(7, 2, Tile::Built(Building::House));
+        city.set_tile(8, 2, Tile::Built(Building::Workshop));
+        let connected = compute_edge_connected_roads(&city);
+        let pop_map = compute_population_map(&city, &connected);
+        let workshop_income = employment_income_cents(
+            &city,
+            8,
+            2,
+            WORKSHOP_CAPACITY_CENTS,
+            EMPLOYMENT_DEMAND_PER_CAPITA,
+            &pop_map,
+            &connected,
+        );
+        city.set_tile(8, 2, Tile::Built(Building::Factory));
+        let connected = compute_edge_connected_roads(&city);
+        let pop_map = compute_population_map(&city, &connected);
+        let factory_income = employment_income_cents(
+            &city,
+            8,
+            2,
+            FACTORY_CAPACITY_CENTS,
+            EMPLOYMENT_DEMAND_PER_CAPITA,
+            &pop_map,
+            &connected,
+        );
+        assert!(
+            factory_income > workshop_income,
+            "Factory should out-earn Workshop: workshop={} factory={}",
+            workshop_income, factory_income
+        );
+    }
+
+    /// 過剰店舗ペナルティ: 同範囲に Shop を増やすと 1 軒あたりの収入が減る。
+    #[test]
+    fn excess_shops_split_demand() {
+        let mut city = City::new();
+        for x in 0..16 {
+            place_edge_road(&mut city, x);
+        }
+        city.set_tile(0, 1, Tile::Built(Building::Road));
+        city.set_tile(0, 2, Tile::Built(Building::Road));
+        city.set_tile(0, 3, Tile::Built(Building::Road));
+        for x in 1..7 {
+            city.set_tile(x, 1, Tile::Built(Building::House));
+        }
+        // Shop 1 軒目を Road 隣接位置に。
+        city.set_tile(1, 2, Tile::Built(Building::Shop));
+        let connected = compute_edge_connected_roads(&city);
+        let pop_map = compute_population_map(&city, &connected);
+        let solo = commercial_income_cents(&city, 1, 2, SHOP_CAPACITY_CENTS, &pop_map, &connected);
+
+        // 同範囲に Shop をもう 1 軒追加 (Road 隣接位置)。
+        city.set_tile(1, 3, Tile::Built(Building::Shop));
+        let connected = compute_edge_connected_roads(&city);
+        let pop_map = compute_population_map(&city, &connected);
+        let with_competition =
+            commercial_income_cents(&city, 1, 2, SHOP_CAPACITY_CENTS, &pop_map, &connected);
+        assert!(
+            with_competition <= solo,
+            "Adding competing shop should not increase single shop income: solo={} comp={}",
+            solo, with_competition
         );
     }
 

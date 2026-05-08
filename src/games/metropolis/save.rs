@@ -45,8 +45,10 @@ use super::terrain::Terrain;
 ///   v5: `AiTier::DeepPlanner` (= 数値 5) 追加。
 ///   v6: `last_save_wall_ms` 追加 (オフライン進行ボーナス用 wall-clock 計測)。
 ///       旧データは default 0 → 「初回計測」扱いでボーナス未発動になる。
+///   v7: `Building::Factory` / `Building::Mall` / `Building::Office` 追加。
+///       新数値 (6/7/8) を割り当て。旧データには出現しないので互換性維持。
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 6;
+const SAVE_VERSION: u32 = 7;
 
 /// 互換性を維持できる最小バージョン。破壊的変更で +1。
 /// v1-v3 はフィールド追加だけだったが、v4 でマップ寸法が変わったので
@@ -209,6 +211,9 @@ mod codes {
     pub const BUILDING_SHOP: u8 = 3;
     pub const BUILDING_PARK: u8 = 4;
     pub const BUILDING_OUTPOST: u8 = 5;
+    pub const BUILDING_FACTORY: u8 = 6;
+    pub const BUILDING_MALL: u8 = 7;
+    pub const BUILDING_OFFICE: u8 = 8;
 
     pub const TERRAIN_PLAIN: u8 = 0;
     pub const TERRAIN_FOREST: u8 = 1;
@@ -250,6 +255,9 @@ fn building_to_u8(b: Building) -> u8 {
         Building::Shop => BUILDING_SHOP,
         Building::Park => BUILDING_PARK,
         Building::Outpost => BUILDING_OUTPOST,
+        Building::Factory => BUILDING_FACTORY,
+        Building::Mall => BUILDING_MALL,
+        Building::Office => BUILDING_OFFICE,
     }
 }
 
@@ -262,6 +270,9 @@ fn building_from_u8(v: u8) -> Option<Building> {
         BUILDING_SHOP => Some(Building::Shop),
         BUILDING_PARK => Some(Building::Park),
         BUILDING_OUTPOST => Some(Building::Outpost),
+        BUILDING_FACTORY => Some(Building::Factory),
+        BUILDING_MALL => Some(Building::Mall),
+        BUILDING_OFFICE => Some(Building::Office),
         _ => None,
     }
 }
