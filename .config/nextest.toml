@@ -1,6 +1,6 @@
 [profile.default]
-# 30 秒で warning。テストが想定外に重くなった時に気付くため。
-slow-timeout = { period = "30s", terminate-after = 4 }
+# 30 秒で warning、60 秒で SIGTERM。テストが想定外に重くなった時に CI ログだけで気付ける。
+slow-timeout = { period = "30s", terminate-after = 2 }
 # 失敗したテストの出力だけ最後にまとめて表示する。
 failure-output = "immediate-final"
 success-output = "never"
@@ -8,14 +8,19 @@ success-output = "never"
 [profile.ci]
 # CI ではフレークの一時的な失敗を retry でカバー。本質的な失敗は3回連続で落ちる。
 retries = 2
-# CI ログを GitHub の Test Reporting で読めるよう JUnit XML 出力。
 fail-fast = false
 
 [profile.ci.junit]
 path = "junit.xml"
 
-# Simulator 系テストは仕様上長い (1-2 分) ので slow-timeout を緩める。
-# 短時間化は別途 horizon 削減で対応する。
+# 仕様上 10 秒以上かかる simulator テストは slow-timeout を緩める。
+# それ以外のテストは 60 秒で SIGTERM される invariant を維持する。
 [[profile.default.overrides]]
-filter = 'test(/automation_drives_outposts_and_demolitions/) | test(/tier1_never_stalls_across_seeds/) | test(/simulate_abyss_long_run/) | test(/simulate_abyss_balance_sweep/) | test(/print_cafe_balance_report/) | test(/simulate_cafe_full_loop/)'
-slow-timeout = { period = "180s", terminate-after = 2 }
+filter = 'test(/automation_drives_outposts_and_demolitions/) | test(/tier1_never_stalls_across_seeds/) | test(/tier_ordering_holds_at_30min/)'
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+# 重い simulator は retry しない。ここで flake るのは現に slow なだけで、
+# retry すると最大 6 分 ×3 = 18 分 CI を浪費する。
+[[profile.ci.overrides]]
+filter = 'test(/automation_drives_outposts_and_demolitions/) | test(/tier1_never_stalls_across_seeds/) | test(/tier_ordering_holds_at_30min/)'
+retries = 0
