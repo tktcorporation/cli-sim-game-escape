@@ -392,24 +392,27 @@ mod tests {
         assert_eq!(g.state.panel_scroll.get(), 0);
     }
 
-    /// 戦略を切り替えただけで `auto_strategy_actions` が tick から発火し、
-    /// 撤去・開拓を自動で進める (= 旧 `[D]` `[O]` `[X]` ボタン廃止後の保証)。
+    /// AI が中央の inactive Shop を自分で撤去対象に選ぶ (= drive_ai が
+    /// `AiAction::Demolish` を生成して `demolish_at` を呼ぶ経路の sanity check)。
+    /// Tier 4 (`DemandAware`) は `placement_value` と `demolish_value` を比較し、
+    /// 機能不全建物は build より高評価 → 即撤去される決定論的経路。
     #[test]
-    fn auto_strategy_actions_run_without_manual_buttons() {
-        use state::{Building, Tile, GRID_H, GRID_W};
+    fn drive_ai_demolishes_inactive_shop() {
+        use state::{AiTier, Building, Tile, GRID_H, GRID_W};
         let mut g = MetropolisGame::new();
-        // 大量の現金と中央に inactive Shop を置く: 自動撤去のターゲット。
         g.state.cash = 50_000;
         g.state.workers = 4;
-        g.state.strategy = Strategy::Income; // 撤去頻度の高い戦略
+        g.state.strategy = Strategy::Income;
+        g.state.ai_tier = AiTier::DemandAware;
         let cx = GRID_W / 2;
         let cy = GRID_H / 2;
         g.state.set_tile(cx, cy, Tile::Built(Building::Shop));
-        // Income の auto_demolish_period_ticks = 450。500 tick 進めれば 1 回は発火。
-        g.tick(500);
+        // 数 tick で Demolish action が選ばれて発火する (周期発火ではないので
+        // 大きな tick 数は不要)。
+        g.tick(20);
         assert!(
             matches!(g.state.tile(cx, cy), Tile::Empty),
-            "auto_demolish should have removed the inactive Shop"
+            "AI (Tier 4) should select the inactive Shop for Demolish"
         );
     }
 }

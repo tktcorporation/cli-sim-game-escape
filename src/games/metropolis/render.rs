@@ -35,7 +35,7 @@ use ratzilla::ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::ClickState;
-use crate::widgets::{Clickable, ClickableGrid, ClickableList, TabBar};
+use crate::widgets::{ClickableGrid, ClickableList, ScrollableTab, TabBar};
 
 use super::logic;
 use super::state::{
@@ -1329,115 +1329,23 @@ fn render_tab_panel(
         bar.render(f, v[0], &mut cs);
     }
 
-    // 内容を「scroll 可能な抽象表現」に揃えてから clamp + 描画。
-    // 4 タブすべて同じ仕組みに乗せることで、スマホでパネル下端が見切れる
-    // 問題を一網打尽にする。content height は visual rows で正確に測れる範囲
-    // (= wrap=false 前提) で計算する。
-    let content = match state.panel_tab {
-        PanelTab::Status => TabContent::Lines(status_lines(state)),
-        PanelTab::Manager => TabContent::Clickable(manager_list(state)),
-        PanelTab::Events => TabContent::Lines(log_lines(state)),
-        PanelTab::World => TabContent::Lines(world_lines(state)),
+    // 4 タブを共通の `ScrollableTab` primitive に乗せる。Cafe / Abyss と
+    // 同じスクロール挙動 (overflow 時のみ ▲▼ 列を予約 / clamp の自動書き戻し)
+    // を共有することで、game ごとに scroll 実装を再発明しない。
+    let list = match state.panel_tab {
+        PanelTab::Status => status_list(state),
+        PanelTab::Manager => manager_list(state),
+        PanelTab::Events => log_list(state),
+        PanelTab::World => world_list(state),
     };
-
-    let (content_area, scroll_col) = split_for_scroll(v[1]);
-    let content_h = content.content_height();
-    let scroll = clamp_panel_scroll(state, content_h, content_area.height);
-    let max_scroll = content_h.saturating_sub(content_area.height);
-
     let mut cs = click_state.borrow_mut();
-    content.render(f, content_area, scroll, &mut cs);
-    if let Some(sc) = scroll_col {
-        render_scroll_indicators(f, sc, scroll, max_scroll, &mut cs);
-    }
-}
-
-// ── スクロール抽象 ─────────────────────────────────────────
-//
-// 「タブ内容を Lines / ClickableList で組む → 共通レイヤが scroll を当てて
-// 描画」という流れに 4 タブすべてを乗せる。タブごとに scroll 計算を散らさない
-// ことで「Manager だけ動かない」みたいな drift を防ぐ。
-
-enum TabContent<'a> {
-    Lines(Vec<Line<'a>>),
-    Clickable(ClickableList<'a>),
-}
-
-impl<'a> TabContent<'a> {
-    fn content_height(&self) -> u16 {
-        match self {
-            TabContent::Lines(lines) => lines.len().min(u16::MAX as usize) as u16,
-            TabContent::Clickable(list) => list.len().min(u16::MAX as usize) as u16,
-        }
-    }
-
-    fn render(self, f: &mut Frame<'_>, area: Rect, scroll: u16, cs: &mut ClickState) {
-        match self {
-            TabContent::Lines(lines) => {
-                let p = Paragraph::new(lines).scroll((scroll, 0));
-                f.render_widget(p, area);
-            }
-            TabContent::Clickable(list) => {
-                list.render(f, area, Block::default(), cs, false, scroll);
-            }
-        }
-    }
-}
-
-/// content 領域の右 1 列を ▲/▼ ボタン用に分離する。幅が 1 セル以下しか
-/// 残らない場合は分割せず content にすべて渡す (極端な狭幅 fallback)。
-fn split_for_scroll(area: Rect) -> (Rect, Option<Rect>) {
-    if area.width <= 1 {
-        return (area, None);
-    }
-    let chunks = Layout::default()
-        .direction(LayoutDir::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
-        .split(area);
-    (chunks[0], Some(chunks[1]))
-}
-
-/// 入力で増えたスクロール量を「実際の content と area」に合わせて押し戻す。
-/// content_h <= area_h の時 (=スクロール不要) は 0 に戻る。
-fn clamp_panel_scroll(state: &City, content_h: u16, area_h: u16) -> u16 {
-    let max_scroll = content_h.saturating_sub(area_h);
-    let s = state.panel_scroll.get().min(max_scroll);
-    state.panel_scroll.set(s);
-    s
-}
-
-/// 上下半分を ▲ / ▼ のクリック領域として描画。スクロール余地が無い側は
-/// グリフを出さない (= 連打しても無効な操作はビジュアル的にも見えない)。
-fn render_scroll_indicators(
-    f: &mut Frame<'_>,
-    area: Rect,
-    scroll: u16,
-    max_scroll: u16,
-    cs: &mut ClickState,
-) {
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let half = area.height / 2;
-    let style = Style::default()
-        .fg(Color::LightCyan)
-        .add_modifier(Modifier::BOLD);
-
-    if half > 0 && scroll > 0 {
-        let up_rect = Rect::new(area.x, area.y, area.width, half);
-        let para = Paragraph::new(Line::from(Span::styled("▲", style)));
-        Clickable::new(para, ACT_PANEL_SCROLL_UP).render(f, up_rect, cs);
-    }
-    if scroll < max_scroll && area.height > half {
-        let down_h = area.height - half;
-        let down_rect = Rect::new(area.x, area.y + half, area.width, down_h);
-        let mut lines: Vec<Line> = (0..down_h.saturating_sub(1))
-            .map(|_| Line::from(""))
-            .collect();
-        lines.push(Line::from(Span::styled("▼", style)));
-        let para = Paragraph::new(lines);
-        Clickable::new(para, ACT_PANEL_SCROLL_DOWN).render(f, down_rect, cs);
-    }
+    ScrollableTab::new(
+        list,
+        &state.panel_scroll,
+        ACT_PANEL_SCROLL_UP,
+        ACT_PANEL_SCROLL_DOWN,
+    )
+    .render(f, v[1], &mut cs);
 }
 
 fn tab_style(active: bool) -> Style {
@@ -1456,7 +1364,7 @@ fn tab_style(active: bool) -> Style {
 // シード値と地形比率を表示。「マイクラ感」を演出する場所で、後で
 // 「シード入力 → リジェネ」も加えやすいようここに集約。
 
-fn world_lines(state: &City) -> Vec<Line<'static>> {
+fn world_list(state: &City) -> ClickableList<'static> {
     let mut counts = [0u32; 5];
     for row in &state.terrain {
         for t in row {
@@ -1472,7 +1380,7 @@ fn world_lines(state: &City) -> Vec<Line<'static>> {
     let total = (GRID_W * GRID_H).max(1) as u32;
     let pct = |c: u32| (c * 100) / total;
 
-    vec![
+    let lines: Vec<Line<'static>> = vec![
         Line::from(vec![
             Span::styled("SEED ", Style::default().fg(Color::DarkGray)),
             Span::styled(
@@ -1508,7 +1416,12 @@ fn world_lines(state: &City) -> Vec<Line<'static>> {
             "湖は建設不可。岩盤は機材で開拓。",
             Style::default().fg(Color::DarkGray),
         )),
-    ]
+    ];
+    let mut cl = ClickableList::new();
+    for line in lines {
+        cl.push(line);
+    }
+    cl
 }
 
 // ── Status panel ────────────────────────────────────────────
@@ -1524,7 +1437,7 @@ fn is_payout_flash_active(state: &City) -> bool {
         && state.tick.saturating_sub(state.last_payout_tick) < PAYOUT_FLASH_TICKS
 }
 
-fn status_lines(state: &City) -> Vec<Line<'static>> {
+fn status_list(state: &City) -> ClickableList<'static> {
     let income = logic::compute_income_per_sec(state);
     let pop = state.population();
     let active = state.active_constructions();
@@ -1612,7 +1525,11 @@ fn status_lines(state: &City) -> Vec<Line<'static>> {
     lines.push(Line::from(""));
     lines.extend(worker_status_lines(state));
 
-    lines
+    let mut cl = ClickableList::new();
+    for line in lines {
+        cl.push(line);
+    }
+    cl
 }
 
 /// 選択中セルの詳細を Status パネルに 4-6 行で表示する。
@@ -2116,19 +2033,11 @@ fn manager_list(state: &City) -> ClickableList<'static> {
         )));
     }
 
-    // 自動運用ステータス — 戦略に応じた撤去周期を表示。
-    // **Outpost 派遣は AI 評価関数 (placement_value) に統合済み**:
-    // 賢い AI ほど saturation 時に自然に外の岩場を選ぶため、ここでの
-    // ハードコード周期は不要。撤去だけが garbage collection として残る。
+    // 自動運用ステータス — 撤去判断は AI が `placement_value` と
+    // `demolish_value` を比較して即時実行。表示は予備金ガードのみ
+    // (= AI が撤去後に手元に残す cash 下限。デフレ螺旋ガード)。
     let policy = logic::automation_policy(state.strategy);
-    let demolish_txt = policy
-        .auto_demolish_period_ticks
-        .map(|p| format!("撤去{}s", p / 10))
-        .unwrap_or_else(|| "撤去なし".to_string());
-    let auto_label = format!(
-        " 🤖 自動運用: {} / 予備${}",
-        demolish_txt, policy.min_cash_reserve
-    );
+    let auto_label = format!(" 🤖 撤去判断: AI / 予備${}", policy.min_cash_reserve);
     cl.push(Line::from(Span::styled(
         auto_label,
         Style::default().fg(Color::DarkGray),
@@ -2150,15 +2059,16 @@ fn strategy_button_line(label: &str, selected: bool, accent: Color) -> Line<'sta
 
 // ── AI activity log ─────────────────────────────────────────
 
-fn log_lines(state: &City) -> Vec<Line<'static>> {
+fn log_list(state: &City) -> ClickableList<'static> {
     let spinner_chars = ['◐', '◓', '◑', '◒'];
     let spinner = spinner_chars[((state.tick / 2) % spinner_chars.len() as u64) as usize];
     let header = format!("{} AI {} 履歴", spinner, ai_tier_icon(state.ai_tier));
 
-    let mut lines: Vec<Line> = vec![Line::from(Span::styled(
+    let mut cl = ClickableList::new();
+    cl.push(Line::from(Span::styled(
         header,
         Style::default().fg(Color::Magenta),
-    ))];
+    )));
     for (i, e) in state.events.iter().enumerate() {
         let style = if i == 0 {
             Style::default()
@@ -2169,10 +2079,9 @@ fn log_lines(state: &City) -> Vec<Line<'static>> {
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        lines.push(Line::from(Span::styled(e.clone(), style)));
+        cl.push(Line::from(Span::styled(e.clone(), style)));
     }
-
-    lines
+    cl
 }
 
 fn strategy_label(s: Strategy) -> &'static str {

@@ -459,11 +459,11 @@ impl City {
     }
 
     /// 右パネルを縦に動かす。`delta` は visual row 単位の符号付き量。
-    /// 上限は render 内の `clamp_panel_scroll` が再度クランプするため、ここでは
-    /// 下限 0 のみ保証する (実際の content_h を知るのは render なので)。
+    /// 上限は render 内の `ScrollableTab` が content_h に合わせて再度
+    /// クランプするため、ここでは下限 0 と u16 上限の saturate のみ保証する。
     pub fn scroll_panel(&mut self, delta: i32) {
         let cur = self.panel_scroll.get() as i32;
-        let next = (cur + delta).max(0) as u16;
+        let next = (cur + delta).clamp(0, u16::MAX as i32) as u16;
         self.panel_scroll.set(next);
     }
 

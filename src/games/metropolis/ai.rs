@@ -14,9 +14,15 @@ pub enum AiAction {
         y: usize,
         kind: Building,
     },
-    /// 撤去 (Tier 4/5 のみ生成)。Tier 1-3 は周期撤去で `auto_strategy_actions`
-    /// が処理する。AI が build と同じ `cents/sec` 天秤で「壊す方が得」と判定した
-    /// 時に生成される。
+    /// 撤去。全 Tier の AI が生成する:
+    ///   - Tier 1: 5% 確率で `auto_demolish_target` を試す
+    ///   - Tier 2: 隣接候補が枯渇した時のみ
+    ///   - Tier 3: 機能不全 (score >= 200) を build より優先撤去
+    ///   - Tier 4/5: `placement_value` (build) と `demolish_value` を 1 つの
+    ///     max 選択に統合し、撤去価値が勝った時に生成
+    ///
+    /// 全経路で `can_afford_demolish` (= cost + min_cash_reserve) を満たすか
+    /// 確認してから生成される。デフレ螺旋ガード。
     Demolish {
         x: usize,
         y: usize,
@@ -253,9 +259,9 @@ fn is_empty_next_to_building(city: &City, x: usize, y: usize) -> bool {
 /// 優先する。「道路網優先」の思想と整合: 網の中に dead 建物があれば取り除く。
 fn tier3_road_planner(city: &mut City) -> AiAction {
     // 機能不全建物 (score >= 200, = inactive Shop 相当) があれば優先撤去。
-    // 網の整理を先回り — Tier 3 の特徴付け。
+    // 網の整理を先回り — Tier 3 の特徴付け。reserve ガード必須。
     if let Some((dx, dy, score)) = super::logic::auto_demolish_target(city) {
-        if score >= 200 && city.cash >= super::logic::demolish_cost(dx, dy) {
+        if score >= 200 && can_afford_demolish(city, dx, dy) {
             return AiAction::Demolish { x: dx, y: dy };
         }
     }
@@ -330,12 +336,24 @@ fn tier3_road_planner(city: &mut City) -> AiAction {
 ///
 /// 各 Tier は呼び出し側で「いつ呼ぶか」(発火確率 / 候補枯渇時 / score 閾値) を
 /// 制御することで階層差を表現する。本ヘルパー自体は単純なラッパー。
+///
+/// `min_cash_reserve` ガード: 撤去後の cash が戦略予備金を下回るなら見送る。
+/// これがないと「cash $50 → 中央のミス撤去 ($50) → cash $0 → 翌 tick 全 idle」
+/// のデフレ螺旋に陥る。
 fn try_random_demolish(city: &City) -> Option<AiAction> {
     let (dx, dy, _score) = super::logic::auto_demolish_target(city)?;
-    if city.cash < super::logic::demolish_cost(dx, dy) {
+    if !can_afford_demolish(city, dx, dy) {
         return None;
     }
     Some(AiAction::Demolish { x: dx, y: dy })
+}
+
+/// 撤去後の cash が戦略予備金 (`automation_policy.min_cash_reserve`) を
+/// 下回らないか確認する。AI の全 Demolish 経路 (Tier 1-5) が共通で使う。
+pub(super) fn can_afford_demolish(city: &City, x: usize, y: usize) -> bool {
+    let cost = super::logic::demolish_cost(x, y);
+    let reserve = super::logic::automation_policy(city.strategy).min_cash_reserve;
+    city.cash >= cost + reserve
 }
 
 /// Tier 4 / 5 共用の評価ベース placement search。
@@ -541,7 +559,7 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
     match (best_build_value, best_demo_value) {
         (Some(bv), Some(dv)) if dv > bv => {
             let (dx, dy, _) = demolish_best.unwrap();
-            if city.cash >= super::logic::demolish_cost(dx, dy) {
+            if can_afford_demolish(city, dx, dy) {
                 AiAction::Demolish { x: dx, y: dy }
             } else {
                 AiAction::Idle
@@ -553,7 +571,7 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
         }
         (None, Some(_)) => {
             let (dx, dy, _) = demolish_best.unwrap();
-            if city.cash >= super::logic::demolish_cost(dx, dy) {
+            if can_afford_demolish(city, dx, dy) {
                 AiAction::Demolish { x: dx, y: dy }
             } else {
                 AiAction::Idle

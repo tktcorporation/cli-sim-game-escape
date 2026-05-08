@@ -450,87 +450,46 @@ pub fn strategy_thought_verb(s: Strategy, kind: Building) -> &'static str {
     }
 }
 
-// ── 自動運用ポリシー (Phase A 撤去 / 開拓の完全自動化) ─────────────
+// ── 自動運用ポリシー (Strategy ごとの撤去 cash 余力) ───────────────
 //
-// プレイヤーが選んだ Strategy に応じて、CPU が「いつ Outpost を派遣するか /
-// いつ撤去判断を走らせるか / どこまで現金を予備に取っておくか」を自動決定する。
-// 撤去・開拓の手動ボタンは廃止され、すべてここを起点に tick 駆動で発火する。
+// 撤去判断は AI (`ai::decide`) が `placement_value` と `demolish_value` を
+// 同じ天秤で行う。本セクションが提供するのは「撤去後 cash がこの予備金を
+// 下回るなら撤去を見送る」というガードのみ。これがないと cash $50 →
+// 中央のミス建物を撤去 → cash $0 → 次 tick の build を全て idle、の
+// デフレ螺旋に陥り得る。
 //
-// ## 数値の意味
-//
-// **Phase A 以降**: Outpost 派遣は AI 評価関数 (`placement_value`) に統合済み。
-// このセクションは撤去周期のみを扱う。
-//
-// - `auto_demolish_period_ticks` (None = 自動撤去しない):
-//   この間隔で `auto_demolish` を試行。短くすると無駄な建物を即排除する
-//   「効率最大化」キャラ、長くすると「のんびり放置」キャラ。
-//
-// - `min_cash_reserve`:
-//   この額より下になる行動 (Outpost 派遣 / 撤去) は控える。drive_ai が建物を
-//   建てる原資を残すためのガード。Outpost コスト ($600) + 余裕 = 戦略次第。
-//
-// 数値はシミュレーター (simulator.rs `automation_*` 群) で 30min ベンチを
-// 走らせて「成長する / cash が貯まる / Rock が解禁される」を観測しながら
-// 確定させた。変更時は同テストで回帰を確認すること。
+// Strategy ごとの reserve は「キャラ付け」を数字で表現する:
+//   - 守備的な戦略 (Growth/Eco) は予備金を厚めに → cash 枯渇しにくい
+//   - 攻撃的な戦略 (Income) はやや薄めに → 撤去再建をテンポ良く回す
 
-/// 自動運用の方針 (Strategy ごとの周期と予算ガード)。
-///
-/// **Outpost 派遣は廃止** — AI 自身が `placement_value` で Outpost を選ぶため、
-/// ハードコード周期は不要になった (= 賢い AI ほど自然に外を拡張する設計)。
-/// 撤去だけがここに残る (= 老朽化 / 機能不全の garbage collection)。
+/// 撤去判断時の cash 予備金ガード。AI が demolish action を出す前に
+/// `cash >= demolish_cost(x, y) + min_cash_reserve` を満たすか確認する。
 #[derive(Clone, Copy, Debug)]
 pub struct AutomationPolicy {
-    pub auto_demolish_period_ticks: Option<u32>,
+    /// 撤去後に手元に残しておく cash 下限。これを割る撤去は見送られる。
     pub min_cash_reserve: i64,
 }
 
-/// 戦略ごとの自動運用設定。`auto_strategy_actions` が毎 tick 参照する。
-///
-/// シミュレータ (`automation_drives_outposts_and_demolitions`) で 4-worker
-/// DemandAware で 30 min 動かして「全戦略が拡張可能戦略では Outpost を
-/// 1 基以上派遣する」を担保しながら値を確定した。
-///
-/// `min_cash_reserve` は **drive_ai が建物を建て終えた後の余裕**。
-/// drive_ai が貪欲にキャッシュを消費するため、リザーブを大きくしすぎると
-/// 自動派遣が永遠に発火しない。$200-500 程度が実機テストでバランス良い。
+/// 戦略ごとの撤去予備金ガード。AI と Manager タブの両方が参照する。
 pub fn automation_policy(s: Strategy) -> AutomationPolicy {
     match s {
-        // 成長: 人口拡張のために土地が要る → 撤去は控えめ。
-        Strategy::Growth => AutomationPolicy {
-            auto_demolish_period_ticks: Some(450),
-            min_cash_reserve: 250,
-        },
-        // 収入: 効率最大化 = 無駄な建物を積極排除。
-        Strategy::Income => AutomationPolicy {
-            auto_demolish_period_ticks: Some(400),
-            min_cash_reserve: 400,
-        },
-        // 技術投資: 建設+20% を活かす + 老朽更新も標準。
-        Strategy::Tech => AutomationPolicy {
-            auto_demolish_period_ticks: Some(400),
-            min_cash_reserve: 350,
-        },
-        // 環境配慮: 撤去周期は控えめ (老朽化更新のみ)。
-        // 「緑地を保護し、既存の市域でゆっくり更新する」キャラクター。
-        // **Phase A**: 旧仕様で `None` だったが、Forest soft penalty 化で
-        // saturation 時に AI が森を切らずに進行可能になっても、撤去経路を
-        // 全く持たないと老朽化した街区が永続して詰まる (レビュー指摘 #1)。
-        // 控えめな周期 (900 tick = 90 sec) で老朽建物の世代交代だけ行う。
-        Strategy::Eco => AutomationPolicy {
-            auto_demolish_period_ticks: Some(900),
-            min_cash_reserve: 200,
-        },
+        // Growth: 人口拡張に資金を残したいので予備金厚め。
+        Strategy::Growth => AutomationPolicy { min_cash_reserve: 250 },
+        // Income: 撤去再建を積極的に回す = 予備金は薄め。
+        Strategy::Income => AutomationPolicy { min_cash_reserve: 400 },
+        // Tech: 建設+20% を活かしたいので House cost 程度を残す。
+        Strategy::Tech => AutomationPolicy { min_cash_reserve: 350 },
+        // Eco: 既存街区の更新がメインなので慎重に。
+        Strategy::Eco => AutomationPolicy { min_cash_reserve: 200 },
     }
 }
 
-/// `step_one_tick` から毎 tick 呼ばれる自動運用ハブ。
+/// `step_one_tick` から毎 tick 呼ばれる no-op (互換性のため残置)。
 ///
-/// **全 Tier で no-op**: 撤去判断は AI (`ai::decide`) 自身が `Demolish` action
-/// で行うようになったため、外付けの周期撤去は不要。本関数は API 互換性のため
-/// 残してあるが、内部処理は無し (= 周期撤去の二重発火による cash drain を防ぐ)。
-///
-/// `AutomationPolicy` / `automation_policy()` は Manager タブの「自動運用設定」
-/// 表示用メタデータとして残してある (= UI に「撤去周期」「予備金」を見せたい)。
+/// 旧仕様では戦略ごとの周期で撤去を発火していたが、AI 自身が
+/// `placement_value` と `demolish_value` を同じ天秤で比較するように
+/// なったため不要。`step_one_tick` の呼び出し点を変えずに済むよう
+/// 関数だけ残してある。次回大幅リファクタ時に呼び出し側ごと削除可。
 pub fn auto_strategy_actions(_city: &mut City) {}
 
 /// セルが「AI が即着工できる」状態か。
@@ -1428,29 +1387,22 @@ pub fn demolish_at(city: &mut City, x: usize, y: usize) -> bool {
     true
 }
 
-// ── AI 撤去判断 (Phase A: 完全自動化) ───────────────────────────
+// ── 撤去評価関数 (AI が `placement_value` と並べて比較) ─────────────
 //
-// Idle Metropolis の哲学「CPU が街を作る、プレイヤーは方向だけ」に沿って、
-// 撤去判断も CPU 側に委譲する。`auto_strategy_actions` から戦略ごとの
-// 周期 (`automation_policy(s).auto_demolish_period_ticks`) で発火し、
-// **最も無駄な建物**を 1 つ選んで撤去する。手動撤去ボタン / モードは
-// すべて廃止されたため、プレイヤーは戦略選択でしか撤去挙動を変えられない。
+// `demolish_value` が「撤去すれば街が改善する量」を返し、AI (`ai::decide`) が
+// `placement_value` の最良候補と直接比較する。値の大小だけが意味を持つ
+// 相対スコア (cents/sec とは厳密には揃わないが、cost_penalty を /10 にする
+// ことで「中央のミスは即撤去 / 外周は滅多に撤去しない」という直感に
+// 沿う挙動になる)。
 //
-// ## 評価関数の設計
+// 「無駄な建物」の定義:
+//   1. 機能不全 (inactive Shop / Workshop, Road 接続無し House)
+//   2. 役目を終えた (Outpost で周囲に Rock が無い、孤立 Road, House 無し Park)
+//   3. 老朽化 (寿命が尽きて income が大きく目減りしている)
 //
-// 「無駄な建物」の定義は複数あり得る:
-//   1. 機能不全 (inactive Shop / Workshop)
-//   2. 役目を終えた (Outpost で周囲に Rock がもう無い)
-//   3. 戦略的にミスマッチ (Cottage in core, でも income に貢献している…)
-//
-// すべて足し合わせた **wastefulness score** から **demolish_cost / 10** を引いた
-// 値を「撤去で得をする度合い」とし、最大値の建物を選ぶ。負の値しか出ない場合
-// (= どの撤去も損) は何もしない。
-//
-// この設計だと:
-// - 中央のミスは積極的に撤去される (cost 安い)
-// - 外周の建設ミスは滅多に撤去されない (cost 高い、d² 曲線が AI を萎縮させる)
-//   → プレイヤーが「外側に建てる前に再考しろ」と誘導される
+// 中央 ($50) のミスは coast_penalty 5 で撤去価値が大きく残るが、外周 ($2050)
+// では penalty 205 で機能不全 +250 でも余裕は +45 しかない。プレイヤーが
+// 「外側に建てる前に再考しろ」と誘導される設計。
 
 /// 撤去価値 (`auto_demolish_target` と AI 評価の両方が参照)。
 ///
