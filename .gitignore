@@ -4,3 +4,4 @@
 .serena/
 node_modules/
 proptest-regressions/
+.claude/.pr-review-count
