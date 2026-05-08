@@ -260,8 +260,9 @@ impl Game for MetropolisGame {
         // 30 秒間隔 (= 300 ticks) は cookie/save と揃えている。
         self.save_countdown = self.save_countdown.saturating_sub(delta_ticks);
         if self.save_countdown == 0 {
+            // best-effort autosave: 失敗時の戻り値は無視する (warn は save_game 内で出力済)。
             #[cfg(target_arch = "wasm32")]
-            save::save_game(&self.state);
+            let _ = save::save_game(&self.state);
             self.save_countdown = save::AUTOSAVE_INTERVAL;
         }
     }

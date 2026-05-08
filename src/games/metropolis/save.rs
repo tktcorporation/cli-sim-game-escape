@@ -42,6 +42,7 @@ use super::terrain::Terrain;
 ///       既存配列の再解釈ができない (旧 index 32 = 旧 (0,1) が、新 GRID_W=64
 ///       では (32,0) に化ける)。v3 以前のセーブは安全に再マップできない
 ///       ため `MIN_COMPATIBLE_VERSION = 4` でロード拒否し、新規開始を促す。
+///   v5: `AiTier::DeepPlanner` (= 数値 5) 追加。
 ///   v6: `last_save_wall_ms` 追加 (オフライン進行ボーナス用 wall-clock 計測)。
 ///       旧データは default 0 → 「初回計測」扱いでボーナス未発動になる。
 #[cfg(any(target_arch = "wasm32", test))]
@@ -128,7 +129,7 @@ pub fn offline_bonus(last_save_ms: u64, now_ms: u64, income_per_sec: i64) -> Opt
     let credited_secs = elapsed_secs.min(MAX_OFFLINE_SECS);
     let bonus_cash = (credited_secs as i64)
         .saturating_mul(income_per_sec)
-        .saturating_mul(OFFLINE_EFFICIENCY_PCT as i64)
+        .saturating_mul(i64::from(OFFLINE_EFFICIENCY_PCT))
         / 100;
     if bonus_cash <= 0 {
         return None;
@@ -143,8 +144,19 @@ pub fn offline_bonus(last_save_ms: u64, now_ms: u64, income_per_sec: i64) -> Opt
 
 /// 経過秒を「2時間13分」「45分」のような日本語表現にする。
 /// `secs >= OFFLINE_MIN_SECS (60)` を前提に、0分表記は出さない。
+///
+/// **既知の表記限界**: capped メッセージは elapsed と上限を両方この関数で
+/// フォーマットする。elapsed が cap より 0〜59 秒だけ大きい場合 (= 分単位の
+/// 切り捨てで両者が同じ "X時間" に化ける) は「オフライン 4時間 (上限4時間まで回収)」
+/// のような同表記が並ぶ。実害はほぼ無い (ボーナスは正しく支払われる) ので
+/// 表記の修正は行わない。
 #[cfg(any(target_arch = "wasm32", test))]
 pub fn format_offline_duration(secs: u64) -> String {
+    debug_assert!(
+        secs >= OFFLINE_MIN_SECS,
+        "format_offline_duration is only meaningful for secs >= OFFLINE_MIN_SECS (60); got {}",
+        secs
+    );
     let h = secs / 3600;
     let m = (secs % 3600) / 60;
     if h == 0 {
@@ -711,30 +723,44 @@ fn get_storage() -> Option<web_sys::Storage> {
     web_sys::window()?.local_storage().ok()?
 }
 
-/// City 状態を localStorage に保存する。失敗時はサイレントに無視 (console 出力)。
+/// f64 の wall-clock ms を u64 に安全にキャストする。
+/// 非 finite (NaN / inf) や負値は「未計測」のセマンティクスに合流させる 0 を返す。
 #[cfg(target_arch = "wasm32")]
-pub fn save_game(state: &City) {
+fn wall_clock_ms_to_u64(v: f64) -> u64 {
+    if v.is_finite() && v >= 0.0 {
+        v as u64
+    } else {
+        0
+    }
+}
+
+/// City 状態を localStorage に保存する。成功時 true、失敗時 false (warn 出力済)。
+/// 戻り値は `load_game` 内のオフラインボーナスロールバック判定で使う。
+#[cfg(target_arch = "wasm32")]
+pub fn save_game(state: &City) -> bool {
     let storage = match get_storage() {
         Some(s) => s,
-        None => return,
+        None => return false,
     };
     let mut save = extract_save(state);
     // セーブ瞬間の wall-clock を記録。次回ロード時の経過秒算出に使う。
-    save.game.last_save_wall_ms = js_sys::Date::now() as u64;
+    save.game.last_save_wall_ms = wall_clock_ms_to_u64(js_sys::Date::now());
     let json = match serde_json::to_string(&save) {
         Ok(j) => j,
         Err(e) => {
             web_sys::console::warn_1(
                 &format!("Idle Metropolis: セーブのシリアライズに失敗: {e}").into(),
             );
-            return;
+            return false;
         }
     };
     if let Err(e) = storage.set_item(STORAGE_KEY, &json) {
         web_sys::console::warn_1(
             &format!("Idle Metropolis: localStorage への書き込みに失敗: {e:?}").into(),
         );
+        return false;
     }
+    true
 }
 
 /// localStorage からロードして state に反映。成功時 true。
@@ -787,12 +813,31 @@ pub fn load_game(state: &mut City) -> bool {
     // オフライン進行ボーナス: 前回セーブから現在までの経過時間に応じて
     // 推定収入を一括加算。`compute_income_per_sec` は state ロード後に評価して
     // 「戻ってきた時の街の実力」を反映する。
-    let now_ms = js_sys::Date::now() as u64;
+    let now_ms = wall_clock_ms_to_u64(js_sys::Date::now());
     let income_per_sec = super::logic::compute_income_per_sec(state);
     if let Some(bonus) = offline_bonus(save_data.game.last_save_wall_ms, now_ms, income_per_sec) {
         state.cash = state.cash.saturating_add(bonus.bonus_cash);
         state.cash_earned_total = state.cash_earned_total.saturating_add(bonus.bonus_cash);
         state.push_event(make_offline_event_message(&bonus));
+        // ボーナス適用後は即時セーブして wall-clock を更新する。直後にタブを
+        // 閉じて autosave (30秒間隔) が走らないと、次回ロードで同じオフライン
+        // 期間が再算定され二重支給になるため。
+        //
+        // 保存に失敗 (localStorage 容量超過 / disable 等) した場合は state 側の
+        // 加算をロールバックする — 二重支給を防ぐため次回ロードでもう一度
+        // 算定し直す方が安全 (失敗ケースは元々 cash 永続化も壊れているので、
+        // ボーナスを引っ込めても体感的な損失は最小)。
+        if !save_game(state) {
+            state.cash = state.cash.saturating_sub(bonus.bonus_cash);
+            state.cash_earned_total = state.cash_earned_total.saturating_sub(bonus.bonus_cash);
+            // push_event は先頭挿入なので index 0 を取り除けば直前のメッセージが消える。
+            if !state.events.is_empty() {
+                state.events.remove(0);
+            }
+            web_sys::console::warn_1(
+                &"Idle Metropolis: オフラインボーナスを保存失敗のためロールバック".into(),
+            );
+        }
     }
     true
 }
@@ -1019,6 +1064,44 @@ mod tests {
         assert!(bonus.capped);
         // 14400 sec * $5 * 70% = $50400
         assert_eq!(bonus.bonus_cash, 50_400);
+    }
+
+    /// 上限ぴったり (elapsed == MAX): credited == elapsed で capped=false。
+    /// 境界が `>` か `>=` かを担保する回帰テスト。
+    #[test]
+    fn offline_bonus_exact_max_is_not_capped() {
+        let last = 1_700_000_000_000u64;
+        let now = last + MAX_OFFLINE_SECS * 1000;
+        let bonus = offline_bonus(last, now, 5).expect("bonus expected");
+        assert_eq!(bonus.elapsed_secs, MAX_OFFLINE_SECS);
+        assert_eq!(bonus.credited_secs, MAX_OFFLINE_SECS);
+        assert!(!bonus.capped);
+    }
+
+    /// 上限+1 秒: credited は MAX に丸まり capped=true。
+    #[test]
+    fn offline_bonus_one_second_over_max_is_capped() {
+        let last = 1_700_000_000_000u64;
+        let now = last + (MAX_OFFLINE_SECS + 1) * 1000;
+        let bonus = offline_bonus(last, now, 5).expect("bonus expected");
+        assert_eq!(bonus.elapsed_secs, MAX_OFFLINE_SECS + 1);
+        assert_eq!(bonus.credited_secs, MAX_OFFLINE_SECS);
+        assert!(bonus.capped);
+    }
+
+    /// 巨大な income と elapsed でも `saturating_mul` が i64 範囲を保ち panic しない。
+    /// 50年×i64::MAX/2 のような非現実的な値で `saturating_mul` が i64::MAX に
+    /// 飽和し、最終的に `/100` した結果も正であることを確認する。
+    #[test]
+    fn offline_bonus_does_not_overflow_on_extreme_values() {
+        let last = 1u64;
+        let now = last + 50 * 365 * 24 * 3600 * 1000; // ~50年
+        let bonus = offline_bonus(last, now, i64::MAX / 2).expect("bonus expected");
+        assert_eq!(bonus.credited_secs, MAX_OFFLINE_SECS);
+        assert!(bonus.capped);
+        // 14400 * (i64::MAX/2) で saturating → i64::MAX。さらに * 70 saturate → i64::MAX。
+        // 最後に /100 → i64::MAX / 100 ≈ 9.22e16。
+        assert_eq!(bonus.bonus_cash, i64::MAX / 100);
     }
 
     /// 短時間 (60秒未満) はリロード扱いでボーナス無し。
