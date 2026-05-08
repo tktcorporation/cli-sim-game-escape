@@ -46,8 +46,9 @@ use super::state::{
 use super::terrain::Terrain;
 use super::{
     ACT_DISMISS_OFFLINE_WELCOME, ACT_HIRE_WORKER, ACT_PANEL_SCROLL_DOWN, ACT_PANEL_SCROLL_UP,
-    ACT_STRATEGY_ECO, ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH, ACT_TAB_EVENTS,
-    ACT_TAB_MANAGER, ACT_TAB_STATUS, ACT_TAB_WORLD, ACT_UPGRADE_AI,
+    ACT_STRATEGY_ECO, ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH,
+    ACT_TAB_CATALOG, ACT_TAB_EVENTS, ACT_TAB_MANAGER, ACT_TAB_STATUS, ACT_TAB_WORLD,
+    ACT_UPGRADE_AI,
 };
 
 /// Wide layout が必要とする最小幅。
@@ -485,6 +486,8 @@ fn tile_span_1(
                 logic::HouseTier::Cottage => ('h', Color::Green),
                 logic::HouseTier::Apartment => ('H', Color::LightGreen),
                 logic::HouseTier::Highrise => ('▮', Color::LightCyan),
+                logic::HouseTier::Tower => ('▌', Color::LightMagenta),
+                logic::HouseTier::Arcology => ('◆', Color::Magenta),
             };
             Span::styled(
                 ch.to_string(),
@@ -624,6 +627,86 @@ fn tile_span_1(
                     .add_modifier(Modifier::BOLD),
             )
         }
+        Tile::Built(Building::Plaza) => {
+            // 中央広場: Park より明るい色味で「人が集う」感を出す。
+            let phase = (tick / 5) as usize % 3;
+            let ch = ['◈', '✦', '◇'][phase];
+            Span::styled(
+                ch.to_string(),
+                Style::default()
+                    .fg(Color::LightMagenta)
+                    .bg(Color::Rgb(60, 40, 80))
+                    .add_modifier(Modifier::BOLD),
+            )
+        }
+        Tile::Built(Building::Stadium) => {
+            // 競技場: 観客のざわめきを点滅で表現。
+            let bright = (tick / 3).is_multiple_of(2);
+            let ch = if bright { '◎' } else { '○' };
+            Span::styled(
+                ch.to_string(),
+                Style::default()
+                    .fg(Color::LightYellow)
+                    .bg(Color::Rgb(70, 40, 0))
+                    .add_modifier(Modifier::BOLD),
+            )
+        }
+        Tile::Built(Building::MegaMall) => {
+            // メガモール: Mall より眩しいネオン (☆ + 強点滅)。
+            let active = logic::shop_is_active_with(state, x, y, connected);
+            let bright = (tick / 2).is_multiple_of(2);
+            let ch = if active && bright { '☆' } else { '★' };
+            let (fg, bg) = if active {
+                (Color::LightYellow, Color::Rgb(140, 80, 0))
+            } else {
+                (Color::DarkGray, Color::Rgb(50, 50, 50))
+            };
+            Span::styled(
+                ch.to_string(),
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            )
+        }
+        Tile::Built(Building::Headquarters) => {
+            // 本社ビル: 高層 + 屋上に赤い航空標識 (夜だけ点滅)。
+            let active = logic::workshop_is_active_with(state, x, y, connected);
+            let night = matches!(logic::day_phase(tick), logic::DayPhase::Night);
+            let beacon = night && (tick % 15) < 5;
+            let ch = if beacon { '▼' } else { '▣' };
+            let (fg, bg) = if active {
+                if beacon {
+                    (Color::LightRed, Color::Rgb(20, 30, 90))
+                } else if night {
+                    (Color::LightYellow, Color::Rgb(20, 30, 80))
+                } else {
+                    (Color::White, Color::Rgb(30, 50, 90))
+                }
+            } else {
+                (Color::DarkGray, Color::Rgb(40, 40, 50))
+            };
+            Span::styled(
+                ch.to_string(),
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            )
+        }
+        Tile::Built(Building::Refinery) => {
+            // 製油所: Factory より大きい煙と炎の点滅。
+            let active = logic::workshop_is_active_with(state, x, y, connected);
+            let phase = (tick / 2) as usize % 4;
+            let ch = if active {
+                ['R', '#', 'R', '▒'][phase]
+            } else {
+                'R'
+            };
+            let (fg, bg) = if active {
+                (Color::LightRed, Color::Rgb(110, 30, 0))
+            } else {
+                (Color::DarkGray, Color::Rgb(40, 40, 40))
+            };
+            Span::styled(
+                ch.to_string(),
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            )
+        }
     }
 }
 
@@ -633,10 +716,15 @@ fn tile_char_1(b: Building) -> char {
         Building::House => 'H',
         Building::Workshop => 'W',
         Building::Factory => 'F',
+        Building::Refinery => 'R',
         Building::Shop => 'S',
         Building::Mall => 'M',
+        Building::MegaMall => '★',
         Building::Office => 'O',
+        Building::Headquarters => '▣',
         Building::Park => 'P',
+        Building::Plaza => '◈',
+        Building::Stadium => '◎',
         Building::Outpost => 'X',
     }
 }
@@ -950,6 +1038,111 @@ fn tile_spans_2(
                 ),
             ]
         }
+        Tile::Built(Building::Plaza) => {
+            // 中央広場: 噴水 + 花壇の点滅。
+            let phase = (tick / 4) as usize % 4;
+            let left = ['◈', '✦', '◇', '✧'][phase];
+            let right = ['✿', '❀', '✿', '❀'][phase];
+            let bg = Color::Rgb(60, 40, 80);
+            vec![
+                Span::styled(
+                    left.to_string(),
+                    Style::default()
+                        .fg(Color::LightMagenta)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    right.to_string(),
+                    Style::default()
+                        .fg(Color::LightYellow)
+                        .bg(bg)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]
+        }
+        Tile::Built(Building::Stadium) => {
+            // 競技場: ◎ + 看板の点滅で「観戦中」を示す。
+            let bright = (tick / 3).is_multiple_of(2);
+            let glyph = if bright { "◎▣" } else { "○▣" };
+            let bg = Color::Rgb(70, 40, 0);
+            vec![Span::styled(
+                glyph.to_string(),
+                Style::default()
+                    .fg(Color::LightYellow)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            )]
+        }
+        Tile::Built(Building::MegaMall) => {
+            // メガモール: ☆ ★ の眩しいネオン交互点滅。
+            let active = logic::shop_is_active_with(state, x, y, connected);
+            let bright = (tick / 2).is_multiple_of(2);
+            if !active {
+                vec![Span::styled(
+                    "☆★".to_string(),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .bg(Color::Rgb(50, 50, 50)),
+                )]
+            } else {
+                let glyph = if bright { "☆★" } else { "★☆" };
+                vec![Span::styled(
+                    glyph.to_string(),
+                    Style::default()
+                        .fg(Color::LightYellow)
+                        .bg(Color::Rgb(140, 80, 0))
+                        .add_modifier(Modifier::BOLD),
+                )]
+            }
+        }
+        Tile::Built(Building::Headquarters) => {
+            // 本社ビル: 高層 + 屋上に赤い航空標識 (夜だけ点滅)。
+            let active = logic::workshop_is_active_with(state, x, y, connected);
+            let night = matches!(logic::day_phase(tick), logic::DayPhase::Night);
+            let beacon = night && (tick % 15) < 5;
+            let glyph = if active {
+                if beacon { "▼▣" } else if night { "▮▣" } else { "▭▣" }
+            } else {
+                "▭▢"
+            };
+            let (fg, bg) = if active {
+                if beacon {
+                    (Color::LightRed, Color::Rgb(20, 30, 90))
+                } else if night {
+                    (Color::LightYellow, Color::Rgb(20, 30, 80))
+                } else {
+                    (Color::White, Color::Rgb(30, 50, 90))
+                }
+            } else {
+                (Color::DarkGray, Color::Rgb(40, 40, 50))
+            };
+            vec![Span::styled(
+                glyph.to_string(),
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            )]
+        }
+        Tile::Built(Building::Refinery) => {
+            // 製油所: 大きい煙突 + 炎の点滅。Factory より重厚。
+            let active = logic::workshop_is_active_with(state, x, y, connected);
+            let phase = (tick / 2) as usize % 4;
+            let smoke = if active {
+                ['▓', '█', '▓', '▒'][phase]
+            } else {
+                '▁'
+            };
+            let body = if active { '▣' } else { '▢' };
+            let glyph = format!("{}{}", smoke, body);
+            let (fg, bg) = if active {
+                (Color::LightRed, Color::Rgb(110, 30, 0))
+            } else {
+                (Color::DarkGray, Color::Rgb(40, 40, 40))
+            };
+            vec![Span::styled(
+                glyph,
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            )]
+        }
     }
 }
 
@@ -1007,6 +1200,9 @@ fn house_bg_rgb(tier: logic::HouseTier) -> (u8, u8, u8) {
         logic::HouseTier::Cottage => (40, 25, 15),
         logic::HouseTier::Apartment => (40, 40, 40),
         logic::HouseTier::Highrise => (20, 30, 60),
+        // Tower / Arcology は紫がかった背景で「終盤の象徴」感を出す。
+        logic::HouseTier::Tower => (40, 20, 60),
+        logic::HouseTier::Arcology => (60, 20, 80),
     }
 }
 
@@ -1186,6 +1382,11 @@ fn house_glyph_2wide(tier: logic::HouseTier, level: logic::HouseLevel) -> &'stat
         (HouseTier::Highrise, HouseLevel::Low) => "█▌",
         (HouseTier::Highrise, HouseLevel::Mid) => "▐█",
         (HouseTier::Highrise, HouseLevel::High) => "██",
+        // Tower: 摩天楼が突き抜ける細い縦シルエット。
+        (HouseTier::Tower, _) => "▌█",
+        // Arcology: 自己完結都市 — ダイヤとフルブロックの組み合わせで
+        // 「ひとつの建物が街区全体」感を出す。
+        (HouseTier::Arcology, _) => "◆█",
     }
 }
 
@@ -1212,6 +1413,10 @@ fn house_style_2wide(tier: logic::HouseTier, tick: u64) -> (Color, Modifier) {
         (HouseTier::Apartment, true) => Color::LightYellow, // 夜の窓灯り
         (HouseTier::Highrise, false) => Color::LightCyan,
         (HouseTier::Highrise, true) => Color::Yellow, // 夜のネオン感
+        (HouseTier::Tower, false) => Color::LightMagenta,
+        (HouseTier::Tower, true) => Color::White, // 夜のタワー全体ライトアップ
+        (HouseTier::Arcology, false) => Color::Magenta,
+        (HouseTier::Arcology, true) => Color::LightMagenta,
     };
     (color, modifier)
 }
@@ -1222,10 +1427,15 @@ fn construction_color(b: Building) -> Color {
         Building::House => Color::LightGreen,
         Building::Workshop => Color::LightRed,
         Building::Factory => Color::Red,
+        Building::Refinery => Color::LightRed,
         Building::Shop => Color::LightCyan,
         Building::Mall => Color::LightYellow,
+        Building::MegaMall => Color::LightYellow,
         Building::Office => Color::LightCyan,
+        Building::Headquarters => Color::White,
         Building::Park => Color::LightGreen,
+        Building::Plaza => Color::LightMagenta,
+        Building::Stadium => Color::LightYellow,
         Building::Outpost => Color::LightYellow,
     }
 }
@@ -1236,10 +1446,15 @@ fn built_color(b: Building) -> Color {
         Building::House => Color::Green,
         Building::Workshop => Color::LightRed,
         Building::Factory => Color::Red,
+        Building::Refinery => Color::LightRed,
         Building::Shop => Color::Yellow,
         Building::Mall => Color::LightYellow,
+        Building::MegaMall => Color::LightYellow,
         Building::Office => Color::LightCyan,
+        Building::Headquarters => Color::White,
         Building::Park => Color::LightGreen,
+        Building::Plaza => Color::LightMagenta,
+        Building::Stadium => Color::LightYellow,
         Building::Outpost => Color::LightYellow,
     }
 }
@@ -1250,10 +1465,15 @@ fn built_2wide_glyph(b: Building) -> &'static str {
         Building::House => "▟▙",
         Building::Workshop => "˚⊞",
         Building::Factory => "▆▣",
+        Building::Refinery => "█▣",
         Building::Shop => "$$",
         Building::Mall => "★$",
+        Building::MegaMall => "☆★",
         Building::Office => "▮▮",
+        Building::Headquarters => "▮▣",
         Building::Park => "❀✿",
+        Building::Plaza => "◈✿",
+        Building::Stadium => "◎▣",
         Building::Outpost => "◐⚒",
     }
 }
@@ -1465,11 +1685,16 @@ fn render_tab_panel(
                 format!("4 {}", PanelTab::World.label()),
                 tab_style(state.panel_tab == PanelTab::World),
                 ACT_TAB_WORLD,
+            )
+            .tab(
+                format!("5 {}", PanelTab::Catalog.label()),
+                tab_style(state.panel_tab == PanelTab::Catalog),
+                ACT_TAB_CATALOG,
             );
         bar.render(f, v[0], &mut cs);
     }
 
-    // 4 タブを共通の `ScrollableTab` primitive に乗せる。Cafe / Abyss と
+    // 5 タブを共通の `ScrollableTab` primitive に乗せる。Cafe / Abyss と
     // 同じスクロール挙動 (overflow 時のみ ▲▼ 列を予約 / clamp の自動書き戻し)
     // を共有することで、game ごとに scroll 実装を再発明しない。
     let list = match state.panel_tab {
@@ -1477,6 +1702,7 @@ fn render_tab_panel(
         PanelTab::Manager => manager_list(state),
         PanelTab::Events => log_list(state),
         PanelTab::World => world_list(state),
+        PanelTab::Catalog => catalog_list(state),
     };
     // スマホでパネル領域内のスワイプを panel scroll (J/K) に振り分けるため、
     // 現在のパネル content 領域を window.metropolisPanelRect に export する。
@@ -1593,6 +1819,159 @@ fn world_list(state: &City) -> ClickableList<'static> {
             Style::default().fg(Color::DarkGray),
         )),
     ];
+    let mut cl = ClickableList::new();
+    for line in lines {
+        cl.push(line);
+    }
+    cl
+}
+
+// ── Catalog panel (建物図鑑) ─────────────────────────────────
+//
+// 全 Building 種類と HouseTier を一覧表示する読み取り専用パネル。
+// プレイヤーが「次のフェーズで何が建つのか」「今の街区はどの段階か」を
+// 1 画面で把握できることが目的。クリックターゲットは登録しない (純粋な
+// 情報パネル)。
+
+/// 建物の役割サマリ (1 行)。Catalog タブに直接表示する。
+fn building_role(b: Building) -> &'static str {
+    match b {
+        Building::Road => "接続インフラ。マップ外と物流を繋ぎ、商業/雇用の活性条件を解く。",
+        Building::House => "人口供給。周辺の経済充実度で Cottage→Arcology まで段階進化。",
+        Building::Workshop => "基礎雇用。隣接 House + Road 接続で活性。Apartment 化の触媒。",
+        Building::Factory => "重工業。Workshop の 3.5 倍雇用。隣接 House に煙害デバフ。",
+        Building::Refinery => "重工業の頂点。Factory の 2.5 倍雇用。煙害は半径 2 タイルに拡大。",
+        Building::Shop => "基礎商業。距離 3 以内の House を客にする小規模店舗。",
+        Building::Mall => "大型商業。Shop の 3 倍商業キャパ。Apartment 以上の街区で本領発揮。",
+        Building::MegaMall => "商業メガ。Mall の 2.5 倍。Tower 化触媒で終盤の主力商業。",
+        Building::Office => "ホワイトカラー雇用。周辺 House を Highrise 化する触媒。",
+        Building::Headquarters => "本社ビル。Office の 2.8 倍雇用。Tower 化を直接駆動する終盤触媒。",
+        Building::Park => "文化触媒。直接収入なし。Highrise 化の文化需要を担う。道路接続不要。",
+        Building::Plaza => "中央広場。Park の 3 倍の文化触媒。Tower 化のサポート条件。",
+        Building::Stadium => "競技場。文化メガ施設。Arcology 化の必須条件。最も建設に時間が掛かる。",
+        Building::Outpost => "開拓機材。隣接 Rock を整地可能にする。Rock 解禁後は撤去候補。",
+    }
+}
+
+/// HouseTier の要約 (条件 + 寄与人口 + 家賃)。
+fn house_tier_summary(tier: logic::HouseTier) -> (&'static str, &'static str, u32, i64) {
+    let (name, cond) = match tier {
+        logic::HouseTier::Cottage => ("Cottage", "デフォルト。インフラ未整備でも住める一軒家。"),
+        logic::HouseTier::Apartment => (
+            "Apartment",
+            "Road 接続 + 経済密度 ≥ 1。築 60 sec で昇格可能。",
+        ),
+        logic::HouseTier::Highrise => (
+            "Highrise",
+            "Road 2 本以上 + 経済密度 ≥ 2 + 周囲 House ≥ 3。築 5 min。",
+        ),
+        logic::HouseTier::Tower => (
+            "Tower",
+            "Highrise 条件 + MegaMall または Headquarters が近接。築 10 min。",
+        ),
+        logic::HouseTier::Arcology => (
+            "Arcology",
+            "Tower 条件 + Stadium が近接 + Road 3 本以上。築 15 min — 最終段階。",
+        ),
+    };
+    let cap = logic::house_capacity(tier);
+    let rent_cents: i64 = match tier {
+        logic::HouseTier::Cottage => 50,
+        logic::HouseTier::Apartment => 150,
+        logic::HouseTier::Highrise => 300,
+        logic::HouseTier::Tower => 600,
+        logic::HouseTier::Arcology => 1_200,
+    };
+    (name, cond, cap, rent_cents)
+}
+
+fn catalog_list(_state: &City) -> ClickableList<'static> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    lines.push(Line::from(Span::styled(
+        "建物図鑑 — 全 14 種",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    for b in Building::ALL {
+        let cost = b.cost();
+        let ticks = b.build_ticks();
+        let secs = (ticks + 5) / 10; // 10 ticks/sec、四捨五入相当
+        // 行1: アイコン + 名前 + コスト + 建設時間
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", building_icon(*b)),
+                Style::default(),
+            ),
+            Span::styled(
+                logic::building_display_name(*b).to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  ${}", cost),
+                Style::default().fg(Color::LightYellow),
+            ),
+            Span::styled(
+                format!("  ⏱{}s", secs),
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
+        // 行2: 役割サマリ (薄色)
+        lines.push(Line::from(Span::styled(
+            format!("  {}", building_role(*b)),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "住宅 Tier — 周辺の経済充実度で自動進化",
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(""));
+
+    let tiers = [
+        logic::HouseTier::Cottage,
+        logic::HouseTier::Apartment,
+        logic::HouseTier::Highrise,
+        logic::HouseTier::Tower,
+        logic::HouseTier::Arcology,
+    ];
+    for t in tiers {
+        let (name, cond, cap, rent_cents) = house_tier_summary(t);
+        lines.push(Line::from(vec![
+            Span::styled(
+                "  ",
+                Style::default(),
+            ),
+            Span::styled(
+                name.to_string(),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  人口{:>3}", cap),
+                Style::default().fg(Color::LightGreen),
+            ),
+            Span::styled(
+                format!("  家賃${:.1}/s", rent_cents as f32 / 100.0),
+                Style::default().fg(Color::LightYellow),
+            ),
+        ]));
+        lines.push(Line::from(Span::styled(
+            format!("    {}", cond),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
     let mut cl = ClickableList::new();
     for line in lines {
         cl.push(line);
@@ -1999,20 +2378,10 @@ fn worker_status_lines(state: &City) -> Vec<Line<'static>> {
     out
 }
 
-/// `building_name` は logic.rs にあるが pub では無いので render 側で複製。
-/// 種類が増えた時に両方更新する必要がある (clippy で気付くのは難しいので注意)。
+/// 名称は logic.rs の `building_display_name` に集約済み。
+/// render 側は薄いラッパーで参照する (重複定義の同期忘れを避けるため)。
 fn building_name_for(b: Building) -> &'static str {
-    match b {
-        Building::Road => "道路",
-        Building::House => "住宅",
-        Building::Workshop => "工房",
-        Building::Factory => "工場",
-        Building::Shop => "店舗",
-        Building::Mall => "商業ビル",
-        Building::Office => "オフィス",
-        Building::Park => "公園",
-        Building::Outpost => "開拓機材",
-    }
+    logic::building_display_name(b)
 }
 
 fn terrain_name_for(t: Terrain) -> &'static str {
@@ -2025,17 +2394,22 @@ fn terrain_name_for(t: Terrain) -> &'static str {
     }
 }
 
-/// 建物の絵文字アイコン (ワーカー一覧表示用)。
+/// 建物の絵文字アイコン (ワーカー一覧表示用 / 図鑑表示用)。
 fn building_icon(b: Building) -> &'static str {
     match b {
         Building::Road => "🛣",
         Building::House => "🏠",
         Building::Workshop => "🔧",
         Building::Factory => "🏭",
+        Building::Refinery => "⛽",
         Building::Shop => "🏪",
         Building::Mall => "🏬",
+        Building::MegaMall => "🛍",
         Building::Office => "🏢",
+        Building::Headquarters => "🏛",
         Building::Park => "🌳",
+        Building::Plaza => "🎡",
+        Building::Stadium => "🏟",
         Building::Outpost => "⚒",
     }
 }

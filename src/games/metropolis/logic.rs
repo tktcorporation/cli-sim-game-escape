@@ -293,7 +293,7 @@ fn advance_construction(city: &mut City) {
     }
     for (x, y, kind) in completions {
         city.completion_flash_until[y][x] = city.tick + COMPLETION_FLASH_TICKS;
-        city.push_event(format!("✓ {} ({},{}) 完成", building_name(kind), x, y));
+        city.push_event(format!("✓ {} ({},{}) 完成", building_display_name(kind), x, y));
     }
     // 同一 tick 内で複数 worker が走る経路 (Tier 3+ workers) では、
     // 完成→次 worker の判断の間に population が古いままにならないよう
@@ -303,7 +303,8 @@ fn advance_construction(city: &mut City) {
     }
 }
 
-fn building_name(b: Building) -> &'static str {
+/// 図鑑・ログ・診断で使う日本語名。Catalog タブから直接参照するため `pub`。
+pub fn building_display_name(b: Building) -> &'static str {
     match b {
         Building::Road => "道路",
         Building::House => "住宅",
@@ -313,6 +314,11 @@ fn building_name(b: Building) -> &'static str {
         Building::Mall => "商業ビル",
         Building::Office => "オフィス",
         Building::Park => "公園",
+        Building::Plaza => "中央広場",
+        Building::Stadium => "競技場",
+        Building::MegaMall => "メガモール",
+        Building::Headquarters => "本社ビル",
+        Building::Refinery => "製油所",
         Building::Outpost => "開拓機材",
     }
 }
@@ -502,6 +508,14 @@ pub fn strategy_thought_verb(s: Strategy, kind: Building) -> &'static str {
         (Strategy::Tech, Building::Office) => "テック企業の拠点を設置",
         (Strategy::Eco, Building::Office) => "緑化オフィスを建設",
 
+        // 超上位 (Plaza / Stadium / MegaMall / Headquarters / Refinery) は
+        // 街が成熟した終盤の象徴施設。戦略の差より「都市の象徴」感を優先する。
+        (_, Building::Plaza) => "中央広場を整備",
+        (_, Building::Stadium) => "競技場を建設",
+        (_, Building::MegaMall) => "メガモールを開業",
+        (_, Building::Headquarters) => "本社ビルを誘致",
+        (_, Building::Refinery) => "製油所を稼働",
+
         (_, Building::Outpost) => "開拓機材を設置",
     }
 }
@@ -654,7 +668,7 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
     if matches!(city.ai_tier, AiTier::DemandAware) {
         city.push_event(format!(
             "▷ {} ({},{}) — {} -${}",
-            building_name(kind),
+            building_display_name(kind),
             x,
             y,
             strategy_thought_verb(city.strategy, kind),
@@ -663,7 +677,7 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
     } else {
         city.push_event(format!(
             "▷ {} ({},{}) 着工 -${}",
-            building_name(kind),
+            building_display_name(kind),
             x,
             y,
             cost
@@ -793,6 +807,7 @@ fn commercial_capacity_within(
             let cap = match city.tile(nx, ny) {
                 Tile::Built(Building::Shop) => SHOP_CAPACITY_CENTS,
                 Tile::Built(Building::Mall) => MALL_CAPACITY_CENTS,
+                Tile::Built(Building::MegaMall) => MEGAMALL_CAPACITY_CENTS,
                 _ => continue,
             };
             if shop_is_active_with(city, nx, ny, connected) {
@@ -830,6 +845,7 @@ fn industrial_capacity_within(
             let cap = match city.tile(nx, ny) {
                 Tile::Built(Building::Workshop) => WORKSHOP_CAPACITY_CENTS,
                 Tile::Built(Building::Factory) => FACTORY_CAPACITY_CENTS,
+                Tile::Built(Building::Refinery) => REFINERY_CAPACITY_CENTS,
                 _ => continue,
             };
             if workshop_is_active_with(city, nx, ny, connected) {
@@ -860,10 +876,13 @@ fn white_collar_capacity_within(
                 continue;
             }
             let (nx, ny) = (nx as usize, ny as usize);
-            if matches!(city.tile(nx as usize, ny as usize), Tile::Built(Building::Office))
-                && workshop_is_active_with(city, nx, ny, connected)
-            {
-                total += OFFICE_CAPACITY_CENTS;
+            let cap = match city.tile(nx, ny) {
+                Tile::Built(Building::Office) => OFFICE_CAPACITY_CENTS,
+                Tile::Built(Building::Headquarters) => HEADQUARTERS_CAPACITY_CENTS,
+                _ => continue,
+            };
+            if workshop_is_active_with(city, nx, ny, connected) {
+                total += cap;
             }
         }
     }
@@ -878,13 +897,19 @@ pub enum EmploymentClass {
     WhiteCollar,
 }
 
-/// 商業供給キャパシティ (cents/sec) — Shop / Mall の上限収入。
+/// 商業供給キャパシティ (cents/sec) — Shop / Mall / MegaMall の上限収入。
 pub const SHOP_CAPACITY_CENTS: i64 = 200; // $2/sec
 pub const MALL_CAPACITY_CENTS: i64 = 600; // $6/sec
-/// 雇用供給キャパシティ (cents/sec) — Workshop / Factory / Office の上限収入。
+/// MegaMall: Mall の約 2.5 倍。Tower 以上の住人プレミアム需要を吸収する。
+pub const MEGAMALL_CAPACITY_CENTS: i64 = 1_500; // $15/sec
+/// 雇用供給キャパシティ (cents/sec) — Workshop / Factory / Refinery / Office / Headquarters。
 pub const WORKSHOP_CAPACITY_CENTS: i64 = 100; // $1/sec
 pub const FACTORY_CAPACITY_CENTS: i64 = 350; // $3.5/sec
+/// Refinery: Factory の約 2.5 倍。重工業の頂点。
+pub const REFINERY_CAPACITY_CENTS: i64 = 900; // $9/sec
 pub const OFFICE_CAPACITY_CENTS: i64 = 250; // $2.5/sec
+/// Headquarters: Office の約 2.8 倍。Tower 化触媒で終盤の主力。
+pub const HEADQUARTERS_CAPACITY_CENTS: i64 = 700; // $7/sec
 
 /// 1 人当たり購買力 (cents/sec)。商業需要の換算係数。
 pub const PURCHASE_POWER_PER_CAPITA: i64 = 4;
@@ -1003,6 +1028,8 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
                         HouseTier::Cottage => 50,
                         HouseTier::Apartment => 150,
                         HouseTier::Highrise => 300,
+                        HouseTier::Tower => 600,
+                        HouseTier::Arcology => 1_200,
                     };
                     // House SOFT ルール: 未接続 Cottage は半減 ($0.25/sec)。
                     if !is_building_edge_connected(&connected, x, y) {
@@ -1038,6 +1065,24 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
                     &pop_map,
                     &connected,
                 ),
+                Building::Headquarters => employment_income_cents(
+                    city,
+                    x,
+                    y,
+                    HEADQUARTERS_CAPACITY_CENTS,
+                    EmploymentClass::WhiteCollar,
+                    &pop_map,
+                    &connected,
+                ),
+                Building::Refinery => employment_income_cents(
+                    city,
+                    x,
+                    y,
+                    REFINERY_CAPACITY_CENTS,
+                    EmploymentClass::Industrial,
+                    &pop_map,
+                    &connected,
+                ),
                 Building::Shop => commercial_income_cents(
                     city,
                     x,
@@ -1051,6 +1096,14 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
                     x,
                     y,
                     MALL_CAPACITY_CENTS,
+                    &pop_map,
+                    &connected,
+                ),
+                Building::MegaMall => commercial_income_cents(
+                    city,
+                    x,
+                    y,
+                    MEGAMALL_CAPACITY_CENTS,
                     &pop_map,
                     &connected,
                 ),
@@ -1143,6 +1196,9 @@ pub fn house_capacity(tier: HouseTier) -> u32 {
         HouseTier::Cottage => 4,
         HouseTier::Apartment => 12,
         HouseTier::Highrise => 30,
+        // Tower / Arcology は終盤の象徴段階。Highrise の倍以上を吸収する。
+        HouseTier::Tower => 70,
+        HouseTier::Arcology => 150,
     }
 }
 
@@ -1157,25 +1213,36 @@ pub enum HouseTier {
     Cottage,   // 基本の住宅。インフラ未整備。
     Apartment, // 中層。Road + Workshop が近い。
     Highrise,  // 高層。Road + Workshop + Shop が揃った成熟ゾーン。
+    /// 超高層タワー。Highrise を超える経済密度と Plaza 級の文化触媒、
+    /// または Headquarters / MegaMall いずれかが近接した街区で出現する。
+    Tower,
+    /// 自己完結都市 (Arcology)。Stadium と Headquarters / MegaMall が共に近く、
+    /// 経済密度が極めて高い終盤の街区にのみ出現する象徴段階。
+    Arcology,
 }
 
 /// `house_tier_for` が見る周囲の充実度サマリ。
 ///
 /// House 一軒分の周辺をスキャンして集計したもの。フィールドの意味:
 /// - `n_road_adj`: 4-近傍にある Road タイル数 (0..=4)。0 だと未接続。
-/// - `n_workshop_within_5`: 距離 5 以内の Workshop / Factory 合計数。
-///   Factory は Workshop の 2 倍カウントする (= 規模換算)。
-/// - `n_shop_within_5`: 距離 5 以内の Shop / Mall 合計数。
-///   Mall は Shop の 2 倍カウントする。
-/// - `n_office_within_5`: 距離 5 以内の Office 数。Highrise 化の触媒。
+/// - `n_workshop_within_5`: 距離 5 以内の Workshop / Factory / Refinery 換算数。
+///   Factory は Workshop の 2 倍、Refinery は 4 倍 (= 規模換算)。
+/// - `n_shop_within_5`: 距離 5 以内の Shop / Mall / MegaMall 換算数。
+///   Mall は 2 倍、MegaMall は 4 倍。
+/// - `n_office_within_5`: 距離 5 以内の Office / Headquarters 換算数。
+///   Headquarters は Office の 3 倍 (Tower 化触媒)。
 /// - `n_house_within_3`: 距離 3 以内の House 数 (自身は除く)。
-/// - `n_park_within_4`: 距離 4 以内の Park 数。緑地でも街が育つ。
+/// - `n_park_within_4`: 距離 4 以内の Park / Plaza / Stadium 換算数。
+///   Plaza は Park の 3 倍、Stadium は 6 倍。
+/// - `n_megaculture_within_5`: 距離 5 以内の Stadium 数。Arcology の必須条件。
+/// - `n_megacommerce_or_hq_within_5`: 距離 5 以内の MegaMall + Headquarters 数。
+///   Tower 昇格の触媒条件。
 /// - `local_population`: 距離 5 以内の人口合計 (自身を除く)。需給ゲート用。
-/// - `factory_smoke_penalty`: 隣接 (4-近傍) に Factory がある場合 true。
+/// - `factory_smoke_penalty`: 隣接 (4-近傍) に Factory / Refinery がある場合 true。
 ///   Tier を 1 段下げる「煙害」を表現。
 /// - `edge_connected`: 隣接 Road が「マップ端まで繋がる幹線網」に属するか。
 ///   SOFT ルール: 未接続でも Cottage 暮らしは可。Apartment / Highrise には必須。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HouseNeighborhood {
     pub n_road_adj: u32,
     pub n_workshop_within_5: u32,
@@ -1183,6 +1250,8 @@ pub struct HouseNeighborhood {
     pub n_office_within_5: u32,
     pub n_house_within_3: u32,
     pub n_park_within_4: u32,
+    pub n_megaculture_within_5: u32,
+    pub n_megacommerce_or_hq_within_5: u32,
     pub local_population: u32,
     pub factory_smoke_penalty: bool,
     pub edge_connected: bool,
@@ -1219,7 +1288,9 @@ pub fn gather_house_neighborhood_with(
         }
         match city.tile(nx as usize, ny as usize) {
             Tile::Built(Building::Road) => n_road_adj += 1,
-            Tile::Built(Building::Factory) => factory_smoke_penalty = true,
+            Tile::Built(Building::Factory) | Tile::Built(Building::Refinery) => {
+                factory_smoke_penalty = true
+            }
             _ => {}
         }
     }
@@ -1229,6 +1300,8 @@ pub fn gather_house_neighborhood_with(
     let mut n_office_within_5 = 0u32;
     let mut n_house_within_3 = 0u32;
     let mut n_park_within_4 = 0u32;
+    let mut n_megaculture_within_5 = 0u32;
+    let mut n_megacommerce_or_hq_within_5 = 0u32;
     let mut local_population: u32 = 0;
     for cy in 0..GRID_H {
         for cx in 0..GRID_W {
@@ -1238,9 +1311,18 @@ pub fn gather_house_neighborhood_with(
             match city.tile(cx, cy) {
                 Tile::Built(Building::Shop) if manhattan <= 5 => n_shop_within_5 += 1,
                 Tile::Built(Building::Mall) if manhattan <= 5 => n_shop_within_5 += 2,
+                Tile::Built(Building::MegaMall) if manhattan <= 5 => {
+                    n_shop_within_5 += 4;
+                    n_megacommerce_or_hq_within_5 += 1;
+                }
                 Tile::Built(Building::Workshop) if manhattan <= 5 => n_workshop_within_5 += 1,
                 Tile::Built(Building::Factory) if manhattan <= 5 => n_workshop_within_5 += 2,
+                Tile::Built(Building::Refinery) if manhattan <= 5 => n_workshop_within_5 += 4,
                 Tile::Built(Building::Office) if manhattan <= 5 => n_office_within_5 += 1,
+                Tile::Built(Building::Headquarters) if manhattan <= 5 => {
+                    n_office_within_5 += 3;
+                    n_megacommerce_or_hq_within_5 += 1;
+                }
                 Tile::Built(Building::House) if manhattan <= 5 && (cx, cy) != (x, y) => {
                     if manhattan <= 3 {
                         n_house_within_3 += 1;
@@ -1253,6 +1335,11 @@ pub fn gather_house_neighborhood_with(
                     local_population += house_capacity(HouseTier::Cottage);
                 }
                 Tile::Built(Building::Park) if manhattan <= 4 => n_park_within_4 += 1,
+                Tile::Built(Building::Plaza) if manhattan <= 4 => n_park_within_4 += 3,
+                Tile::Built(Building::Stadium) if manhattan <= 5 => {
+                    n_park_within_4 += 6;
+                    n_megaculture_within_5 += 1;
+                }
                 _ => {}
             }
         }
@@ -1265,6 +1352,8 @@ pub fn gather_house_neighborhood_with(
         n_office_within_5,
         n_house_within_3,
         n_park_within_4,
+        n_megaculture_within_5,
+        n_megacommerce_or_hq_within_5,
         local_population,
         factory_smoke_penalty,
         edge_connected: is_building_edge_connected(connected, x, y),
@@ -1326,6 +1415,31 @@ pub fn house_tier_for(stats: HouseNeighborhood) -> HouseTier {
     let demand_pressure = stats.local_population / 30; // 0, 1, 2, ...
     let apartment_required = 1 + demand_pressure;
     let highrise_required = 2 + demand_pressure;
+    // Tower / Arcology は終盤の象徴段階。経済密度の閾値を一気に引き上げ、
+    // 「街区にメガ施設が揃わないと出ない」絵を作る。
+    let tower_required = 8 + demand_pressure;
+    let arcology_required = 14 + demand_pressure;
+
+    // Arcology: 全部入りの最終段階。Stadium と (MegaMall または Headquarters) が
+    // 共に近接し、Road / 周囲 House / 経済密度すべてが厚い時のみ。
+    if stats.n_road_adj >= 3
+        && stats.n_megaculture_within_5 >= 1
+        && stats.n_megacommerce_or_hq_within_5 >= 1
+        && economic_density >= arcology_required
+        && stats.n_house_within_3 >= 4
+    {
+        return apply_smoke_penalty(HouseTier::Arcology, stats.factory_smoke_penalty);
+    }
+
+    // Tower: Highrise の上。MegaMall または Headquarters が近接し、経済密度
+    // が高い街区で出現する。Stadium がなくとも到達できる「現実的な終盤」。
+    if stats.n_road_adj >= 2
+        && stats.n_megacommerce_or_hq_within_5 >= 1
+        && economic_density >= tower_required
+        && stats.n_house_within_3 >= 3
+    {
+        return apply_smoke_penalty(HouseTier::Tower, stats.factory_smoke_penalty);
+    }
 
     // Highrise: 商工業 + 緑地が両立した成熟ゾーン。Office があると Highrise 化
     // しやすい (= n_office_within_5 が経済密度に倍率付き加算済み)。
@@ -1354,6 +1468,8 @@ fn apply_smoke_penalty(tier: HouseTier, penalized: bool) -> HouseTier {
         return tier;
     }
     match tier {
+        HouseTier::Arcology => HouseTier::Tower,
+        HouseTier::Tower => HouseTier::Highrise,
         HouseTier::Highrise => HouseTier::Apartment,
         HouseTier::Apartment => HouseTier::Cottage,
         HouseTier::Cottage => HouseTier::Cottage,
@@ -1398,6 +1514,10 @@ pub fn tier_dwell_required_ticks(target: HouseTier) -> u64 {
         HouseTier::Cottage => 0,
         HouseTier::Apartment => 600,
         HouseTier::Highrise => 3000,
+        // Tower: 築 10 min — 「街区がもう一段成熟するまで」
+        HouseTier::Tower => 6000,
+        // Arcology: 築 15 min — 終盤プレイヤーへの最終報酬
+        HouseTier::Arcology => 9000,
     }
 }
 
@@ -1410,8 +1530,23 @@ pub fn tier_dwell_required_ticks(target: HouseTier) -> u64 {
 /// 判定する。シンプルで純関数のままなのが利点。「条件が揺れても、家自体が
 /// 古ければ昇格できる」副作用があるが、Idle ゲームの粒度では問題にならない。
 pub fn effective_house_tier(target: HouseTier, age_ticks: u64) -> HouseTier {
-    if matches!(target, HouseTier::Highrise)
-        && age_ticks >= tier_dwell_required_ticks(HouseTier::Highrise)
+    // 上から順に「目標 Tier 以上 かつ dwell 満了」を満たす最高位を返す。
+    // 目標が下位なら age_ticks に関係なくそこで打ち切る (Cottage 街区が
+    // 経年で勝手に Highrise にならない)。
+    if matches!(target, HouseTier::Arcology)
+        && age_ticks >= tier_dwell_required_ticks(HouseTier::Arcology)
+    {
+        return HouseTier::Arcology;
+    }
+    if matches!(target, HouseTier::Arcology | HouseTier::Tower)
+        && age_ticks >= tier_dwell_required_ticks(HouseTier::Tower)
+    {
+        return HouseTier::Tower;
+    }
+    if matches!(
+        target,
+        HouseTier::Arcology | HouseTier::Tower | HouseTier::Highrise
+    ) && age_ticks >= tier_dwell_required_ticks(HouseTier::Highrise)
     {
         return HouseTier::Highrise;
     }
@@ -1465,6 +1600,8 @@ pub fn effective_tier_at_with(
 /// 周期が長くなり、終盤の街が落ち着いて見える効果も狙う。
 pub fn lifespan_x100(building: Building, tier: Option<HouseTier>) -> u32 {
     match (building, tier) {
+        (Building::House, Some(HouseTier::Arcology)) => 800,
+        (Building::House, Some(HouseTier::Tower)) => 600,
         (Building::House, Some(HouseTier::Highrise)) => 400,
         (Building::House, Some(HouseTier::Apartment)) => 250,
         (Building::House, _) => 100,
@@ -1474,8 +1611,14 @@ pub fn lifespan_x100(building: Building, tier: Option<HouseTier>) -> u32 {
         (Building::Factory, _) => 300,
         (Building::Mall, _) => 320,
         (Building::Office, _) => 280,
-        // インフラと緑地は不老。
+        // 超上位建物は終盤の街の骨格として長寿命。
+        (Building::Refinery, _) => 500,
+        (Building::MegaMall, _) => 550,
+        (Building::Headquarters, _) => 480,
+        // インフラと緑地は不老 (大型文化施設も含む)。
         (Building::Park, _) => u32::MAX,
+        (Building::Plaza, _) => u32::MAX,
+        (Building::Stadium, _) => u32::MAX,
         (Building::Road, _) => u32::MAX,
         // Outpost は使い捨て (Rock 解禁後に auto_demolish される前提)。
         (Building::Outpost, _) => 100,
@@ -1788,7 +1931,7 @@ pub fn demolish_at(city: &mut City, x: usize, y: usize) -> bool {
         "🗑 ({},{}) {} を撤去 -${}",
         x,
         y,
-        building_name(kind),
+        building_display_name(kind),
         cost
     ));
     true
@@ -1882,6 +2025,41 @@ pub fn demolish_value(city: &City, x: usize, y: usize, connected: &[Vec<bool>]) 
                 functional_bonus += 60;
             }
             active
+        }
+        Building::Refinery => {
+            let active = workshop_is_active_with(city, x, y, connected);
+            if !active {
+                functional_bonus += 140;
+            }
+            active
+        }
+        Building::Headquarters => {
+            let active = workshop_is_active_with(city, x, y, connected);
+            if !active {
+                functional_bonus += 120;
+            }
+            active
+        }
+        Building::MegaMall => {
+            let active = shop_is_active_with(city, x, y, connected);
+            if !active {
+                functional_bonus += 160;
+            }
+            active
+        }
+        Building::Plaza => {
+            let supported = has_house_within(city, x, y, 5);
+            if !supported {
+                functional_bonus += 70;
+            }
+            supported
+        }
+        Building::Stadium => {
+            let supported = has_house_within(city, x, y, 6);
+            if !supported {
+                functional_bonus += 120;
+            }
+            supported
         }
         Building::Outpost => {
             // 役目を終えた Outpost (周囲 4-近傍に Rock が無い) は撤去候補。
@@ -1993,6 +2171,8 @@ fn cell_current_income_cents(city: &City, x: usize, y: usize, connected: &[Vec<b
                 HouseTier::Cottage => 50,
                 HouseTier::Apartment => 150,
                 HouseTier::Highrise => 300,
+                HouseTier::Tower => 600,
+                HouseTier::Arcology => 1_200,
             };
             if !is_building_edge_connected(connected, x, y) {
                 raw / 2
@@ -2000,8 +2180,22 @@ fn cell_current_income_cents(city: &City, x: usize, y: usize, connected: &[Vec<b
                 raw
             }
         }
-        Building::Workshop if workshop_is_active_with(city, x, y, connected) => 100,
-        Building::Shop if shop_is_active_with(city, x, y, connected) => 200,
+        Building::Workshop if workshop_is_active_with(city, x, y, connected) => {
+            WORKSHOP_CAPACITY_CENTS
+        }
+        Building::Factory if workshop_is_active_with(city, x, y, connected) => {
+            FACTORY_CAPACITY_CENTS
+        }
+        Building::Refinery if workshop_is_active_with(city, x, y, connected) => {
+            REFINERY_CAPACITY_CENTS
+        }
+        Building::Office if workshop_is_active_with(city, x, y, connected) => OFFICE_CAPACITY_CENTS,
+        Building::Headquarters if workshop_is_active_with(city, x, y, connected) => {
+            HEADQUARTERS_CAPACITY_CENTS
+        }
+        Building::Shop if shop_is_active_with(city, x, y, connected) => SHOP_CAPACITY_CENTS,
+        Building::Mall if shop_is_active_with(city, x, y, connected) => MALL_CAPACITY_CENTS,
+        Building::MegaMall if shop_is_active_with(city, x, y, connected) => MEGAMALL_CAPACITY_CENTS,
         _ => 0,
     };
     if base_cents == 0 || city.built_at_tick[y][x] == 0 {
@@ -2016,6 +2210,10 @@ fn cell_current_income_cents(city: &City, x: usize, y: usize, connected: &[Vec<b
 /// 全 kind を試し、最大値を返す (= 同 kind の再建も含むので「撤去 → 同種建て直しで
 /// improvement = 0」の挙動が自然に出る)。下限は 0 (= 何も建てないなら 0)。
 fn best_replacement_value(city: &City, x: usize, y: usize, connected: &[Vec<bool>]) -> i64 {
+    // 上位建物 (Plaza / MegaMall 等) は cost が大きく ROI ペナルティで自然に
+    // 落選するため、撤去 → 即建て替え候補としては基礎建物だけでも十分。
+    // 候補リストを増やしすぎると best_replacement_value の計算量が
+    // 全 Built タイル × 全候補と掛け算になるため意図的に最小限に絞る。
     let candidates = [
         Building::House,
         Building::Road,
@@ -2321,9 +2519,29 @@ fn direct_income_value(
             OFFICE_CAPACITY_CENTS,
             EmploymentClass::WhiteCollar,
         ),
+        Building::Refinery => employment_demand_aware_value(
+            city,
+            x,
+            y,
+            connected,
+            REFINERY_CAPACITY_CENTS,
+            EmploymentClass::Industrial,
+        ),
+        Building::Headquarters => employment_demand_aware_value(
+            city,
+            x,
+            y,
+            connected,
+            HEADQUARTERS_CAPACITY_CENTS,
+            EmploymentClass::WhiteCollar,
+        ),
         Building::Shop => commercial_demand_aware_value(city, x, y, connected, SHOP_CAPACITY_CENTS),
         Building::Mall => commercial_demand_aware_value(city, x, y, connected, MALL_CAPACITY_CENTS),
-        Building::Park | Building::Road | Building::Outpost => 0,
+        Building::MegaMall => {
+            commercial_demand_aware_value(city, x, y, connected, MEGAMALL_CAPACITY_CENTS)
+        }
+        Building::Park | Building::Plaza | Building::Stadium | Building::Road
+        | Building::Outpost => 0,
     }
 }
 
@@ -2432,10 +2650,11 @@ fn synergy_income_value(
     // `house_tier_for` の `local_population` が距離 5 以内で集計するため
     // (= 新規 House を置くと距離 5 以内の周囲 House の需給ゲートが厳しくなる)。
     let radius: i32 = match kind {
-        Building::Workshop | Building::Factory => 5,
-        Building::Shop | Building::Mall => 5,
-        Building::Office => 5,
-        Building::Park => 4,
+        Building::Workshop | Building::Factory | Building::Refinery => 5,
+        Building::Shop | Building::Mall | Building::MegaMall => 5,
+        Building::Office | Building::Headquarters => 5,
+        Building::Park | Building::Plaza => 4,
+        Building::Stadium => 5,
         Building::House => 5,
         Building::Road => 1,
         Building::Outpost => return 0,
@@ -2483,10 +2702,30 @@ fn synergy_income_value(
                         after.factory_smoke_penalty = true;
                     }
                 }
+                Building::Refinery => {
+                    after.n_workshop_within_5 += 4;
+                    let manh = ((nx as i32 - x as i32).abs() + (ny as i32 - y as i32).abs()) as u32;
+                    if manh <= 2 {
+                        after.factory_smoke_penalty = true;
+                    }
+                }
                 Building::Shop => after.n_shop_within_5 += 1,
                 Building::Mall => after.n_shop_within_5 += 2,
+                Building::MegaMall => {
+                    after.n_shop_within_5 += 4;
+                    after.n_megacommerce_or_hq_within_5 += 1;
+                }
                 Building::Office => after.n_office_within_5 += 1,
+                Building::Headquarters => {
+                    after.n_office_within_5 += 3;
+                    after.n_megacommerce_or_hq_within_5 += 1;
+                }
                 Building::Park => after.n_park_within_4 += 1,
+                Building::Plaza => after.n_park_within_4 += 3,
+                Building::Stadium => {
+                    after.n_park_within_4 += 6;
+                    after.n_megaculture_within_5 += 1;
+                }
                 Building::Road => {
                     let manh = ((nx as i32 - x as i32).abs() + (ny as i32 - y as i32).abs()) as u32;
                     if manh == 1 {
@@ -2498,17 +2737,14 @@ fn synergy_income_value(
             let cur_tier = house_tier_for(cur);
             let new_tier = house_tier_for(after);
             if new_tier > cur_tier {
-                let cur_inc = match cur_tier {
+                let to_income = |t: HouseTier| match t {
                     HouseTier::Cottage => 50,
                     HouseTier::Apartment => 150,
                     HouseTier::Highrise => 300,
+                    HouseTier::Tower => 600,
+                    HouseTier::Arcology => 1_200,
                 };
-                let new_inc = match new_tier {
-                    HouseTier::Cottage => 50,
-                    HouseTier::Apartment => 150,
-                    HouseTier::Highrise => 300,
-                };
-                delta_cents += new_inc - cur_inc;
+                delta_cents += to_income(new_tier) - to_income(cur_tier);
             }
         }
     }
@@ -2622,26 +2858,36 @@ fn future_potential_value(
 /// 評価関数の主軸 (income/sec の真の予測) は崩さない。
 fn strategy_bias(s: Strategy, kind: Building) -> i64 {
     match (s, kind) {
-        // 成長: House 最優先、Office は Highrise 化に効くので軽く加点。
+        // 成長: House 最優先、Office / Headquarters は Highrise / Tower 化に効くので加点。
         (Strategy::Growth, Building::House) => 40,
         (Strategy::Growth, Building::Road) => 10,
         (Strategy::Growth, Building::Shop) => -20,
         (Strategy::Growth, Building::Office) => 15,
-        // 収入: 商業 + 必要な住宅。Mall / Factory も積極的に。
+        (Strategy::Growth, Building::Headquarters) => 30,
+        (Strategy::Growth, Building::Plaza) => 25,
+        (Strategy::Growth, Building::Stadium) => 50,
+        // 収入: 商業 + 必要な住宅。Mall / Factory / 上位施設も積極的に。
         (Strategy::Income, Building::Shop) => 50,
         (Strategy::Income, Building::Mall) => 70,
+        (Strategy::Income, Building::MegaMall) => 90,
         (Strategy::Income, Building::Workshop) => 25,
         (Strategy::Income, Building::Factory) => 45,
+        (Strategy::Income, Building::Refinery) => 80,
         (Strategy::Income, Building::Office) => 30,
+        (Strategy::Income, Building::Headquarters) => 60,
         (Strategy::Income, Building::House) => 25,
-        // 技術: 道路網拡大を最優先 + Office (テック企業のイメージ)。
+        // 技術: 道路網拡大を最優先 + Office / Headquarters (テック企業のイメージ)。
         (Strategy::Tech, Building::Road) => 40,
         (Strategy::Tech, Building::House) => 10,
         (Strategy::Tech, Building::Office) => 25,
-        // 環境: Park ボーナス + Factory は減点 (煙害)。
+        (Strategy::Tech, Building::Headquarters) => 50,
+        // 環境: Park / Plaza / Stadium ボーナス + 重工業は減点 (煙害)。
         (Strategy::Eco, Building::Park) => 60,
+        (Strategy::Eco, Building::Plaza) => 80,
+        (Strategy::Eco, Building::Stadium) => 70,
         (Strategy::Eco, Building::House) => 20,
         (Strategy::Eco, Building::Factory) => -50,
+        (Strategy::Eco, Building::Refinery) => -90,
         _ => 0,
     }
 }
@@ -2711,12 +2957,9 @@ mod tests {
             n_road_adj: n_road,
             n_workshop_within_5: n_workshop,
             n_shop_within_5: n_shop,
-            n_office_within_5: 0,
             n_house_within_3: n_house,
-            n_park_within_4: 0,
-            local_population: 0,
-            factory_smoke_penalty: false,
             edge_connected: true,
+            ..Default::default()
         }
     }
 
@@ -2732,12 +2975,10 @@ mod tests {
             n_road_adj: n_road,
             n_workshop_within_5: n_workshop,
             n_shop_within_5: n_shop,
-            n_office_within_5: 0,
             n_house_within_3: n_house,
             n_park_within_4: n_park,
-            local_population: 0,
-            factory_smoke_penalty: false,
             edge_connected: true,
+            ..Default::default()
         }
     }
 
@@ -2755,12 +2996,10 @@ mod tests {
             n_road_adj: 2,
             n_workshop_within_5: 2,
             n_shop_within_5: 2,
-            n_office_within_5: 0,
             n_house_within_3: 4,
             n_park_within_4: 2,
-            local_population: 0,
-            factory_smoke_penalty: false,
             edge_connected: false,
+            ..Default::default()
         };
         assert_eq!(
             house_tier_for(stats),
@@ -3516,12 +3755,10 @@ mod tests {
             n_road_adj: 1,
             n_workshop_within_5: 0,
             n_shop_within_5: 1,
-            n_office_within_5: 0,
             n_house_within_3: 1,
-            n_park_within_4: 0,
             local_population: 35, // ゲート発動
-            factory_smoke_penalty: false,
             edge_connected: true,
+            ..Default::default()
         };
         // econ=1, 必要 2 → Apartment にならず Cottage に縮退。
         assert_eq!(house_tier_for(stats), HouseTier::Cottage);
@@ -3534,12 +3771,10 @@ mod tests {
             n_road_adj: 1,
             n_workshop_within_5: 0,
             n_shop_within_5: 1,
-            n_office_within_5: 0,
             n_house_within_3: 1,
-            n_park_within_4: 0,
             local_population: 10, // ゲート未発動
-            factory_smoke_penalty: false,
             edge_connected: true,
+            ..Default::default()
         };
         assert_eq!(house_tier_for(stats), HouseTier::Apartment);
     }
@@ -3549,14 +3784,11 @@ mod tests {
     fn office_promotes_to_highrise() {
         let stats = HouseNeighborhood {
             n_road_adj: 2,
-            n_workshop_within_5: 0,
             n_shop_within_5: 1,
             n_office_within_5: 1, // 1 * 3 / 2 = 1 → econ=2
             n_house_within_3: 3,
-            n_park_within_4: 0,
-            local_population: 0,
-            factory_smoke_penalty: false,
             edge_connected: true,
+            ..Default::default()
         };
         // economic_density = 1 (Shop) + 1 (Office) = 2 → Highrise 条件達成。
         assert_eq!(house_tier_for(stats), HouseTier::Highrise);
@@ -3689,14 +3921,11 @@ mod tests {
     fn factory_smoke_penalty_reduces_tier() {
         let stats = HouseNeighborhood {
             n_road_adj: 2,
-            n_workshop_within_5: 0,
             n_shop_within_5: 2,
-            n_office_within_5: 0,
             n_house_within_3: 4,
-            n_park_within_4: 0,
-            local_population: 0,
             factory_smoke_penalty: true, // 煙害 ON
             edge_connected: true,
+            ..Default::default()
         };
         // Highrise 条件を満たすが煙害で Apartment に降格。
         assert_eq!(house_tier_for(stats), HouseTier::Apartment);

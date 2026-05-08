@@ -357,10 +357,15 @@ fn tier3_road_planner(city: &mut City) -> AiAction {
         Building::House
         | Building::Shop
         | Building::Mall
+        | Building::MegaMall
         | Building::Workshop
         | Building::Factory
+        | Building::Refinery
         | Building::Office
+        | Building::Headquarters
         | Building::Park
+        | Building::Plaza
+        | Building::Stadium
         | Building::Outpost => (0..GRID_H)
             .flat_map(|y| (0..GRID_W).map(move |x| (x, y)))
             .filter(|(x, y)| is_empty_next_to_road(city, *x, *y))
@@ -456,6 +461,24 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
         if matches!(kind, Building::Office) && city.count_built(Building::House) < 4 {
             return false;
         }
+        // 超上位建物は街がそれなりに育ってから建てる (cost が高く、機能には
+        // 一定数の House が必要)。ROI ペナルティだけだと序盤に空地スコアの
+        // 関係で誤って高評価されることがあるため、人口下限のガードで弾く。
+        if matches!(kind, Building::Refinery) && city.count_built(Building::House) < 12 {
+            return false;
+        }
+        if matches!(kind, Building::MegaMall) && city.count_built(Building::House) < 12 {
+            return false;
+        }
+        if matches!(kind, Building::Headquarters) && city.count_built(Building::House) < 10 {
+            return false;
+        }
+        if matches!(kind, Building::Plaza) && city.count_built(Building::House) < 8 {
+            return false;
+        }
+        if matches!(kind, Building::Stadium) && city.count_built(Building::House) < 20 {
+            return false;
+        }
         // savings protection: 高コスト建物を建てたら House を建てる原資を割る
         // 場合は避ける。Outpost は飽和時専用なので例外。
         if !matches!(kind, Building::House | Building::Outpost)
@@ -539,16 +562,24 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
         }
     };
 
-    // 通常 cells: 全 kinds (Outpost 除く) を評価
+    // 通常 cells: 全 kinds (Outpost 除く) を評価。
+    // 上位建物 (Refinery / MegaMall / Headquarters / Plaza / Stadium) も候補に
+    // 含めるが、cost が高いため `placement_value` の ROI ペナルティで序盤は
+    // 自然に落選する。終盤 (cash と街の規模が揃った時) のみトップ候補に浮上する設計。
     let normal_kinds: &[Building] = &[
         Building::House,
         Building::Road,
         Building::Workshop,
         Building::Factory,
+        Building::Refinery,
         Building::Shop,
         Building::Mall,
+        Building::MegaMall,
         Building::Office,
+        Building::Headquarters,
         Building::Park,
+        Building::Plaza,
+        Building::Stadium,
     ];
     for &(x, y) in &regular {
         for &kind in normal_kinds {

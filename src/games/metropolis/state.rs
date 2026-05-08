@@ -83,6 +83,22 @@ pub enum Building {
     /// 公園 (文化触媒)。直接収入なし。Highrise 化の最終条件である「文化需要
     /// 充足」を担う。道路接続不要。
     Park,
+    /// 中央広場 (Park 上位)。直接収入なし。Park より広い半径で文化触媒として
+    /// 働き、Tower 化の必須条件のひとつ。
+    Plaza,
+    /// 競技場 (文化メガ施設)。Plaza よりさらに広い半径で文化を供給し、
+    /// Arcology 化の必須条件のひとつ。建設に莫大なコストが掛かる代わりに、
+    /// 周辺街区を一気に高層化させる「都市の象徴」。
+    Stadium,
+    /// 商業ビル群 (Mall 上位)。商業キャパシティが Mall の約 2.5 倍で、
+    /// Tower 以上の住人にプレミアム需要を供給する。終盤の主力商業施設。
+    MegaMall,
+    /// 本社ビル (Office 上位)。ホワイトカラー雇用の超大型供給源で、
+    /// 周囲 House を Tower 化する触媒。Highrise 化を超えた最終段階を開く。
+    Headquarters,
+    /// 製油所 (Factory 上位)。雇用キャパシティが Factory の約 2.5 倍で、
+    /// 重工業の頂点。煙害は Factory より広い 2 タイル半径に及ぶ。
+    Refinery,
     /// **開拓機材** — 隣接する Rock セルの整地を可能にする特殊建物。
     /// AI (Tier 4/5) が `placement_value` で判定して自分で建てる。
     Outpost,
@@ -106,8 +122,32 @@ impl Building {
             Building::Factory => 300,
             Building::Mall => 400,
             Building::Outpost => 600,
+            Building::Plaza => 800,
+            Building::Refinery => 1_200,
+            Building::MegaMall => 1_500,
+            Building::Headquarters => 1_800,
+            Building::Stadium => 2_500,
         }
     }
+
+    /// 図鑑表示順 (低 Tier → 高 Tier、インフラ → 住居 → 雇用 → 商業 → オフィス → 文化 → 特殊)。
+    /// Catalog タブが Building 全種を反復する用途で使う。
+    pub const ALL: &'static [Building] = &[
+        Building::Road,
+        Building::House,
+        Building::Workshop,
+        Building::Factory,
+        Building::Refinery,
+        Building::Shop,
+        Building::Mall,
+        Building::MegaMall,
+        Building::Office,
+        Building::Headquarters,
+        Building::Park,
+        Building::Plaza,
+        Building::Stadium,
+        Building::Outpost,
+    ];
 
     /// Ticks needed to finish construction.
     ///
@@ -115,15 +155,20 @@ impl Building {
     /// 序盤有利・上位建物が中盤以降に開く流れ。
     pub fn build_ticks(self) -> u32 {
         match self {
-            Building::Road => 30,        // 3 sec
-            Building::House => 100,      // 10 sec
-            Building::Park => 80,        // 8 sec
-            Building::Workshop => 150,   // 15 sec
-            Building::Shop => 200,       // 20 sec
-            Building::Office => 220,     // 22 sec — オフィスは内装に時間
-            Building::Factory => 280,    // 28 sec — 重工業は搬入が長い
-            Building::Mall => 320,       // 32 sec — 大型商業
-            Building::Outpost => 600,    // 60 sec
+            Building::Road => 30,         // 3 sec
+            Building::House => 100,       // 10 sec
+            Building::Park => 80,         // 8 sec
+            Building::Workshop => 150,    // 15 sec
+            Building::Shop => 200,        // 20 sec
+            Building::Office => 220,      // 22 sec — オフィスは内装に時間
+            Building::Factory => 280,     // 28 sec — 重工業は搬入が長い
+            Building::Mall => 320,        // 32 sec — 大型商業
+            Building::Outpost => 600,     // 60 sec
+            Building::Plaza => 360,       // 36 sec — 大型公園は造園に時間
+            Building::Refinery => 540,    // 54 sec — 重工業の頂点
+            Building::MegaMall => 600,    // 60 sec — 多層商業ビル
+            Building::Headquarters => 720,// 72 sec — 高層オフィス
+            Building::Stadium => 900,     // 90 sec — 都市の象徴は最も長い
         }
     }
 
@@ -194,13 +239,17 @@ pub fn next_tier_threshold(t: CityTier) -> Option<u32> {
     }
 }
 
-/// 右パネルのタブ。Status / Manager / Events / World が初期セット。
+/// 右パネルのタブ。Status / Manager / Events / World / Catalog の 5 種。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PanelTab {
     Status,
     Manager,
     Events,
     World,
+    /// 建物図鑑。全 Building 種類のコスト・建設時間・役割・条件・収入レンジを
+    /// 一覧で見せる読み取り専用パネル。プレイヤーが「次に何が建つのか」を
+    /// 把握するための情報源。
+    Catalog,
 }
 
 impl PanelTab {
@@ -210,6 +259,7 @@ impl PanelTab {
             PanelTab::Manager => "操作",
             PanelTab::Events => "履歴",
             PanelTab::World => "世界",
+            PanelTab::Catalog => "図鑑",
         }
     }
 }
