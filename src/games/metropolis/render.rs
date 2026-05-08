@@ -1796,8 +1796,11 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
     // House/Shop/Workshop 以外の branch では未使用だが、計算コストは僅かなので
     // 全パスで計算しておく方がシンプル。
     let connected = logic::compute_edge_connected_roads(state);
-    // 収入按分の参照テーブル (Workshop/Factory/Office/Shop/Mall の per-tile 収入)。
-    let pop_map = logic::compute_population_map(state, &connected);
+    // 収入按分の参照テーブル。frame 毎に呼ばれる描画パスなので、収入表示に
+    // 必要な branch (House / Shop / Mall / Workshop / Factory / Office) で
+    // 初回アクセス時にだけ作る lazy cache。Road/Park/Outpost/空き地選択時は
+    // `compute_population_map` のフルグリッドパスをスキップする。
+    let mut pop_map_cache: Option<Vec<Vec<u32>>> = None;
 
     // 1 行目: タイル種別
     let kind_label: String = match state.tile(x, y) {
@@ -1879,7 +1882,9 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                     ),
                     Style::default().fg(Color::DarkGray),
                 )]));
-                let rent = logic::tile_income_cents_with(state, x, y, &pop_map, &connected);
+                let pop_map = pop_map_cache
+                    .get_or_insert_with(|| logic::compute_population_map(state, &connected));
+                let rent = logic::tile_income_cents_with(state, x, y, pop_map, &connected);
                 out.push(Line::from(vec![
                     Span::styled(" 家賃 ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
@@ -1915,7 +1920,9 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                     Style::default().fg(Color::DarkGray),
                 )]));
                 if active {
-                    let income = logic::tile_income_cents_with(state, x, y, &pop_map, &connected);
+                    let pop_map = pop_map_cache
+                        .get_or_insert_with(|| logic::compute_population_map(state, &connected));
+                    let income = logic::tile_income_cents_with(state, x, y, pop_map, &connected);
                     let customers = count_houses_within(state, x, y, 3);
                     out.push(Line::from(vec![
                         Span::styled(" 収入 ", Style::default().fg(Color::DarkGray)),
@@ -1968,7 +1975,9 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
                     Style::default().fg(Color::DarkGray),
                 )]));
                 if active {
-                    let income = logic::tile_income_cents_with(state, x, y, &pop_map, &connected);
+                    let pop_map = pop_map_cache
+                        .get_or_insert_with(|| logic::compute_population_map(state, &connected));
+                    let income = logic::tile_income_cents_with(state, x, y, pop_map, &connected);
                     out.push(Line::from(vec![
                         Span::styled(" 収入 ", Style::default().fg(Color::DarkGray)),
                         Span::styled(
