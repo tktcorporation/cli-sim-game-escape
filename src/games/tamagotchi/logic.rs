@@ -116,6 +116,8 @@ fn tick_once(state: &mut TamaState) {
     }
 
     // ── ステータス減衰 ──
+    // 周期判定を `age_ticks` 基準にすることで、孵化からの経過時間に対して
+    // 決定論的に動く (世代を跨いだ位相も卵期間の運も挟まない)。
     // 寝てる間は減衰を 1/3 に (周期 ×3)。
     // 周期は意図的に互いに非整数倍 (60/80/120 など) なので、たまに LCM の
     // タイミングで複数ステータスが同時に減るのは仕様。ペットが「お昼寝の
@@ -128,13 +130,13 @@ fn tick_once(state: &mut TamaState) {
         periods.cleanliness = periods.cleanliness.saturating_mul(4);
     }
 
-    if state.total_ticks.is_multiple_of(periods.hunger as u64) && state.stats.hunger > 0 {
+    if state.age_ticks.is_multiple_of(periods.hunger as u64) && state.stats.hunger > 0 {
         state.stats.hunger -= 1;
     }
-    if state.total_ticks.is_multiple_of(periods.happiness as u64) && state.stats.happiness > 0 {
+    if state.age_ticks.is_multiple_of(periods.happiness as u64) && state.stats.happiness > 0 {
         state.stats.happiness -= 1;
     }
-    if state.total_ticks.is_multiple_of(periods.cleanliness as u64) && state.stats.cleanliness > 0
+    if state.age_ticks.is_multiple_of(periods.cleanliness as u64) && state.stats.cleanliness > 0
     {
         state.stats.cleanliness -= 1;
     }
@@ -142,7 +144,7 @@ fn tick_once(state: &mut TamaState) {
     // ── うんち ──
     if !state.sleeping
         && state.stats.cleanliness < 60
-        && state.total_ticks.is_multiple_of(200)
+        && state.age_ticks.is_multiple_of(200)
         && state.poop_count < 5
     {
         state.poop_count += 1;
@@ -151,10 +153,10 @@ fn tick_once(state: &mut TamaState) {
     // ── HP 減衰 ──
     let hp_dmg_period = hp_damage_period(state);
     if let Some(period) = hp_dmg_period {
-        if state.total_ticks.is_multiple_of(period as u64) && state.stats.health > 0 {
+        if state.age_ticks.is_multiple_of(period as u64) && state.stats.health > 0 {
             state.stats.health -= 1;
         }
-    } else if state.total_ticks.is_multiple_of(500) && state.stats.health < 100 {
+    } else if state.age_ticks.is_multiple_of(500) && state.stats.health < 100 {
         // 全ステータス健康なら微回復
         state.stats.health += 1;
     }
@@ -561,6 +563,39 @@ mod tests {
         assert_eq!(s.generation, 5);
         assert_eq!(s.age_ticks, snapshot_age);
         assert!(s.is_alive());
+    }
+
+    #[test]
+    fn decay_phase_does_not_leak_through_egg_wait() {
+        // 卵を長く放置して total_ticks を進めても、孵化直後の hunger が
+        // すぐに減らない (age_ticks 基準なので hatch でリセット)。
+        let mut s = TamaState::new();
+        // 卵で 59 tick 待機 — total_ticks が hunger 周期 (60) 直前まで進む
+        tick(&mut s, 59);
+        hatch(&mut s);
+        let hunger_after_hatch = s.stats.hunger;
+        // 孵化後 1 tick だけ進める — age_ticks=1 なので hunger 周期 60 に未到達
+        tick(&mut s, 1);
+        assert_eq!(
+            s.stats.hunger, hunger_after_hatch,
+            "孵化直後 1 tick で hunger が減るのは卵期間のフェーズ漏れ",
+        );
+    }
+
+    #[test]
+    fn decay_phase_resets_across_generations() {
+        // 1 世代目で長く生きた後、新世代の孵化直後が phase 漏れを起こさない。
+        let mut s = alive_state();
+        s.stats.hunger = 0;
+        s.stats.health = 1;
+        tick(&mut s, 2000); // 自然死まで進める
+        assert!(s.is_dead());
+        start_new_generation(&mut s);
+        hatch(&mut s);
+        let h = s.stats.hunger;
+        // 新世代孵化後 1 tick で減衰しない
+        tick(&mut s, 1);
+        assert_eq!(s.stats.hunger, h);
     }
 
     #[test]
