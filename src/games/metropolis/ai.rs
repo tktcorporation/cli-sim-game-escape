@@ -557,12 +557,15 @@ fn tier4_value_search(city: &mut City, depth: u8) -> AiAction {
     let best_demo_value = demolish_best.map(|(_, _, v)| v);
 
     match (best_build_value, best_demo_value) {
-        (Some(bv), Some(dv)) if dv > bv => {
+        (Some(_), Some(dv)) if dv > best_build_value.unwrap() => {
             let (dx, dy, _) = demolish_best.unwrap();
             if can_afford_demolish(city, dx, dy) {
                 AiAction::Demolish { x: dx, y: dy }
             } else {
-                AiAction::Idle
+                // Demolish が最高だが reserve ガードに引っかかった →
+                // worker と tick を捨てずに次善策の Build に倒す。
+                let (x, y, kind, _) = best.unwrap();
+                AiAction::Build { x, y, kind }
             }
         }
         (Some(_), _) => {

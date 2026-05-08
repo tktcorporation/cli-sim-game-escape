@@ -2381,7 +2381,8 @@ mod tests {
     }
 
     /// スクロールダウン後は ▲ も登録され、最下端まで降りると ▼ が消える。
-    /// `scroll_panel` + `clamp_panel_scroll` の連携テスト。
+    /// `scroll_panel` で深いオフセットを設定 → `ScrollableTab` 内部の
+    /// clamp で max_scroll に揃えられて write-back される連携テスト。
     #[test]
     fn scroll_clamp_and_arrow_visibility() {
         let mut city = City::new();

@@ -37,13 +37,12 @@ use state::{City, PanelTab, Strategy};
 // These are click/key actions on the manager panel.  Keep them stable —
 // they're persisted through Click events keyed by `ClickScope::Game(...)`.
 //
-// Phase A (撤去・開拓の完全自動化) で ID 7/8/9 (旧 DISPATCH_OUTPOST /
-// TOGGLE_DEMOLISH / AUTO_DEMOLISH) と DEMOLISH_CELL_BASE (1000+) を撤去。
-// 戦略を選んだ後の挙動はすべて `logic::auto_strategy_actions` が tick から
-// 自動実行する。プレイヤー操作は戦略 / 雇用 / CPU 進化 / タブだけ。
+// 7-9 と 1000 番台 (旧 DEMOLISH_CELL_BASE) は再利用可能な ID 範囲。
+// プレイヤー操作は戦略 / 雇用 / CPU 進化 / タブだけで、撤去・開拓判断は
+// すべて AI (`ai::decide`) が `placement_value` / `demolish_value` 経由で行う。
 pub const ACT_STRATEGY_GROWTH: u16 = 1;
 pub const ACT_STRATEGY_INCOME: u16 = 2;
-/// 旧 `ACT_STRATEGY_BALANCED` の枠を流用。Tech 戦略 (建設速度 +20% / 収入 -20%)。
+/// Tech 戦略 (建設速度 +20% / 収入 -20%)。
 /// 数値 ID は永続クリックスコープのため変更しない。
 pub const ACT_STRATEGY_TECH: u16 = 3;
 pub const ACT_HIRE_WORKER: u16 = 4;
@@ -81,9 +80,7 @@ const PANEL_SCROLL_STEP: i32 = 2;
 
 /// マップセルのクリック識別子の起点。`base + row * VIEW_W + col` で
 /// ビューポート相対座標を u16 に詰め込む。`ClickableGrid::decode` で逆引き。
-/// 1000 番台はかつて DEMOLISH_CELL_BASE で使っていたが Phase A の自動撤去で
-/// 廃止済みなので再利用可能。VIEW_W * VIEW_H = 32*16 = 512 < 1000 なので
-/// 既存 ID 1-23 とも衝突しない。
+/// VIEW_W * VIEW_H = 32*16 = 512 < 1000 なので既存 action ID と衝突しない。
 pub const ACT_GRID_CELL_BASE: u16 = 1000;
 
 pub struct MetropolisGame {

@@ -190,11 +190,8 @@ pub fn tick(city: &mut City, delta_ticks: u32) {
 
 fn step_one_tick(city: &mut City) {
     advance_construction(city);
-    // auto を drive_ai より先に動かす理由: drive_ai は free_workers をすべて
-    // 埋めてしまうので、その後で auto を回すと Outpost 派遣の発火ウィンドウ
-    // (`tick % period == 0` の単一 tick) がほぼ常に free_workers=0 で外れる。
-    // 先に auto が 1 ワーカーを Outpost に予約しておくことで、戦略の意図
-    // (拡張する / 撤去する) が確実に成立する。
+    // `auto_strategy_actions` は no-op (互換 stub)。撤去判断は AI が
+    // `decide()` 経由で `placement_value` と `demolish_value` を比較して行う。
     auto_strategy_actions(city);
     drive_ai(city);
     accrue_income(city);
@@ -202,8 +199,8 @@ fn step_one_tick(city: &mut City) {
     city.tick = city.tick.wrapping_add(1);
 }
 
-/// ティア境界を跨いだら演出をトリガー。降格 (建物撤去等で人口減) は
-/// 現状ありえない (撤去機能なし) ので、上昇のみ検出する。
+/// ティア境界を跨いだら演出をトリガー。AI 撤去で人口が一時的に減ることは
+/// あるが、`detect_tier_advance` は上昇遷移時のみフラッシュを焚く。
 fn detect_tier_advance(city: &mut City) {
     let now = city_tier_for(city.population());
     if now > city.last_observed_tier {
@@ -1419,7 +1416,8 @@ pub fn demolish_at(city: &mut City, x: usize, y: usize) -> bool {
 /// **AI 統合**: Tier 4/5 はこの値を `placement_value` と並べて max 選択する。
 /// 中央のミス (= cost_penalty が小さい inactive Shop など) は build を上回り
 /// やすく、外周は coast_penalty が膨らむため build/idle が勝つ。
-/// Tier 1-3 は周期撤去 (`auto_strategy_actions`) で本値を参照する。
+/// 全 Tier の AI が `decide()` 経由で参照 (Tier 1-3 はトリガー限定の撤去、
+/// Tier 4/5 は build と同時比較)。`auto_demolish_target_with` がこの値の最大を選ぶ。
 pub fn demolish_value(city: &City, x: usize, y: usize, connected: &[Vec<bool>]) -> i64 {
     let kind = match city.tile(x, y) {
         Tile::Built(b) => *b,
