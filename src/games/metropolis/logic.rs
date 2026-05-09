@@ -2235,6 +2235,11 @@ pub(super) fn collect_candidates(city: &City) -> (Vec<(usize, usize)>, Vec<(usiz
                 if !t.buildable() {
                     continue;
                 }
+                // Rock セルは隣接 Outpost が無いと start_construction で必ず弾かれる。
+                // fallback でも上ループと同じく needs_outpost ガードを通す。
+                if t.needs_outpost() && !has_outpost_neighbor(city, x, y) {
+                    continue;
+                }
                 if has_built_within_distance(city, x, y, 3) {
                     regular.push((x, y));
                 }
