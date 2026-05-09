@@ -486,4 +486,97 @@ mod tests {
             }
         }
     }
+
+    /// 「街の散らかり度」: 死に道路 (edge未接続 Road) + 機能不全建物 (inactive
+    /// Shop/Mall/Workshop/Factory/Office) の合計。低い方が綺麗。
+    fn waste_count(city: &City) -> u32 {
+        let connected = logic::compute_edge_connected_roads(city);
+        let mut waste = 0u32;
+        for y in 0..GRID_H {
+            for x in 0..GRID_W {
+                match city.tile(x, y) {
+                    Tile::Built(Building::Road) => {
+                        if !connected[y][x] {
+                            waste += 1;
+                        }
+                    }
+                    Tile::Built(Building::Shop) | Tile::Built(Building::Mall) => {
+                        if !logic::shop_is_active_with(city, x, y, &connected) {
+                            waste += 1;
+                        }
+                    }
+                    Tile::Built(Building::Workshop)
+                    | Tile::Built(Building::Factory)
+                    | Tile::Built(Building::Office) => {
+                        if !logic::workshop_is_active_with(city, x, y, &connected) {
+                            waste += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        waste
+    }
+
+    /// Tier 上昇後にゴミを掃除できるかの不変条件。
+    ///
+    /// **シナリオ**:
+    ///   1. Tier 1 (Random) で 5 分走らせて散らかった街を作る (大量の死に道路 +
+    ///      inactive Shop)
+    ///   2. Tier 4 (Planner) に切り替え + workers を 4 に増やして 5 分走らせる
+    ///   3. waste_count が **半減以下** に減っていることを assert
+    ///
+    /// 「Tier 上昇 = 過去の駄作を整理する能力の獲得」をプレイヤー視点で担保する。
+    /// Tier 4 が完璧に掃除する必要は無いが、放置よりは明確に良くなることを要求。
+    #[test]
+    fn higher_tier_cleans_up_low_tier_mess() {
+        let seed = 0xC1A5_5EED;
+        let mut city = City::with_seed(seed);
+        city.ai_tier = AiTier::Random;
+        city.strategy = Strategy::Income;
+        city.workers = 1;
+        city.cash = 5_000; // Random AI が建て続けられるだけの現金
+
+        // Phase 1: Tier 1 で 5 分散らかす。
+        logic::tick(&mut city, TICKS_PER_SEC * 300);
+        let mess = waste_count(&city);
+        let pop_before = city.population();
+        eprintln!(
+            "[cleanup test] phase1 (Tier 1, 5min): waste={} pop={} cash=${}",
+            mess, pop_before, city.cash
+        );
+        assert!(
+            mess >= 3,
+            "Tier 1 should generate enough waste for the cleanup test (got {})",
+            mess
+        );
+
+        // Phase 2: Tier 4 + workers 4 で 5 分掃除させる。
+        city.ai_tier = AiTier::Planner;
+        city.workers = 4;
+        // 撤去ループの reserve ガードがあるので追加の cash を入れておく。
+        city.cash += 20_000;
+        logic::tick(&mut city, TICKS_PER_SEC * 300);
+        let cleaned = waste_count(&city);
+        let pop_after = city.population();
+        eprintln!(
+            "[cleanup test] phase2 (Tier 4, +5min): waste={} pop={} cash=${}",
+            cleaned, pop_after, city.cash
+        );
+
+        assert!(
+            cleaned * 2 <= mess,
+            "Tier 4 should at least halve the Tier-1 mess (before={} after={})",
+            mess,
+            cleaned
+        );
+        // 掃除しながらも街は伸びる方向 (= 「掃除のせいで街が縮まないか」担保)。
+        assert!(
+            pop_after >= pop_before,
+            "cleanup should not regress population (before={} after={})",
+            pop_before,
+            pop_after
+        );
+    }
 }

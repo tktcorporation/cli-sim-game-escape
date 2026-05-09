@@ -714,7 +714,23 @@ fn accrue_income(city: &mut City) {
 /// `population_within` に渡すと近隣人口の集計が radius² の単純ループで済む。
 #[allow(clippy::needless_range_loop)] // (y,x) 両方で他の grid を index するため enumerate 化はしない
 pub(super) fn compute_population_map(city: &City, connected: &[Vec<bool>]) -> Vec<Vec<u32>> {
-    let mut map = vec![vec![0u32; GRID_W]; GRID_H];
+    compute_pop_and_tier_maps(city, connected).0
+}
+
+/// AI 評価ホットパス用: pop_map と tier_map を 1 度のスキャンで両方計算する。
+///
+/// `tile_income_cents_with` は House の `effective_house_tier` を必要とし、
+/// `compute_population_map` も同じ計算を行う。両者を合わせると House 1 軒あたり
+/// `gather_house_neighborhood_with` (= O(R²) ≈ 121 ops) を 2 回呼ぶ無駄が発生する。
+/// `_pre_tier` 引数で事前計算した tier を `tile_income_cents_with_tier` に渡すと、
+/// 2 回目の gather を回避できる (= 評価関数の hot path で ~2× speedup)。
+#[allow(clippy::needless_range_loop)]
+pub(super) fn compute_pop_and_tier_maps(
+    city: &City,
+    connected: &[Vec<bool>],
+) -> (Vec<Vec<u32>>, Vec<Vec<Option<HouseTier>>>) {
+    let mut pop = vec![vec![0u32; GRID_W]; GRID_H];
+    let mut tiers: Vec<Vec<Option<HouseTier>>> = vec![vec![None; GRID_W]; GRID_H];
     for y in 0..GRID_H {
         for x in 0..GRID_W {
             if !matches!(city.tile(x, y), Tile::Built(Building::House)) {
@@ -723,10 +739,11 @@ pub(super) fn compute_population_map(city: &City, connected: &[Vec<bool>]) -> Ve
             let target = house_tier_for(gather_house_neighborhood_with(city, x, y, connected));
             let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
             let tier = effective_house_tier(target, age);
-            map[y][x] = house_capacity(tier);
+            pop[y][x] = house_capacity(tier);
+            tiers[y][x] = Some(tier);
         }
     }
-    map
+    (pop, tiers)
 }
 
 /// 半径 `radius` 内の人口合計 (Manhattan 距離)。
@@ -887,14 +904,32 @@ pub(super) fn tile_income_cents_with(
     pop_map: &[Vec<u32>],
     connected: &[Vec<bool>],
 ) -> i64 {
+    tile_income_cents_with_tier(city, x, y, pop_map, connected, None)
+}
+
+/// `tile_income_cents_with` の tier 事前計算版。AI 評価ホットパスで
+/// `compute_pop_and_tier_maps` の出力を渡すことで gather の二重呼び出しを回避する。
+pub(super) fn tile_income_cents_with_tier(
+    city: &City,
+    x: usize,
+    y: usize,
+    pop_map: &[Vec<u32>],
+    connected: &[Vec<bool>],
+    pre_tier: Option<HouseTier>,
+) -> i64 {
     let kind = match city.tile(x, y) {
         Tile::Built(b) => *b,
         _ => return 0,
     };
     let tier_opt = if matches!(kind, Building::House) {
-        let target = house_tier_for(gather_house_neighborhood_with(city, x, y, connected));
-        let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
-        Some(effective_house_tier(target, age))
+        if pre_tier.is_some() {
+            pre_tier
+        } else {
+            let target =
+                house_tier_for(gather_house_neighborhood_with(city, x, y, connected));
+            let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
+            Some(effective_house_tier(target, age))
+        }
     } else {
         None
     };
@@ -1056,13 +1091,28 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
 /// cents 段階で乗算するので、AI 評価と実 cash 計算で戦略補正の効きが一致する。
 /// $1/sec floor は dollars 化する側の責務なのでここでは適用しない。
 pub fn compute_income_per_sec_cents(city: &City) -> i64 {
-    let mut income_cents: i64 = 0;
     let connected = compute_edge_connected_roads(city);
-    let pop_map = compute_population_map(city, &connected);
+    compute_income_per_sec_cents_with(city, &connected)
+}
 
+/// `compute_income_per_sec_cents` の `connected` 持ち回し版。`evaluate` で BFS 結果を
+/// 共有して `road_network_value` / `inactive_building_penalty_with` と合わせ、
+/// 評価 1 回あたりの BFS 呼び出しを 1 回に抑える。
+pub fn compute_income_per_sec_cents_with(city: &City, connected: &[Vec<bool>]) -> i64 {
+    let mut income_cents: i64 = 0;
+    let (pop_map, tier_map) = compute_pop_and_tier_maps(city, connected);
+
+    #[allow(clippy::needless_range_loop)]
     for y in 0..GRID_H {
         for x in 0..GRID_W {
-            income_cents += tile_income_cents_with(city, x, y, &pop_map, &connected);
+            income_cents += tile_income_cents_with_tier(
+                city,
+                x,
+                y,
+                &pop_map,
+                connected,
+                tier_map[y][x],
+            );
         }
     }
 
@@ -1899,9 +1949,8 @@ pub const AI_PAYBACK_SECS: i64 = 1800;
 /// 「街全体の cents/sec」+ thematic bonus + Outpost territory bonus
 /// + inactive 建物 penalty + 道路網健全性。Tier 3 以上で共通、Tier 差は探索深さで作る。
 pub fn evaluate(city: &City) -> i64 {
-    let income = compute_income_per_sec_cents(city);
     let connected = compute_edge_connected_roads(city);
-    income
+    compute_income_per_sec_cents_with(city, &connected)
         + strategy_thematic_bonus(city)
         + outpost_territory_bonus(city)
         + inactive_building_penalty_with(city, &connected)
@@ -1924,7 +1973,11 @@ pub fn evaluate(city: &City) -> i64 {
 ///     周辺がすべて Built だと Road の expansion 余地が無くなり、評価が落ちる
 fn road_network_value(city: &City, connected: &[Vec<bool>]) -> i64 {
     const FRONTIER_PER_CELL: i64 = 8;
-    const ISOLATED_PENALTY: i64 = 10;
+    // Isolated Road の demolish_cost は外周ほど 2 次関数的に大きい
+    // (距離 10 で $550 → 30 cents/sec amort)。撤去 action_value が build を
+    // 上回るには penalty が demolish_cost amort + Build 候補の Δincome を
+    // 超える必要があるため、強めの値にする。
+    const ISOLATED_PENALTY: i64 = 60;
     let mut frontier_visited = vec![vec![false; GRID_W]; GRID_H];
     let mut frontier_count = 0i64;
     let mut isolated_roads = 0i64;
