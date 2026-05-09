@@ -2432,14 +2432,26 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
         Building::Park,
     ];
     for &(x, y) in &regular {
+        let terrain = city.terrain_at(x, y);
+        let extra = if terrain.needs_clearing() {
+            terrain.clearing_cost()
+        } else {
+            0
+        };
         for &kind in normal_kinds {
-            if action_passes_guards(city, kind) {
+            if action_passes_guards(city, kind, extra) {
                 actions.push(super::ai::AiAction::Build { x, y, kind });
             }
         }
     }
     for &(x, y) in &outpost {
-        if action_passes_guards(city, Building::Outpost) {
+        let terrain = city.terrain_at(x, y);
+        let extra = if terrain.needs_clearing() {
+            terrain.clearing_cost()
+        } else {
+            0
+        };
+        if action_passes_guards(city, Building::Outpost, extra) {
             actions.push(super::ai::AiAction::Build {
                 x,
                 y,
@@ -2470,8 +2482,12 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
 }
 
 /// affordability + 建物前提条件ガード。`enumerate_actions` から呼ぶ。
-fn action_passes_guards(city: &City, kind: Building) -> bool {
-    let cost = kind.cost();
+///
+/// `extra_cost` は terrain の `clearing_cost` を渡す枠。整地必要セル
+/// (Forest/Wasteland/Rock) は `start_construction` が `kind.cost() + clearing_cost`
+/// を引くため、cash がそれに足りない手は候補化しない (= 実行不可手の混入を防ぐ)。
+fn action_passes_guards(city: &City, kind: Building, extra_cost: i64) -> bool {
+    let cost = kind.cost() + extra_cost;
     if city.cash < cost {
         return false;
     }
