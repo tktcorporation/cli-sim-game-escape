@@ -2120,7 +2120,18 @@ pub fn action_value<F: Fn(&City) -> i64>(
     let before = eval_fn(city);
     let after = with_action_applied(city, action, |c| eval_fn(c));
     let cost_cents = match action {
-        super::ai::AiAction::Build { kind, .. } => kind.cost() * 100,
+        super::ai::AiAction::Build { x, y, kind } => {
+            // 整地必要セル (Forest/Wasteland/Rock) は実行時に
+            // `terrain.clearing_cost` も支払うため、AI 評価でも cost に含める。
+            // これがないと Forest/Rock セルへの Build を Plain と同コストで評価して
+            // しまい、整地が高い場所への展開を過大評価する。
+            let mut cost = kind.cost();
+            let t = city.terrain_at(*x, *y);
+            if t.needs_clearing() {
+                cost += t.clearing_cost();
+            }
+            cost * 100
+        }
         super::ai::AiAction::Demolish { x, y } => demolish_cost(*x, *y) * 100,
         super::ai::AiAction::Idle => 0,
     };
