@@ -12,12 +12,15 @@
 //!   • `simulator.rs` — balance tests (cargo test, no rendering).
 
 pub mod ai;
+pub mod ai_worker;
 pub mod logic;
 pub mod render;
 pub mod save;
 pub mod simulator;
 pub mod state;
 pub mod terrain;
+#[cfg(target_arch = "wasm32")]
+pub mod worker_handle;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -102,6 +105,12 @@ pub struct MetropolisGame {
     /// `Date.now()` は連続的に進むので、tick 経由の gap 検出に使う。
     #[cfg(target_arch = "wasm32")]
     last_wall_ms: u64,
+    /// AI 探索を別 WASM の Web Worker で動かすためのハンドル。
+    /// `Some` の間は `tick` が同期的な `drive_ai` を呼ばず、worker から
+    /// 返ってきた `AiAction` を `apply_ai_action` で適用する非同期パスに切替わる。
+    /// 生成失敗 (file:// 起動・worker 制限環境等) の場合は `None` で同期パスにフォールバック。
+    #[cfg(target_arch = "wasm32")]
+    ai_worker: Option<worker_handle::AiWorkerHandle>,
     /// `tick` / `render` の実行時間サンプル (ms)。WASM ブラウザで描画が重い時に
     /// どこがボトルネックかを画面表示するために使う。release ビルドでも有効
     /// (チューニング中の実測用)。 RefCell で `&self` の `render` から書き込む。
@@ -219,6 +228,12 @@ impl MetropolisGame {
             state.push_event("🏙 都市建設を開始しました".to_string());
         }
 
+        // Worker のスポーンは best-effort。失敗 (CSP / file:// 起動等) しても
+        // ゲームは同期 AI でそのまま動くようフォールバックする。`AI_WORKER_SCRIPT_URL`
+        // は `index.html` の `<link data-trunk rel="copy-file">` 経路と一致させる。
+        #[cfg(target_arch = "wasm32")]
+        let ai_worker = worker_handle::AiWorkerHandle::try_new(AI_WORKER_SCRIPT_URL);
+
         Self {
             state,
             save_countdown: save::AUTOSAVE_INTERVAL,
@@ -226,10 +241,17 @@ impl MetropolisGame {
             // 既にボーナス済みの期間を tick 側で二重支給することはない。
             #[cfg(target_arch = "wasm32")]
             last_wall_ms: save::wall_clock_now_ms(),
+            #[cfg(target_arch = "wasm32")]
+            ai_worker,
             perf: std::cell::RefCell::new(PerfStats::new()),
         }
     }
 }
+
+/// `metropolis_worker_entry.js` を Trunk が dist 直下にコピーする想定。
+/// dist のルート絶対パスを当てにせず、相対パスで参照する。
+#[cfg(target_arch = "wasm32")]
+const AI_WORKER_SCRIPT_URL: &str = "./metropolis_worker_entry.js";
 
 impl Default for MetropolisGame {
     fn default() -> Self {
@@ -400,7 +422,30 @@ impl Game for MetropolisGame {
             self.last_wall_ms = save::wall_clock_now_ms();
         }
 
-        logic::tick(&mut self.state, delta_ticks);
+        // AI Worker が確保できている時のみ 非同期 AI 経路に分岐する。
+        // worker が用意した `AiAction` を tick 開始時にまず適用してから
+        // 物理シム (`tick_without_ai`) を進めることで、worker の判断が
+        // 「現在の街」より 1 tick 古い前提で計算されたとしても、
+        // `apply_ai_action` 内の `start_construction` / `demolish_at` が
+        // 再検証して stale なら no-op にする。
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(handle) = self.ai_worker.as_mut() {
+                if let Some(action) = handle.take_action() {
+                    let _ = logic::apply_ai_action(&mut self.state, action);
+                }
+                logic::tick_without_ai(&mut self.state, delta_ticks);
+                // 物理 tick で grid / cash / tick が進んだ最新スナップショットを
+                // worker に投げて、次の判断を仕込む。in-flight 中は no-op。
+                handle.try_dispatch(&self.state);
+            } else {
+                logic::tick(&mut self.state, delta_ticks);
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            logic::tick(&mut self.state, delta_ticks);
+        }
 
         // オートセーブ。カウンタ更新自体は常に実行 (フィールドが
         // dead_code にならないよう)、実際の保存は WASM 環境のみ。

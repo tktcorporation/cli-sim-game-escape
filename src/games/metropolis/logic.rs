@@ -188,6 +188,18 @@ pub fn tick(city: &mut City, delta_ticks: u32) {
     }
 }
 
+/// AI を **メインループ外** が駆動する非同期 (Web Worker) 経路用の tick。
+///
+/// `step_one_tick` から `drive_ai` だけを抜いた版。MetropolisGame::tick が
+/// AI Worker への request 送信と、返ってきた `AiAction` の適用 (apply_ai_action)
+/// を別途行う前提。drive_ai の同期実行コストが render を巻き込まないようにする
+/// のが目的。
+pub fn tick_without_ai(city: &mut City, delta_ticks: u32) {
+    for _ in 0..delta_ticks {
+        step_one_physics_tick(city);
+    }
+}
+
 fn step_one_tick(city: &mut City) {
     advance_construction(city);
     // `auto_strategy_actions` は no-op (互換 stub)。撤去判断は AI が
@@ -201,6 +213,33 @@ fn step_one_tick(city: &mut City) {
     // 「他で漏れてもここで必ず無効化される」セーフティネット。
     city.invalidate_population_cache();
     city.tick = city.tick.wrapping_add(1);
+}
+
+fn step_one_physics_tick(city: &mut City) {
+    advance_construction(city);
+    auto_strategy_actions(city);
+    accrue_income(city);
+    detect_tier_advance(city);
+    city.invalidate_population_cache();
+    city.tick = city.tick.wrapping_add(1);
+}
+
+/// Worker から返ってきた `AiAction` を現状の `City` に **再検証付き** で適用する。
+///
+/// snapshot を投げてから返答までに数 tick 経過しているため、`AiAction` が
+/// 指す tile は別の建物で埋まっていたり、cash が足りなくなっていたりする
+/// 可能性がある。`start_construction` / `demolish_at` 自体が前提条件
+/// (空き地 / cash / 整地必要 etc) を再評価して bool を返すので、
+/// それを stale 判定として活用する。
+pub fn apply_ai_action(city: &mut City, action: super::ai::AiAction) -> bool {
+    if city.free_workers() == 0 {
+        return false;
+    }
+    match action {
+        super::ai::AiAction::Build { x, y, kind } => start_construction(city, x, y, kind),
+        super::ai::AiAction::Demolish { x, y } => demolish_at(city, x, y),
+        super::ai::AiAction::Idle => true,
+    }
 }
 
 /// ティア境界を跨いだら演出をトリガー。AI 撤去で人口が一時的に減ることは
