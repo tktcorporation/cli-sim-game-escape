@@ -424,15 +424,12 @@ impl Game for MetropolisGame {
 
         // AI Worker が確保できている時のみ 非同期 AI 経路に分岐する。
         //
-        // 順序の意図: 物理 tick (advance_construction を含む) を **先に** 走らせ、
-        // 完了した建設で worker が解放された状態で `apply_ai_action` を呼ぶ。
-        // 同期版 `step_one_tick` も `advance_construction → drive_ai` の順なので、
-        // この並びを保つことで「直前 tick で完了する建設で worker が解放される
-        // 筈なのに AI Build が `free_workers() == 0` で reject される」回帰を防ぐ。
-        //
-        // worker の判断が古い snapshot (= advance 前) 由来でも、
+        // 順序の意図: 物理 tick (建設進行・収入・人口) を **先に** 走らせ、
+        // その時点の `free_workers()` で `apply_ai_action` を判定する。これに
+        // より直前 tick で完了した建設で解放された worker を AI Build が
+        // 即座に使える。worker の判断が古い snapshot 由来でも、
         // `apply_ai_action` 内の `start_construction` / `demolish_at` が
-        // 前提条件を再検証して stale なら no-op にする。
+        // 前提条件を再検証して stale なら no-op になる。
         #[cfg(target_arch = "wasm32")]
         {
             if let Some(handle) = self.ai_worker.as_mut() {

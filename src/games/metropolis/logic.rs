@@ -190,10 +190,10 @@ pub fn tick(city: &mut City, delta_ticks: u32) {
 
 /// AI を **メインループ外** が駆動する非同期 (Web Worker) 経路用の tick。
 ///
-/// `step_one_tick` から `drive_ai` だけを抜いた版。MetropolisGame::tick が
-/// AI Worker への request 送信と、返ってきた `AiAction` の適用 (apply_ai_action)
-/// を別途行う前提。drive_ai の同期実行コストが render を巻き込まないようにする
-/// のが目的。
+/// 物理シム (建設進行・収入・人口・tick++) のみを進める。AI 判断
+/// (`apply_ai_action`) は外部 (`MetropolisGame::tick` が AI Worker から
+/// 受け取って適用) が担当する前提。drive_ai の同期実行コストを render
+/// から逃がすのが目的。
 pub fn tick_without_ai(city: &mut City, delta_ticks: u32) {
     for _ in 0..delta_ticks {
         step_one_physics_tick(city);

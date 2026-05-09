@@ -9,10 +9,12 @@
 //! 1 リクエスト 1 アクションの厳密な往復。Main 側の `MetropolisGame::tick`
 //! が毎 tick で `take_action()` → `try_dispatch()` を 1 セット呼ぶ:
 //!
-//! - `take_action()`: 直近 onmessage で来た response があれば取り出して `AiAction` に
-//!   復元し、`in_flight = None` に戻す。
-//! - `try_dispatch()`: 投げっぱなし (in_flight = Some) なら何もしない、空いていれば
-//!   現状の `City` snapshot を JSON 化して `worker.postMessage` で送る。
+//! - `take_action()`: 直近 onmessage で来た response を取り出す。**id が
+//!   一致した時だけ** `in_flight` をクリアして `AiAction` を返す。id 不一致や
+//!   parse 失敗は drop して `in_flight` はそのまま (= 本来の応答の到着を待つ)。
+//! - `try_dispatch()`: `in_flight = None` の時だけ snapshot を送る。`in_flight`
+//!   が `STALE_TIMEOUT_TICKS` を超えて滞留していたら Worker 死亡とみなし強制解除
+//!   して新規 dispatch を許可する。
 //!
 //! ## 失敗時の挙動
 //!
@@ -20,17 +22,12 @@
 //! ないので `try_new` が `None` を返す。`MetropolisGame` は `None` の時
 //! 同期パス (`logic::tick`) にフォールバックする。
 //!
-//! ### in_flight ロックの二重防御
+//! ### in_flight ロック防止
 //!
-//! Worker が応答を返さない / parse 失敗で消費される / WASM init 失敗で永久に
-//! 黙る、いずれの場合も `in_flight` が `Some(...)` のまま固まると新規 dispatch
-//! が永久に走らず AI が完全停止する。これを次の二段で防ぐ:
-//!
-//! 1. `take_action()` は inbox を **取り出した時点で** `in_flight` をクリアする。
-//!    parse 失敗 / id 不一致でも `in_flight` は解放され、次 tick で fresh request
-//!    を投げ直せる。stale な action は drop するだけで実害無し。
-//! 2. `try_dispatch()` は応答ゼロのまま `STALE_TIMEOUT_TICKS` 経過した
-//!    `in_flight` を強制解除する。Worker init が失敗した場合の最終救済策。
+//! Worker init 失敗 / `ai_decide` 例外 / parse 失敗で応答ゼロが続いても、
+//! `try_dispatch` の `STALE_TIMEOUT_TICKS` 超過で `in_flight` を強制解除する。
+//! 強制解除後に古い id 応答が遅れて到着しても、`take_action` の id 一致判定で
+//! drop されるため二重適用にならない (= cascade での fresh dispatch 喪失も無い)。
 
 #![cfg(target_arch = "wasm32")]
 
@@ -46,10 +43,11 @@ use super::ai_worker;
 use super::state::City;
 
 /// in_flight が解消されないまま放置されたとみなすしきい値 (tick 単位)。
-/// 10 Hz の tick で 5 秒 = 50 tick。Tier 5 の AI でも数百 ms で返ってくる
-/// 想定なので、これを超えるのは Worker 側の永久的な失敗 (init 失敗・例外で
-/// postMessage 不能) を意味する。`try_dispatch` がここで強制解除する。
-const STALE_TIMEOUT_TICKS: u64 = 50;
+/// 10 Hz の tick で 10 秒 = 100 tick。Tier 5 の AI が数百 ms で返ってくる
+/// 想定 + Worker WASM の cold start (低速モバイルで 1〜2 秒) を吸収できる
+/// 余裕を確保した。これを超えたら Worker 側の永久失敗 (init 失敗・例外で
+/// postMessage 不能) とみなし `try_dispatch` で強制解除する。
+const STALE_TIMEOUT_TICKS: u64 = 100;
 
 pub struct AiWorkerHandle {
     worker: Worker,
@@ -57,15 +55,20 @@ pub struct AiWorkerHandle {
     inbox: Rc<RefCell<Option<String>>>,
     /// 次回発番する request_id。`u32::MAX` を超えたら 1 から再利用。
     next_request_id: u32,
-    /// 投げっぱなしの request_id。`take_action` で受信を観測 or `try_dispatch` の
-    /// timeout で `None` に戻る。`None` = 新しい request を送れる。
-    in_flight: Option<u32>,
-    /// 直近 `try_dispatch` 成功時の `city.tick`。`STALE_TIMEOUT_TICKS` 超過の
-    /// 強制解除判定に使う。
-    dispatch_tick: u64,
+    /// in-flight 状態。`Some((request_id, dispatched_at_tick))` で投げっぱなしの
+    /// request を表す。`None` = 新しい request を送れる。
+    /// id と dispatch_tick を 1 つの Option にまとめることで、強制解除パスで
+    /// 片方だけ stale に残るリスクを潰している。
+    in_flight: Option<InFlight>,
     /// `Closure` を Drop すると Worker から listener が外れて自動キャンセル
     /// されるため、handle が生きている間は保持し続ける。
     _on_message: Closure<dyn FnMut(MessageEvent)>,
+}
+
+#[derive(Clone, Copy)]
+struct InFlight {
+    request_id: u32,
+    dispatched_at_tick: u64,
 }
 
 impl AiWorkerHandle {
@@ -96,37 +99,37 @@ impl AiWorkerHandle {
             inbox,
             next_request_id: 1,
             in_flight: None,
-            dispatch_tick: 0,
             _on_message: on_message,
         })
     }
 
     /// 直近の response を取り出して `AiAction` に復元する。
     ///
-    /// inbox に何かが入っていた時点で `in_flight` をクリアする。parse 失敗 /
-    /// id 不一致 / 空 string でも次の dispatch を許可することで、Worker からの
-    /// 1 回の "壊れた応答" で AI が永久停止する事故を防ぐ (in_flight ロック防御 1)。
-    /// id 不一致の action は捨てて、次 tick で新しい snapshot を投げ直す。
+    /// **id が一致した時だけ** `in_flight` をクリアする。古い id (例: timeout
+    /// で強制解除された後に遅れて到着した応答) は drop し、`in_flight` には
+    /// 触れない — 本来の現 in-flight 応答が到着するチャンスを残すため。
+    /// parse 失敗時も同様に in_flight を維持し、`try_dispatch` の timeout が
+    /// 最終救済する。
     pub fn take_action(&mut self) -> Option<AiAction> {
         let raw = self.inbox.borrow_mut().take()?;
-        // 「観測した時点で in_flight を解放」が中核。
-        let was_in_flight = self.in_flight.take();
         let (id, action) = ai_worker::parse_response_json(&raw).ok()?;
-        // 1 in-flight 制約下では基本一致するが、保険として stale 判定を残す。
-        if was_in_flight != Some(id) {
+        let current = self.in_flight?;
+        if current.request_id != id {
+            // stale 応答 — 強制解除→再 dispatch 後に来た古い id。drop だけ。
             return None;
         }
+        self.in_flight = None;
         Some(action)
     }
 
     /// in-flight が無ければ現在の `City` を snapshot して送信する。
     ///
     /// `STALE_TIMEOUT_TICKS` を超えた in_flight は Worker 永久失敗とみなし
-    /// 強制解除する (in_flight ロック防御 2)。Worker `init()` 失敗で
-    /// postMessage が永久に来ないケースをここで救済する。
+    /// 強制解除する。Worker `init()` 失敗で postMessage が永久に来ないケースを
+    /// ここで救済する。
     pub fn try_dispatch(&mut self, city: &City) {
-        if self.in_flight.is_some() {
-            let elapsed = city.tick.wrapping_sub(self.dispatch_tick);
+        if let Some(current) = self.in_flight {
+            let elapsed = city.tick.wrapping_sub(current.dispatched_at_tick);
             if elapsed > STALE_TIMEOUT_TICKS {
                 // Worker が遅れて応答してきても take_action 側の id 不一致で
                 // 捨てるため、強制解除しても二重適用にはならない。
@@ -148,8 +151,10 @@ impl AiWorkerHandle {
             .post_message(&JsValue::from_str(&json))
             .is_ok()
         {
-            self.in_flight = Some(id);
-            self.dispatch_tick = city.tick;
+            self.in_flight = Some(InFlight {
+                request_id: id,
+                dispatched_at_tick: city.tick,
+            });
         }
     }
 }
