@@ -2249,6 +2249,11 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
             actions.push(super::ai::AiAction::Demolish { x, y });
         }
     }
+    // Idle を常に合法手として並べる。全候補が負評価 (= cash 浪費) な状況で
+    // AI が「最もマシな破壊」を強行する誤動作を防ぐ。`action_value(Idle)` は
+    // Δevaluate=0、cost=0 で常に 0 を返すので、他の候補の上位値が負ならば Idle が
+    // 自動的に勝つ。
+    actions.push(super::ai::AiAction::Idle);
     actions
 }
 
