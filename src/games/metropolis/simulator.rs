@@ -529,34 +529,54 @@ mod tests {
     ///
     /// 「Tier 上昇 = 過去の駄作を整理する能力の獲得」をプレイヤー視点で担保する。
     /// Tier 4 が完璧に掃除する必要は無いが、放置よりは明確に良くなることを要求。
+    ///
+    /// Tier 1 random の RNG 経路に依存すると `enumerate_actions` の候補集合変更で
+    /// テスト結果が不安定になるため、ゴミは **明示的に配置** する (= 死に道路と
+    /// 機能不全 Shop)。Tier 4 がそれを掃除できるかだけを検証する。
     #[test]
     fn higher_tier_cleans_up_low_tier_mess() {
         let seed = 0xC1A5_5EED;
         let mut city = City::with_seed(seed);
-        city.ai_tier = AiTier::Random;
         city.strategy = Strategy::Income;
-        city.workers = 1;
-        city.cash = 5_000; // Random AI が建て続けられるだけの現金
+        city.workers = 4;
+        city.cash = 50_000;
 
-        // Phase 1: Tier 1 で 5 分散らかす。
-        logic::tick(&mut city, TICKS_PER_SEC * 300);
+        // 明示的にゴミを配置する。`with_seed` の創設街路 (cx 列の y=0..GRID_H/2)
+        // は edge_connected。それから離れた場所に死に道路と inactive Shop を埋める。
+        let cx = GRID_W / 2;
+        let cy = GRID_H / 2;
+        // 死に道路 5 本: 創設街路から離れた東側に孤立した Road の塊。
+        let dead_roads: [(usize, usize); 5] = [
+            (cx + 8, cy + 4),
+            (cx + 9, cy + 4),
+            (cx + 8, cy + 5),
+            (cx + 10, cy + 4),
+            (cx + 8, cy + 3),
+        ];
+        for &(rx, ry) in &dead_roads {
+            city.set_tile(rx, ry, Tile::Built(Building::Road));
+        }
+        // inactive Shop 3 軒: 道路接続の無い場所に。
+        let dead_shops: [(usize, usize); 3] =
+            [(cx + 12, cy - 4), (cx + 13, cy - 4), (cx - 12, cy + 6)];
+        for &(sx, sy) in &dead_shops {
+            city.set_tile(sx, sy, Tile::Built(Building::Shop));
+        }
+
         let mess = waste_count(&city);
         let pop_before = city.population();
         eprintln!(
-            "[cleanup test] phase1 (Tier 1, 5min): waste={} pop={} cash=${}",
+            "[cleanup test] phase1 (placed mess): waste={} pop={} cash=${}",
             mess, pop_before, city.cash
         );
         assert!(
-            mess >= 3,
-            "Tier 1 should generate enough waste for the cleanup test (got {})",
+            mess >= 5,
+            "test setup should produce enough waste (got {})",
             mess
         );
 
-        // Phase 2: Tier 4 + workers 4 で 5 分掃除させる。
+        // Phase 2: Tier 4 で 5 分掃除させる。
         city.ai_tier = AiTier::Planner;
-        city.workers = 4;
-        // 撤去ループの reserve ガードがあるので追加の cash を入れておく。
-        city.cash += 20_000;
         logic::tick(&mut city, TICKS_PER_SEC * 300);
         let cleaned = waste_count(&city);
         let pop_after = city.population();
@@ -567,7 +587,7 @@ mod tests {
 
         assert!(
             cleaned * 2 <= mess,
-            "Tier 4 should at least halve the Tier-1 mess (before={} after={})",
+            "Tier 4 should at least halve the placed mess (before={} after={})",
             mess,
             cleaned
         );

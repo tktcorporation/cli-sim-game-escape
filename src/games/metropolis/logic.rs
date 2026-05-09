@@ -2012,10 +2012,10 @@ pub fn evaluate(city: &City) -> i64 {
 fn road_network_value(city: &City, connected: &[Vec<bool>]) -> i64 {
     const FRONTIER_PER_CELL: i64 = 8;
     // Isolated Road の demolish_cost は外周ほど 2 次関数的に大きい
-    // (距離 10 で $550 → 30 cents/sec amort)。撤去 action_value が build を
-    // 上回るには penalty が demolish_cost amort + Build 候補の Δincome を
-    // 超える必要があるため、強めの値にする。
-    const ISOLATED_PENALTY: i64 = 60;
+    // (距離 12 で $770 → 43 cents/sec amort)。撤去 action_value が build (~+48 cents/sec
+    // for edge-connected House) を上回るには、penalty ≥ 距離 12 の amort + 48 = ~91。
+    // 100 にすることで距離 ~12 までは確実に撤去候補として勝つ。
+    const ISOLATED_PENALTY: i64 = 100;
     let mut scratch = city.eval_scratch.borrow_mut();
     let visited = &mut scratch.frontier_visited;
     for row in visited.iter_mut() {
@@ -2123,13 +2123,15 @@ fn inactive_building_penalty_with(city: &City, connected: &[Vec<bool>]) -> i64 {
 /// 値: 隣接 Rock 数 × 20 cents/sec。Outpost cost $600 → amort = 33 cents/sec
 /// なので、Rock 2 個以上隣接で評価値プラス。
 fn outpost_territory_bonus(city: &City) -> i64 {
-    let mut bonus = 0i64;
+    // 複数 Outpost が同じ Rock セルに隣接していても 1 度しかカウントしない
+    // (= 解禁余地は実物理セル数ぶんだけ)。重複を排除するため visited grid を使う。
+    let mut counted = vec![vec![false; GRID_W]; GRID_H];
+    let mut unlockable_rocks = 0i64;
     for y in 0..GRID_H {
         for x in 0..GRID_W {
             if !matches!(city.tile(x, y), Tile::Built(Building::Outpost)) {
                 continue;
             }
-            let mut n_rock = 0i64;
             for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
                 let nx = x as i32 + dx;
                 let ny = y as i32 + dy;
@@ -2137,6 +2139,9 @@ fn outpost_territory_bonus(city: &City) -> i64 {
                     continue;
                 }
                 let (nx, ny) = (nx as usize, ny as usize);
+                if counted[ny][nx] {
+                    continue;
+                }
                 // 「未利用 Rock」だけ将来価値として計上する。Built/Construction/
                 // Clearing 中の Rock セルは既に消費中で、今後 Outpost が解禁する
                 // 余地は無い。terrain layer は Clearing 完了まで Rock のままなので、
@@ -2145,13 +2150,13 @@ fn outpost_territory_bonus(city: &City) -> i64 {
                     continue;
                 }
                 if city.terrain_at(nx, ny) == super::terrain::Terrain::Rock {
-                    n_rock += 1;
+                    counted[ny][nx] = true;
+                    unlockable_rocks += 1;
                 }
             }
-            bonus += n_rock * 20;
         }
     }
-    bonus
+    unlockable_rocks * 20
 }
 
 /// 評価関数 — 簡易版 (アマ低級相当: 「駒得しか見えない」)。
@@ -2459,11 +2464,56 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
             });
         }
     }
-    // Demolish 候補は Built タイルのみ。reserve ガードはここで適用。
+    // Demolish 候補は **「明らかに無駄」な Built tile のみ** に絞る:
+    //   - inactive な商業/雇用建物 (Shop/Mall/Workshop/Factory/Office)
+    //   - edge未接続 / Built 隣接無しの Road (= 孤立した死に道路)
+    //   - 周囲 Rock 無しの Outpost (= 役目を終えた拠点)
+    //
+    // 「健全な建物 (active な Shop、edge connected な Road、住人のいる House) を
+    // 撤去して上位建物に置換する」のような最適化はできなくなるが、saturated map で
+    // Demolish 候補が数百個に膨れ上がって AI tick が秒オーダで詰まる症状を回避する
+    // ためのトレードオフ。`inactive_building_penalty` / `road_network_value` の
+    // 機会コスト計上と合わせて、機能不全建物は引き続き自動撤去される。
+    //
+    // 連結性は cache 済み。商業/雇用 active 判定の cache は無いので per-cell 計算するが、
+    // フィルタで弾かれた cell は最初から Demolish 候補にすらならず evaluate コストが消える。
     let reserve = automation_policy(city.strategy).min_cash_reserve;
+    let connected = cached_edge_connected_roads(city);
     for y in 0..GRID_H {
         for x in 0..GRID_W {
-            if !matches!(city.tile(x, y), Tile::Built(_)) {
+            let kind = match city.tile(x, y) {
+                Tile::Built(b) => *b,
+                _ => continue,
+            };
+            let worth_demolishing = match kind {
+                Building::Shop | Building::Mall => {
+                    !shop_is_active_with(city, x, y, &connected)
+                }
+                Building::Workshop | Building::Factory | Building::Office => {
+                    !workshop_is_active_with(city, x, y, &connected)
+                }
+                Building::Road => {
+                    !connected[y][x] || !has_built_neighbor_built(city, x, y)
+                }
+                Building::Outpost => {
+                    let mut n = 0u32;
+                    for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                        let nx = x as i32 + dx;
+                        let ny = y as i32 + dy;
+                        if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                            continue;
+                        }
+                        if city.terrain_at(nx as usize, ny as usize)
+                            == super::terrain::Terrain::Rock
+                        {
+                            n += 1;
+                        }
+                    }
+                    n == 0
+                }
+                Building::House | Building::Park => false,
+            };
+            if !worth_demolishing {
                 continue;
             }
             let cost = demolish_cost(x, y);
