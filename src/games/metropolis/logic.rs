@@ -1441,7 +1441,12 @@ pub fn gather_house_neighborhood_with(
                 Tile::Built(Building::Park) if manhattan <= 4 => n_park_within_4 += 1,
                 Tile::Built(Building::Plaza) if manhattan <= 4 => n_park_within_4 += 3,
                 Tile::Built(Building::Stadium) => {
-                    n_park_within_4 += 6;
+                    if manhattan <= 4 {
+                        n_park_within_4 += 6;
+                    }
+                    // megaculture シグナルは半径 5 で取る (Arcology 必須条件)。
+                    // n_park_within_4 はフィールド名通り距離 4 までに揃え、
+                    // Park / Plaza との一貫性を保つ。
                     n_megaculture_within_5 += 1;
                 }
                 _ => {}
@@ -2248,6 +2253,14 @@ fn inactive_building_penalty_with(city: &City, connected: &[Vec<bool>]) -> i64 {
                         penalty -= 100;
                     }
                 }
+                Tile::Built(Building::MegaMall) => {
+                    // MegaMall は cost $1500 で、撤去 amort コストも大きい。
+                    // 機能不全だと Mall の倍ペナルティを与えて、撤去判断を
+                    // net-positive 側に寄せる (Codex P2 review)。
+                    if !shop_is_active_with(city, x, y, connected) {
+                        penalty -= 200;
+                    }
+                }
                 Tile::Built(Building::Workshop) => {
                     if !workshop_is_active_with(city, x, y, connected) {
                         penalty -= 50;
@@ -2258,9 +2271,19 @@ fn inactive_building_penalty_with(city: &City, connected: &[Vec<bool>]) -> i64 {
                         penalty -= 100;
                     }
                 }
+                Tile::Built(Building::Refinery) => {
+                    if !workshop_is_active_with(city, x, y, connected) {
+                        penalty -= 200;
+                    }
+                }
                 Tile::Built(Building::Office) => {
                     if !workshop_is_active_with(city, x, y, connected) {
                         penalty -= 80;
+                    }
+                }
+                Tile::Built(Building::Headquarters) => {
+                    if !workshop_is_active_with(city, x, y, connected) {
+                        penalty -= 180;
                     }
                 }
                 _ => {}
