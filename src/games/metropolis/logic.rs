@@ -2199,7 +2199,16 @@ pub fn with_action_applied<R, F: FnOnce(&mut City) -> R>(
             }
             let saved_tile = city.grid[*y][*x].clone();
             let saved_built_at = city.built_at_tick[*y][*x];
-            let cost = kind.cost();
+            // 整地必要セルでは start_construction が `kind.cost() + clearing_cost` を
+            // 引く。仮想 cash も同額減らさないと、depth-2/3 探索の `action_passes_guards`
+            // が現実では afford 不可能な後続 action を許してしまう。
+            let terrain = city.terrain_at(*x, *y);
+            let cost = kind.cost()
+                + if terrain.needs_clearing() {
+                    terrain.clearing_cost()
+                } else {
+                    0
+                };
             city.grid[*y][*x] = Tile::Built(*kind);
             // 仮想着工は「築 0」として評価する。`built_at_tick = city.tick` を
             // セットしないと、`tile_income_cents_with` は `built_at_tick == 0` で
