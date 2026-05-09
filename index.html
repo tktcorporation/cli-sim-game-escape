@@ -3,6 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <!-- Fira Code を webfont として明示的に読み込む。これがないと未インストール
+         環境でフォールバック (Courier New / SF Mono / Droid Sans Mono) になり、
+         char 幅が環境差で揺れて grid のフィットが端末ごとに異なる。
+         ratzilla 公式 example と同じ CDN 設定で metrics を全環境で固定。 -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/fira_code.min.css" />
     <link data-trunk rel="rust" />
     <title>Idle Games - 放置ゲーム</title>
     <style>
@@ -44,125 +49,267 @@
   </head>
   <body></body>
   <script>
-    // Reduce the viewport dimensions reported to Ratzilla so it calculates
-    // fewer terminal columns/rows, resulting in larger text that fills the
-    // real viewport via the fitGridToViewport scaler below.
-    // SCALE_W < 1 → bigger text.  0.85 ≈ 18 % larger characters.
+    // viewport を grid にぴったり合わせるロジック (mount-and-correct):
+    //
+    //   1. ratzilla が起動する前に、視覚 viewport から推定した cols/rows で
+    //      window.innerWidth/innerHeight (と screen.*) を override しておく
+    //   2. ratzilla が grid を mount したら、まず font を実 viewport 幅に
+    //      合わせて scale (横方向は実測ベース)
+    //   3. 続いて 1 行の実 height を測って、実 viewport 高さに収まる行数を
+    //      算出。推定値とズレていたら override の scale を書き換えて
+    //      `resize` を dispatch、ratzilla に grid を作り直させる
+    //
+    // 推定が当たれば step 3 は no-op。当たらなくても measurement で必ず
+    // 1〜2 イテレーションで収束する。
     (function() {
-      var SCALE_W = 0.85;
       // CSS の `:root { --line-height: ... }` を SSOT として読む。
-      // CSS 側の値を変えるだけでこの計算式も自動追従する (rowHeight 計算が
-      // 実描画 line-height と同期、Math.floor の切り捨てで行が無駄になったり
-      // 最後の行が viewport からクリップされる事故を防ぐ)。
-      // var() が未対応の環境のため 1.10 をフォールバック。
+      // var() 未対応環境のため 1.10 をフォールバック。
       var cssLh = parseFloat(
         getComputedStyle(document.documentElement).getPropertyValue('--line-height')
       );
       var LINE_HEIGHT = isNaN(cssLh) ? 1.10 : cssLh;
 
-      // Capture originals before any overrides.
-      var origW = window.innerWidth || screen.width || 375;
-      var origH = window.innerHeight || screen.height || 667;
+      // 視覚 viewport = ユーザーが実際に見える領域。fontScale / 行数推定の基準。
+      // fitGridToViewport も documentElement.clientWidth (≈ window.innerWidth)
+      // 基準にスケールするので、ここを揃えないと横と縦で別世界の数字を扱う。
+      var visibleW = window.innerWidth || screen.width || 375;
+      var visibleH = window.innerHeight || screen.height || 667;
 
-      // Estimate how many rows will fit after font-width scaling.
-      // Ratzilla: cols ≈ floor(scaledWidth / 10), assumes 15px/row.
-      // fitGridToViewport scales font by: realWidth / gridContentWidth.
-      // gridContentWidth ≈ cols × charWidth (monospace char ≈ 8.4px at 14px).
-      // After scaling, row height = baseFontSize × fontScale × lineHeight.
-      var cols = Math.floor(origW * SCALE_W / 10);
-      var charWidth = 8.4;
-      var fontScale = origW / (cols * charWidth);
-      var rowHeight = 14 * fontScale * LINE_HEIGHT;
-      var maxRows = Math.floor(origH / rowHeight);
-      // Ratzilla creates rows = floor(innerHeight / 15).
-      // SCALE_H gives us exactly maxRows.
-      var SCALE_H = Math.min((maxRows * 15) / origH, SCALE_W);
-
-      function overrideWith(obj, proto, prop, scale) {
-        var desc = Object.getOwnPropertyDescriptor(proto, prop);
-        if (desc && desc.get) {
-          var orig = desc.get;
-          Object.defineProperty(obj, prop, {
-            get: function() { return Math.floor(orig.call(obj) * scale); },
-            configurable: true
-          });
-        }
+      // hidden span で実 char 幅を測る。Fira Code は webfont 配信していない
+      // ため未インストール環境では Courier New / SF Mono にフォールバック
+      // し char 幅が変わる。100 文字一括測定で subpixel 丸めを 1/100 に薄める。
+      // fallback 8.4 は Fira Code 14px の理論値。
+      var FONT_FAMILY = '"Fira Code", "Courier New", monospace';
+      var FONT_SIZE_PX = 14;
+      function measureCharWidth() {
+        var SAMPLES = 100;
+        var span = document.createElement('span');
+        span.style.cssText =
+          'position:absolute;visibility:hidden;white-space:pre;'
+          + 'font-family:' + FONT_FAMILY + ';font-size:' + FONT_SIZE_PX + 'px;';
+        span.textContent = new Array(SAMPLES + 1).join('M');
+        document.body.appendChild(span);
+        var width = span.getBoundingClientRect().width;
+        document.body.removeChild(span);
+        var per = width / SAMPLES;
+        return per > 0 ? per : 8.4;
       }
 
-      // Width: fixed scale for bigger font.
-      // Height: computed scale so rows × scaled-row-height ≈ viewport height.
-      overrideWith(window, Window.prototype, 'innerWidth', SCALE_W);
-      overrideWith(window, Window.prototype, 'innerHeight', SCALE_H);
-      overrideWith(screen, Screen.prototype, 'width', SCALE_W);
-      overrideWith(screen, Screen.prototype, 'height', SCALE_H);
-    })();
-  </script>
-  <script>
-    // Ratzilla calculates terminal columns as screen_width/10 (mobile) or
-    // window.innerWidth/10 (desktop), assuming ~10px per character. When the
-    // actual rendered character width differs from 10px the grid becomes
-    // narrower than the viewport. This observer waits for Ratzilla to mount
-    // its grid, measures the real content width, and scales the font so the
-    // grid fills the viewport exactly.
-    (function() {
-      var applied = false;
-      var lastViewportWidth = 0;
+      // 横方向: 視覚幅から逆算して target cols を決める。
+      // SCALE_W = 0.85 で文字を 18% 程度大きくする (画面密度に応じた可読性)。
+      var SCALE_W = 0.85;
+      var charWidth = measureCharWidth();
+      var targetCols = Math.floor(visibleW * SCALE_W / 10);
+      var predictedFontScale = visibleW / (targetCols * charWidth);
+      var predictedRowH = FONT_SIZE_PX * predictedFontScale * LINE_HEIGHT;
+      var targetRows = Math.floor(visibleH / predictedRowH);
 
-      function fitGridToViewport() {
-        var grid = document.getElementById('grid') || document.querySelector('body > div');
-        if (!grid) return false;
+      // ratzilla 0.3.0 は実行環境で参照プロパティ・行除数を切り替える
+      // (utils.rs:46-56):
+      //   desktop: window.inner{Width,Height} / {10, 20}
+      //   mobile : screen.{width,height}      / {10, 19}
+      // 各 override は floor(real * scale) を返す。どちらのパスを通っても
+      // 同じ targetCols/targetRows になるよう、プロパティごとに専用 scale
+      // を持つ。+0.5px は IEEE754 往復誤差 (~1e-12) ≪ 0.5 ≪ 行除数 の
+      // 安全域、行が +1 増える方向には絶対に転ばない。
+      // 値は mutable: measurement で targetRows が更新されたら再計算。
+      // 原始 getter を prototype chain 遡って取得。後で override しても
+      // 物理 screen size を読み戻せる (resize ハンドラで分母として使う)。
+      // 回転で物理 width/height が swap する端末もあるので毎回原始値で読む。
+      function findGetter(obj, prop) {
+        var current = obj;
+        while (current) {
+          var desc = Object.getOwnPropertyDescriptor(current, prop);
+          if (desc && desc.get) return desc.get;
+          current = Object.getPrototypeOf(current);
+        }
+        return null;
+      }
+      var origScreenWGet = findGetter(screen, 'width');
+      var origScreenHGet = findGetter(screen, 'height');
+      function realScreenW() {
+        return (origScreenWGet ? origScreenWGet.call(screen) : visibleW) || visibleW;
+      }
+      function realScreenH() {
+        return (origScreenHGet ? origScreenHGet.call(screen) : visibleH) || visibleH;
+      }
+
+      var scales = {
+        wW: 0, wH: 0, sW: 0, sH: 0
+      };
+      function recomputeScales() {
+        scales.wW = (targetCols * 10 + 0.5) / visibleW;
+        scales.sW = (targetCols * 10 + 0.5) / realScreenW();
+        scales.wH = (targetRows * 20 + 0.5) / visibleH;
+        scales.sH = (targetRows * 19 + 0.5) / realScreenH();
+      }
+      recomputeScales();
+
+      // Chrome 最新版では innerWidth / innerHeight の getter が Window.prototype
+      // ではなく prototype chain の別ノード (WindowProperties / Window 本体) に
+      // 定義されることがある。固定で Window.prototype だけ見ると getter が
+      // 見つからず override が silent skip されて ratzilla が raw 値を使ってしまう
+      // (cols/rows がスケールされず gridH ≠ viewportH になる)。
+      // findGetter は前段で定義済み: prototype chain を遡って getter を探す。
+      function overrideWith(obj, prop, key) {
+        var orig = findGetter(obj, prop);
+        if (!orig) {
+          console.warn('[viewport-fit] override skipped: ' + prop + ' getter not found');
+          return false;
+        }
+        Object.defineProperty(obj, prop, {
+          get: function() { return Math.floor(orig.call(obj) * scales[key]); },
+          configurable: true
+        });
+        return true;
+      }
+      overrideWith(window, 'innerWidth', 'wW');
+      overrideWith(window, 'innerHeight', 'wH');
+      overrideWith(screen, 'width', 'sW');
+      overrideWith(screen, 'height', 'sH');
+
+      // ── ここから mount 後の adjustment ─────────────────────────
+      // ratzilla が grid を作ったら、font を視覚幅に合わせ → 実 row height
+      // を測って targetRows を補正する。
+
+      function findGrid() {
+        return document.getElementById('grid')
+          || document.querySelector('body > div');
+      }
+
+      // 横を実測してフォントサイズを決定。pre は block 要素なので
+      // shrink-wrap させるため一時的に inline-block にして測る。
+      // overflow (real font が予測より幅広) 時は scale down で対応するため、
+      // 上限は付けない (font ratio < 1 で content が viewport に収まる)。
+      function fitFontWidth(grid) {
         var pre = grid.querySelector('pre');
         if (!pre) return false;
-
         var viewportWidth = document.documentElement.clientWidth;
-
-        // <pre> is a block element so scrollWidth always equals the
-        // container width, not the actual text width.  Temporarily switch
-        // to inline-block so the element shrink-wraps to its content,
-        // then measure with getBoundingClientRect for sub-pixel accuracy.
         pre.style.display = 'inline-block';
         var contentWidth = pre.getBoundingClientRect().width;
         pre.style.display = '';
-
-        if (contentWidth <= 0 || contentWidth >= viewportWidth) return true;
-
+        if (contentWidth <= 0) return false;
         var currentFontSize = parseFloat(getComputedStyle(pre).fontSize);
-        var scaledFontSize = Math.floor(currentFontSize * (viewportWidth / contentWidth) * 100) / 100;
+        var scaledFontSize = Math.floor(
+          currentFontSize * (viewportWidth / contentWidth) * 100
+        ) / 100;
         var preElements = document.querySelectorAll('pre');
         for (var i = 0; i < preElements.length; i++) {
           preElements[i].style.fontSize = scaledFontSize + 'px';
         }
-
-        applied = true;
-        lastViewportWidth = viewportWidth;
         return true;
       }
 
-      // Observe DOM for Ratzilla grid mount, then fit once.
+      // 縦を実測。font scale 適用後の実 row height で「視覚 viewport に
+      // 何行入るか」を計算し、現在の grid 行数とズレていたら scale を
+      // 更新して resize を dispatch、ratzilla に grid を作り直させる。
+      // ratzilla の onresize ハンドラは initialized=false にするだけで、
+      // 実際の populate は次の draw タイミング (game loop) で走る。
+      // 戻り値: true = 行数調整した (続けて再 measurement が要る),
+      //         false = 調整不要 (収束)。
+      var selfDispatching = false;
+      // measurement→dispatch ループの上限。actualRowH が webfont swap や
+      // sub-pixel 揺らぎで微小に変動すると ideal が振動して無限ループ化
+      // しうる。3 回で収束しなければ「最後の値で妥協」して画面を死守。
+      var MAX_FIT_ITERS = 3;
+      var fitIters = 0;
+      function fitRowCount(grid) {
+        var pres = grid.querySelectorAll('pre');
+        if (pres.length === 0) return false;
+        var actualRowH = pres[0].getBoundingClientRect().height;
+        if (actualRowH <= 0) return false;
+        var realH = document.documentElement.clientHeight;
+        var ideal = Math.floor(realH / actualRowH);
+        if (ideal === targetRows) return false;
+        if (fitIters >= MAX_FIT_ITERS) {
+          console.warn('[viewport-fit] iter cap hit, holding rows=' + targetRows
+            + ' ideal=' + ideal + ' rowH=' + actualRowH.toFixed(2));
+          return false;
+        }
+        fitIters++;
+        targetRows = ideal;
+        recomputeScales();
+        selfDispatching = true;
+        window.dispatchEvent(new Event('resize'));
+        selfDispatching = false;
+        return true;
+      }
+
+      var settled = false;
+
+      function tryFit() {
+        var grid = findGrid();
+        if (!grid) return false;
+        if (!fitFontWidth(grid)) return false;
+        var changed = fitRowCount(grid);
+        if (!changed) {
+          settled = true;
+          // 実環境で何が起きているか正確に切り分けるための診断。
+          // 期待: gridH ≈ bodyH ≈ docH ≈ visibleH。ズレてる場所で原因が分かる。
+          var pres = grid.querySelectorAll('pre');
+          var rowH = pres.length ? pres[0].getBoundingClientRect().height : 0;
+          var gridRect = grid.getBoundingClientRect();
+          var bodyRect = document.body.getBoundingClientRect();
+          console.info('[viewport-fit]',
+            'visible=' + visibleW + 'x' + visibleH,
+            'docH=' + document.documentElement.clientHeight,
+            'bodyH=' + bodyRect.height.toFixed(0),
+            'gridH=' + gridRect.height.toFixed(0),
+            'rows=' + pres.length, 'rowH=' + rowH.toFixed(2),
+            'cols=' + targetCols,
+            'charW=' + charWidth.toFixed(2),
+            'gap_to_visible=' + (visibleH - gridRect.height).toFixed(0) + 'px');
+        }
+        return true;
+      }
+
+      // mount を待って observe。settle するまで disconnect しない
+      // (ratzilla が複数回 populate するため)。settle 後は fonts.ready 等
+      // で再走させない: webfont swap タイミングと measureCharWidth /
+      // pre の computed font が乖離した状態で fitRowCount を回すと、
+      // ideal が振動して dispatch ループが暴走 (画面が再構築され続けて
+      // blank に見える) する事故があったため。
       var observer = new MutationObserver(function() {
-        if (fitGridToViewport()) observer.disconnect();
+        tryFit();
+        if (settled) observer.disconnect();
       });
       observer.observe(document.body, { childList: true, subtree: true });
 
-      // Re-fit on orientation change or resize (debounced).
+      // 真の viewport resize (回転や URL バー collapse) のみで再走。
+      // 自己 dispatch (= fitRowCount の調整トリガ) は selfDispatching フラグで弾く。
       var resizeTimer;
       window.addEventListener('resize', function() {
+        if (selfDispatching) return;
         clearTimeout(resizeTimer);
         resizeTimer = setTimeout(function() {
-          var vw = document.documentElement.clientWidth;
-          if (vw !== lastViewportWidth) {
-            // Reset to CSS default so measurement is from a clean state.
-            var preElements = document.querySelectorAll('pre');
-            for (var i = 0; i < preElements.length; i++) {
-              preElements[i].style.fontSize = '';
-            }
-            applied = false;
-            // Allow one frame for layout, then re-measure.
-            requestAnimationFrame(function() { fitGridToViewport(); });
+          // 視覚 viewport を更新 → font とサイズを再測定して再 settle へ。
+          // realScreen* は原始 getter 経由で都度読むので別途更新不要。
+          visibleW = document.documentElement.clientWidth;
+          visibleH = document.documentElement.clientHeight;
+          // 元のフォントサイズに戻してから再測定 (前回の inline scale を消す)。
+          var preElements = document.querySelectorAll('pre');
+          for (var i = 0; i < preElements.length; i++) {
+            preElements[i].style.fontSize = '';
           }
+          // 推定を更新。webfont が後から swap すると char 幅が変わるので
+          // resize ごとに再 measure (回転やデバイス変更でも到着済み font を
+          // 反映できる)。fonts.ready 単発で再 fit する path は無限 dispatch
+          // ループで画面が消える事故があったため使わない。
+          charWidth = measureCharWidth();
+          targetCols = Math.floor(visibleW * SCALE_W / 10);
+          predictedFontScale = visibleW / (targetCols * charWidth);
+          predictedRowH = FONT_SIZE_PX * predictedFontScale * LINE_HEIGHT;
+          targetRows = Math.floor(visibleH / predictedRowH);
+          recomputeScales();
+          settled = false;
+          fitIters = 0;
+          observer.observe(document.body, { childList: true, subtree: true });
+          requestAnimationFrame(tryFit);
         }, 150);
       });
     })();
+  </script>
+  <script>
 
     // Touch / wheel handler: スワイプ・ホイールを keydown に変換する state
     // machine。タップは mousedown 経由で ratzilla に流す。

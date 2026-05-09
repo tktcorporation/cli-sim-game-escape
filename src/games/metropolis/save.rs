@@ -42,7 +42,7 @@ use super::terrain::Terrain;
 ///       既存配列の再解釈ができない (旧 index 32 = 旧 (0,1) が、新 GRID_W=64
 ///       では (32,0) に化ける)。v3 以前のセーブは安全に再マップできない
 ///       ため `MIN_COMPATIBLE_VERSION = 4` でロード拒否し、新規開始を促す。
-///   v5: `AiTier::DeepPlanner` (= 数値 5) 追加。
+///   v5: `AiTier::Master` (= 数値 5) 追加。
 ///   v6: `last_save_wall_ms` 追加 (オフライン進行ボーナス用 wall-clock 計測)。
 ///       旧データは default 0 → 「初回計測」扱いでボーナス未発動になる。
 ///   v7: `Building::Factory` / `Building::Mall` / `Building::Office` 追加。
@@ -441,9 +441,9 @@ fn ai_tier_to_u8(t: AiTier) -> u8 {
     match t {
         AiTier::Random => AI_TIER_RANDOM,
         AiTier::Greedy => AI_TIER_GREEDY,
-        AiTier::RoadPlanner => AI_TIER_ROAD_PLANNER,
-        AiTier::DemandAware => AI_TIER_DEMAND_AWARE,
-        AiTier::DeepPlanner => AI_TIER_DEEP_PLANNER,
+        AiTier::Aware => AI_TIER_ROAD_PLANNER,
+        AiTier::Planner => AI_TIER_DEMAND_AWARE,
+        AiTier::Master => AI_TIER_DEEP_PLANNER,
     }
 }
 
@@ -451,9 +451,9 @@ fn ai_tier_to_u8(t: AiTier) -> u8 {
 fn ai_tier_from_u8(v: u8) -> AiTier {
     match v {
         AI_TIER_GREEDY => AiTier::Greedy,
-        AI_TIER_ROAD_PLANNER => AiTier::RoadPlanner,
-        AI_TIER_DEMAND_AWARE => AiTier::DemandAware,
-        AI_TIER_DEEP_PLANNER => AiTier::DeepPlanner,
+        AI_TIER_ROAD_PLANNER => AiTier::Aware,
+        AI_TIER_DEMAND_AWARE => AiTier::Planner,
+        AI_TIER_DEEP_PLANNER => AiTier::Master,
         _ => AiTier::Random,
     }
 }
@@ -620,6 +620,9 @@ fn extract_save(state: &City) -> SaveData {
         cash_history: _,
         // オフライン進行ボーナス通知モーダル (タップで dismissal、再ロード後はリセット)。
         pending_offline_welcome: _,
+        connected_cache: _,
+        income_dollars_cache: _,
+        eval_scratch: _,
     } = state;
 
     let mut tiles = Vec::with_capacity(GRID_W * GRID_H);
@@ -969,7 +972,7 @@ mod tests {
         let mut original = City::with_seed(0xDEADBEEF);
         original.cash = 12345;
         original.tick = 1000;
-        original.ai_tier = AiTier::DemandAware;
+        original.ai_tier = AiTier::Planner;
         original.strategy = Strategy::Eco;
         original.panel_tab = PanelTab::Events;
         original.last_observed_tier = CityTier::City;
@@ -1013,7 +1016,7 @@ mod tests {
 
         assert_eq!(restored.cash, 12345);
         assert_eq!(restored.tick, 1000);
-        assert_eq!(restored.ai_tier, AiTier::DemandAware);
+        assert_eq!(restored.ai_tier, AiTier::Planner);
         assert_eq!(restored.strategy, Strategy::Eco);
         assert_eq!(restored.panel_tab, PanelTab::Events);
         assert_eq!(restored.last_observed_tier, CityTier::City);

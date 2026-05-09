@@ -39,7 +39,7 @@ use state::{City, PanelTab, Strategy};
 //
 // 7-9 と 1000 番台 (旧 DEMOLISH_CELL_BASE) は再利用可能な ID 範囲。
 // プレイヤー操作は戦略 / 雇用 / CPU 進化 / タブだけで、撤去・開拓判断は
-// すべて AI (`ai::decide`) が `placement_value` / `demolish_value` 経由で行う。
+// すべて AI (`ai::decide`) が `evaluate` / `action_value` 経由で行う。
 pub const ACT_STRATEGY_GROWTH: u16 = 1;
 pub const ACT_STRATEGY_INCOME: u16 = 2;
 /// Tech 戦略 (建設速度 +20% / 収入 -20%)。
@@ -102,6 +102,95 @@ pub struct MetropolisGame {
     /// `Date.now()` は連続的に進むので、tick 経由の gap 検出に使う。
     #[cfg(target_arch = "wasm32")]
     last_wall_ms: u64,
+    /// `tick` / `render` の実行時間サンプル (ms)。WASM ブラウザで描画が重い時に
+    /// どこがボトルネックかを画面表示するために使う。release ビルドでも有効
+    /// (チューニング中の実測用)。 RefCell で `&self` の `render` から書き込む。
+    perf: std::cell::RefCell<PerfStats>,
+}
+
+/// `tick` / `render` 実行時間の rolling-window 統計。
+///
+/// 60 FPS の WASM 描画で「重さ」を可視化するために使う:
+///   - tick が 16ms 超 → 1 フレーム以上 main thread が block して frame drop
+///   - render が 16ms 超 → 描画自体が間に合わない (本来軽量なはず)
+///
+/// 最近 N サンプルの max / avg を表示することで、瞬間的な spike も逃さない。
+pub struct PerfStats {
+    tick_samples: std::collections::VecDeque<f32>,
+    render_samples: std::collections::VecDeque<f32>,
+    /// オーバーレイを描画するかのトグル。Manager タブの設定で切替予定。
+    /// 既定 true: チューニング中なので常時表示。
+    pub overlay_enabled: bool,
+}
+
+impl PerfStats {
+    const WINDOW: usize = 30;
+
+    pub fn new() -> Self {
+        Self {
+            tick_samples: std::collections::VecDeque::with_capacity(Self::WINDOW),
+            render_samples: std::collections::VecDeque::with_capacity(Self::WINDOW),
+            overlay_enabled: true,
+        }
+    }
+
+    fn push(buf: &mut std::collections::VecDeque<f32>, ms: f32) {
+        if buf.len() == Self::WINDOW {
+            buf.pop_front();
+        }
+        buf.push_back(ms);
+    }
+
+    pub fn record_tick(&mut self, ms: f32) {
+        Self::push(&mut self.tick_samples, ms);
+    }
+
+    pub fn record_render(&mut self, ms: f32) {
+        Self::push(&mut self.render_samples, ms);
+    }
+
+    fn stat(buf: &std::collections::VecDeque<f32>) -> (f32, f32) {
+        if buf.is_empty() {
+            return (0.0, 0.0);
+        }
+        let n = buf.len() as f32;
+        let sum: f32 = buf.iter().sum();
+        let max = buf.iter().cloned().fold(0.0f32, f32::max);
+        (sum / n, max)
+    }
+
+    pub fn tick_avg_max(&self) -> (f32, f32) {
+        Self::stat(&self.tick_samples)
+    }
+
+    pub fn render_avg_max(&self) -> (f32, f32) {
+        Self::stat(&self.render_samples)
+    }
+}
+
+impl Default for PerfStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 高解像度ミリ秒タイマー。WASM では `Performance.now()`、native では
+/// `SystemTime` フォールバック (テストで panic しないため)。
+fn perf_now_ms() -> Option<f64> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.performance())
+            .map(|p| p.now())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs_f64() * 1000.0)
+    }
 }
 
 impl MetropolisGame {
@@ -137,6 +226,7 @@ impl MetropolisGame {
             // 既にボーナス済みの期間を tick 側で二重支給することはない。
             #[cfg(target_arch = "wasm32")]
             last_wall_ms: save::wall_clock_now_ms(),
+            perf: std::cell::RefCell::new(PerfStats::new()),
         }
     }
 }
@@ -286,6 +376,7 @@ impl Game for MetropolisGame {
     }
 
     fn tick(&mut self, delta_ticks: u32) {
+        let t_start = perf_now_ms();
         // タブ復帰時のオフライン進行ボーナス。`requestAnimationFrame` がバック
         // グラウンドで停止していた間、`delta_ticks` は `time.rs` の clamp で
         // 最大 5 tick (500ms) しか進まないため、wall-clock の gap で実時間を
@@ -321,10 +412,45 @@ impl Game for MetropolisGame {
             let _ = save::save_game(&self.state);
             self.save_countdown = save::AUTOSAVE_INTERVAL;
         }
+
+        if let (Some(s), Some(e)) = (t_start, perf_now_ms()) {
+            self.perf.borrow_mut().record_tick((e - s) as f32);
+        }
     }
 
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+        let t_start = perf_now_ms();
         render::render(&self.state, f, area, click_state);
+        if let (Some(s), Some(e)) = (t_start, perf_now_ms()) {
+            self.perf.borrow_mut().record_render((e - s) as f32);
+        }
+        // perf overlay: チューニング中の実測用に右上に小さく表示。
+        // overlay_enabled = false にすれば消せる (将来 Manager タブの設定で切替予定)。
+        let perf = self.perf.borrow();
+        if perf.overlay_enabled {
+            let (t_avg, t_max) = perf.tick_avg_max();
+            let (r_avg, r_max) = perf.render_avg_max();
+            let line = format!(
+                " ⚡ T:{:.1}/{:.1}ms R:{:.1}/{:.1}ms ",
+                t_avg, t_max, r_avg, r_max
+            );
+            let w = (line.chars().count() as u16).min(area.width);
+            if w > 0 {
+                let overlay_area = Rect::new(
+                    area.x + area.width.saturating_sub(w),
+                    area.y,
+                    w,
+                    1,
+                );
+                let p = ratatui::widgets::Paragraph::new(ratatui::text::Span::styled(
+                    line,
+                    ratatui::style::Style::default()
+                        .fg(ratatui::style::Color::DarkGray)
+                        .bg(ratatui::style::Color::Black),
+                ));
+                f.render_widget(p, overlay_area);
+            }
+        }
     }
 }
 
@@ -452,11 +578,17 @@ mod tests {
 
     /// AI が中央の inactive Shop を自分で撤去対象に選ぶ (= drive_ai が
     /// `AiAction::Demolish` を生成して `demolish_at` を呼ぶ経路の sanity check)。
-    /// Tier 4 (`DemandAware`) は `placement_value` と `demolish_value` を比較し、
-    /// 機能不全建物が他の build 候補より高評価な状況なら撤去を選ぶ。
+    /// Tier 4 (`Planner`) は `evaluate` と `action_value` を比較し、
+    /// 機能不全建物 (= 物理的に救えない位置の inactive Shop) を AI が撤去する。
     ///
-    /// 撤去判断より Outpost 拡張の方が高 value になる場合があるため、
-    /// テストでは terrain を Plain で固定して Outpost 候補を除外する。
+    /// **テスト前提**: 街全体に edge-connected Road が存在しない (= seed road を消去)
+    /// 状態 + 中央の Shop の 4-近傍を Water 地形で囲んで Road/House の隣接配置を
+    /// 不可能にする。これで AI には:
+    ///     - Shop を救う手段が無い (= 隣接セルが全部 Water)
+    ///     - Build House すると unconnected Cottage で +22.8 action_value
+    ///     - Demolish Shop は中央なので cost $50、+39.3 action_value
+    ///
+    /// となり、Demolish が一意に最高評価。短い tick 数で確実に選ばれる。
     #[test]
     fn drive_ai_demolishes_inactive_shop() {
         use state::{AiTier, Building, Tile, GRID_H, GRID_W};
@@ -464,22 +596,29 @@ mod tests {
         g.state.cash = 50_000;
         g.state.workers = 4;
         g.state.strategy = Strategy::Income;
-        g.state.ai_tier = AiTier::DemandAware;
-        // Plain で埋めて Rock を排除 (= Outpost 候補が湧かない決定論的環境)。
+        g.state.ai_tier = AiTier::Planner;
         for y in 0..GRID_H {
             for x in 0..GRID_W {
                 g.state.terrain[y][x] = crate::games::metropolis::terrain::Terrain::Plain;
+                if matches!(g.state.tile(x, y), Tile::Built(Building::Road)) {
+                    g.state.set_tile(x, y, Tile::Empty);
+                }
             }
         }
-        let cx = GRID_W / 2;
-        let cy = GRID_H / 2;
-        g.state.set_tile(cx, cy, Tile::Built(Building::Shop));
-        // 数 tick で Demolish action が選ばれて発火する (周期発火ではないので
-        // 大きな tick 数は不要)。
-        g.tick(20);
+        let sx = GRID_W / 2;
+        let sy = GRID_H / 2;
+        g.state.set_tile(sx, sy, Tile::Built(Building::Shop));
+        // 4-近傍を Water (= 建設不可) にして Shop の救済路を断つ。
+        for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+            let nx = (sx as i32 + dx) as usize;
+            let ny = (sy as i32 + dy) as usize;
+            g.state.terrain[ny][nx] = crate::games::metropolis::terrain::Terrain::Water;
+        }
+
+        g.tick(60);
         assert!(
-            matches!(g.state.tile(cx, cy), Tile::Empty),
-            "AI (Tier 4) should select the inactive Shop for Demolish"
+            matches!(g.state.tile(sx, sy), Tile::Empty),
+            "AI (Tier 4) should demolish unreachable inactive Shop"
         );
     }
 }
