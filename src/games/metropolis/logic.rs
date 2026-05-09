@@ -1897,13 +1897,70 @@ pub const AI_PAYBACK_SECS: i64 = 1800;
 
 /// 評価関数 (アマ初段〜プロ相当)。
 /// 「街全体の cents/sec」+ thematic bonus + Outpost territory bonus
-/// + inactive 建物 penalty。Tier 3 以上で共通、Tier 差は探索深さで作る。
+/// + inactive 建物 penalty + 道路網健全性。Tier 3 以上で共通、Tier 差は探索深さで作る。
 pub fn evaluate(city: &City) -> i64 {
     let income = compute_income_per_sec_cents(city);
+    let connected = compute_edge_connected_roads(city);
     income
         + strategy_thematic_bonus(city)
         + outpost_territory_bonus(city)
-        + inactive_building_penalty(city)
+        + inactive_building_penalty_with(city, &connected)
+        + road_network_value(city, &connected)
+}
+
+/// 道路網の「街にとっての価値」(cents/sec 単位)。2 成分の単一指標:
+///
+/// 1. **frontier 拡張余地**: 幹線網 (= edge-connected Road) に隣接する Empty buildable
+///    セル × `FRONTIER_PER_CELL`。「将来そこに建物が建てられる」期待値。
+/// 2. **孤立 Road ペナルティ**: edge-connected で無い Road タイル × `-ISOLATED_PENALTY`。
+///    マップ外と物流が繋がらない Road は無駄なので、AI が自動で撤去候補にできるように
+///    マイナス計上。
+///
+/// **単一指標で 3 症状を捕まえる設計**:
+///   - 死に道路 (孤立 Road): 成分 2 で直接ペナルティ → 撤去で +Δ
+///   - あみあみ (冗長な平行 Road): 既に隣接フロンティアがある領域に追加 Road しても
+///     成分 1 の Δ がほぼ 0 → AI が選好しない
+///   - 道路を囲んで拡張不能化: 成分 1 のフロンティアセルを建物が消費する形で -Δ →
+///     周辺がすべて Built だと Road の expansion 余地が無くなり、評価が落ちる
+fn road_network_value(city: &City, connected: &[Vec<bool>]) -> i64 {
+    const FRONTIER_PER_CELL: i64 = 8;
+    const ISOLATED_PENALTY: i64 = 10;
+    let mut frontier_visited = vec![vec![false; GRID_W]; GRID_H];
+    let mut frontier_count = 0i64;
+    let mut isolated_roads = 0i64;
+    #[allow(clippy::needless_range_loop)] // (y, x) を直接 connected[y][x] 参照に使うため enumerate 化はしない
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            if !matches!(city.tile(x, y), Tile::Built(Building::Road)) {
+                continue;
+            }
+            if !connected[y][x] {
+                isolated_roads += 1;
+                continue;
+            }
+            for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+                let nx = x as i32 + dx;
+                let ny = y as i32 + dy;
+                if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                    continue;
+                }
+                let (nx, ny) = (nx as usize, ny as usize);
+                if frontier_visited[ny][nx] {
+                    continue;
+                }
+                if !matches!(city.tile(nx, ny), Tile::Empty) {
+                    continue;
+                }
+                let t = city.terrain_at(nx, ny);
+                if !t.buildable() {
+                    continue;
+                }
+                frontier_visited[ny][nx] = true;
+                frontier_count += 1;
+            }
+        }
+    }
+    frontier_count * FRONTIER_PER_CELL - isolated_roads * ISOLATED_PENALTY
 }
 
 /// 機能不全の商業/雇用建物に対するマイナス bonus。
@@ -1916,34 +1973,33 @@ pub fn evaluate(city: &City) -> i64 {
 /// 値の根拠: 各建物の active 時の収入下限 ~1/3 を「失われている価値」として計上。
 ///   - Shop demolish $150 / 1800 sec ≈ 8.3 cents/sec amort → 撤去ペイバックは小さい
 ///   - Build House (= 並行候補) は +25 cents/sec → ペナルティはこれを超える必要
-fn inactive_building_penalty(city: &City) -> i64 {
-    let connected = compute_edge_connected_roads(city);
+fn inactive_building_penalty_with(city: &City, connected: &[Vec<bool>]) -> i64 {
     let mut penalty = 0i64;
     for y in 0..GRID_H {
         for x in 0..GRID_W {
             match city.tile(x, y) {
                 Tile::Built(Building::Shop) => {
-                    if !shop_is_active_with(city, x, y, &connected) {
+                    if !shop_is_active_with(city, x, y, connected) {
                         penalty -= 50;
                     }
                 }
                 Tile::Built(Building::Mall) => {
-                    if !shop_is_active_with(city, x, y, &connected) {
+                    if !shop_is_active_with(city, x, y, connected) {
                         penalty -= 100;
                     }
                 }
                 Tile::Built(Building::Workshop) => {
-                    if !workshop_is_active_with(city, x, y, &connected) {
+                    if !workshop_is_active_with(city, x, y, connected) {
                         penalty -= 50;
                     }
                 }
                 Tile::Built(Building::Factory) => {
-                    if !workshop_is_active_with(city, x, y, &connected) {
+                    if !workshop_is_active_with(city, x, y, connected) {
                         penalty -= 100;
                     }
                 }
                 Tile::Built(Building::Office) => {
-                    if !workshop_is_active_with(city, x, y, &connected) {
+                    if !workshop_is_active_with(city, x, y, connected) {
                         penalty -= 80;
                     }
                 }
