@@ -411,6 +411,20 @@ pub struct City {
     /// では invalidate して `None` に戻す。
     pub population_cache: Cell<Option<u32>>,
 
+    /// `compute_edge_connected_roads` の per-frame メモ化キャッシュ。
+    /// render は 60 FPS で複数の場所からこの BFS を呼ぶため、tick 境界毎に
+    /// 1 回計算して frame 内で共有する。`(tick, Rc<grid>)` ペアで保持し、
+    /// tick が進んだら自動で stale 判定 (= 直接 city.tick を書き換えるテスト経路でも
+    /// 安全)。AI の `with_action_applied` で grid を仮想 mutate する経路は
+    /// invalidate してから再計算する。
+    #[allow(clippy::type_complexity)] // (tick, Rc<grid>) ペアが意味的に明確
+    pub connected_cache: std::cell::RefCell<Option<(u64, std::rc::Rc<Vec<Vec<bool>>>)>>,
+
+    /// `compute_income_per_sec` (dollars) の per-frame メモ化キャッシュ。
+    /// 描画は header / status / Manager タブ等から複数回呼ぶ。`(tick, dollars)`
+    /// ペアで保持。connected_cache と同じ寿命管理。
+    pub income_dollars_cache: Cell<Option<(u64, i64)>>,
+
     /// タブ復帰時のオフライン進行ボーナス通知。`Some` の間は `render` が
     /// 中央モーダルを上書き描画し、`handle_input` が通常操作をブロックして
     /// 任意の入力で `None` に戻す。
@@ -508,14 +522,19 @@ impl City {
             panel_scroll: Cell::new(0),
             cash_history: VecDeque::new(),
             population_cache: Cell::new(None),
+            connected_cache: std::cell::RefCell::new(None),
+            income_dollars_cache: Cell::new(None),
             pending_offline_welcome: None,
         }
     }
 
-    /// grid 構造を変更した時にキャッシュ済み人口を無効化する。
-    /// `set_tile` / 建設完成 / 撤去 / 整地 / セーブロード のあとで呼ぶ。
+    /// grid 構造を変更した時に派生キャッシュを全て無効化する。
+    /// `set_tile` / 建設完成 / 撤去 / 整地 / セーブロード / tick 境界 で呼ぶ。
+    /// 関連: `population_cache` / `connected_cache` / `income_dollars_cache`。
     pub fn invalidate_population_cache(&self) {
         self.population_cache.set(None);
+        self.connected_cache.borrow_mut().take();
+        self.income_dollars_cache.set(None);
     }
 
     /// カメラを (dx, dy) だけ移動。`GRID_W - VIEW_W` を上限にクランプ。

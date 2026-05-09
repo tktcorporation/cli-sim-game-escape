@@ -1075,29 +1075,43 @@ fn employment_income_cents(
 /// 「Highrise は 6 倍」が本機能の主役。dwell time (5 min) と寿命 (4×) を考えると
 /// 「育てた街区は長く高収入を出す」が成り立つ。
 pub fn compute_income_per_sec(city: &City) -> i64 {
-    let cents = compute_income_per_sec_cents(city);
+    if let Some((cached_tick, cached)) = city.income_dollars_cache.get() {
+        if cached_tick == city.tick {
+            return cached;
+        }
+    }
+    let connected_rc = cached_edge_connected_roads(city);
+    let cents = compute_income_per_sec_cents_with(city, &connected_rc);
     let any_house = city.count_built(Building::House) > 0;
     let mut income = cents / 100;
     if any_house && income == 0 {
         income = 1;
     }
+    city.income_dollars_cache.set(Some((city.tick, income)));
     income
+}
+
+/// `compute_edge_connected_roads` の per-frame メモ化版。`Rc` を共有して
+/// frame 内の複数 caller (render の grid path / status panel / 選択セル詳細など) で
+/// BFS を 1 度だけ走らせる。AI search の `with_action_applied` 経路では
+/// `invalidate_population_cache` で cache がクリアされるので、AI 評価中の
+/// 仮想 mutate と矛盾しない。
+pub fn cached_edge_connected_roads(city: &City) -> std::rc::Rc<Vec<Vec<bool>>> {
+    if let Some((cached_tick, rc)) = city.connected_cache.borrow().as_ref() {
+        if *cached_tick == city.tick {
+            return rc.clone();
+        }
+    }
+    let rc = std::rc::Rc::new(compute_edge_connected_roads(city));
+    *city.connected_cache.borrow_mut() = Some((city.tick, rc.clone()));
+    rc
 }
 
 /// `compute_income_per_sec` の cents/sec 解像度版。AI 評価関数の基底として使う。
 ///
-/// dollars/sec は AI 評価に粒度が荒すぎる ($0.50 が 0 に丸まる) ため、
-/// cents/sec を別関数として公開する。Strategy の `income_penalty_pct` も
-/// cents 段階で乗算するので、AI 評価と実 cash 計算で戦略補正の効きが一致する。
-/// $1/sec floor は dollars 化する側の責務なのでここでは適用しない。
-pub fn compute_income_per_sec_cents(city: &City) -> i64 {
-    let connected = compute_edge_connected_roads(city);
-    compute_income_per_sec_cents_with(city, &connected)
-}
-
-/// `compute_income_per_sec_cents` の `connected` 持ち回し版。`evaluate` で BFS 結果を
-/// 共有して `road_network_value` / `inactive_building_penalty_with` と合わせ、
-/// 評価 1 回あたりの BFS 呼び出しを 1 回に抑える。
+/// dollars/sec は AI 評価に粒度が荒すぎる ($0.50 が 0 に丸まる) ため cents/sec を
+/// 公開する。`evaluate` で BFS 結果を `road_network_value` /
+/// `inactive_building_penalty_with` と共有して、評価 1 回あたり BFS 1 回に抑える。
 pub fn compute_income_per_sec_cents_with(city: &City, connected: &[Vec<bool>]) -> i64 {
     let mut income_cents: i64 = 0;
     let (pop_map, tier_map) = compute_pop_and_tier_maps(city, connected);
@@ -2008,6 +2022,11 @@ fn road_network_value(city: &City, connected: &[Vec<bool>]) -> i64 {
                 if !t.buildable() {
                     continue;
                 }
+                // Rock セルは隣接 Outpost が無いと start_construction に通らないので、
+                // 「現に建てられる」フロンティアにはカウントしない。
+                if t.needs_outpost() && !has_outpost_neighbor(city, nx, ny) {
+                    continue;
+                }
                 frontier_visited[ny][nx] = true;
                 frontier_count += 1;
             }
@@ -2089,7 +2108,15 @@ fn outpost_territory_bonus(city: &City) -> i64 {
                 if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
                     continue;
                 }
-                if city.terrain_at(nx as usize, ny as usize) == super::terrain::Terrain::Rock {
+                let (nx, ny) = (nx as usize, ny as usize);
+                // 「未利用 Rock」だけ将来価値として計上する。Built/Construction/
+                // Clearing 中の Rock セルは既に消費中で、今後 Outpost が解禁する
+                // 余地は無い。terrain layer は Clearing 完了まで Rock のままなので、
+                // tile レイヤで Empty 判定する必要がある。
+                if !matches!(city.tile(nx, ny), Tile::Empty) {
+                    continue;
+                }
+                if city.terrain_at(nx, ny) == super::terrain::Terrain::Rock {
                     n_rock += 1;
                 }
             }

@@ -602,6 +602,8 @@ fn extract_save(state: &City) -> SaveData {
         cash_history: _,
         // オフライン進行ボーナス通知モーダル (タップで dismissal、再ロード後はリセット)。
         pending_offline_welcome: _,
+        connected_cache: _,
+        income_dollars_cache: _,
     } = state;
 
     let mut tiles = Vec::with_capacity(GRID_W * GRID_H);
