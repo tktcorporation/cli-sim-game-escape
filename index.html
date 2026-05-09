@@ -64,11 +64,10 @@
       var origW = window.innerWidth || screen.width || 375;
       var origH = window.innerHeight || screen.height || 667;
 
-      // 実フォントの char 幅を測る。理論値 8.4 (Fira Code 14px) をハード
-      // コードしていた頃は、Fira Code 未インストール環境 (= ほぼ全モバイル)
-      // でフォールバック (Courier New / SF Mono 等) が使われ、実 char 幅
-      // ≠ 8.4 → 予測 rowHeight が外れて maxRows を過小評価し、画面下に
-      // 空きが出ていた。
+      // Fira Code は webfont として配信していないため、未インストール環境
+      // (= ほぼ全モバイル) では Courier New / SF Mono にフォールバックして
+      // char 幅が変わる。実測しないと rowHeight 予測が外れて maxRows を
+      // 過小評価し、画面下に空きが出る。
       var FONT_FAMILY = '"Fira Code", "Courier New", monospace';
       var FONT_SIZE_PX = 14;
       var charWidth = measureCharWidth(FONT_FAMILY, FONT_SIZE_PX);
@@ -80,13 +79,11 @@
       var fontScale = origW / (cols * charWidth);
       var rowHeight = FONT_SIZE_PX * fontScale * LINE_HEIGHT;
       var maxRows = Math.floor(origH / rowHeight);
-      // Ratzilla creates rows = floor(innerHeight / 15).
-      // overrideWith は floor(origH * SCALE_H) を返すため、SCALE_H に
-      // (maxRows*15)/origH をそのまま渡すと、IEEE754 の往復で
-      // origH * ((maxRows*15)/origH) が maxRows*15 - ε に落ちて
-      // Ratzilla が 1 行少なく作ってしまう事故がある。0.5px の
-      // マージンで丸め方向を確定させる (上限は maxRows*15+1px なので
-      // 次の grid 行は跨がない)。
+      // Ratzilla rows = floor(innerHeight/15)、innerHeight =
+      // floor(origH * SCALE_H)。+0.5px は IEEE754 往復誤差 (~1e-12) で
+      // floor が maxRows*15 - 1 に落ちて 1 行クリップされるのを防ぐ
+      // 安全域。実誤差 ≪ 0.5 < 15 なので grid 1 行を跨いで余分に
+      // 行が作られる方向には絶対に転ばない。
       var SCALE_H = (maxRows * 15 + 0.5) / origH;
 
       // hidden <span> 経由で実 char 幅を測る。Canvas measureText より遅いが
@@ -154,7 +151,11 @@
         var contentWidth = pre.getBoundingClientRect().width;
         pre.style.display = '';
 
-        if (contentWidth <= 0 || contentWidth >= viewportWidth) return true;
+        // 上限の +0.5 は subpixel 丸めの安全域。実 charWidth が大きい
+        // フォント (SF Mono / Droid Sans Mono) で `cols * charWidth * fontScale`
+        // が origW にぴったり張り付いた時、丸め誤差で contentWidth ==
+        // viewportWidth になりスケーラを取りこぼす事故を防ぐ。
+        if (contentWidth <= 0 || contentWidth > viewportWidth + 0.5) return true;
 
         var currentFontSize = parseFloat(getComputedStyle(pre).fontSize);
         var scaledFontSize = Math.floor(currentFontSize * (viewportWidth / contentWidth) * 100) / 100;
