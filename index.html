@@ -3,6 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <!-- Fira Code を webfont として明示的に読み込む。これがないと未インストール
+         環境でフォールバック (Courier New / SF Mono / Droid Sans Mono) になり、
+         char 幅が環境差で揺れて grid のフィットが端末ごとに異なる。
+         ratzilla 公式 example と同じ CDN 設定で metrics を全環境で固定。 -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/fira_code.min.css" />
     <link data-trunk rel="rust" />
     <title>Idle Games - 放置ゲーム</title>
     <style>
@@ -210,17 +215,21 @@
         var changed = fitRowCount(grid);
         if (!changed) {
           settled = true;
-          // 実環境での fit 結果を 1 行だけ console に残す。実機調査で
-          // どの値が外れているか即座に分かる (charWidth 予測 vs 実 row
-          // height の関係)。本番でもノイズにならない 1 line。
+          // 実環境で何が起きているか正確に切り分けるための診断。
+          // 期待: gridH ≈ bodyH ≈ docH ≈ visibleH。ズレてる場所で原因が分かる。
           var pres = grid.querySelectorAll('pre');
           var rowH = pres.length ? pres[0].getBoundingClientRect().height : 0;
+          var gridRect = grid.getBoundingClientRect();
+          var bodyRect = document.body.getBoundingClientRect();
           console.info('[viewport-fit]',
             'visible=' + visibleW + 'x' + visibleH,
-            'cols=' + targetCols, 'rows=' + targetRows,
-            'rowH=' + rowH.toFixed(2),
-            'used=' + (targetRows * rowH).toFixed(0) + 'px',
-            'gap=' + (visibleH - targetRows * rowH).toFixed(0) + 'px');
+            'docH=' + document.documentElement.clientHeight,
+            'bodyH=' + bodyRect.height.toFixed(0),
+            'gridH=' + gridRect.height.toFixed(0),
+            'rows=' + pres.length, 'rowH=' + rowH.toFixed(2),
+            'cols=' + targetCols,
+            'charW=' + charWidth.toFixed(2),
+            'gap_to_visible=' + (visibleH - gridRect.height).toFixed(0) + 'px');
         }
         return true;
       }
@@ -232,6 +241,27 @@
         if (settled) observer.disconnect();
       });
       observer.observe(document.body, { childList: true, subtree: true });
+
+      // webfont (Fira Code) が後から読み込まれると char 幅が変わり、
+      // 既に settle した fit が外れる。document.fonts.ready で確実に
+      // 再 fit させる。CSS3 Font Loading API が無い環境はそのまま無視。
+      if (document.fonts && document.fonts.ready) {
+        document.fonts.ready.then(function() {
+          // measureCharWidth を再実行して charWidth を更新。
+          var newCharW = measureCharWidth();
+          if (Math.abs(newCharW - charWidth) > 0.05) {
+            charWidth = newCharW;
+            // font 切替で予測も外れるので再 settle へ。
+            var preElements = document.querySelectorAll('pre');
+            for (var i = 0; i < preElements.length; i++) {
+              preElements[i].style.fontSize = '';
+            }
+            settled = false;
+            observer.observe(document.body, { childList: true, subtree: true });
+            requestAnimationFrame(tryFit);
+          }
+        });
+      }
 
       // 真の viewport resize (回転や URL バー collapse) のみで再走。
       // 自己 dispatch (= fitRowCount の調整トリガ) は selfDispatching フラグで弾く。
