@@ -250,6 +250,11 @@ mod codes {
     pub const BUILDING_FACTORY: u8 = 6;
     pub const BUILDING_MALL: u8 = 7;
     pub const BUILDING_OFFICE: u8 = 8;
+    pub const BUILDING_PLAZA: u8 = 9;
+    pub const BUILDING_STADIUM: u8 = 10;
+    pub const BUILDING_MEGAMALL: u8 = 11;
+    pub const BUILDING_HEADQUARTERS: u8 = 12;
+    pub const BUILDING_REFINERY: u8 = 13;
 
     pub const TERRAIN_PLAIN: u8 = 0;
     pub const TERRAIN_FOREST: u8 = 1;
@@ -272,6 +277,7 @@ mod codes {
     pub const PANEL_MANAGER: u8 = 1;
     pub const PANEL_EVENTS: u8 = 2;
     pub const PANEL_WORLD: u8 = 3;
+    pub const PANEL_CATALOG: u8 = 4;
 
     pub const CITY_TIER_VILLAGE: u8 = 0;
     pub const CITY_TIER_TOWN: u8 = 1;
@@ -294,6 +300,11 @@ fn building_to_u8(b: Building) -> u8 {
         Building::Factory => BUILDING_FACTORY,
         Building::Mall => BUILDING_MALL,
         Building::Office => BUILDING_OFFICE,
+        Building::Plaza => BUILDING_PLAZA,
+        Building::Stadium => BUILDING_STADIUM,
+        Building::MegaMall => BUILDING_MEGAMALL,
+        Building::Headquarters => BUILDING_HEADQUARTERS,
+        Building::Refinery => BUILDING_REFINERY,
     }
 }
 
@@ -309,6 +320,11 @@ fn building_from_u8(v: u8) -> Option<Building> {
         BUILDING_FACTORY => Some(Building::Factory),
         BUILDING_MALL => Some(Building::Mall),
         BUILDING_OFFICE => Some(Building::Office),
+        BUILDING_PLAZA => Some(Building::Plaza),
+        BUILDING_STADIUM => Some(Building::Stadium),
+        BUILDING_MEGAMALL => Some(Building::MegaMall),
+        BUILDING_HEADQUARTERS => Some(Building::Headquarters),
+        BUILDING_REFINERY => Some(Building::Refinery),
         _ => None,
     }
 }
@@ -449,6 +465,7 @@ fn panel_to_u8(p: PanelTab) -> u8 {
         PanelTab::Manager => PANEL_MANAGER,
         PanelTab::Events => PANEL_EVENTS,
         PanelTab::World => PANEL_WORLD,
+        PanelTab::Catalog => PANEL_CATALOG,
     }
 }
 
@@ -458,6 +475,7 @@ fn panel_from_u8(v: u8) -> PanelTab {
         PANEL_STATUS => PanelTab::Status,
         PANEL_EVENTS => PanelTab::Events,
         PANEL_WORLD => PanelTab::World,
+        PANEL_CATALOG => PanelTab::Catalog,
         _ => PanelTab::Manager,
     }
 }

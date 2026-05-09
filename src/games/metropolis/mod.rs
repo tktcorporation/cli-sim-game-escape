@@ -51,11 +51,12 @@ pub const ACT_UPGRADE_AI: u16 = 5;
 /// 既存 ID 1-5 と重複しないよう新しい番号を取得。
 pub const ACT_STRATEGY_ECO: u16 = 6;
 
-// タブ切替アクション (10-13 を予約; 戦略の隣だが衝突しない)。
+// タブ切替アクション (10-14 を予約; 戦略の隣だが衝突しない)。
 pub const ACT_TAB_STATUS: u16 = 10;
 pub const ACT_TAB_MANAGER: u16 = 11;
 pub const ACT_TAB_EVENTS: u16 = 12;
 pub const ACT_TAB_WORLD: u16 = 13;
+pub const ACT_TAB_CATALOG: u16 = 14;
 
 // ビューポートスクロール (Phase 3)。マップ 64×32 を 32×16 の viewport で覗く。
 // h/j/k/l (Vim 流) または矢印キー風のキーで動かす。1 回 4 セル送り (= 視野の 1/8)。
@@ -294,6 +295,7 @@ impl Game for MetropolisGame {
                 '2' => ACT_TAB_MANAGER,
                 '3' => ACT_TAB_EVENTS,
                 '4' => ACT_TAB_WORLD,
+                '5' => ACT_TAB_CATALOG,
                 // Phase 3: Vim 流 hjkl でビューポートをスクロール (64×32 マップ)。
                 'h' => ACT_SCROLL_LEFT,
                 'j' => ACT_SCROLL_DOWN,
@@ -339,6 +341,10 @@ impl Game for MetropolisGame {
             }
             ACT_TAB_WORLD => {
                 switch_tab(&mut self.state, PanelTab::World);
+                true
+            }
+            ACT_TAB_CATALOG => {
+                switch_tab(&mut self.state, PanelTab::Catalog);
                 true
             }
             ACT_SCROLL_LEFT => {
