@@ -60,9 +60,12 @@
       );
       var LINE_HEIGHT = isNaN(cssLh) ? 1.10 : cssLh;
 
-      // Capture originals before any overrides.
-      var origW = window.innerWidth || screen.width || 375;
-      var origH = window.innerHeight || screen.height || 667;
+      // 視覚 viewport = ユーザーが実際に見える領域。fontScale / maxRows
+      // 計算の基準にする。fitGridToViewport も documentElement.clientWidth
+      // (≈ window.innerWidth) を基準にスケールするので、ここを揃えないと
+      // 横と縦で別の世界の数字を扱うことになる。
+      var visibleW = window.innerWidth || screen.width || 375;
+      var visibleH = window.innerHeight || screen.height || 667;
 
       // Fira Code は webfont として配信していないため、未インストール環境
       // (= ほぼ全モバイル) では Courier New / SF Mono にフォールバックして
@@ -72,19 +75,13 @@
       var FONT_SIZE_PX = 14;
       var charWidth = measureCharWidth(FONT_FAMILY, FONT_SIZE_PX);
 
-      // Ratzilla: cols ≈ floor(scaledWidth / 10), assumes 15px/row.
+      // Ratzilla: cols ≈ floor(scaledWidth / 10).
       // fitGridToViewport scales font by: realWidth / gridContentWidth.
       // After scaling, row height = baseFontSize × fontScale × lineHeight.
-      var cols = Math.floor(origW * SCALE_W / 10);
-      var fontScale = origW / (cols * charWidth);
+      var cols = Math.floor(visibleW * SCALE_W / 10);
+      var fontScale = visibleW / (cols * charWidth);
       var rowHeight = FONT_SIZE_PX * fontScale * LINE_HEIGHT;
-      var maxRows = Math.floor(origH / rowHeight);
-      // Ratzilla rows = floor(innerHeight/15)、innerHeight =
-      // floor(origH * SCALE_H)。+0.5px は IEEE754 往復誤差 (~1e-12) で
-      // floor が maxRows*15 - 1 に落ちて 1 行クリップされるのを防ぐ
-      // 安全域。実誤差 ≪ 0.5 < 15 なので grid 1 行を跨いで余分に
-      // 行が作られる方向には絶対に転ばない。
-      var SCALE_H = (maxRows * 15 + 0.5) / origH;
+      var maxRows = Math.floor(visibleH / rowHeight);
 
       // hidden <span> 経由で実 char 幅を測る。Canvas measureText より遅いが
       // Ratzilla の <pre> と同じレイアウトエンジン経路を通るため、
@@ -116,12 +113,27 @@
         }
       }
 
-      // Width: fixed scale for bigger font.
-      // Height: computed scale so rows × scaled-row-height ≈ viewport height.
-      overrideWith(window, Window.prototype, 'innerWidth', SCALE_W);
-      overrideWith(window, Window.prototype, 'innerHeight', SCALE_H);
-      overrideWith(screen, Screen.prototype, 'width', SCALE_W);
-      overrideWith(screen, Screen.prototype, 'height', SCALE_H);
+      // Per-property scales: Ratzilla 0.3.0 は実行環境で参照プロパティ・
+      // 行除数を切り替える (utils.rs:46-56)。
+      //   desktop: window.innerWidth/10, window.innerHeight/20
+      //   mobile : screen.width/10,      screen.height/19
+      // 各 override は floor(real * scale) を返すので、どのパスを通っても
+      // ratzilla の cols/rows が同じ (= 視覚 viewport から逆算した値) に
+      // なるよう、プロパティごとに専用 scale を計算する。+0.5px は IEEE754
+      // 往復誤差 (~1e-12) ≪ 0.5 ≪ 行除数 なので、行が +1 増える方向には
+      // 絶対に転ばない安全域。
+      // この設計だと Ratzilla 側の is_mobile() 誤判定にも自動で耐える。
+      var realScreenW = screen.width || visibleW;
+      var realScreenH = screen.height || visibleH;
+      var SCALE_W_WIN = (cols * 10 + 0.5) / visibleW;
+      var SCALE_W_SCR = (cols * 10 + 0.5) / realScreenW;
+      var SCALE_H_WIN = (maxRows * 20 + 0.5) / visibleH;
+      var SCALE_H_SCR = (maxRows * 19 + 0.5) / realScreenH;
+
+      overrideWith(window, Window.prototype, 'innerWidth', SCALE_W_WIN);
+      overrideWith(window, Window.prototype, 'innerHeight', SCALE_H_WIN);
+      overrideWith(screen, Screen.prototype, 'width', SCALE_W_SCR);
+      overrideWith(screen, Screen.prototype, 'height', SCALE_H_SCR);
     })();
   </script>
   <script>
