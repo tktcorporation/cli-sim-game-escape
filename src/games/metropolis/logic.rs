@@ -2258,19 +2258,32 @@ pub fn with_action_applied<R, F: FnOnce(&mut City) -> R>(
 /// **`&mut City` を取る理由**: in-place mutate + revert で評価する。clone は
 /// 64×32 grid のメモリ確保が探索の度に走り、Tier 5 の depth=3 で tick が
 /// 秒単位に詰まる。mutate-then-revert で同じ depth が ~10x 速くなる。
+///
+/// production の hot path (`rank_actions`) は baseline 共有版
+/// `action_value_with_baseline` を直接呼ぶ。本関数は単発評価向けの公開 API
+/// (テストや `render` の選択セル詳細などで使う)。
+#[allow(dead_code)]
 pub fn action_value<F: Fn(&City) -> i64>(
     city: &mut City,
     action: &super::ai::AiAction,
     eval_fn: &F,
 ) -> i64 {
     let before = eval_fn(city);
+    action_value_with_baseline(city, action, eval_fn, before)
+}
+
+/// `action_value` の baseline 共有版。同じ city 状態に対して N 個の候補を比較する
+/// 場合、呼び側で `before = eval_fn(city)` を 1 度だけ計算して渡せば、`eval_fn`
+/// 呼び出しが 2N → N+1 回に減る。`rank_actions` のホットパスで効く。
+pub(super) fn action_value_with_baseline<F: Fn(&City) -> i64>(
+    city: &mut City,
+    action: &super::ai::AiAction,
+    eval_fn: &F,
+    before: i64,
+) -> i64 {
     let after = with_action_applied(city, action, |c| eval_fn(c));
     let cost_cents = match action {
         super::ai::AiAction::Build { x, y, kind } => {
-            // 整地必要セル (Forest/Wasteland/Rock) は実行時に
-            // `terrain.clearing_cost` も支払うため、AI 評価でも cost に含める。
-            // これがないと Forest/Rock セルへの Build を Plain と同コストで評価して
-            // しまい、整地が高い場所への展開を過大評価する。
             let mut cost = kind.cost();
             let t = city.terrain_at(*x, *y);
             if t.needs_clearing() {
@@ -2444,10 +2457,13 @@ pub(super) fn rank_actions<F: Fn(&City) -> i64>(
     top_k: usize,
 ) -> Vec<(super::ai::AiAction, i64)> {
     let actions = enumerate_actions(city);
+    // baseline `before` は同じ city 状態で全候補に共通。1 度計算して N 個の候補で
+    // 共有することで evaluate 呼び出しが 2N → N+1 回 (実質 ~2x speedup)。
+    let before = eval_fn(city);
     let mut scored: Vec<(super::ai::AiAction, i64)> = actions
         .into_iter()
         .map(|a| {
-            let v = action_value(city, &a, eval_fn);
+            let v = action_value_with_baseline(city, &a, eval_fn, before);
             (a, v)
         })
         .collect();
