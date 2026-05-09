@@ -221,7 +221,7 @@ impl PanelTab {
 /// `Eco` は森を残し荒地だけ整地する「環境配慮」型 — 整地メカニクスと組み合わせ。
 /// `Balanced` は「中間値で意思決定が薄まる」ため削除し、各択に明確な
 /// トレードオフを持たせる方針 (Plan #1)。
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Strategy {
     Growth, // prefer Houses
     Income, // prefer Shops
@@ -421,9 +421,10 @@ pub struct City {
     pub connected_cache: std::cell::RefCell<Option<(u64, std::rc::Rc<Vec<Vec<bool>>>)>>,
 
     /// `compute_income_per_sec` (dollars) の per-frame メモ化キャッシュ。
-    /// 描画は header / status / Manager タブ等から複数回呼ぶ。`(tick, dollars)`
-    /// ペアで保持。connected_cache と同じ寿命管理。
-    pub income_dollars_cache: Cell<Option<(u64, i64)>>,
+    /// 描画は header / status / Manager タブ等から複数回呼ぶ。`(tick, strategy, dollars)`
+    /// のトリプルで保持: strategy は `income_penalty_pct` を通じて income に直接効くため
+    /// cache key に含める (= プレイヤーが strategy を切り替えた瞬間も自動 stale)。
+    pub income_dollars_cache: Cell<Option<(u64, Strategy, i64)>>,
 
     /// タブ復帰時のオフライン進行ボーナス通知。`Some` の間は `render` が
     /// 中央モーダルを上書き描画し、`handle_input` が通常操作をブロックして

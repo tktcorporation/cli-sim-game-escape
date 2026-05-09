@@ -1075,8 +1075,8 @@ fn employment_income_cents(
 /// 「Highrise は 6 倍」が本機能の主役。dwell time (5 min) と寿命 (4×) を考えると
 /// 「育てた街区は長く高収入を出す」が成り立つ。
 pub fn compute_income_per_sec(city: &City) -> i64 {
-    if let Some((cached_tick, cached)) = city.income_dollars_cache.get() {
-        if cached_tick == city.tick {
+    if let Some((cached_tick, cached_strategy, cached)) = city.income_dollars_cache.get() {
+        if cached_tick == city.tick && cached_strategy == city.strategy {
             return cached;
         }
     }
@@ -1087,7 +1087,8 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
     if any_house && income == 0 {
         income = 1;
     }
-    city.income_dollars_cache.set(Some((city.tick, income)));
+    city.income_dollars_cache
+        .set(Some((city.tick, city.strategy, income)));
     income
 }
 
