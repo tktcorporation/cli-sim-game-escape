@@ -108,16 +108,23 @@
       // を持つ。+0.5px は IEEE754 往復誤差 (~1e-12) ≪ 0.5 ≪ 行除数 の
       // 安全域、行が +1 増える方向には絶対に転ばない。
       // 値は mutable: measurement で targetRows が更新されたら再計算。
-      var realScreenW = screen.width || visibleW;
-      var realScreenH = screen.height || visibleH;
+      // 原始 getter をキャプチャしておく。screen.width/height は後で
+      // override されるため、再読み込み (resize ハンドラ) で物理サイズを
+      // 取り戻したい時に必要。回転で物理 width/height が swap する端末も
+      // あるので、resize の度に必ず原始値で取り直す。
+      var origScreenWGet = Object.getOwnPropertyDescriptor(Screen.prototype, 'width').get;
+      var origScreenHGet = Object.getOwnPropertyDescriptor(Screen.prototype, 'height').get;
+      function realScreenW() { return origScreenWGet.call(screen) || visibleW; }
+      function realScreenH() { return origScreenHGet.call(screen) || visibleH; }
+
       var scales = {
         wW: 0, wH: 0, sW: 0, sH: 0
       };
       function recomputeScales() {
         scales.wW = (targetCols * 10 + 0.5) / visibleW;
-        scales.sW = (targetCols * 10 + 0.5) / realScreenW;
+        scales.sW = (targetCols * 10 + 0.5) / realScreenW();
         scales.wH = (targetRows * 20 + 0.5) / visibleH;
-        scales.sH = (targetRows * 19 + 0.5) / realScreenH;
+        scales.sH = (targetRows * 19 + 0.5) / realScreenH();
       }
       recomputeScales();
 
@@ -234,10 +241,9 @@
         clearTimeout(resizeTimer);
         resizeTimer = setTimeout(function() {
           // 視覚 viewport を更新 → font とサイズを再測定して再 settle へ。
+          // realScreen* は原始 getter 経由で都度読むので別途更新不要。
           visibleW = document.documentElement.clientWidth;
           visibleH = document.documentElement.clientHeight;
-          realScreenW = screen.width || visibleW;
-          realScreenH = screen.height || visibleH;
           // 元のフォントサイズに戻してから再測定 (前回の inline scale を消す)。
           var preElements = document.querySelectorAll('pre');
           for (var i = 0; i < preElements.length; i++) {
