@@ -529,12 +529,21 @@ impl City {
         }
     }
 
-    /// grid 構造を変更した時に派生キャッシュを全て無効化する。
-    /// `set_tile` / 建設完成 / 撤去 / 整地 / セーブロード / tick 境界 で呼ぶ。
-    /// 関連: `population_cache` / `connected_cache` / `income_dollars_cache`。
+    /// 派生キャッシュを全て無効化する。`set_tile` / 建設完成 / 撤去 / 整地 /
+    /// セーブロード / tick 境界 で呼ぶ。Road 以外の grid 変更では
+    /// `invalidate_per_tile_caches` を使うことで `connected_cache` を温存できる
+    /// (= AI search の非 Road actions が BFS を再計算せずに済む)。
     pub fn invalidate_population_cache(&self) {
         self.population_cache.set(None);
         self.connected_cache.borrow_mut().take();
+        self.income_dollars_cache.set(None);
+    }
+
+    /// Road tile が変化しない grid mutation 用の細粒度 invalidate。
+    /// 道路網トポロジは不変なので `connected_cache` を残し、人口・収入派生だけ
+    /// クリアする。AI search の非 Road actions で BFS を保持して評価を高速化する。
+    pub fn invalidate_per_tile_caches(&self) {
+        self.population_cache.set(None);
         self.income_dollars_cache.set(None);
     }
 

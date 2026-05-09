@@ -1964,7 +1964,11 @@ pub const AI_PAYBACK_SECS: i64 = 1800;
 /// 「街全体の cents/sec」+ thematic bonus + Outpost territory bonus
 /// + inactive 建物 penalty + 道路網健全性。Tier 3 以上で共通、Tier 差は探索深さで作る。
 pub fn evaluate(city: &City) -> i64 {
-    let connected = compute_edge_connected_roads(city);
+    // `cached_edge_connected_roads` を経由することで、AI search の非 Road actions では
+    // BFS を走らせず connected_cache から再利用される (Road change 時のみ city.tick を
+    // 進めて invalidate するか別経路で再計算)。同 tick 内で連続 evaluate しても
+    // BFS 1 回で済む。
+    let connected = cached_edge_connected_roads(city);
     compute_income_per_sec_cents_with(city, &connected)
         + strategy_thematic_bonus(city)
         + outpost_territory_bonus(city)
@@ -2217,12 +2221,23 @@ pub fn with_action_applied<R, F: FnOnce(&mut City) -> R>(
             // ため、新築 House を即 Highrise として評価してしまう。
             city.built_at_tick[*y][*x] = city.tick;
             city.cash -= cost;
-            city.invalidate_population_cache();
+            // Road 配置は edge-connectivity を変えるので connected_cache を含めて全クリア。
+            // 非 Road なら per-tile cache だけクリアして connected_cache を温存
+            // (= 評価関数 BFS が cached_edge_connected_roads でヒットして高速化)。
+            if matches!(kind, Building::Road) {
+                city.invalidate_population_cache();
+            } else {
+                city.invalidate_per_tile_caches();
+            }
             let result = f(city);
             city.grid[*y][*x] = saved_tile;
             city.built_at_tick[*y][*x] = saved_built_at;
             city.cash += cost;
-            city.invalidate_population_cache();
+            if matches!(kind, Building::Road) {
+                city.invalidate_population_cache();
+            } else {
+                city.invalidate_per_tile_caches();
+            }
             result
         }
         super::ai::AiAction::Demolish { x, y } => {
@@ -2232,15 +2247,25 @@ pub fn with_action_applied<R, F: FnOnce(&mut City) -> R>(
             let saved_tile = city.grid[*y][*x].clone();
             let saved_built_at = city.built_at_tick[*y][*x];
             let cost = demolish_cost(*x, *y);
+            // 撤去対象が Road の時のみ connected_cache を invalidate する必要がある。
+            let was_road = matches!(saved_tile, Tile::Built(Building::Road));
             city.grid[*y][*x] = Tile::Empty;
             city.cash -= cost;
             city.built_at_tick[*y][*x] = 0;
-            city.invalidate_population_cache();
+            if was_road {
+                city.invalidate_population_cache();
+            } else {
+                city.invalidate_per_tile_caches();
+            }
             let result = f(city);
             city.grid[*y][*x] = saved_tile;
             city.built_at_tick[*y][*x] = saved_built_at;
             city.cash += cost;
-            city.invalidate_population_cache();
+            if was_road {
+                city.invalidate_population_cache();
+            } else {
+                city.invalidate_per_tile_caches();
+            }
             result
         }
         super::ai::AiAction::Idle => f(city),
