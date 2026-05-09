@@ -101,6 +101,95 @@ pub struct MetropolisGame {
     /// `Date.now()` は連続的に進むので、tick 経由の gap 検出に使う。
     #[cfg(target_arch = "wasm32")]
     last_wall_ms: u64,
+    /// `tick` / `render` の実行時間サンプル (ms)。WASM ブラウザで描画が重い時に
+    /// どこがボトルネックかを画面表示するために使う。release ビルドでも有効
+    /// (チューニング中の実測用)。 RefCell で `&self` の `render` から書き込む。
+    perf: std::cell::RefCell<PerfStats>,
+}
+
+/// `tick` / `render` 実行時間の rolling-window 統計。
+///
+/// 60 FPS の WASM 描画で「重さ」を可視化するために使う:
+///   - tick が 16ms 超 → 1 フレーム以上 main thread が block して frame drop
+///   - render が 16ms 超 → 描画自体が間に合わない (本来軽量なはず)
+///
+/// 最近 N サンプルの max / avg を表示することで、瞬間的な spike も逃さない。
+pub struct PerfStats {
+    tick_samples: std::collections::VecDeque<f32>,
+    render_samples: std::collections::VecDeque<f32>,
+    /// オーバーレイを描画するかのトグル。Manager タブの設定で切替予定。
+    /// 既定 true: チューニング中なので常時表示。
+    pub overlay_enabled: bool,
+}
+
+impl PerfStats {
+    const WINDOW: usize = 30;
+
+    pub fn new() -> Self {
+        Self {
+            tick_samples: std::collections::VecDeque::with_capacity(Self::WINDOW),
+            render_samples: std::collections::VecDeque::with_capacity(Self::WINDOW),
+            overlay_enabled: true,
+        }
+    }
+
+    fn push(buf: &mut std::collections::VecDeque<f32>, ms: f32) {
+        if buf.len() == Self::WINDOW {
+            buf.pop_front();
+        }
+        buf.push_back(ms);
+    }
+
+    pub fn record_tick(&mut self, ms: f32) {
+        Self::push(&mut self.tick_samples, ms);
+    }
+
+    pub fn record_render(&mut self, ms: f32) {
+        Self::push(&mut self.render_samples, ms);
+    }
+
+    fn stat(buf: &std::collections::VecDeque<f32>) -> (f32, f32) {
+        if buf.is_empty() {
+            return (0.0, 0.0);
+        }
+        let n = buf.len() as f32;
+        let sum: f32 = buf.iter().sum();
+        let max = buf.iter().cloned().fold(0.0f32, f32::max);
+        (sum / n, max)
+    }
+
+    pub fn tick_avg_max(&self) -> (f32, f32) {
+        Self::stat(&self.tick_samples)
+    }
+
+    pub fn render_avg_max(&self) -> (f32, f32) {
+        Self::stat(&self.render_samples)
+    }
+}
+
+impl Default for PerfStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 高解像度ミリ秒タイマー。WASM では `Performance.now()`、native では
+/// `SystemTime` フォールバック (テストで panic しないため)。
+fn perf_now_ms() -> Option<f64> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window()
+            .and_then(|w| w.performance())
+            .map(|p| p.now())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_secs_f64() * 1000.0)
+    }
 }
 
 impl MetropolisGame {
@@ -136,6 +225,7 @@ impl MetropolisGame {
             // 既にボーナス済みの期間を tick 側で二重支給することはない。
             #[cfg(target_arch = "wasm32")]
             last_wall_ms: save::wall_clock_now_ms(),
+            perf: std::cell::RefCell::new(PerfStats::new()),
         }
     }
 }
@@ -280,6 +370,7 @@ impl Game for MetropolisGame {
     }
 
     fn tick(&mut self, delta_ticks: u32) {
+        let t_start = perf_now_ms();
         // タブ復帰時のオフライン進行ボーナス。`requestAnimationFrame` がバック
         // グラウンドで停止していた間、`delta_ticks` は `time.rs` の clamp で
         // 最大 5 tick (500ms) しか進まないため、wall-clock の gap で実時間を
@@ -315,10 +406,45 @@ impl Game for MetropolisGame {
             let _ = save::save_game(&self.state);
             self.save_countdown = save::AUTOSAVE_INTERVAL;
         }
+
+        if let (Some(s), Some(e)) = (t_start, perf_now_ms()) {
+            self.perf.borrow_mut().record_tick((e - s) as f32);
+        }
     }
 
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+        let t_start = perf_now_ms();
         render::render(&self.state, f, area, click_state);
+        if let (Some(s), Some(e)) = (t_start, perf_now_ms()) {
+            self.perf.borrow_mut().record_render((e - s) as f32);
+        }
+        // perf overlay: チューニング中の実測用に右上に小さく表示。
+        // overlay_enabled = false にすれば消せる (将来 Manager タブの設定で切替予定)。
+        let perf = self.perf.borrow();
+        if perf.overlay_enabled {
+            let (t_avg, t_max) = perf.tick_avg_max();
+            let (r_avg, r_max) = perf.render_avg_max();
+            let line = format!(
+                " ⚡ T:{:.1}/{:.1}ms R:{:.1}/{:.1}ms ",
+                t_avg, t_max, r_avg, r_max
+            );
+            let w = (line.chars().count() as u16).min(area.width);
+            if w > 0 {
+                let overlay_area = Rect::new(
+                    area.x + area.width.saturating_sub(w),
+                    area.y,
+                    w,
+                    1,
+                );
+                let p = ratatui::widgets::Paragraph::new(ratatui::text::Span::styled(
+                    line,
+                    ratatui::style::Style::default()
+                        .fg(ratatui::style::Color::DarkGray)
+                        .bg(ratatui::style::Color::Black),
+                ));
+                f.render_widget(p, overlay_area);
+            }
+        }
     }
 }
 
