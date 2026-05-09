@@ -2447,8 +2447,8 @@ fn manager_list(state: &City) -> ClickableList<'static> {
         )));
     }
 
-    // 自動運用ステータス — 撤去判断は AI が `placement_value` と
-    // `demolish_value` を比較して即時実行。表示は予備金ガードのみ
+    // 自動運用ステータス — 撤去判断は AI が `evaluate` と
+    // `action_value` を比較して即時実行。表示は予備金ガードのみ
     // (= AI が撤去後に手元に残す cash 下限。デフレ螺旋ガード)。
     let policy = logic::automation_policy(state.strategy);
     let auto_label = format!(" 🤖 撤去判断: AI / 予備${}", policy.min_cash_reserve);

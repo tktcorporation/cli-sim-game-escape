@@ -191,7 +191,7 @@ pub fn tick(city: &mut City, delta_ticks: u32) {
 fn step_one_tick(city: &mut City) {
     advance_construction(city);
     // `auto_strategy_actions` は no-op (互換 stub)。撤去判断は AI が
-    // `decide()` 経由で `placement_value` と `demolish_value` を比較して行う。
+    // `decide()` 経由で `evaluate` と `action_value` を比較して行う。
     auto_strategy_actions(city);
     drive_ai(city);
     accrue_income(city);
@@ -389,8 +389,8 @@ pub struct StrategyInfo {
     /// AI が建物種別を引く時の重み (合計 100 を厳守)。
     /// AI が建物種別を引く時の重み (合計 100 を厳守)。
     ///
-    /// **注意**: Tier 4 以上は `placement_value` 評価ベースなのでこの重みは
-    /// 直接参照しない。Tier 3 (RoadPlanner) と Status パネルの「戦略内訳」
+    /// **注意**: Tier 4 以上は `evaluate` 評価ベースなのでこの重みは
+    /// 直接参照しない。Tier 3 (Aware) と Status パネルの「戦略内訳」
     /// 表示でのみ使われる。Park の重みは「strategy_bias」側に統合済み
     /// (= 評価ベース AI が Eco の時に Park を選びやすくなる)。
     pub house_pct: u32,
@@ -508,7 +508,7 @@ pub fn strategy_thought_verb(s: Strategy, kind: Building) -> &'static str {
 
 // ── 自動運用ポリシー (Strategy ごとの撤去 cash 余力) ───────────────
 //
-// 撤去判断は AI (`ai::decide`) が `placement_value` と `demolish_value` を
+// 撤去判断は AI (`ai::decide`) が `evaluate` と `action_value` を
 // 同じ天秤で行う。本セクションが提供するのは「撤去後 cash がこの予備金を
 // 下回るなら撤去を見送る」というガードのみ。これがないと cash $50 →
 // 中央のミス建物を撤去 → cash $0 → 次 tick の build を全て idle、の
@@ -543,7 +543,7 @@ pub fn automation_policy(s: Strategy) -> AutomationPolicy {
 /// `step_one_tick` から毎 tick 呼ばれる no-op (互換性のため残置)。
 ///
 /// 旧仕様では戦略ごとの周期で撤去を発火していたが、AI 自身が
-/// `placement_value` と `demolish_value` を同じ天秤で比較するように
+/// `evaluate` と `action_value` を同じ天秤で比較するように
 /// なったため不要。`step_one_tick` の呼び出し点を変えずに済むよう
 /// 関数だけ残してある。次回大幅リファクタ時に呼び出し側ごと削除可。
 pub fn auto_strategy_actions(_city: &mut City) {}
@@ -624,13 +624,13 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
     };
     city.invalidate_population_cache();
     city.buildings_started += 1;
-    // Outpost 派遣統計: AI が `placement_value` 経由で Outpost を選んだ時にも
+    // Outpost 派遣統計: AI が `evaluate` 経由で Outpost を選んだ時にも
     // カウントされるよう、start_construction でフックする (= 旧 dispatch_outpost
     // の責務を吸収)。
     if matches!(kind, Building::Outpost) {
         city.outposts_dispatched_total = city.outposts_dispatched_total.saturating_add(1);
     }
-    // Tier 4 (DemandAware) のみ Strategy に基づく動詞を表示。
+    // Tier 4 (Planner) のみ Strategy に基づく動詞を表示。
     // 低 Tier は戦略を読まない設計なので、汎用の「着工」を出す方が誠実。
     // この差自体が「上位 AI ほど目的を持って動いている」演出にもなる。
     if matches!(city.ai_tier, AiTier::Planner) {
@@ -1896,11 +1896,62 @@ pub fn hire_worker(city: &mut City) -> bool {
 pub const AI_PAYBACK_SECS: i64 = 1800;
 
 /// 評価関数 (アマ初段〜プロ相当)。
-/// 「街全体の cents/sec」+ Strategy thematic bonus + Outpost テリトリー bonus。
-/// 全 Tier 共通の主軸評価。Tier 差は探索深さで作る。
+/// 「街全体の cents/sec」+ thematic bonus + Outpost territory bonus
+/// + inactive 建物 penalty。Tier 3 以上で共通、Tier 差は探索深さで作る。
 pub fn evaluate(city: &City) -> i64 {
     let income = compute_income_per_sec_cents(city);
-    income + strategy_thematic_bonus(city) + outpost_territory_bonus(city)
+    income
+        + strategy_thematic_bonus(city)
+        + outpost_territory_bonus(city)
+        + inactive_building_penalty(city)
+}
+
+/// 機能不全の商業/雇用建物に対するマイナス bonus。
+///
+/// **必要性**: 純 Δincome 評価では「inactive Shop を撤去」の Δevaluate ≈ 0
+/// (失う income も 0) になり、AI が機能不全建物を撤去しなくなる。「セルが他用途に
+/// 使えるはず」という機会コストを評価に乗せることで、撤去 action が並行する
+/// Build 候補 (House +25 cents/sec 等) を上回るようにする。
+///
+/// 値の根拠: 各建物の active 時の収入下限 ~1/3 を「失われている価値」として計上。
+///   - Shop $150 / 1800 amort = 0.08 cents/sec → 撤去ペイバックは小さい
+///   - Build House (= 並行候補) は +25 cents/sec → ペナルティはこれを超える必要
+fn inactive_building_penalty(city: &City) -> i64 {
+    let connected = compute_edge_connected_roads(city);
+    let mut penalty = 0i64;
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            match city.tile(x, y) {
+                Tile::Built(Building::Shop) => {
+                    if !shop_is_active_with(city, x, y, &connected) {
+                        penalty -= 50;
+                    }
+                }
+                Tile::Built(Building::Mall) => {
+                    if !shop_is_active_with(city, x, y, &connected) {
+                        penalty -= 100;
+                    }
+                }
+                Tile::Built(Building::Workshop) => {
+                    if !workshop_is_active_with(city, x, y, &connected) {
+                        penalty -= 50;
+                    }
+                }
+                Tile::Built(Building::Factory) => {
+                    if !workshop_is_active_with(city, x, y, &connected) {
+                        penalty -= 100;
+                    }
+                }
+                Tile::Built(Building::Office) => {
+                    if !workshop_is_active_with(city, x, y, &connected) {
+                        penalty -= 80;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    penalty
 }
 
 /// Outpost が隣接 Rock を解禁する将来価値を評価関数に組み込む thematic bonus。
@@ -1997,7 +2048,11 @@ fn strategy_thematic_bonus(city: &City) -> i64 {
 ///
 /// 安全性: f は `evaluate` 系の純関数を想定。f が `&mut City` を要求する場合は
 /// この関数を再帰的に呼べないが、評価関数は `&City` で十分なのでこの設計で OK。
-pub fn with_action_applied<R, F: FnOnce(&City) -> R>(
+/// `f` のシグネチャは `FnOnce(&mut City) -> R`。再帰的な探索 (= `f` 内で
+/// さらに `with_action_applied` を呼ぶケース) を許す代わりに、**`f` は city を
+/// 自身が受け取った時の状態に戻す責務を負う**。`f` が `with_action_applied` を
+/// 入れ子で呼ぶ限り (= 各層が apply/revert する) 自然にこの契約が満たされる。
+pub fn with_action_applied<R, F: FnOnce(&mut City) -> R>(
     city: &mut City,
     action: &super::ai::AiAction,
     f: F,
@@ -2011,6 +2066,12 @@ pub fn with_action_applied<R, F: FnOnce(&City) -> R>(
             let saved_built_at = city.built_at_tick[*y][*x];
             let cost = kind.cost();
             city.grid[*y][*x] = Tile::Built(*kind);
+            // 仮想着工は「築 0」として評価する。`built_at_tick = city.tick` を
+            // セットしないと、`tile_income_cents_with` は `built_at_tick == 0` で
+            // aging スキップする一方、`gather_house_neighborhood_with` の
+            // `effective_house_tier(target, age)` が `age = city.tick` で扱う
+            // ため、新築 House を即 Highrise として評価してしまう。
+            city.built_at_tick[*y][*x] = city.tick;
             city.cash -= cost;
             city.invalidate_population_cache();
             let result = f(city);
@@ -2254,12 +2315,7 @@ pub(super) fn search_best_action<F: Fn(&City) -> i64>(
     for (a, v1) in &depth1 {
         let next_k = (top_k / 2).max(2);
         let next_total = with_action_applied(city, a, |c| {
-            // 内側の再帰探索は &City しか持てない (with_action_applied の f は &City)。
-            // best_continuation_value は &mut City を要求するので、ここは
-            // 「再 mutate」せず、評価関数だけを使った単純な depth=1 best を取る形に
-            // する。これで深さ 2 までは正確、depth=3 以降は近似だが Tier 5 の
-            // 体感としては十分。
-            best_continuation_inner(c, depth - 1, next_k, eval_fn)
+            best_continuation_value(c, depth - 1, next_k, eval_fn)
         });
         let total = v1 + next_total;
         let better = match &best {
@@ -2273,14 +2329,12 @@ pub(super) fn search_best_action<F: Fn(&City) -> i64>(
     best.map(|(a, _)| a)
 }
 
-/// `search_best_action` の継続評価。仮想着手後の局面で「best 1 手目」の value
-/// を返す。`&City` 版で再帰しないため depth=2 までは正確、depth=3 以降の挙動は
-/// 「2 手目までの best を見る」近似 (Tier 5 用)。
+/// 仮想着手後の局面で「残り `depth` 手で得られる最良の合計 action_value」を返す。
 ///
-/// 単一エージェント探索なので「次の手を打たない」(Idle 相当 = 0) も選択肢。
-/// 最良 1 手目の value が負なら 0 を返す。
-fn best_continuation_inner<F: Fn(&City) -> i64>(
-    city: &City,
+/// 単一エージェント探索なので「次の手を打たない (= action_value 0)」も選択肢。
+/// 最良候補が負なら 0 を返す。Tier 5 の depth=3 まで本物の再帰で読む。
+fn best_continuation_value<F: Fn(&City) -> i64>(
+    city: &mut City,
     depth: u32,
     top_k: usize,
     eval_fn: &F,
@@ -2288,92 +2342,25 @@ fn best_continuation_inner<F: Fn(&City) -> i64>(
     if depth == 0 {
         return 0;
     }
-    // `&City` 版の rank_actions: action_value も `&City` 版にする必要があるが、
-    // ここでは `with_action_applied` を経由できないので素朴な clone-eval で代替。
-    // depth=1 用なので 1 候補あたり 1 evaluate しか走らず、許容範囲。
-    let actions = enumerate_actions(city);
-    let mut best_v: i64 = 0;
-    for a in actions {
-        let v = action_value_pure(city, &a, eval_fn);
-        if v > best_v {
-            best_v = v;
+    let ranked = rank_actions(city, eval_fn, top_k);
+    if ranked.is_empty() {
+        return 0;
+    }
+    if depth == 1 {
+        return ranked[0].1.max(0);
+    }
+    let next_k = (top_k / 2).max(2);
+    let mut best_total = ranked[0].1.max(0);
+    for (a, v1) in ranked.iter() {
+        let cont = with_action_applied(city, a, |c| {
+            best_continuation_value(c, depth - 1, next_k, eval_fn)
+        });
+        let total = v1 + cont;
+        if total > best_total {
+            best_total = total;
         }
     }
-    let _ = top_k;
-    best_v
-}
-
-/// `&City` 版の `action_value`。clone を使うが、深い recursion からは呼ばれず
-/// 末端 1 段だけなので OK。
-fn action_value_pure<F: Fn(&City) -> i64>(
-    city: &City,
-    action: &super::ai::AiAction,
-    eval_fn: &F,
-) -> i64 {
-    let before = eval_fn(city);
-    let after = match action {
-        super::ai::AiAction::Build { x, y, kind } if *x < GRID_W && *y < GRID_H => {
-            let mut tmp = clone_city_min(city);
-            tmp.grid[*y][*x] = Tile::Built(*kind);
-            tmp.cash -= kind.cost();
-            tmp.invalidate_population_cache();
-            eval_fn(&tmp)
-        }
-        super::ai::AiAction::Demolish { x, y } if *x < GRID_W && *y < GRID_H => {
-            let mut tmp = clone_city_min(city);
-            tmp.grid[*y][*x] = Tile::Empty;
-            tmp.built_at_tick[*y][*x] = 0;
-            tmp.cash -= demolish_cost(*x, *y);
-            tmp.invalidate_population_cache();
-            eval_fn(&tmp)
-        }
-        _ => before,
-    };
-    let cost_cents = match action {
-        super::ai::AiAction::Build { kind, .. } => kind.cost() * 100,
-        super::ai::AiAction::Demolish { x, y } => demolish_cost(*x, *y) * 100,
-        super::ai::AiAction::Idle => 0,
-    };
-    (after - before) - cost_cents / AI_PAYBACK_SECS
-}
-
-/// 末端評価用の最小限 city clone (grid と terrain と built_at_tick のみ)。
-/// `apply_action_virtual` の clone を回避できない部分でだけ使う。
-fn clone_city_min(city: &City) -> City {
-    City {
-        grid: city.grid.clone(),
-        terrain: city.terrain.clone(),
-        world_seed: city.world_seed,
-        cash: city.cash,
-        tick: city.tick,
-        ai_tier: city.ai_tier,
-        strategy: city.strategy,
-        panel_tab: city.panel_tab,
-        last_observed_tier: city.last_observed_tier,
-        tier_flash_until: 0,
-        last_outpost_dispatch_tick: city.last_outpost_dispatch_tick,
-        last_auto_demolish_tick: city.last_auto_demolish_tick,
-        outposts_dispatched_total: city.outposts_dispatched_total,
-        workers: city.workers,
-        rng_state: city.rng_state,
-        buildings_started: city.buildings_started,
-        buildings_finished: city.buildings_finished,
-        cash_earned_total: city.cash_earned_total,
-        cash_spent_total: city.cash_spent_total,
-        events: Vec::new(),
-        completion_flash_until: vec![vec![0u64; GRID_W]; GRID_H],
-        payout_flash_until: vec![vec![0u64; GRID_W]; GRID_H],
-        last_payout_amount: 0,
-        last_payout_tick: 0,
-        built_at_tick: city.built_at_tick.clone(),
-        cam_x: city.cam_x,
-        cam_y: city.cam_y,
-        selected_cell: None,
-        panel_scroll: std::cell::Cell::new(0),
-        cash_history: std::collections::VecDeque::new(),
-        population_cache: std::cell::Cell::new(None),
-        pending_offline_welcome: None,
-    }
+    best_total
 }
 
 /// Stockfish 流のノイズ付き選択: `noise_pct`% の確率で「上位 3 候補から random」を選ぶ。

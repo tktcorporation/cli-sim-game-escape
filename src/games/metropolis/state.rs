@@ -84,7 +84,7 @@ pub enum Building {
     /// 充足」を担う。道路接続不要。
     Park,
     /// **開拓機材** — 隣接する Rock セルの整地を可能にする特殊建物。
-    /// AI (Tier 4/5) が `placement_value` で判定して自分で建てる。
+    /// AI (Tier 4/5) が `evaluate` で判定して自分で建てる。
     Outpost,
 }
 
@@ -327,13 +327,14 @@ pub struct City {
     /// ティア進化フラッシュが消える tick。`tick < value` の間バナーを光らせる。
     pub tier_flash_until: u64,
 
-    /// 旧周期撤去のクールダウン用フィールド (現在 dead state)。AI 統合で
-    /// `auto_strategy_actions` が no-op になったため値を読む production code
-    /// は無いが、save schema v2 互換のため field と (de)serialize 経路は残す。
-    /// 次回 schema bump 時に削除候補。
+    /// 旧周期撤去のクールダウン用フィールド (現在 dead state)。値を読む
+    /// production code は無いが、save schema v2 互換のため field と
+    /// (de)serialize 経路は残す。次回 schema bump 時に削除候補。
+    #[allow(dead_code)]
     pub last_outpost_dispatch_tick: u64,
     /// 旧周期撤去用フィールド (現在 dead state、save 互換のため残置)。
     /// 詳細は `last_outpost_dispatch_tick` の説明参照。
+    #[allow(dead_code)]
     pub last_auto_demolish_tick: u64,
     /// Outpost の累計建設回数。`count_built(Outpost)` は撤去で減るので
     /// 「これまでに何基建てたか」の生涯統計はこちらに加算する。

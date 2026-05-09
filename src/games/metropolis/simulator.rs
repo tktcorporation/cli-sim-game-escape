@@ -172,7 +172,7 @@ mod tests {
         //   - Tech: インフラ特化は AI 統合後 cents/sec ベース判断で Income と
         //     拮抗するため、roads の絶対順位は担保しない。
         //
-        // Tech roads の順位を要求していた assertion は、AI が `placement_value`
+        // Tech roads の順位を要求していた assertion は、AI が `evaluate`
         // で road を経済価値で選ぶ結果として「Tech > Income roads」が成立しなく
         // なったため削除。Tech の identity は cash floor (= 撤去再建で薄い)
         // と pop floor で間接的に担保される。
@@ -269,7 +269,7 @@ mod tests {
         let s3 = run(seed, AiTier::Aware, 1, span, &cps);
         eprintln!("\n=== Tier 4 (Income baseline) ===");
         let s4 = run(seed, AiTier::Planner, 1, span, &cps);
-        eprintln!("\n=== Tier 5 (DeepPlanner) ===");
+        eprintln!("\n=== Tier 5 (Master) ===");
         let s5 = run(seed, AiTier::Master, 1, span, &cps);
 
         let c1 = s1.last().unwrap().cash;
@@ -383,11 +383,11 @@ mod tests {
 
     /// 自動化バランスのシミュレーション。各戦略を 30 min 動かして、
     /// 全戦略合計で 1 基以上 Outpost が派遣されていることを確認する。
-    /// `placement_value` のチューニング時に数値感を見るためのベンチマーク。
+    /// `evaluate` のチューニング時に数値感を見るためのベンチマーク。
     ///
-    /// **Phase A**: Outpost 派遣は AI 評価関数 (`placement_value`) に統合された。
+    /// **Phase A**: Outpost 派遣は AI 評価関数 (`evaluate`) に統合された。
     /// 旧仕様の「`workers >= 2` ガード」「戦略ごとのハードコード周期」は廃止。
-    /// 4 worker DemandAware で十分な現金が出る環境を想定する。
+    /// 4 worker Planner で十分な現金が出る環境を想定する。
     #[test]
     fn automation_drives_outposts_and_demolitions() {
         let seed = 0xC1A5_5EED;
@@ -422,7 +422,7 @@ mod tests {
         }
 
         // **Phase A (評価ベース AI 統合後)**: Outpost 派遣は AI の
-        // `placement_value` で「収入を増やす手」として自然発火する。
+        // `evaluate` で「収入を増やす手」として自然発火する。
         // ハードコード周期が無くなったので、戦略バイアスではなく AI Tier 4 の
         // 賢さが拡張行動を駆動する。30 min で全 4 戦略合計の派遣数 >= 1 を
         // 不変条件として担保 (= マップ全埋めで完全停滞しないこと)。
