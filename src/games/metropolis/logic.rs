@@ -2544,16 +2544,26 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
 
 /// affordability + 建物前提条件ガード。`enumerate_actions` から呼ぶ。
 ///
-/// `extra_cost` は terrain の `clearing_cost` を渡す枠。整地必要セル
-/// (Forest/Wasteland/Rock) は `start_construction` が `kind.cost() + clearing_cost`
-/// を引くため、cash がそれに足りない手は候補化しない (= 実行不可手の混入を防ぐ)。
+/// `extra_cost` は terrain の `clearing_cost` を渡す枠。`start_construction` は
+/// 整地必要セルでは「即時 `clearing_cost` を引いて Tile::Clearing にする」
+/// だけで早期 return し、`kind.cost()` は整地完了後の別 tick で別途引く。
+/// したがって即時必要 cash は:
+///   - 整地必要 (extra_cost > 0): `clearing_cost` のみ
+///   - そうでない (extra_cost == 0): `kind.cost()`
 fn action_passes_guards(city: &City, kind: Building, extra_cost: i64) -> bool {
-    let cost = kind.cost() + extra_cost;
-    if city.cash < cost {
+    let immediate_cost = if extra_cost > 0 {
+        extra_cost
+    } else {
+        kind.cost()
+    };
+    if city.cash < immediate_cost {
         return false;
     }
+    // 即時消費後に House 1 軒分の余裕は残す (savings protection)。
     let house_cost = Building::House.cost();
-    if !matches!(kind, Building::House | Building::Outpost) && city.cash - cost < house_cost {
+    if !matches!(kind, Building::House | Building::Outpost)
+        && city.cash - immediate_cost < house_cost
+    {
         return false;
     }
     if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 {
