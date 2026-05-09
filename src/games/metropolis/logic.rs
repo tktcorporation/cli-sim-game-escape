@@ -1914,7 +1914,7 @@ pub fn evaluate(city: &City) -> i64 {
 /// Build 候補 (House +25 cents/sec 等) を上回るようにする。
 ///
 /// 値の根拠: 各建物の active 時の収入下限 ~1/3 を「失われている価値」として計上。
-///   - Shop $150 / 1800 amort = 0.08 cents/sec → 撤去ペイバックは小さい
+///   - Shop demolish $150 / 1800 sec ≈ 8.3 cents/sec amort → 撤去ペイバックは小さい
 ///   - Build House (= 並行候補) は +25 cents/sec → ペナルティはこれを超える必要
 fn inactive_building_penalty(city: &City) -> i64 {
     let connected = compute_edge_connected_roads(city);
@@ -2046,8 +2046,6 @@ fn strategy_thematic_bonus(city: &City) -> i64 {
 /// **Build は Construction を経由せず即 Built タイル**として置く (= 評価時点で
 /// 「建ったあとの局面」を見たい)。Demolish は Built → Empty。Idle は f を直接呼ぶだけ。
 ///
-/// 安全性: f は `evaluate` 系の純関数を想定。f が `&mut City` を要求する場合は
-/// この関数を再帰的に呼べないが、評価関数は `&City` で十分なのでこの設計で OK。
 /// `f` のシグネチャは `FnOnce(&mut City) -> R`。再帰的な探索 (= `f` 内で
 /// さらに `with_action_applied` を呼ぶケース) を許す代わりに、**`f` は city を
 /// 自身が受け取った時の状態に戻す責務を負う**。`f` が `with_action_applied` を
