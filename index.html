@@ -113,14 +113,26 @@
       // を持つ。+0.5px は IEEE754 往復誤差 (~1e-12) ≪ 0.5 ≪ 行除数 の
       // 安全域、行が +1 増える方向には絶対に転ばない。
       // 値は mutable: measurement で targetRows が更新されたら再計算。
-      // 原始 getter をキャプチャしておく。screen.width/height は後で
-      // override されるため、再読み込み (resize ハンドラ) で物理サイズを
-      // 取り戻したい時に必要。回転で物理 width/height が swap する端末も
-      // あるので、resize の度に必ず原始値で取り直す。
-      var origScreenWGet = Object.getOwnPropertyDescriptor(Screen.prototype, 'width').get;
-      var origScreenHGet = Object.getOwnPropertyDescriptor(Screen.prototype, 'height').get;
-      function realScreenW() { return origScreenWGet.call(screen) || visibleW; }
-      function realScreenH() { return origScreenHGet.call(screen) || visibleH; }
+      // 原始 getter を prototype chain 遡って取得。後で override しても
+      // 物理 screen size を読み戻せる (resize ハンドラで分母として使う)。
+      // 回転で物理 width/height が swap する端末もあるので毎回原始値で読む。
+      function findGetter(obj, prop) {
+        var current = obj;
+        while (current) {
+          var desc = Object.getOwnPropertyDescriptor(current, prop);
+          if (desc && desc.get) return desc.get;
+          current = Object.getPrototypeOf(current);
+        }
+        return null;
+      }
+      var origScreenWGet = findGetter(screen, 'width');
+      var origScreenHGet = findGetter(screen, 'height');
+      function realScreenW() {
+        return (origScreenWGet ? origScreenWGet.call(screen) : visibleW) || visibleW;
+      }
+      function realScreenH() {
+        return (origScreenHGet ? origScreenHGet.call(screen) : visibleH) || visibleH;
+      }
 
       var scales = {
         wW: 0, wH: 0, sW: 0, sH: 0
@@ -133,20 +145,28 @@
       }
       recomputeScales();
 
-      function overrideWith(obj, proto, prop, key) {
-        var desc = Object.getOwnPropertyDescriptor(proto, prop);
-        if (desc && desc.get) {
-          var orig = desc.get;
-          Object.defineProperty(obj, prop, {
-            get: function() { return Math.floor(orig.call(obj) * scales[key]); },
-            configurable: true
-          });
+      // Chrome 最新版では innerWidth / innerHeight の getter が Window.prototype
+      // ではなく prototype chain の別ノード (WindowProperties / Window 本体) に
+      // 定義されることがある。固定で Window.prototype だけ見ると getter が
+      // 見つからず override が silent skip されて ratzilla が raw 値を使ってしまう
+      // (cols/rows がスケールされず gridH ≠ viewportH になる)。
+      // findGetter は前段で定義済み: prototype chain を遡って getter を探す。
+      function overrideWith(obj, prop, key) {
+        var orig = findGetter(obj, prop);
+        if (!orig) {
+          console.warn('[viewport-fit] override skipped: ' + prop + ' getter not found');
+          return false;
         }
+        Object.defineProperty(obj, prop, {
+          get: function() { return Math.floor(orig.call(obj) * scales[key]); },
+          configurable: true
+        });
+        return true;
       }
-      overrideWith(window, Window.prototype, 'innerWidth', 'wW');
-      overrideWith(window, Window.prototype, 'innerHeight', 'wH');
-      overrideWith(screen, Screen.prototype, 'width', 'sW');
-      overrideWith(screen, Screen.prototype, 'height', 'sH');
+      overrideWith(window, 'innerWidth', 'wW');
+      overrideWith(window, 'innerHeight', 'wH');
+      overrideWith(screen, 'width', 'sW');
+      overrideWith(screen, 'height', 'sH');
 
       // ── ここから mount 後の adjustment ─────────────────────────
       // ratzilla が grid を作ったら、font を視覚幅に合わせ → 実 row height
@@ -271,7 +291,11 @@
           for (var i = 0; i < preElements.length; i++) {
             preElements[i].style.fontSize = '';
           }
-          // 推定を更新 (実 charWidth は不変なので再測定不要)。
+          // 推定を更新。webfont が後から swap すると char 幅が変わるので
+          // resize ごとに再 measure (回転やデバイス変更でも到着済み font を
+          // 反映できる)。fonts.ready 単発で再 fit する path は無限 dispatch
+          // ループで画面が消える事故があったため使わない。
+          charWidth = measureCharWidth();
           targetCols = Math.floor(visibleW * SCALE_W / 10);
           predictedFontScale = visibleW / (targetCols * charWidth);
           predictedRowH = FONT_SIZE_PX * predictedFontScale * LINE_HEIGHT;
