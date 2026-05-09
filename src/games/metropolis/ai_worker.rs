@@ -131,10 +131,16 @@ fn building_from_u8(v: u8) -> Option<Building> {
 }
 
 /// Main thread が呼ぶ: 現在の `City` を request 1 通分の JSON にする。
+///
+/// `events` (UI 表示用のログ) は AI 判断に使われないので空にしてから serialize
+/// する。saturated map では数十件溜まる文字列なので、毎 tick の postMessage
+/// コストにそれなりに効く。
 pub fn build_request_json(city: &City, request_id: u32) -> Result<String, serde_json::Error> {
     let save = extract_save(city);
+    let mut snapshot = save.game;
+    snapshot.events.clear();
     let req = Request {
-        snapshot: save.game,
+        snapshot,
         request_id,
     };
     serde_json::to_string(&req)

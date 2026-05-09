@@ -17,18 +17,42 @@
 // グローバル関数 `wasm_bindgen` を提供する。`import` 文は使えないので
 // `importScripts` で同期ロードする。Main 側もクラシック Worker (= 非
 // `{ type: "module" }`) として生成する規約。
+//
+// ## エラーハンドリングの方針
+//
+// WASM 初期化が失敗した場合や `ai_decide` が throw した場合に何も postMessage
+// しないと、main 側 `AiWorkerHandle` の `in_flight` がロックされ AI が永久停止
+// する。これを防ぐ二重防御:
+//   1. ここで `ready` の reject を catch して onmessage 内で握りつぶす
+//      (= unhandled rejection を発生させない)。
+//   2. main 側 `try_dispatch` がタイムアウトで強制 dispatch を再開する。
 
 importScripts("./metropolis_worker.js");
 
 // `wasm_bindgen` は IIFE のグローバル名。WASM をフェッチして instantiate し、
 // 解決後に `ai_decide` を取り出す。`init()` Promise は再 await しても
 // 1 度だけ resolve されるので onmessage 内で `await ready` してよい。
-const ready = self.wasm_bindgen("./metropolis_worker_bg.wasm");
+//
+// reject した時に unhandled rejection を出さないよう `.catch` で潰し、
+// `null` を返すことで onmessage 側が「init 失敗 = 何もできない」と判定できるようにする。
+const ready = self
+  .wasm_bindgen("./metropolis_worker_bg.wasm")
+  .catch((e) => {
+    console.error("[metropolis_worker] init failed:", e);
+    return null;
+  });
 
 self.onmessage = async (event) => {
-  const initialized = await ready;
-  const ai_decide = initialized.ai_decide;
-  if (typeof ai_decide !== "function") {
+  let initialized;
+  try {
+    initialized = await ready;
+  } catch (_e) {
+    // ready が reject されても上の .catch で null になっているので通常ここには
+    // 来ないが、もしランナーが Promise を差し替えた場合の保険。
+    return;
+  }
+
+  if (!initialized || typeof initialized.ai_decide !== "function") {
     return;
   }
 
@@ -38,7 +62,7 @@ self.onmessage = async (event) => {
   }
 
   try {
-    const response = ai_decide(request);
+    const response = initialized.ai_decide(request);
     if (typeof response === "string" && response.length > 0) {
       self.postMessage(response);
     }

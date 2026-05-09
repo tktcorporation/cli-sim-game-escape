@@ -537,7 +537,9 @@ pub(super) struct GameSave {
     cash_spent_total: i64,
 
     /// イベントログ (新→旧)。`MAX_EVENTS` で切られている。
-    events: Vec<String>,
+    /// `pub(super)`: `ai_worker::build_request_json` が AI スナップショットを
+    /// 軽量化するために中身を空にするので、隣接モジュールから書き込めること。
+    pub(super) events: Vec<String>,
 
     /// v2 以降: 自動運用クールダウン用 tick。
     /// 旧データには無いので `serde(default)` の 0 を使う (= 「未着手」扱い、

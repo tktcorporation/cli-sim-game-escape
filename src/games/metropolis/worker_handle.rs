@@ -20,9 +20,17 @@
 //! ないので `try_new` が `None` を返す。`MetropolisGame` は `None` の時
 //! 同期パス (`logic::tick`) にフォールバックする。
 //!
-//! 単発の send/receive エラーは握りつぶし、次 tick で再試行する。Worker の
-//! `init()` 完了前に postMessage しても Worker 側の `await ready` で順番待ち
-//! になるため、起動レースは worker 側で解決される。
+//! ### in_flight ロックの二重防御
+//!
+//! Worker が応答を返さない / parse 失敗で消費される / WASM init 失敗で永久に
+//! 黙る、いずれの場合も `in_flight` が `Some(...)` のまま固まると新規 dispatch
+//! が永久に走らず AI が完全停止する。これを次の二段で防ぐ:
+//!
+//! 1. `take_action()` は inbox を **取り出した時点で** `in_flight` をクリアする。
+//!    parse 失敗 / id 不一致でも `in_flight` は解放され、次 tick で fresh request
+//!    を投げ直せる。stale な action は drop するだけで実害無し。
+//! 2. `try_dispatch()` は応答ゼロのまま `STALE_TIMEOUT_TICKS` 経過した
+//!    `in_flight` を強制解除する。Worker init が失敗した場合の最終救済策。
 
 #![cfg(target_arch = "wasm32")]
 
@@ -37,15 +45,24 @@ use super::ai::AiAction;
 use super::ai_worker;
 use super::state::City;
 
+/// in_flight が解消されないまま放置されたとみなすしきい値 (tick 単位)。
+/// 10 Hz の tick で 5 秒 = 50 tick。Tier 5 の AI でも数百 ms で返ってくる
+/// 想定なので、これを超えるのは Worker 側の永久的な失敗 (init 失敗・例外で
+/// postMessage 不能) を意味する。`try_dispatch` がここで強制解除する。
+const STALE_TIMEOUT_TICKS: u64 = 50;
+
 pub struct AiWorkerHandle {
     worker: Worker,
     /// onmessage で受信した response JSON の置き場。`take_action` が `take()` する。
     inbox: Rc<RefCell<Option<String>>>,
     /// 次回発番する request_id。`u32::MAX` を超えたら 1 から再利用。
     next_request_id: u32,
-    /// 投げっぱなしの request_id。stale 判定 (response.request_id が一致するか) に使う。
-    /// `None` = 無投げ状態 = 新しい request を送れる。
+    /// 投げっぱなしの request_id。`take_action` で受信を観測 or `try_dispatch` の
+    /// timeout で `None` に戻る。`None` = 新しい request を送れる。
     in_flight: Option<u32>,
+    /// 直近 `try_dispatch` 成功時の `city.tick`。`STALE_TIMEOUT_TICKS` 超過の
+    /// 強制解除判定に使う。
+    dispatch_tick: u64,
     /// `Closure` を Drop すると Worker から listener が外れて自動キャンセル
     /// されるため、handle が生きている間は保持し続ける。
     _on_message: Closure<dyn FnMut(MessageEvent)>,
@@ -79,31 +96,44 @@ impl AiWorkerHandle {
             inbox,
             next_request_id: 1,
             in_flight: None,
+            dispatch_tick: 0,
             _on_message: on_message,
         })
     }
 
     /// 直近の response を取り出して `AiAction` に復元する。
     ///
-    /// stale (古い request の response) は捨てる。in-flight が解消されるのは
-    /// 一致したときのみで、stale を取りこぼした in-flight は次の `take_action`
-    /// 時に新しいレスポンスが来るまで残り続ける (= 新規 dispatch が走らない)。
-    /// この自然待機が「main の state が動いてもワーカーは前回 snapshot で計算
-    /// しているだけ」状態を吸収する。
+    /// inbox に何かが入っていた時点で `in_flight` をクリアする。parse 失敗 /
+    /// id 不一致 / 空 string でも次の dispatch を許可することで、Worker からの
+    /// 1 回の "壊れた応答" で AI が永久停止する事故を防ぐ (in_flight ロック防御 1)。
+    /// id 不一致の action は捨てて、次 tick で新しい snapshot を投げ直す。
     pub fn take_action(&mut self) -> Option<AiAction> {
         let raw = self.inbox.borrow_mut().take()?;
+        // 「観測した時点で in_flight を解放」が中核。
+        let was_in_flight = self.in_flight.take();
         let (id, action) = ai_worker::parse_response_json(&raw).ok()?;
-        if Some(id) != self.in_flight {
+        // 1 in-flight 制約下では基本一致するが、保険として stale 判定を残す。
+        if was_in_flight != Some(id) {
             return None;
         }
-        self.in_flight = None;
         Some(action)
     }
 
     /// in-flight が無ければ現在の `City` を snapshot して送信する。
+    ///
+    /// `STALE_TIMEOUT_TICKS` を超えた in_flight は Worker 永久失敗とみなし
+    /// 強制解除する (in_flight ロック防御 2)。Worker `init()` 失敗で
+    /// postMessage が永久に来ないケースをここで救済する。
     pub fn try_dispatch(&mut self, city: &City) {
         if self.in_flight.is_some() {
-            return;
+            let elapsed = city.tick.wrapping_sub(self.dispatch_tick);
+            if elapsed > STALE_TIMEOUT_TICKS {
+                // Worker が遅れて応答してきても take_action 側の id 不一致で
+                // 捨てるため、強制解除しても二重適用にはならない。
+                self.in_flight = None;
+            } else {
+                return;
+            }
         }
         let id = self.next_request_id;
         // 0 は「未割当」の慣例として避け、wrap 時も 1 から始める。
@@ -119,6 +149,7 @@ impl AiWorkerHandle {
             .is_ok()
         {
             self.in_flight = Some(id);
+            self.dispatch_tick = city.tick;
         }
     }
 }
