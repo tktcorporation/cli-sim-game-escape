@@ -188,6 +188,11 @@
       // 戻り値: true = 行数調整した (続けて再 measurement が要る),
       //         false = 調整不要 (収束)。
       var selfDispatching = false;
+      // measurement→dispatch ループの上限。actualRowH が webfont swap や
+      // sub-pixel 揺らぎで微小に変動すると ideal が振動して無限ループ化
+      // しうる。3 回で収束しなければ「最後の値で妥協」して画面を死守。
+      var MAX_FIT_ITERS = 3;
+      var fitIters = 0;
       function fitRowCount(grid) {
         var pres = grid.querySelectorAll('pre');
         if (pres.length === 0) return false;
@@ -195,9 +200,13 @@
         if (actualRowH <= 0) return false;
         var realH = document.documentElement.clientHeight;
         var ideal = Math.floor(realH / actualRowH);
-        // ratzilla が +1 行多く作って overflow すると下端が viewport を
-        // 超えるので、ideal は厳密に floor で切り捨て。
         if (ideal === targetRows) return false;
+        if (fitIters >= MAX_FIT_ITERS) {
+          console.warn('[viewport-fit] iter cap hit, holding rows=' + targetRows
+            + ' ideal=' + ideal + ' rowH=' + actualRowH.toFixed(2));
+          return false;
+        }
+        fitIters++;
         targetRows = ideal;
         recomputeScales();
         selfDispatching = true;
@@ -235,33 +244,16 @@
       }
 
       // mount を待って observe。settle するまで disconnect しない
-      // (ratzilla が複数回 populate するため)。
+      // (ratzilla が複数回 populate するため)。settle 後は fonts.ready 等
+      // で再走させない: webfont swap タイミングと measureCharWidth /
+      // pre の computed font が乖離した状態で fitRowCount を回すと、
+      // ideal が振動して dispatch ループが暴走 (画面が再構築され続けて
+      // blank に見える) する事故があったため。
       var observer = new MutationObserver(function() {
         tryFit();
         if (settled) observer.disconnect();
       });
       observer.observe(document.body, { childList: true, subtree: true });
-
-      // webfont (Fira Code) が後から読み込まれると char 幅が変わり、
-      // 既に settle した fit が外れる。document.fonts.ready で確実に
-      // 再 fit させる。CSS3 Font Loading API が無い環境はそのまま無視。
-      if (document.fonts && document.fonts.ready) {
-        document.fonts.ready.then(function() {
-          // measureCharWidth を再実行して charWidth を更新。
-          var newCharW = measureCharWidth();
-          if (Math.abs(newCharW - charWidth) > 0.05) {
-            charWidth = newCharW;
-            // font 切替で予測も外れるので再 settle へ。
-            var preElements = document.querySelectorAll('pre');
-            for (var i = 0; i < preElements.length; i++) {
-              preElements[i].style.fontSize = '';
-            }
-            settled = false;
-            observer.observe(document.body, { childList: true, subtree: true });
-            requestAnimationFrame(tryFit);
-          }
-        });
-      }
 
       // 真の viewport resize (回転や URL バー collapse) のみで再走。
       // 自己 dispatch (= fitRowCount の調整トリガ) は selfDispatching フラグで弾く。
@@ -286,6 +278,7 @@
           targetRows = Math.floor(visibleH / predictedRowH);
           recomputeScales();
           settled = false;
+          fitIters = 0;
           observer.observe(document.body, { childList: true, subtree: true });
           requestAnimationFrame(tryFit);
         }, 150);
