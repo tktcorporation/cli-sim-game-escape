@@ -604,6 +604,7 @@ fn extract_save(state: &City) -> SaveData {
         pending_offline_welcome: _,
         connected_cache: _,
         income_dollars_cache: _,
+        eval_scratch: _,
     } = state;
 
     let mut tiles = Vec::with_capacity(GRID_W * GRID_H);

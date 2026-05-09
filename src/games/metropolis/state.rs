@@ -301,6 +301,38 @@ impl AiTier {
     }
 }
 
+/// AI 評価で使い回す scratch buffer 群。`City::eval_scratch` が `RefCell` で抱える。
+///
+/// **保持理由**: `compute_pop_and_tier_maps` / `road_network_value` の内部 grid
+/// 配列を毎 evaluate で alloc すると、WASM dlmalloc がボトルネックになる
+/// (Tier 5 depth=3 で数十 MB/sec の alloc churn)。grid サイズは `GRID_W × GRID_H`
+/// 固定なので、City 生成時に 1 度確保して以降は in-place clear+fill で再利用する。
+pub struct EvalScratch {
+    pub pop_map: Vec<Vec<u32>>,
+    pub tier_map: Vec<Vec<Option<HouseTier>>>,
+    pub frontier_visited: Vec<Vec<bool>>,
+}
+
+impl EvalScratch {
+    pub fn new() -> Self {
+        Self {
+            pop_map: vec![vec![0u32; GRID_W]; GRID_H],
+            tier_map: vec![vec![None; GRID_W]; GRID_H],
+            frontier_visited: vec![vec![false; GRID_W]; GRID_H],
+        }
+    }
+}
+
+impl Default for EvalScratch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// House の経済段階レベル (`compute_pop_and_tier_maps` の cache 値型)。
+/// `logic::HouseTier` と同一だが state.rs で `EvalScratch` 定義のために前置宣言する。
+pub use crate::games::metropolis::logic::HouseTier;
+
 /// Whole-city snapshot.  Everything the simulator needs to step forward.
 pub struct City {
     pub grid: Vec<Vec<Tile>>,
@@ -426,6 +458,15 @@ pub struct City {
     /// cache key に含める (= プレイヤーが strategy を切り替えた瞬間も自動 stale)。
     pub income_dollars_cache: Cell<Option<(u64, Strategy, i64)>>,
 
+    /// AI 評価ホットパス用の使い回しスクラッチバッファ。
+    ///
+    /// `compute_income_per_sec_cents_with` と `road_network_value` は 1 evaluate あたり
+    /// 数千 cells の bool/u32/Option<HouseTier> を作る。WASM の dlmalloc は per-call
+    /// 小 alloc に弱く、Tier 5 depth=3 で数十 MB/sec の alloc churn が起きる。
+    /// 同一 grid サイズの buffer を `RefCell` で 1 度だけ確保 → 毎回 clear+fill に
+    /// 切り替えると alloc が消える (= 純粋に WASM スループット改善目的)。
+    pub eval_scratch: std::cell::RefCell<EvalScratch>,
+
     /// タブ復帰時のオフライン進行ボーナス通知。`Some` の間は `render` が
     /// 中央モーダルを上書き描画し、`handle_input` が通常操作をブロックして
     /// 任意の入力で `None` に戻す。
@@ -525,6 +566,7 @@ impl City {
             population_cache: Cell::new(None),
             connected_cache: std::cell::RefCell::new(None),
             income_dollars_cache: Cell::new(None),
+            eval_scratch: std::cell::RefCell::new(EvalScratch::new()),
             pending_offline_welcome: None,
         }
     }

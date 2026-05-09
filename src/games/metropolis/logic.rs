@@ -724,13 +724,33 @@ pub(super) fn compute_population_map(city: &City, connected: &[Vec<bool>]) -> Ve
 /// `gather_house_neighborhood_with` (= O(R²) ≈ 121 ops) を 2 回呼ぶ無駄が発生する。
 /// `_pre_tier` 引数で事前計算した tier を `tile_income_cents_with_tier` に渡すと、
 /// 2 回目の gather を回避できる (= 評価関数の hot path で ~2× speedup)。
-#[allow(clippy::needless_range_loop)]
+///
+/// **alloc 削減版**: `fill_pop_and_tier_maps` は caller 提供の buffer に in-place で
+/// 書き込むため、scratch を再利用すれば WASM の dlmalloc churn を回避できる。
+/// テスト用には allocating wrapper の `compute_pop_and_tier_maps` を残す。
 pub(super) fn compute_pop_and_tier_maps(
     city: &City,
     connected: &[Vec<bool>],
 ) -> (Vec<Vec<u32>>, Vec<Vec<Option<HouseTier>>>) {
     let mut pop = vec![vec![0u32; GRID_W]; GRID_H];
     let mut tiers: Vec<Vec<Option<HouseTier>>> = vec![vec![None; GRID_W]; GRID_H];
+    fill_pop_and_tier_maps(city, connected, &mut pop, &mut tiers);
+    (pop, tiers)
+}
+
+#[allow(clippy::needless_range_loop)]
+pub(super) fn fill_pop_and_tier_maps(
+    city: &City,
+    connected: &[Vec<bool>],
+    pop: &mut [Vec<u32>],
+    tiers: &mut [Vec<Option<HouseTier>>],
+) {
+    for row in pop.iter_mut() {
+        row.fill(0);
+    }
+    for row in tiers.iter_mut() {
+        row.fill(None);
+    }
     for y in 0..GRID_H {
         for x in 0..GRID_W {
             if !matches!(city.tile(x, y), Tile::Built(Building::House)) {
@@ -743,7 +763,6 @@ pub(super) fn compute_pop_and_tier_maps(
             tiers[y][x] = Some(tier);
         }
     }
-    (pop, tiers)
 }
 
 /// 半径 `radius` 内の人口合計 (Manhattan 距離)。
@@ -1114,9 +1133,10 @@ pub fn cached_edge_connected_roads(city: &City) -> std::rc::Rc<Vec<Vec<bool>>> {
 /// 公開する。`evaluate` で BFS 結果を `road_network_value` /
 /// `inactive_building_penalty_with` と共有して、評価 1 回あたり BFS 1 回に抑える。
 pub fn compute_income_per_sec_cents_with(city: &City, connected: &[Vec<bool>]) -> i64 {
+    let mut scratch_ref = city.eval_scratch.borrow_mut();
+    let scratch = &mut *scratch_ref;
+    fill_pop_and_tier_maps(city, connected, &mut scratch.pop_map, &mut scratch.tier_map);
     let mut income_cents: i64 = 0;
-    let (pop_map, tier_map) = compute_pop_and_tier_maps(city, connected);
-
     #[allow(clippy::needless_range_loop)]
     for y in 0..GRID_H {
         for x in 0..GRID_W {
@@ -1124,13 +1144,12 @@ pub fn compute_income_per_sec_cents_with(city: &City, connected: &[Vec<bool>]) -
                 city,
                 x,
                 y,
-                &pop_map,
+                &scratch.pop_map,
                 connected,
-                tier_map[y][x],
+                scratch.tier_map[y][x],
             );
         }
     }
-
     let modifier = strategy_info(city.strategy).income_penalty_pct;
     if modifier != 0 && income_cents > 0 {
         let factor = (100 + modifier).max(10) as i64;
@@ -1997,7 +2016,11 @@ fn road_network_value(city: &City, connected: &[Vec<bool>]) -> i64 {
     // 上回るには penalty が demolish_cost amort + Build 候補の Δincome を
     // 超える必要があるため、強めの値にする。
     const ISOLATED_PENALTY: i64 = 60;
-    let mut frontier_visited = vec![vec![false; GRID_W]; GRID_H];
+    let mut scratch = city.eval_scratch.borrow_mut();
+    let visited = &mut scratch.frontier_visited;
+    for row in visited.iter_mut() {
+        row.fill(false);
+    }
     let mut frontier_count = 0i64;
     let mut isolated_roads = 0i64;
     #[allow(clippy::needless_range_loop)] // (y, x) を直接 connected[y][x] 参照に使うため enumerate 化はしない
@@ -2017,7 +2040,7 @@ fn road_network_value(city: &City, connected: &[Vec<bool>]) -> i64 {
                     continue;
                 }
                 let (nx, ny) = (nx as usize, ny as usize);
-                if frontier_visited[ny][nx] {
+                if visited[ny][nx] {
                     continue;
                 }
                 if !matches!(city.tile(nx, ny), Tile::Empty) {
@@ -2032,7 +2055,7 @@ fn road_network_value(city: &City, connected: &[Vec<bool>]) -> i64 {
                 if t.needs_outpost() && !has_outpost_neighbor(city, nx, ny) {
                     continue;
                 }
-                frontier_visited[ny][nx] = true;
+                visited[ny][nx] = true;
                 frontier_count += 1;
             }
         }
