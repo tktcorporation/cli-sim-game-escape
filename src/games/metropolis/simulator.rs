@@ -152,9 +152,9 @@ mod tests {
         let seed = 0xC1A5_5EED;
         let span = 1800;
         let cps = [1800];
-        let inc = run_with_strategy(seed, AiTier::DemandAware, Strategy::Income, 1, span, &cps);
-        let tec = run_with_strategy(seed, AiTier::DemandAware, Strategy::Tech, 1, span, &cps);
-        let gro = run_with_strategy(seed, AiTier::DemandAware, Strategy::Growth, 1, span, &cps);
+        let inc = run_with_strategy(seed, AiTier::Planner, Strategy::Income, 1, span, &cps);
+        let tec = run_with_strategy(seed, AiTier::Planner, Strategy::Tech, 1, span, &cps);
+        let gro = run_with_strategy(seed, AiTier::Planner, Strategy::Growth, 1, span, &cps);
 
         let inc_final = inc.last().unwrap();
         let tec_final = tec.last().unwrap();
@@ -172,7 +172,7 @@ mod tests {
         //   - Tech: インフラ特化は AI 統合後 cents/sec ベース判断で Income と
         //     拮抗するため、roads の絶対順位は担保しない。
         //
-        // Tech roads の順位を要求していた assertion は、AI が `placement_value`
+        // Tech roads の順位を要求していた assertion は、AI が `evaluate`
         // で road を経済価値で選ぶ結果として「Tech > Income roads」が成立しなく
         // なったため削除。Tech の identity は cash floor (= 撤去再建で薄い)
         // と pop floor で間接的に担保される。
@@ -226,7 +226,7 @@ mod tests {
         let seed = 0xC1A5_5EED;
         let span = 1800;
         let cps = [1800];
-        let eco = run_with_strategy(seed, AiTier::DemandAware, Strategy::Eco, 1, span, &cps);
+        let eco = run_with_strategy(seed, AiTier::Planner, Strategy::Eco, 1, span, &cps);
         let final_snap = eco.last().unwrap();
         eprintln!(
             "[Eco 30min] cash=${} pop={} built={} (R{} H{} S{})",
@@ -266,11 +266,11 @@ mod tests {
         eprintln!("\n=== Tier 2 ===");
         let s2 = run(seed, AiTier::Greedy, 1, span, &cps);
         eprintln!("\n=== Tier 3 ===");
-        let s3 = run(seed, AiTier::RoadPlanner, 1, span, &cps);
+        let s3 = run(seed, AiTier::Aware, 1, span, &cps);
         eprintln!("\n=== Tier 4 (Income baseline) ===");
-        let s4 = run(seed, AiTier::DemandAware, 1, span, &cps);
-        eprintln!("\n=== Tier 5 (DeepPlanner) ===");
-        let s5 = run(seed, AiTier::DeepPlanner, 1, span, &cps);
+        let s4 = run(seed, AiTier::Planner, 1, span, &cps);
+        eprintln!("\n=== Tier 5 (Master) ===");
+        let s5 = run(seed, AiTier::Master, 1, span, &cps);
 
         let c1 = s1.last().unwrap().cash;
         let c2 = s2.last().unwrap().cash;
@@ -383,11 +383,11 @@ mod tests {
 
     /// 自動化バランスのシミュレーション。各戦略を 30 min 動かして、
     /// 全戦略合計で 1 基以上 Outpost が派遣されていることを確認する。
-    /// `placement_value` のチューニング時に数値感を見るためのベンチマーク。
+    /// `evaluate` のチューニング時に数値感を見るためのベンチマーク。
     ///
-    /// **Phase A**: Outpost 派遣は AI 評価関数 (`placement_value`) に統合された。
+    /// **Phase A**: Outpost 派遣は AI 評価関数 (`evaluate`) に統合された。
     /// 旧仕様の「`workers >= 2` ガード」「戦略ごとのハードコード周期」は廃止。
-    /// 4 worker DemandAware で十分な現金が出る環境を想定する。
+    /// 4 worker Planner で十分な現金が出る環境を想定する。
     #[test]
     fn automation_drives_outposts_and_demolitions() {
         let seed = 0xC1A5_5EED;
@@ -404,7 +404,7 @@ mod tests {
             Strategy::Eco,
         ] {
             let mut city = City::with_seed(seed);
-            city.ai_tier = AiTier::DemandAware;
+            city.ai_tier = AiTier::Planner;
             city.strategy = strategy;
             city.workers = 4;
             logic::tick(&mut city, TICKS_PER_SEC * span);
@@ -422,7 +422,7 @@ mod tests {
         }
 
         // **Phase A (評価ベース AI 統合後)**: Outpost 派遣は AI の
-        // `placement_value` で「収入を増やす手」として自然発火する。
+        // `evaluate` で「収入を増やす手」として自然発火する。
         // ハードコード周期が無くなったので、戦略バイアスではなく AI Tier 4 の
         // 賢さが拡張行動を駆動する。30 min で全 4 戦略合計の派遣数 >= 1 を
         // 不変条件として担保 (= マップ全埋めで完全停滞しないこと)。
@@ -485,5 +485,118 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 「街の散らかり度」: 死に道路 (edge未接続 Road) + 機能不全建物 (inactive
+    /// Shop/Mall/Workshop/Factory/Office) の合計。低い方が綺麗。
+    fn waste_count(city: &City) -> u32 {
+        let connected = logic::compute_edge_connected_roads(city);
+        let mut waste = 0u32;
+        for y in 0..GRID_H {
+            for x in 0..GRID_W {
+                match city.tile(x, y) {
+                    Tile::Built(Building::Road) => {
+                        if !connected[y][x] {
+                            waste += 1;
+                        }
+                    }
+                    Tile::Built(Building::Shop) | Tile::Built(Building::Mall) => {
+                        if !logic::shop_is_active_with(city, x, y, &connected) {
+                            waste += 1;
+                        }
+                    }
+                    Tile::Built(Building::Workshop)
+                    | Tile::Built(Building::Factory)
+                    | Tile::Built(Building::Office) => {
+                        if !logic::workshop_is_active_with(city, x, y, &connected) {
+                            waste += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        waste
+    }
+
+    /// Tier 上昇後にゴミを掃除できるかの不変条件。
+    ///
+    /// **シナリオ**:
+    ///   1. Tier 1 (Random) で 5 分走らせて散らかった街を作る (大量の死に道路 +
+    ///      inactive Shop)
+    ///   2. Tier 4 (Planner) に切り替え + workers を 4 に増やして 5 分走らせる
+    ///   3. waste_count が **半減以下** に減っていることを assert
+    ///
+    /// 「Tier 上昇 = 過去の駄作を整理する能力の獲得」をプレイヤー視点で担保する。
+    /// Tier 4 が完璧に掃除する必要は無いが、放置よりは明確に良くなることを要求。
+    ///
+    /// Tier 1 random の RNG 経路に依存すると `enumerate_actions` の候補集合変更で
+    /// テスト結果が不安定になるため、ゴミは **明示的に配置** する (= 死に道路と
+    /// 機能不全 Shop)。Tier 4 がそれを掃除できるかだけを検証する。
+    #[test]
+    fn higher_tier_cleans_up_low_tier_mess() {
+        let seed = 0xC1A5_5EED;
+        let mut city = City::with_seed(seed);
+        city.strategy = Strategy::Income;
+        city.workers = 4;
+        city.cash = 50_000;
+
+        // 明示的にゴミを配置する。`with_seed` の創設街路 (cx 列の y=0..GRID_H/2)
+        // は edge_connected。それから離れた場所に死に道路と inactive Shop を埋める。
+        let cx = GRID_W / 2;
+        let cy = GRID_H / 2;
+        // 死に道路 5 本: 創設街路から離れた東側に孤立した Road の塊。
+        let dead_roads: [(usize, usize); 5] = [
+            (cx + 8, cy + 4),
+            (cx + 9, cy + 4),
+            (cx + 8, cy + 5),
+            (cx + 10, cy + 4),
+            (cx + 8, cy + 3),
+        ];
+        for &(rx, ry) in &dead_roads {
+            city.set_tile(rx, ry, Tile::Built(Building::Road));
+        }
+        // inactive Shop 3 軒: 道路接続の無い場所に。
+        let dead_shops: [(usize, usize); 3] =
+            [(cx + 12, cy - 4), (cx + 13, cy - 4), (cx - 12, cy + 6)];
+        for &(sx, sy) in &dead_shops {
+            city.set_tile(sx, sy, Tile::Built(Building::Shop));
+        }
+
+        let mess = waste_count(&city);
+        let pop_before = city.population();
+        eprintln!(
+            "[cleanup test] phase1 (placed mess): waste={} pop={} cash=${}",
+            mess, pop_before, city.cash
+        );
+        assert!(
+            mess >= 5,
+            "test setup should produce enough waste (got {})",
+            mess
+        );
+
+        // Phase 2: Tier 4 で 5 分掃除させる。
+        city.ai_tier = AiTier::Planner;
+        logic::tick(&mut city, TICKS_PER_SEC * 300);
+        let cleaned = waste_count(&city);
+        let pop_after = city.population();
+        eprintln!(
+            "[cleanup test] phase2 (Tier 4, +5min): waste={} pop={} cash=${}",
+            cleaned, pop_after, city.cash
+        );
+
+        assert!(
+            cleaned * 2 <= mess,
+            "Tier 4 should at least halve the placed mess (before={} after={})",
+            mess,
+            cleaned
+        );
+        // 掃除しながらも街は伸びる方向 (= 「掃除のせいで街が縮まないか」担保)。
+        assert!(
+            pop_after >= pop_before,
+            "cleanup should not regress population (before={} after={})",
+            pop_before,
+            pop_after
+        );
     }
 }

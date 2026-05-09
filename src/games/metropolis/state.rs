@@ -84,7 +84,7 @@ pub enum Building {
     /// 充足」を担う。道路接続不要。
     Park,
     /// **開拓機材** — 隣接する Rock セルの整地を可能にする特殊建物。
-    /// AI (Tier 4/5) が `placement_value` で判定して自分で建てる。
+    /// AI (Tier 4/5) が `evaluate` で判定して自分で建てる。
     Outpost,
 }
 
@@ -221,7 +221,7 @@ impl PanelTab {
 /// `Eco` は森を残し荒地だけ整地する「環境配慮」型 — 整地メカニクスと組み合わせ。
 /// `Balanced` は「中間値で意思決定が薄まる」ため削除し、各択に明確な
 /// トレードオフを持たせる方針 (Plan #1)。
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Strategy {
     Growth, // prefer Houses
     Income, // prefer Shops
@@ -232,29 +232,35 @@ pub enum Strategy {
     Eco,
 }
 
-/// CPU intelligence tier.  Higher = smarter placement decisions.
+/// CPU intelligence tier — 将棋AI 風のレベル設計。
 ///
-/// **アーキテクチャ**: Tier 4 以上は `logic::placement_value` を使った
-/// 「収入が最も増える手」を選ぶ評価ベース AI。Tier の差は **思考の深さ**:
-///   - Tier 4 (DemandAware): 1 手先の value を見る (= candidate を全部評価して上位サンプル)
-///   - Tier 5 (DeepPlanner):  1 手目 + 2 手目の合計 value を見る (= 道路を引いて家を載せるシナリオが拾える)
+/// **強さの源泉**: 将棋エンジンと同じく **評価関数 × 探索深さ** の2軸。
+/// 評価関数 (`logic::evaluate`) は Tier 3 以上で共通、Tier 差は探索深さ +
+/// ノイズ量で作る (= Stockfish Skill Level / ぴよ将棋 と同じ思想)。
 ///
-/// 同じ評価関数を共有するため、シミュレータで `T5 ≥ T4 ≥ T3 ≥ T2 ≥ T1` の
-/// cash 順位が原理的に保証される。
+///   - Tier 1 (Random):  ランダム指し。15級相当。評価関数なし。
+///   - Tier 2 (Greedy):  1手読み + 簡易評価 (駒得のみ) + 30%ノイズ。5級相当。
+///   - Tier 3 (Aware):   1手読み + フル評価 + 5%ノイズ。初段相当。
+///   - Tier 4 (Planner): 2手読み + フル評価。三段相当。
+///   - Tier 5 (Master):  3手読み + フル評価。アマ高段相当。
+///
+/// 「自然な弱さ」設計: 弱い Tier は **視野を狭めることで自然に悪手が出る**。
+/// 明示ブランダー (突然の大悪手) は入れない (=「バカにされた感」を避ける)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AiTier {
-    /// Random placement, random building.  Wastes money, may strand shops.
+    /// 15級: 合法手から完全ランダム選択。評価関数なし。
     Random = 1,
-    /// Builds adjacent to existing tiles.  Has minimal "can I afford it?" sense.
+    /// 5級: 1手読み + 簡易評価 (House 数だけ見る駒得) + 30% ノイズ。
+    /// 「目先の家賃しか見えない」短視眼な弱さ。
     Greedy = 2,
-    /// Plans roads first, then buildings on the road.
-    RoadPlanner = 3,
-    /// Reads strategy weights and evaluates 1-step income gain per candidate.
-    DemandAware = 4,
-    /// Evaluates 2-step lookahead income gain. Includes Outpost dispatch in
-    /// the candidate set, so naturally chooses "break the rocks to the east"
-    /// when interior cells are saturated and yield zero value.
-    DeepPlanner = 5,
+    /// 初段: 1手読み + フル評価関数 (income/sec + Strategy bias) + 5% ノイズ。
+    /// 「考えてるが先は読まない」レベル。
+    Aware = 3,
+    /// 三段: 2手読み + フル評価。「道路を引いて家を建てる」のような
+    /// 1手目+2手目の連携を発見できる。
+    Planner = 4,
+    /// アマ高段: 3手読み + フル評価 + ワイド beam search。長期投資が見える。
+    Master = 5,
 }
 
 impl AiTier {
@@ -268,32 +274,64 @@ impl AiTier {
         match self {
             AiTier::Random => 0, // starting tier
             AiTier::Greedy => 500,
-            AiTier::RoadPlanner => 3_000,
-            AiTier::DemandAware => 12_000,
-            AiTier::DeepPlanner => 35_000,
+            AiTier::Aware => 3_000,
+            AiTier::Planner => 12_000,
+            AiTier::Master => 35_000,
         }
     }
 
     pub fn next(self) -> Option<AiTier> {
         match self {
             AiTier::Random => Some(AiTier::Greedy),
-            AiTier::Greedy => Some(AiTier::RoadPlanner),
-            AiTier::RoadPlanner => Some(AiTier::DemandAware),
-            AiTier::DemandAware => Some(AiTier::DeepPlanner),
-            AiTier::DeepPlanner => None,
+            AiTier::Greedy => Some(AiTier::Aware),
+            AiTier::Aware => Some(AiTier::Planner),
+            AiTier::Planner => Some(AiTier::Master),
+            AiTier::Master => None,
         }
     }
 
     pub fn name(self) -> &'static str {
         match self {
-            AiTier::Random => "Random Bot",
+            AiTier::Random => "Random",
             AiTier::Greedy => "Greedy",
-            AiTier::RoadPlanner => "Road Planner",
-            AiTier::DemandAware => "Demand Aware",
-            AiTier::DeepPlanner => "Deep Planner",
+            AiTier::Aware => "Aware",
+            AiTier::Planner => "Planner",
+            AiTier::Master => "Master",
         }
     }
 }
+
+/// AI 評価で使い回す scratch buffer 群。`City::eval_scratch` が `RefCell` で抱える。
+///
+/// **保持理由**: `compute_pop_and_tier_maps` / `road_network_value` の内部 grid
+/// 配列を毎 evaluate で alloc すると、WASM dlmalloc がボトルネックになる
+/// (Tier 5 depth=3 で数十 MB/sec の alloc churn)。grid サイズは `GRID_W × GRID_H`
+/// 固定なので、City 生成時に 1 度確保して以降は in-place clear+fill で再利用する。
+pub struct EvalScratch {
+    pub pop_map: Vec<Vec<u32>>,
+    pub tier_map: Vec<Vec<Option<HouseTier>>>,
+    pub frontier_visited: Vec<Vec<bool>>,
+}
+
+impl EvalScratch {
+    pub fn new() -> Self {
+        Self {
+            pop_map: vec![vec![0u32; GRID_W]; GRID_H],
+            tier_map: vec![vec![None; GRID_W]; GRID_H],
+            frontier_visited: vec![vec![false; GRID_W]; GRID_H],
+        }
+    }
+}
+
+impl Default for EvalScratch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// House の経済段階レベル (`compute_pop_and_tier_maps` の cache 値型)。
+/// `logic::HouseTier` と同一だが state.rs で `EvalScratch` 定義のために前置宣言する。
+pub use crate::games::metropolis::logic::HouseTier;
 
 /// Whole-city snapshot.  Everything the simulator needs to step forward.
 pub struct City {
@@ -321,13 +359,14 @@ pub struct City {
     /// ティア進化フラッシュが消える tick。`tick < value` の間バナーを光らせる。
     pub tier_flash_until: u64,
 
-    /// 旧周期撤去のクールダウン用フィールド (現在 dead state)。AI 統合で
-    /// `auto_strategy_actions` が no-op になったため値を読む production code
-    /// は無いが、save schema v2 互換のため field と (de)serialize 経路は残す。
-    /// 次回 schema bump 時に削除候補。
+    /// 旧周期撤去のクールダウン用フィールド (現在 dead state)。値を読む
+    /// production code は無いが、save schema v2 互換のため field と
+    /// (de)serialize 経路は残す。次回 schema bump 時に削除候補。
+    #[allow(dead_code)]
     pub last_outpost_dispatch_tick: u64,
     /// 旧周期撤去用フィールド (現在 dead state、save 互換のため残置)。
     /// 詳細は `last_outpost_dispatch_tick` の説明参照。
+    #[allow(dead_code)]
     pub last_auto_demolish_tick: u64,
     /// Outpost の累計建設回数。`count_built(Outpost)` は撤去で減るので
     /// 「これまでに何基建てたか」の生涯統計はこちらに加算する。
@@ -403,6 +442,30 @@ pub struct City {
     /// grid を変更する操作 (set_tile / 建設完成 / 撤去 / 整地完了 / save ロード)
     /// では invalidate して `None` に戻す。
     pub population_cache: Cell<Option<u32>>,
+
+    /// `compute_edge_connected_roads` の per-frame メモ化キャッシュ。
+    /// render は 60 FPS で複数の場所からこの BFS を呼ぶため、tick 境界毎に
+    /// 1 回計算して frame 内で共有する。`(tick, Rc<grid>)` ペアで保持し、
+    /// tick が進んだら自動で stale 判定 (= 直接 city.tick を書き換えるテスト経路でも
+    /// 安全)。AI の `with_action_applied` で grid を仮想 mutate する経路は
+    /// invalidate してから再計算する。
+    #[allow(clippy::type_complexity)] // (tick, Rc<grid>) ペアが意味的に明確
+    pub connected_cache: std::cell::RefCell<Option<(u64, std::rc::Rc<Vec<Vec<bool>>>)>>,
+
+    /// `compute_income_per_sec` (dollars) の per-frame メモ化キャッシュ。
+    /// 描画は header / status / Manager タブ等から複数回呼ぶ。`(tick, strategy, dollars)`
+    /// のトリプルで保持: strategy は `income_penalty_pct` を通じて income に直接効くため
+    /// cache key に含める (= プレイヤーが strategy を切り替えた瞬間も自動 stale)。
+    pub income_dollars_cache: Cell<Option<(u64, Strategy, i64)>>,
+
+    /// AI 評価ホットパス用の使い回しスクラッチバッファ。
+    ///
+    /// `compute_income_per_sec_cents_with` と `road_network_value` は 1 evaluate あたり
+    /// 数千 cells の bool/u32/Option<HouseTier> を作る。WASM の dlmalloc は per-call
+    /// 小 alloc に弱く、Tier 5 depth=3 で数十 MB/sec の alloc churn が起きる。
+    /// 同一 grid サイズの buffer を `RefCell` で 1 度だけ確保 → 毎回 clear+fill に
+    /// 切り替えると alloc が消える (= 純粋に WASM スループット改善目的)。
+    pub eval_scratch: std::cell::RefCell<EvalScratch>,
 
     /// タブ復帰時のオフライン進行ボーナス通知。`Some` の間は `render` が
     /// 中央モーダルを上書き描画し、`handle_input` が通常操作をブロックして
@@ -501,14 +564,29 @@ impl City {
             panel_scroll: Cell::new(0),
             cash_history: VecDeque::new(),
             population_cache: Cell::new(None),
+            connected_cache: std::cell::RefCell::new(None),
+            income_dollars_cache: Cell::new(None),
+            eval_scratch: std::cell::RefCell::new(EvalScratch::new()),
             pending_offline_welcome: None,
         }
     }
 
-    /// grid 構造を変更した時にキャッシュ済み人口を無効化する。
-    /// `set_tile` / 建設完成 / 撤去 / 整地 / セーブロード のあとで呼ぶ。
+    /// 派生キャッシュを全て無効化する。`set_tile` / 建設完成 / 撤去 / 整地 /
+    /// セーブロード / tick 境界 で呼ぶ。Road 以外の grid 変更では
+    /// `invalidate_per_tile_caches` を使うことで `connected_cache` を温存できる
+    /// (= AI search の非 Road actions が BFS を再計算せずに済む)。
     pub fn invalidate_population_cache(&self) {
         self.population_cache.set(None);
+        self.connected_cache.borrow_mut().take();
+        self.income_dollars_cache.set(None);
+    }
+
+    /// Road tile が変化しない grid mutation 用の細粒度 invalidate。
+    /// 道路網トポロジは不変なので `connected_cache` を残し、人口・収入派生だけ
+    /// クリアする。AI search の非 Road actions で BFS を保持して評価を高速化する。
+    pub fn invalidate_per_tile_caches(&self) {
+        self.population_cache.set(None);
+        self.income_dollars_cache.set(None);
     }
 
     /// カメラを (dx, dy) だけ移動。`GRID_W - VIEW_W` を上限にクランプ。

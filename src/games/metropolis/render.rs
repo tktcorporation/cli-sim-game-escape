@@ -198,9 +198,9 @@ fn ai_tier_icon(t: AiTier) -> &'static str {
     match t {
         AiTier::Random => "[I]",
         AiTier::Greedy => "[II]",
-        AiTier::RoadPlanner => "[III]",
-        AiTier::DemandAware => "[IV]",
-        AiTier::DeepPlanner => "[V]",
+        AiTier::Aware => "[III]",
+        AiTier::Planner => "[IV]",
+        AiTier::Master => "[V]",
     }
 }
 
@@ -342,10 +342,11 @@ fn render_grid(
     let x1 = (x0 + VIEW_W).min(GRID_W);
     let y1 = (y0 + VIEW_H).min(GRID_H);
 
-    // Codex review #103 P1 対策: edge-connectivity BFS をフレーム冒頭で 1 回だけ
-    // 計算し、per-tile ループに流す。タイルごとに per-cell BFS を回すと
-    // 32*16 = 512 BFS / フレームになるため、UI 応答性を大きく損なう。
-    let connected = logic::compute_edge_connected_roads(state);
+    // edge-connectivity BFS をフレーム冒頭で 1 回だけ計算し、per-tile ループに流す。
+    // タイルごとに per-cell BFS を回すと 32*16 = 512 BFS / フレームになり UI 応答性を
+    // 大きく損なう。`cached_edge_connected_roads` は tick 境界毎にしか BFS を走らせず、
+    // 60 FPS の render から複数回呼ばれても 1 BFS / 10 frames に抑えられる。
+    let connected = logic::cached_edge_connected_roads(state);
 
     let mut lines: Vec<Line> = Vec::with_capacity(VIEW_H);
     for y in y0..y1 {
@@ -1817,11 +1818,10 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
     )]));
 
     // **edge connectivity を 1 度だけ計算** して下の各 building branch に流す
-    // (レビュー指摘 #7: 旧コードは House/Shop/Workshop それぞれで BFS を回し、
-    // 1 回の Status タブ描画で同じ BFS を最大 4 回繰り返していた)。
-    // House/Shop/Workshop 以外の branch では未使用だが、計算コストは僅かなので
-    // 全パスで計算しておく方がシンプル。
-    let connected = logic::compute_edge_connected_roads(state);
+    // House/Shop/Workshop 系の active 判定で BFS を共有する。tick 境界毎にしか
+    // BFS を走らせない `cached_edge_connected_roads` を使うことで、render が
+    // 60 FPS で同 BFS を繰り返さずに済む。
+    let connected = logic::cached_edge_connected_roads(state);
     // 収入按分の参照テーブル。frame 毎に呼ばれる描画パスなので、収入表示に
     // 必要な branch (House / Shop / Mall / Workshop / Factory / Office) で
     // 初回アクセス時にだけ作る lazy cache。Road/Park/Outpost/空き地選択時は
@@ -2447,8 +2447,8 @@ fn manager_list(state: &City) -> ClickableList<'static> {
         )));
     }
 
-    // 自動運用ステータス — 撤去判断は AI が `placement_value` と
-    // `demolish_value` を比較して即時実行。表示は予備金ガードのみ
+    // 自動運用ステータス — 撤去判断は AI が `evaluate` と
+    // `action_value` を比較して即時実行。表示は予備金ガードのみ
     // (= AI が撤去後に手元に残す cash 下限。デフレ螺旋ガード)。
     let policy = logic::automation_policy(state.strategy);
     let auto_label = format!(" 🤖 撤去判断: AI / 予備${}", policy.min_cash_reserve);
