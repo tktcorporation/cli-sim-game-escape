@@ -335,26 +335,37 @@ fn terrain_name(t: super::terrain::Terrain) -> &'static str {
 /// 消費しないと「Demolish が tick あたり最高評価のまま続く」状況で 1 tick
 /// 内に attempts (= worker×2) 回の連続撤去が走り、cash が一気に枯渇する。
 /// 1 worker 1 アクションに揃えることで「1 tick 1 撤去」を保つ。
+/// 1 tick あたり最大 1 アクションを実行する (= worker 数に依存しない直列判断)。
+///
+/// **直列化の理由**: worker N 人いても並列に N 回 `decide()` を呼ぶと AI 探索コストが
+/// N 倍になり、saturated map + Tier 5 の状態で 1 tick が 100ms を超えて render が
+/// 詰まる (= 体感「重い」)。1 tick = 1 decide に固定することで、AI tick 時間が worker
+/// 数に依存しなくなる (= 8 workers でも 1 worker と同じ思考コスト)。
+///
+/// 副次効果: Construction は複数 tick かかるため、worker は 1 tick あたり 1 つでも
+/// すぐに埋まる。City growth pace も実用上ほぼ変わらない (10 ticks/sec × 1 build/tick =
+/// 10 builds/sec の理論上限、実際は build 完了待ちで 1 build/sec 程度)。
 fn drive_ai(city: &mut City) {
-    let mut placements_left = city.free_workers();
-    let mut attempts = placements_left.saturating_mul(2).max(1);
-    while placements_left > 0 && attempts > 0 {
-        attempts -= 1;
+    if city.free_workers() == 0 {
+        return;
+    }
+    // attempts は最大 2 回: 1 回目で失敗 (start_construction reject 等) した場合の
+    // リトライ猶予。それでも駄目なら諦めて次 tick に回す (busy-loop 防止)。
+    for _ in 0..2 {
         match decide(city) {
             AiAction::Build { x, y, kind } => {
                 if start_construction(city, x, y, kind) {
-                    placements_left -= 1;
+                    return;
                 }
             }
             AiAction::Demolish { x, y } => {
-                if demolish_at(city, x, y) {
-                    placements_left -= 1;
-                } else {
-                    // 失敗 (cash 不足等) なら break して busy-loop を防ぐ。
-                    break;
-                }
+                // 成否いずれでも 1 attempt 消費して return。失敗時 (cash 不足等) を
+                // リトライしても同条件で再失敗するだけなので、次 tick に回す方が
+                // 健全 (= busy-loop 防止)。
+                let _ = demolish_at(city, x, y);
+                return;
             }
-            AiAction::Idle => break,
+            AiAction::Idle => return,
         }
     }
 }
