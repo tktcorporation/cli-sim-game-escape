@@ -756,6 +756,58 @@ mod tests {
         // テストとして閾値 assertion を追加する、という運用。
     }
 
+    /// 30 min クイック診断: アルゴリズム改修時のフィードバックループ用。
+    /// 3h は壁時計で十数分かかるので、実装を試行錯誤するときは 30min 版を使う。
+    /// 手動実行: `cargo test --release diagnose_t4_30min -- --ignored --nocapture`
+    #[test]
+    #[ignore = "long-horizon diagnostic; run with --ignored"]
+    fn diagnose_t4_30min() {
+        let seed = 0xC1A5_5EED;
+        let total = 1800;
+        let sample_every = 60;
+        let (samples, actions) = run_diagnostic(
+            seed,
+            AiTier::Planner,
+            Strategy::Income,
+            4,
+            total,
+            sample_every,
+        );
+
+        eprintln!(
+            "\n=== diagnose_t4_30min: {} samples, {} actions ===",
+            samples.len(),
+            actions.len()
+        );
+        for s in &samples {
+            eprintln!(
+                "│ t={:>4}s  cash=${:>8}  pop={:>4}  built={:>3}  inc=${}/s  waste={}",
+                s.sec, s.cash, s.pop, s.built, s.income_per_sec, s.waste
+            );
+        }
+
+        let win = 5usize;
+        let mut stagnation_windows = 0usize;
+        for i in win..=samples.len() {
+            let w = &samples[i - win..i];
+            if is_stagnant_window(w).is_some() {
+                stagnation_windows += 1;
+            }
+        }
+
+        use std::collections::BTreeMap;
+        let mut by_reason: BTreeMap<&'static str, usize> = BTreeMap::new();
+        for r in &actions {
+            if let Some(reason) = classify_suspicious_action(r) {
+                *by_reason.entry(reason).or_default() += 1;
+            }
+        }
+        eprintln!("\n[diagnose_t4_30min] stagnation_windows={}", stagnation_windows);
+        for (reason, count) in &by_reason {
+            eprintln!("  {} × {}", reason, count);
+        }
+    }
+
     /// 「街の散らかり度」: 死に道路 (edge未接続 Road) + 機能不全建物 (inactive
     /// Shop/Mall/Workshop/Factory/Office) の合計。低い方が綺麗。
     fn waste_count(city: &City) -> u32 {
