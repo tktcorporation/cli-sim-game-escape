@@ -2890,43 +2890,127 @@ fn action_passes_guards(city: &City, kind: Building, extra_cost: i64) -> bool {
     city.cash >= immediate_cost
 }
 
-/// O(1) で計算できる action の概算スコア。`rank_actions` の事前 rank に使う。
+/// 任意の建物タイプを「最大時の単位 income (cents/sec)」で表す per-kind 定数。
+/// `cheap_action_score` の inline base lookup として参照する。
+fn cheap_base_cents(kind: Building) -> i64 {
+    match kind {
+        Building::House => 50,
+        Building::Workshop => WORKSHOP_CAPACITY_CENTS,
+        Building::Factory => FACTORY_CAPACITY_CENTS,
+        Building::Refinery => REFINERY_CAPACITY_CENTS,
+        Building::Shop => SHOP_CAPACITY_CENTS,
+        Building::Mall => MALL_CAPACITY_CENTS,
+        Building::MegaMall => MEGAMALL_CAPACITY_CENTS,
+        Building::Office => OFFICE_CAPACITY_CENTS,
+        Building::Headquarters => HEADQUARTERS_CAPACITY_CENTS,
+        // インフラ・触媒系: 直接 income なしだが評価上の base を与える
+        Building::Road => 8,
+        Building::Park => 4,
+        Building::Plaza => 50,
+        Building::Stadium => 100,
+        Building::Outpost => 20, // Rock 解禁の期待値
+    }
+}
+
+/// 「この建物 kind が cell (x, y) で機能する見込み」を 0..=100 (%) で返す近傍互換係数。
 ///
-/// 目的: saturated map では候補数が数千に達し、各候補で full evaluate を回すと
-/// AI tick が秒単位に詰まる。この関数で「明らかに筋が悪い候補」を cheap に弾き、
-/// 上位だけ full evaluate する 2 段構え (= chess engine の reductions / move ordering
-/// に相当) を成立させる。
+/// **必要性**: Mall や Refinery の base income は高いが、近隣 House が無ければ実
+/// income は 0 (inactive)。base のみで rank すると「empty 空地に Mall」のような
+/// 表面高評価で実質ゼロな候補が pre-rank top を埋め、本当に良い手 (= House を
+/// 建てて街を育てる) が外れる。簡易な近傍チェックで kind ごとに割引する。
 ///
-/// **設計**: kind 固有の base income (capacity / 期待税率) と cost amort のみ。
-/// 隣接情報を見ないので近似精度は粗いが、`PURCHASE_POWER_PER_CAPITA` 等の constants
-/// は per-cell 補正なしでも「Mall は Cottage より高価かつ高収入」のような relative
-/// ordering を概ね保つ。最終 ranking は full `action_value` がやり直す。
-pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i64 {
-    fn base_cents(kind: Building) -> i64 {
-        match kind {
-            Building::House => 50,
-            Building::Workshop => WORKSHOP_CAPACITY_CENTS,
-            Building::Factory => FACTORY_CAPACITY_CENTS,
-            Building::Refinery => REFINERY_CAPACITY_CENTS,
-            Building::Shop => SHOP_CAPACITY_CENTS,
-            Building::Mall => MALL_CAPACITY_CENTS,
-            Building::MegaMall => MEGAMALL_CAPACITY_CENTS,
-            Building::Office => OFFICE_CAPACITY_CENTS,
-            Building::Headquarters => HEADQUARTERS_CAPACITY_CENTS,
-            // インフラ・触媒系: 直接 income なしだが評価上の base を与える
-            Building::Road => 8,
-            Building::Park => 4,
-            Building::Plaza => 50,
-            Building::Stadium => 100,
-            Building::Outpost => 20, // Rock 解禁の期待値
+/// **設計**: O(R²) per call (R=5 で 50 ops 程度)。pre-rank で全候補に呼ぶが、
+/// 5000 候補 × 50 = 250K ops は full evaluate 1 回 (50K ops) 数回分で済むので
+/// 性能ペナルティは小さい。
+fn neighborhood_match_factor(city: &City, x: usize, y: usize, kind: Building) -> i64 {
+    fn count_built_within(
+        city: &City,
+        x: usize,
+        y: usize,
+        radius: i32,
+        is_target: impl Fn(Building) -> bool,
+    ) -> u32 {
+        let mut n = 0u32;
+        let xi = x as i32;
+        let yi = y as i32;
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx.abs() + dy.abs() > radius {
+                    continue;
+                }
+                let nx = xi + dx;
+                let ny = yi + dy;
+                if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                    continue;
+                }
+                if let Tile::Built(b) = city.tile(nx as usize, ny as usize) {
+                    if is_target(*b) {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
+    }
+
+    match kind {
+        // 商業: 近くに House がないと活性化しない (= shop_is_active_with の demand 側)
+        Building::Shop | Building::Mall | Building::MegaMall => {
+            let houses = count_built_within(city, x, y, 3, |b| matches!(b, Building::House));
+            if houses == 0 { 5 } else { 100 }
+        }
+        // 雇用: 近隣 House が労働力供給。Workshop は radius 4、Office も同等で扱う。
+        Building::Workshop
+        | Building::Factory
+        | Building::Refinery
+        | Building::Office
+        | Building::Headquarters => {
+            let houses = count_built_within(city, x, y, 4, |b| matches!(b, Building::House));
+            if houses == 0 { 10 } else { 100 }
+        }
+        // House: 近隣 Road があると edge_connected 化しやすく、商業/雇用建物が
+        // あれば Apartment 化候補。何もない孤島は Cottage 据え置き。
+        Building::House => {
+            let nearby = count_built_within(city, x, y, 3, |b| {
+                matches!(
+                    b,
+                    Building::Road
+                        | Building::Workshop
+                        | Building::Factory
+                        | Building::Shop
+                        | Building::Mall
+                )
+            });
+            // 周辺に何かあれば 100、孤立でも House は pop 供給源として価値あるので 50
+            if nearby > 0 { 100 } else { 50 }
+        }
+        // インフラ・触媒系: 周辺に Built があれば意義あり、孤立だと無価値
+        Building::Road | Building::Park | Building::Plaza | Building::Stadium => {
+            let nearby = count_built_within(city, x, y, 2, |_| true);
+            if nearby > 0 { 100 } else { 20 }
+        }
+        // Outpost: 隣接 Rock がないと意味なし (terrain check は ai 側だが、
+        // ここでは「近くに Rock がある = 拡張余地」を 100 扱い)
+        Building::Outpost => {
+            // Rock terrain は cell 単位だが、近辺の terrain を見るのは O(R²) かかる。
+            // Outpost は他より候補数が少ないので一律 100 で扱い、本評価に委ねる。
+            100
         }
     }
+}
+
+/// O(R²) で計算できる action の近隣考慮スコア。`rank_actions` の事前 rank に使う。
+///
+/// 目的: saturated map で候補数千 → full evaluate を全候補に回せない。
+/// 近隣互換性 (`neighborhood_match_factor`) を base income に乗じて「表面高評価で
+/// 実質ゼロ」を引き下げ、ヘテロな候補プールが pre-rank top に揃うようにする。
+pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i64 {
     fn cost_amort(cost: i64) -> i64 {
         cost * 100 / AI_PAYBACK_SECS
     }
     fn current_at(city: &City, x: usize, y: usize) -> i64 {
         match city.tile(x, y) {
-            Tile::Built(b) => base_cents(*b),
+            Tile::Built(b) => cheap_base_cents(*b),
             _ => 0,
         }
     }
@@ -2934,7 +3018,8 @@ pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i
         super::ai::AiAction::Build { x, y, kind } => {
             let t = city.terrain_at(*x, *y);
             let extra = if t.needs_clearing() { t.clearing_cost() } else { 0 };
-            base_cents(*kind) - cost_amort(kind.cost() + extra)
+            let m = neighborhood_match_factor(city, *x, *y, *kind);
+            cheap_base_cents(*kind) * m / 100 - cost_amort(kind.cost() + extra)
         }
         super::ai::AiAction::Demolish { x, y } => {
             -current_at(city, *x, *y) - cost_amort(demolish_cost(*x, *y))
@@ -2942,7 +3027,8 @@ pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i
         super::ai::AiAction::Replace { x, y, kind } => {
             let t = city.terrain_at(*x, *y);
             let extra = if t.needs_clearing() { t.clearing_cost() } else { 0 };
-            base_cents(*kind)
+            let m = neighborhood_match_factor(city, *x, *y, *kind);
+            cheap_base_cents(*kind) * m / 100
                 - current_at(city, *x, *y)
                 - cost_amort(demolish_cost(*x, *y) + kind.cost() + extra)
         }
