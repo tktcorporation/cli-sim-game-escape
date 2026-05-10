@@ -238,10 +238,17 @@ pub fn apply_ai_action(city: &mut City, action: super::ai::AiAction) -> bool {
     match action {
         super::ai::AiAction::Build { x, y, kind } => start_construction(city, x, y, kind),
         super::ai::AiAction::Demolish { x, y } => demolish_at(city, x, y),
-        // production では Replace を Demolish 部分のみ実行する。次 tick の
-        // `decide` が空きセルとして再評価し、同 kind の Build が action_value
-        // 上位に残っていれば自然に拾う。1 worker 1 action の制約を維持する設計。
-        super::ai::AiAction::Replace { x, y, .. } => demolish_at(city, x, y),
+        // production でも atomic に「demolish + 即着工」する。評価関数が
+        // Replace の価値を「両方適用後の状態」で見積もっているので、production
+        // で半分しか実行されないと AI の意図と実効果が乖離する。1 tick に
+        // demolish + start_construction を続けて走らせ、worker は Construction
+        // phase で 1 つだけ消費 (Build alone と同じコスト)。
+        super::ai::AiAction::Replace { x, y, kind } => {
+            if !demolish_at(city, x, y) {
+                return false;
+            }
+            start_construction(city, x, y, kind)
+        }
         super::ai::AiAction::Idle => true,
     }
 }
@@ -472,10 +479,12 @@ where
                 observer(city, &action, outcome);
                 return;
             }
-            AiAction::Replace { x, y, .. } => {
-                // Replace は探索評価向けの複合アクション。production では
-                // Demolish 部分のみ即時実行し、Build は次 tick の decide が拾う。
-                let applied = demolish_at(city, *x, *y);
+            AiAction::Replace { x, y, kind } => {
+                // production でも atomic に「demolish + 即着工」する。評価と
+                // 実効果を一致させるため、半分だけ実行されると AI の意図 (= 評価
+                // 関数が Replace に与えたスコア) が production に反映されない。
+                let applied = demolish_at(city, *x, *y)
+                    && start_construction(city, *x, *y, *kind);
                 let outcome = if applied {
                     ActionOutcome::Applied
                 } else {
