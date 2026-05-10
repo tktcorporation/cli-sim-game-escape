@@ -638,10 +638,11 @@ mod tests {
 
     /// 長時間診断テスト本体: T4 を 30 分走らせて、停滞窓と変な手を炙り出す。
     ///
-    /// 述語 (`is_stagnant_window` / `classify_suspicious_action`) が None を
-    /// 返している間は「観測のみ・assert 無し」で動き、test 失敗にはならない。
-    /// 述語が実装されたら panic で警告する所まで踏み込んで良い (要 user 判断)。
+    /// 観測専用のため `#[ignore]` で routine cargo test から外す。手動実行は
+    /// `cargo test --release diagnose_t4_30min -- --ignored --nocapture`。
+    /// debug ビルドだと 15 分以上かかるので必ず release で走らせること。
     #[test]
+    #[ignore = "long-horizon diagnostic; run with --ignored when investigating AI behavior"]
     fn diagnose_t4_30min() {
         let seed = 0xC1A5_5EED;
         let total = 1800;
