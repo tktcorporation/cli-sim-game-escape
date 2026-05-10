@@ -70,8 +70,11 @@ fn tier1_random(city: &mut City) -> AiAction {
         .iter()
         .filter(|a| match a {
             AiAction::Build { .. } => !want_demolish,
-            // Replace は撤去枠扱い (= 1 worker で撤去。再建は次 tick 任せ)。
-            AiAction::Demolish { .. } | AiAction::Replace { .. } => want_demolish,
+            AiAction::Demolish { .. } => want_demolish,
+            // Replace は「撤去 + 再建の意図」がセットになった戦略的アクション。
+            // Tier 1 はランダム素人キャラなので「次の手まで考える」を持たない設計。
+            // Tier 2 以上の評価関数ベース AI が action_value で適切に判断する。
+            AiAction::Replace { .. } => false,
             AiAction::Idle => false,
         })
         .collect();
