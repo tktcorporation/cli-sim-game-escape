@@ -30,22 +30,25 @@
 importScripts("./metropolis_worker.js");
 
 // `wasm_bindgen` は IIFE のグローバル名。WASM をフェッチして instantiate する。
-// 注意: `wasm_bindgen('./xxx.wasm')` の resolve 値は **raw wasm exports**
-// (`instance.exports`) で、ここの `ai_decide` は (ptr, len) を取る生関数。
-// 文字列 ↔ ポインタを変換してくれる **wrapper** は `wasm_bindgen.ai_decide`
-// 側 (IIFE が `Object.assign(__wbg_init, ..., exports)` で登録した方) にある。
-// onmessage では `await ready` で初期化完了を待ったあと、wrapper を呼ぶ。
-const ready = self
-  .wasm_bindgen("./metropolis_worker_bg.wasm")
-  .catch((e) => {
-    console.error("[metropolis_worker] init failed:", e);
-    return null;
-  });
+//
+// アクセス時の罠:
+//   - wasm-bindgen --target no-modules は `let wasm_bindgen = (function(){...})()`
+//     で **script-scope の let バインディング** を作る。`let` は `var` と違って
+//     `self`/`globalThis` のプロパティにはならないので、`self.wasm_bindgen` は
+//     `undefined` (TypeError)。bare の `wasm_bindgen` で参照すること。
+//   - `wasm_bindgen('./xxx.wasm')` の resolve 値は **raw wasm exports**
+//     (`instance.exports`) で、`exports.ai_decide` は `(ptr, len)` を取る生関数。
+//     文字列 ↔ ポインタ変換を行う **wrapper** は IIFE が `wasm_bindgen` 自身に
+//     `Object.assign` で乗せた方 (= `wasm_bindgen.ai_decide`)。
+const ready = wasm_bindgen("./metropolis_worker_bg.wasm").catch((e) => {
+  console.error("[metropolis_worker] init failed:", e);
+  return null;
+});
 
 self.onmessage = async (event) => {
   const initialized = await ready;
   // null は init 失敗のセンチネル。ai_decide wrapper の存在も併せて確認。
-  if (!initialized || typeof self.wasm_bindgen.ai_decide !== "function") {
+  if (!initialized || typeof wasm_bindgen.ai_decide !== "function") {
     return;
   }
 
@@ -55,7 +58,7 @@ self.onmessage = async (event) => {
   }
 
   try {
-    const response = self.wasm_bindgen.ai_decide(request);
+    const response = wasm_bindgen.ai_decide(request);
     if (typeof response === "string" && response.length > 0) {
       self.postMessage(response);
     }

@@ -5,3 +5,7 @@
 node_modules/
 proptest-regressions/
 .claude/.pr-review-count
+# Playwright (E2E worker テスト) の生成物
+/playwright-report
+/test-results
+package-lock.json
