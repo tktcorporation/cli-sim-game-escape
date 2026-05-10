@@ -2619,40 +2619,67 @@ fn cells_in_manhattan(cx: usize, cy: usize, radius: i32) -> Vec<(usize, usize)> 
 }
 
 /// 領域 `region` 内のセル群について `cell_contribution` の和を返す。
-/// 周辺 House (radius 5 拡張) の tier/pop を local map に埋めてから合計する。
+/// 周辺 House (radius 5 拡張) の tier/pop を `eval_scratch.local_pop` /
+/// `local_tier_map` に埋めてから合計する。
 ///
-/// **コスト**: 1 call ≈ region.len() × per-cell + extended_pop_region.len() × tier_scan
-/// = 200 × 50 + 250 × 121 ≈ 40K ops。full evaluate の ~140K ops と比べて 3-4x 高速化。
+/// **バッファ規約**: `local_pop` / `local_tier_map` は呼び出し前に **全 0**
+/// であることを前提に書き込み、最後に書き込んだセルだけ 0 に戻す
+/// (= 全 grid を毎回 zero-fill するコストを避ける)。`EvalScratch::new` で
+/// 0 初期化される + 本関数が末尾で revert するので、不変条件は保たれる。
+///
+/// **コスト**: region cells × 50 + pop region cells × 121。saturated map で
+/// region 200 + pop 約 400 として 200×50 + 400×121 ≈ 60K ops。full evaluate の
+/// ~140K ops に比べて 2-3x 高速化。
 fn evaluate_region_sum(
     city: &City,
     region: &[(usize, usize)],
     connected: &[Vec<bool>],
 ) -> i64 {
-    let mut local_pop = vec![vec![0u32; GRID_W]; GRID_H];
-    let mut local_tier_map: Vec<Vec<Option<HouseTier>>> = vec![vec![None; GRID_W]; GRID_H];
-    let mut covered = vec![vec![false; GRID_W]; GRID_H];
-    // House の tier 計算で周囲 5 まで読むので、income 計算も周囲 5 まで pop_map を必要とする。
-    // region 内の各セルの周囲 5 までを pop_map 計算対象に含める。
-    for &(rx, ry) in region {
-        for (cx, cy) in cells_in_manhattan(rx, ry, 5) {
-            if covered[cy][cx] {
-                continue;
+    // 該当 cell に書き込んだことを記録するための一時 Vec。alloc は 1 回だけ
+    // (region の size 上限は ~250)。
+    let mut written_pop: Vec<(usize, usize)> = Vec::with_capacity(region.len() * 2);
+
+    {
+        let mut scratch = city.eval_scratch.borrow_mut();
+        for &(rx, ry) in region {
+            for (cx, cy) in cells_in_manhattan(rx, ry, 5) {
+                if scratch.local_tier_map[cy][cx].is_some() {
+                    continue;
+                }
+                if !matches!(city.tile(cx, cy), Tile::Built(Building::House)) {
+                    continue;
+                }
+                let target = house_tier_for(gather_house_neighborhood_with(city, cx, cy, connected));
+                let age = city.tick.saturating_sub(city.built_at_tick[cy][cx]);
+                let tier = effective_house_tier(target, age);
+                scratch.local_pop[cy][cx] = house_capacity(tier);
+                scratch.local_tier_map[cy][cx] = Some(tier);
+                written_pop.push((cx, cy));
             }
-            covered[cy][cx] = true;
-            if !matches!(city.tile(cx, cy), Tile::Built(Building::House)) {
-                continue;
-            }
-            let target = house_tier_for(gather_house_neighborhood_with(city, cx, cy, connected));
-            let age = city.tick.saturating_sub(city.built_at_tick[cy][cx]);
-            let tier = effective_house_tier(target, age);
-            local_pop[cy][cx] = house_capacity(tier);
-            local_tier_map[cy][cx] = Some(tier);
         }
     }
+
+    let scratch = city.eval_scratch.borrow();
     let mut sum = 0i64;
     for &(rx, ry) in region {
-        sum += cell_contribution(city, rx, ry, &local_pop, local_tier_map[ry][rx], connected);
+        sum += cell_contribution(
+            city,
+            rx,
+            ry,
+            &scratch.local_pop,
+            scratch.local_tier_map[ry][rx],
+            connected,
+        );
     }
+    drop(scratch);
+
+    // 書き込んだセルだけ 0 に戻す
+    let mut scratch = city.eval_scratch.borrow_mut();
+    for (cx, cy) in &written_pop {
+        scratch.local_pop[*cy][*cx] = 0;
+        scratch.local_tier_map[*cy][*cx] = None;
+    }
+
     sum
 }
 

@@ -361,6 +361,12 @@ pub struct EvalScratch {
     pub pop_map: Vec<Vec<u32>>,
     pub tier_map: Vec<Vec<Option<HouseTier>>>,
     pub frontier_visited: Vec<Vec<bool>>,
+    /// 局所差分 evaluate 専用の pop_map バッファ。`evaluate_region_sum` が
+    /// 領域内 House の tier/pop を埋めて使う。grid 全体で 0 初期化されている前提
+    /// で、関数末尾で書き込んだセルだけ zero-back する規約。
+    pub local_pop: Vec<Vec<u32>>,
+    /// `local_pop` と対応する tier 値。
+    pub local_tier_map: Vec<Vec<Option<HouseTier>>>,
 }
 
 impl EvalScratch {
@@ -369,6 +375,8 @@ impl EvalScratch {
             pop_map: vec![vec![0u32; GRID_W]; GRID_H],
             tier_map: vec![vec![None; GRID_W]; GRID_H],
             frontier_visited: vec![vec![false; GRID_W]; GRID_H],
+            local_pop: vec![vec![0u32; GRID_W]; GRID_H],
+            local_tier_map: vec![vec![None; GRID_W]; GRID_H],
         }
     }
 }
