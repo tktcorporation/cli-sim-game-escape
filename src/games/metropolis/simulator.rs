@@ -460,7 +460,7 @@ mod tests {
     ///   - 5min  : income has started flowing (≥ $1/s)
     ///   - 30min : the city is actually a city (≥ 10 buildings)
     ///   - 60min : the player can still grow — either earning income or
-    ///             holding enough cash to keep building
+    ///     holding enough cash to keep building
     ///
     /// 30 分で `income_per_sec ≥ 5` のような厳しめの bar を置くと、Tier 1 の
     /// ランダム撤去で一時的に下がった income を捉えて誤検出する。
