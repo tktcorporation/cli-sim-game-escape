@@ -3055,28 +3055,36 @@ pub(super) fn rank_actions<F: Fn(&City) -> i64>(
 
     let mut actions = enumerate_actions(city);
     if actions.len() > PRE_RANK_LIMIT {
-        // cheap rank で上位を抽出。Idle は score=0 で混ざる枠を確実に残す
-        // (= 全候補が負評価の時に「何もしない」が最終比較で勝てるように)。
+        // cheap rank の上位 + 「Demolish と Idle は常時パススルー」で構成する。
+        //
+        // Demolish を常時含める理由: cheap_action_score は dead 建物 (= isolated
+        // road の -100 ペナルティ等) の **撤去メリット** を base income だけでは
+        // 表現できない。死に建物の Demolish は full evaluate でないと正の
+        // action_value が見えないので、cheap rank の top から漏れても必ず
+        // 最終比較に乗せる (chess engine の killer moves と同じ救済枠)。
+        //
+        // Idle を常時含める理由: 全候補が負評価の時に「何もしない」が最終比較で
+        // 勝てるように。
         let mut indexed: Vec<(usize, i64)> = actions
             .iter()
             .enumerate()
             .map(|(i, a)| (i, cheap_action_score(city, a)))
             .collect();
         indexed.sort_by(|a, b| b.1.cmp(&a.1));
-        let mut keep_idx: Vec<usize> = indexed
+        let mut keep_set: std::collections::HashSet<usize> = indexed
             .into_iter()
             .take(PRE_RANK_LIMIT)
             .map(|(i, _)| i)
             .collect();
-        // Idle が cheap rank で外れた場合に明示的に再追加
-        let idle_idx = actions
-            .iter()
-            .position(|a| matches!(a, super::ai::AiAction::Idle));
-        if let Some(idle_idx) = idle_idx {
-            if !keep_idx.contains(&idle_idx) {
-                keep_idx.push(idle_idx);
+        for (i, a) in actions.iter().enumerate() {
+            if matches!(
+                a,
+                super::ai::AiAction::Demolish { .. } | super::ai::AiAction::Idle
+            ) {
+                keep_set.insert(i);
             }
         }
+        let mut keep_idx: Vec<usize> = keep_set.into_iter().collect();
         keep_idx.sort_unstable();
         let mut filtered = Vec::with_capacity(keep_idx.len());
         for i in keep_idx.into_iter().rev() {
