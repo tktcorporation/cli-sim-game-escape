@@ -334,21 +334,27 @@ mod tests {
         );
     }
 
-    /// More workers ⇒ more parallel construction ⇒ faster growth.
-    /// Tier 4 (Planner) を使う: 評価ベースで安定し、`drive_ai` の worker 並列化
-    /// 効果が「AI のノイズに負けず」観測できる。Tier 2 は myopic な
-    /// `evaluate_simple` で uniform demolish の下では結果が seed 依存で揺れる。
+    /// More workers ⇒ more parallel construction ⇒ more **finished** buildings.
+    ///
+    /// `drive_ai` は 1 tick 1 decide に直列化されているので、worker 数を増やしても
+    /// `constructions_started` の rate は同程度に縛られる (両者 cash bound)。
+    /// 並列性が現れるのは「同時に走らせられる construction の本数」 = ある時点での
+    /// 進行中ビルド数 = 単位時間あたりに完成する数なので、`buildings_built`
+    /// (finished) を metric に取る。
     #[test]
     fn more_workers_build_more() {
-        let s_solo = run(42, AiTier::Planner, 1, 600, &[600]);
-        let s_team = run(42, AiTier::Planner, 4, 600, &[600]);
+        // 30 min horizon: 10 min だと cash bound に達する直前で finished 数が
+        // ノイズに埋もれ、worker concurrency の効きが見えない。30 min まで伸ばすと
+        // cash が income で持ち直し、4 worker の並列性が完成数として現れる。
+        let s_solo = run(42, AiTier::Planner, 1, 1800, &[1800]);
+        let s_team = run(42, AiTier::Planner, 4, 1800, &[1800]);
         let solo = s_solo.last().unwrap();
         let team = s_team.last().unwrap();
         assert!(
-            team.constructions_started > solo.constructions_started,
-            "4 workers should start more constructions than 1: solo={} team={}",
-            solo.constructions_started,
-            team.constructions_started,
+            team.buildings_built > solo.buildings_built,
+            "4 workers should finish more buildings than 1: solo={} team={}",
+            solo.buildings_built,
+            team.buildings_built,
         );
     }
 
