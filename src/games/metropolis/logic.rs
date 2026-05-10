@@ -2890,14 +2890,115 @@ fn action_passes_guards(city: &City, kind: Building, extra_cost: i64) -> bool {
     city.cash >= immediate_cost
 }
 
+/// O(1) で計算できる action の概算スコア。`rank_actions` の事前 rank に使う。
+///
+/// 目的: saturated map では候補数が数千に達し、各候補で full evaluate を回すと
+/// AI tick が秒単位に詰まる。この関数で「明らかに筋が悪い候補」を cheap に弾き、
+/// 上位だけ full evaluate する 2 段構え (= chess engine の reductions / move ordering
+/// に相当) を成立させる。
+///
+/// **設計**: kind 固有の base income (capacity / 期待税率) と cost amort のみ。
+/// 隣接情報を見ないので近似精度は粗いが、`PURCHASE_POWER_PER_CAPITA` 等の constants
+/// は per-cell 補正なしでも「Mall は Cottage より高価かつ高収入」のような relative
+/// ordering を概ね保つ。最終 ranking は full `action_value` がやり直す。
+pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i64 {
+    fn base_cents(kind: Building) -> i64 {
+        match kind {
+            Building::House => 50,
+            Building::Workshop => WORKSHOP_CAPACITY_CENTS,
+            Building::Factory => FACTORY_CAPACITY_CENTS,
+            Building::Refinery => REFINERY_CAPACITY_CENTS,
+            Building::Shop => SHOP_CAPACITY_CENTS,
+            Building::Mall => MALL_CAPACITY_CENTS,
+            Building::MegaMall => MEGAMALL_CAPACITY_CENTS,
+            Building::Office => OFFICE_CAPACITY_CENTS,
+            Building::Headquarters => HEADQUARTERS_CAPACITY_CENTS,
+            // インフラ・触媒系: 直接 income なしだが評価上の base を与える
+            Building::Road => 8,
+            Building::Park => 4,
+            Building::Plaza => 50,
+            Building::Stadium => 100,
+            Building::Outpost => 20, // Rock 解禁の期待値
+        }
+    }
+    fn cost_amort(cost: i64) -> i64 {
+        cost * 100 / AI_PAYBACK_SECS
+    }
+    fn current_at(city: &City, x: usize, y: usize) -> i64 {
+        match city.tile(x, y) {
+            Tile::Built(b) => base_cents(*b),
+            _ => 0,
+        }
+    }
+    match action {
+        super::ai::AiAction::Build { x, y, kind } => {
+            let t = city.terrain_at(*x, *y);
+            let extra = if t.needs_clearing() { t.clearing_cost() } else { 0 };
+            base_cents(*kind) - cost_amort(kind.cost() + extra)
+        }
+        super::ai::AiAction::Demolish { x, y } => {
+            -current_at(city, *x, *y) - cost_amort(demolish_cost(*x, *y))
+        }
+        super::ai::AiAction::Replace { x, y, kind } => {
+            let t = city.terrain_at(*x, *y);
+            let extra = if t.needs_clearing() { t.clearing_cost() } else { 0 };
+            base_cents(*kind)
+                - current_at(city, *x, *y)
+                - cost_amort(demolish_cost(*x, *y) + kind.cost() + extra)
+        }
+        super::ai::AiAction::Idle => 0,
+    }
+}
+
 /// 探索: 全候補アクションを評価し、上位 K を返す (depth=1)。
 /// 戻り値は `(action, value)` の降順ソート済み Vec。
+///
+/// **2 段 ranking**: cheap_action_score で大量候補を上位 ~`PRE_RANK_LIMIT` 個に
+/// 絞り、その上だけで full `action_value` を計算する。saturated map で候補数が
+/// 数千に達するため、O(N) full evaluate を全候補に流すと秒単位の遅延が出る。
+/// cheap score は近似だが正の相関があれば、true best が pre-rank top に残る確率が
+/// 高い。Idle は常に最終候補に含めて「何もしない」を選択肢として残す。
 pub(super) fn rank_actions<F: Fn(&City) -> i64>(
     city: &mut City,
     eval_fn: &F,
     top_k: usize,
 ) -> Vec<(super::ai::AiAction, i64)> {
-    let actions = enumerate_actions(city);
+    /// full evaluate を回す候補の上限。実測でこの数で 30min sim が release で
+    /// 数分内に収まり、かつ AI Tier 4/5 の質はほぼ落ちないと観測。
+    const PRE_RANK_LIMIT: usize = 200;
+
+    let mut actions = enumerate_actions(city);
+    if actions.len() > PRE_RANK_LIMIT {
+        // cheap rank で上位を抽出。Idle は score=0 で混ざる枠を確実に残す
+        // (= 全候補が負評価の時に「何もしない」が最終比較で勝てるように)。
+        let mut indexed: Vec<(usize, i64)> = actions
+            .iter()
+            .enumerate()
+            .map(|(i, a)| (i, cheap_action_score(city, a)))
+            .collect();
+        indexed.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut keep_idx: Vec<usize> = indexed
+            .into_iter()
+            .take(PRE_RANK_LIMIT)
+            .map(|(i, _)| i)
+            .collect();
+        // Idle が cheap rank で外れた場合に明示的に再追加
+        let idle_idx = actions
+            .iter()
+            .position(|a| matches!(a, super::ai::AiAction::Idle));
+        if let Some(idle_idx) = idle_idx {
+            if !keep_idx.contains(&idle_idx) {
+                keep_idx.push(idle_idx);
+            }
+        }
+        keep_idx.sort_unstable();
+        let mut filtered = Vec::with_capacity(keep_idx.len());
+        for i in keep_idx.into_iter().rev() {
+            filtered.push(actions.swap_remove(i));
+        }
+        actions = filtered;
+    }
+
     // baseline `before` は同じ city 状態で全候補に共通。1 度計算して N 個の候補で
     // 共有することで evaluate 呼び出しが 2N → N+1 回 (実質 ~2x speedup)。
     let before = eval_fn(city);
