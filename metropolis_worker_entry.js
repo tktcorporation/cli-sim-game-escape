@@ -29,12 +29,12 @@
 
 importScripts("./metropolis_worker.js");
 
-// `wasm_bindgen` は IIFE のグローバル名。WASM をフェッチして instantiate し、
-// 解決後に `ai_decide` を取り出す。`init()` Promise は再 await しても
-// 1 度だけ resolve されるので onmessage 内で `await ready` してよい。
-//
-// reject した時に unhandled rejection を出さないよう `.catch` で潰し、
-// `null` を返すことで onmessage 側が「init 失敗 = 何もできない」と判定できるようにする。
+// `wasm_bindgen` は IIFE のグローバル名。WASM をフェッチして instantiate する。
+// 注意: `wasm_bindgen('./xxx.wasm')` の resolve 値は **raw wasm exports**
+// (`instance.exports`) で、ここの `ai_decide` は (ptr, len) を取る生関数。
+// 文字列 ↔ ポインタを変換してくれる **wrapper** は `wasm_bindgen.ai_decide`
+// 側 (IIFE が `Object.assign(__wbg_init, ..., exports)` で登録した方) にある。
+// onmessage では `await ready` で初期化完了を待ったあと、wrapper を呼ぶ。
 const ready = self
   .wasm_bindgen("./metropolis_worker_bg.wasm")
   .catch((e) => {
@@ -43,16 +43,9 @@ const ready = self
   });
 
 self.onmessage = async (event) => {
-  let initialized;
-  try {
-    initialized = await ready;
-  } catch (_e) {
-    // ready が reject されても上の .catch で null になっているので通常ここには
-    // 来ないが、もしランナーが Promise を差し替えた場合の保険。
-    return;
-  }
-
-  if (!initialized || typeof initialized.ai_decide !== "function") {
+  const initialized = await ready;
+  // null は init 失敗のセンチネル。ai_decide wrapper の存在も併せて確認。
+  if (!initialized || typeof self.wasm_bindgen.ai_decide !== "function") {
     return;
   }
 
@@ -62,7 +55,7 @@ self.onmessage = async (event) => {
   }
 
   try {
-    const response = initialized.ai_decide(request);
+    const response = self.wasm_bindgen.ai_decide(request);
     if (typeof response === "string" && response.length > 0) {
       self.postMessage(response);
     }
