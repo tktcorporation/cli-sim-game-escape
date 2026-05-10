@@ -2188,32 +2188,6 @@ pub(super) fn has_built_within_distance(city: &City, x: usize, y: usize, dist: i
     false
 }
 
-/// Manhattan 距離 `dist` 以内に House が 1 軒でもあるか。Park の demolish 候補化で
-/// 「周囲に House が無くなった Park = 触媒として死んでいる」を判定するために使う。
-pub(super) fn any_house_within_manhattan(city: &City, x: usize, y: usize, dist: i32) -> bool {
-    let xi = x as i32;
-    let yi = y as i32;
-    for dy in -dist..=dist {
-        for dx in -dist..=dist {
-            if dx.abs() + dy.abs() > dist {
-                continue;
-            }
-            let nx = xi + dx;
-            let ny = yi + dy;
-            if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
-                continue;
-            }
-            if matches!(
-                city.tile(nx as usize, ny as usize),
-                Tile::Built(Building::House)
-            ) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 /// Try to upgrade the AI brain.  Returns true on success.
 pub fn upgrade_ai(city: &mut City) -> bool {
     let Some(next) = city.ai_tier.next() else {
@@ -2796,73 +2770,22 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
             });
         }
     }
-    // Demolish 候補の方針: 「セルを別用途に転用する余地があるか」だけを enumerate
-    // 段階で判断し、転用が net-positive かは `action_value` (= Δevaluate − cost)
-    // に委ねる。enumerate で「明らかに健全」な建物 (active な Highrise / 接続 Road /
-    // 周囲 Rock 持ちの Outpost) を弾くことで saturated map での候補爆発を抑える。
+    // Demolish 候補は **すべての Built タイル**。状況に依存する per-Building
+    // フィルタ (「active な Shop は守る」「Cottage 以外の House は守る」等) は
+    // 一切置かない。理由:
     //
-    // 「健全」の判定は **派生状態**: 周囲のセルから決まる純関数の出力を使う。
-    // ad-hoc に「House は永続資産」のような決め打ちはせず、
-    // 「この建物は今 active か / 上位 Tier か」を尺度にする。
+    //   - その種のフィルタはどれも「今この建物は健全なので保護」という状況依存の
+    //     決め打ちで、街がそのフェーズを抜けた時 (= 全 Shop が active、全 House が
+    //     Apartment) に同じ足かせになる。次の Tier への書き換えが起きなくなる。
+    //   - 健全な建物を撤去する手は `action_value = Δevaluate − cost` で大きく
+    //     負になるため、search が自動的に却下する。ロジック側で禁止する必要は無い。
     //
-    // 連結性は cache 済み。House Tier の `gather_house_neighborhood_with` も
-    // `connected` を受け渡せば BFS は再計算しない。
+    // 唯一かける制約は **affordability** (cash + reserve) — これはどの建物にも
+    // 同じ式で当たる、状況非依存の純粋な物理制約。
     let reserve = automation_policy(city.strategy).min_cash_reserve;
-    let connected = cached_edge_connected_roads(city);
     for y in 0..GRID_H {
         for x in 0..GRID_W {
-            let kind = match city.tile(x, y) {
-                Tile::Built(b) => *b,
-                _ => continue,
-            };
-            let worth_demolishing = match kind {
-                Building::Shop | Building::Mall | Building::MegaMall => {
-                    !shop_is_active_with(city, x, y, &connected)
-                }
-                Building::Workshop
-                | Building::Factory
-                | Building::Refinery
-                | Building::Office
-                | Building::Headquarters => {
-                    !workshop_is_active_with(city, x, y, &connected)
-                }
-                Building::Road => {
-                    !connected[y][x] || !has_built_neighbor_built(city, x, y)
-                }
-                Building::Outpost => {
-                    let mut n = 0u32;
-                    for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-                        let nx = x as i32 + dx;
-                        let ny = y as i32 + dy;
-                        if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
-                            continue;
-                        }
-                        if city.terrain_at(nx as usize, ny as usize)
-                            == super::terrain::Terrain::Rock
-                        {
-                            n += 1;
-                        }
-                    }
-                    n == 0
-                }
-                // House は **Cottage Tier の時のみ** 転用候補にする。Cottage は
-                // 「周囲が育成条件を満たしていない = この cell は今のままだと頭打ち」
-                // を表す派生状態。Apartment 以上に育っている House は実収入を生んで
-                // いるので、撤去は `action_value` 上ほぼ確実に負になり選ばれない。
-                // Cottage の場合だけ enumerate して、再開発 (Workshop / Road / Shop に
-                // 置き換える 2手目) を search に発見させる。
-                Building::House => {
-                    let nb = gather_house_neighborhood_with(city, x, y, &connected);
-                    matches!(house_tier_for(nb), HouseTier::Cottage)
-                }
-                // Park は周囲 House の Tier 押し上げに寄与する触媒。
-                // 周囲 4 マス以内に House が 1 軒も無ければ役目を終えているので転用可能。
-                Building::Park => !any_house_within_manhattan(city, x, y, 4),
-                // Plaza / Stadium は終盤の象徴施設で建設条件が厳しく、
-                // 一度建てたら「街のランドマーク」として残す設計。enumerate しない。
-                Building::Plaza | Building::Stadium => false,
-            };
-            if !worth_demolishing {
+            if !matches!(city.tile(x, y), Tile::Built(_)) {
                 continue;
             }
             let cost = demolish_cost(x, y);

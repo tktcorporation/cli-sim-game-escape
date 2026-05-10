@@ -636,17 +636,19 @@ mod tests {
         }
     }
 
-    /// 長時間診断テスト本体: T4 を 30 分走らせて、停滞窓と変な手を炙り出す。
+    /// 長時間診断テスト本体: T4 を **ゲーム内 3 時間**走らせて、停滞窓と変な手を
+    /// 炙り出す。3 時間 = 10800 sec * 10 ticks/sec = 108000 tick。
     ///
-    /// 観測専用のため `#[ignore]` で routine cargo test から外す。手動実行は
-    /// `cargo test --release diagnose_t4_30min -- --ignored --nocapture`。
-    /// debug ビルドだと 15 分以上かかるので必ず release で走らせること。
+    /// **シミュレーション時間 vs 壁時計時間**: テスト名の「3h」はゲーム内時間。
+    /// 実際の壁時計は AI tick コストに依存し、release で数分〜十数分。debug は
+    /// 数倍重い。観測専用のため `#[ignore]` で routine cargo test から外す。
+    /// 手動実行: `cargo test --release diagnose_t4_3h -- --ignored --nocapture`。
     #[test]
     #[ignore = "long-horizon diagnostic; run with --ignored when investigating AI behavior"]
-    fn diagnose_t4_30min() {
+    fn diagnose_t4_3h() {
         let seed = 0xC1A5_5EED;
-        let total = 1800;
-        let sample_every = 60;
+        let total = 10800; // ゲーム内 3 時間
+        let sample_every = 300; // 5 分刻みで 36 サンプル + 初期
         let (samples, actions) = run_diagnostic(
             seed,
             AiTier::Planner,
@@ -656,7 +658,7 @@ mod tests {
             sample_every,
         );
 
-        eprintln!("\n=== diagnose_t4_30min: {} samples, {} actions ===", samples.len(), actions.len());
+        eprintln!("\n=== diagnose_t4_3h: {} samples, {} actions ===", samples.len(), actions.len());
         for s in &samples {
             eprintln!(
                 "│ t={:>4}s  cash=${:>8}  pop={:>4}  built={:>3}  inc=${}/s  waste={}",
@@ -718,7 +720,7 @@ mod tests {
         }
         let suspicious_total: usize = by_reason.values().map(|(c, _)| *c).sum();
         eprintln!(
-            "[diagnose_t4_30min] suspicious_total={} (out of {} actions)",
+            "[diagnose_t4_3h] suspicious_total={} (out of {} actions)",
             suspicious_total,
             actions.len()
         );
