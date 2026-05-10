@@ -52,6 +52,7 @@ struct Response {
 enum ActionWire {
     Build { x: u8, y: u8, kind: u8 },
     Demolish { x: u8, y: u8 },
+    Replace { x: u8, y: u8, kind: u8 },
     Idle,
 }
 
@@ -67,6 +68,11 @@ impl ActionWire {
                 x: *x as u8,
                 y: *y as u8,
             },
+            AiAction::Replace { x, y, kind } => ActionWire::Replace {
+                x: *x as u8,
+                y: *y as u8,
+                kind: building_to_u8(*kind),
+            },
             AiAction::Idle => ActionWire::Idle,
         }
     }
@@ -81,6 +87,11 @@ impl ActionWire {
             ActionWire::Demolish { x, y } => Some(AiAction::Demolish {
                 x: x as usize,
                 y: y as usize,
+            }),
+            ActionWire::Replace { x, y, kind } => building_from_u8(kind).map(|kind| AiAction::Replace {
+                x: x as usize,
+                y: y as usize,
+                kind,
             }),
             ActionWire::Idle => Some(AiAction::Idle),
         }

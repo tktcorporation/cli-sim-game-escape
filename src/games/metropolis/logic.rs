@@ -238,6 +238,10 @@ pub fn apply_ai_action(city: &mut City, action: super::ai::AiAction) -> bool {
     match action {
         super::ai::AiAction::Build { x, y, kind } => start_construction(city, x, y, kind),
         super::ai::AiAction::Demolish { x, y } => demolish_at(city, x, y),
+        // production では Replace を Demolish 部分のみ実行する。次 tick の
+        // `decide` が空きセルとして再評価し、同 kind の Build が action_value
+        // 上位に残っていれば自然に拾う。1 worker 1 action の制約を維持する設計。
+        super::ai::AiAction::Replace { x, y, .. } => demolish_at(city, x, y),
         super::ai::AiAction::Idle => true,
     }
 }
@@ -459,6 +463,18 @@ where
             AiAction::Demolish { x, y } => {
                 // 成否いずれでも 1 attempt 消費して return。失敗時を retry しても
                 // 同条件で再失敗するだけ。
+                let applied = demolish_at(city, *x, *y);
+                let outcome = if applied {
+                    ActionOutcome::Applied
+                } else {
+                    ActionOutcome::Rejected
+                };
+                observer(city, &action, outcome);
+                return;
+            }
+            AiAction::Replace { x, y, .. } => {
+                // Replace は探索評価向けの複合アクション。production では
+                // Demolish 部分のみ即時実行し、Build は次 tick の decide が拾う。
                 let applied = demolish_at(city, *x, *y);
                 let outcome = if applied {
                     ActionOutcome::Applied
@@ -2575,6 +2591,47 @@ pub fn with_action_applied<R, F: FnOnce(&mut City) -> R>(
             }
             result
         }
+        super::ai::AiAction::Replace { x, y, kind } => {
+            if *x >= GRID_W || *y >= GRID_H {
+                return f(city);
+            }
+            let saved_tile = city.grid[*y][*x].clone();
+            let saved_built_at = city.built_at_tick[*y][*x];
+            // 撤去対象が Road かつ新規が非 Road、もしくは逆、もしくは両者 Road なら
+            // connectivity が変わるので全クリア。両者非 Road なら per-tile のみで OK。
+            let was_road = matches!(saved_tile, Tile::Built(Building::Road));
+            let new_road = matches!(kind, Building::Road);
+            let touches_road = was_road || new_road;
+
+            let demolish_amt = demolish_cost(*x, *y);
+            let terrain = city.terrain_at(*x, *y);
+            let build_amt = kind.cost()
+                + if terrain.needs_clearing() {
+                    terrain.clearing_cost()
+                } else {
+                    0
+                };
+            let total_cost = demolish_amt + build_amt;
+
+            city.grid[*y][*x] = Tile::Built(*kind);
+            city.built_at_tick[*y][*x] = city.tick;
+            city.cash -= total_cost;
+            if touches_road {
+                city.invalidate_population_cache();
+            } else {
+                city.invalidate_per_tile_caches();
+            }
+            let result = f(city);
+            city.grid[*y][*x] = saved_tile;
+            city.built_at_tick[*y][*x] = saved_built_at;
+            city.cash += total_cost;
+            if touches_road {
+                city.invalidate_population_cache();
+            } else {
+                city.invalidate_per_tile_caches();
+            }
+            result
+        }
         super::ai::AiAction::Idle => f(city),
     }
 }
@@ -2624,6 +2681,14 @@ pub(super) fn action_value_with_baseline<F: Fn(&City) -> i64>(
             cost * 100
         }
         super::ai::AiAction::Demolish { x, y } => demolish_cost(*x, *y) * 100,
+        super::ai::AiAction::Replace { x, y, kind } => {
+            let mut cost = demolish_cost(*x, *y) + kind.cost();
+            let t = city.terrain_at(*x, *y);
+            if t.needs_clearing() {
+                cost += t.clearing_cost();
+            }
+            cost * 100
+        }
         super::ai::AiAction::Idle => 0,
     };
     let amort = cost_cents / AI_PAYBACK_SECS;
@@ -2753,17 +2818,38 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
     }
     // Demolish 候補は Built タイル + affordability のみ。判断は `action_value`
     // (= Δevaluate − cost) に委ねる。設計根拠は docs/adr/0001。
+    //
+    // Replace 候補も同じセル群から派生させる。「同セル Demolish + Build kind」を
+    // 1 アクションとして列挙することで、撤去だけだと Δevaluate が負で beam pruning
+    // に切り落とされる「再建で取り戻すシーケンス」が depth=1 比較に直接乗る。
+    // `kind != current` の制約だけ置いて、その他は cost で判断させる。
     let reserve = automation_policy(city.strategy).min_cash_reserve;
     for y in 0..GRID_H {
         for x in 0..GRID_W {
-            if !matches!(city.tile(x, y), Tile::Built(_)) {
-                continue;
+            let current = match city.tile(x, y) {
+                Tile::Built(b) => *b,
+                _ => continue,
+            };
+            let demo_cost = demolish_cost(x, y);
+            if city.cash >= demo_cost + reserve {
+                actions.push(super::ai::AiAction::Demolish { x, y });
             }
-            let cost = demolish_cost(x, y);
-            if city.cash < cost + reserve {
-                continue;
+            for &kind in normal_kinds {
+                if kind == current {
+                    continue;
+                }
+                let terrain = city.terrain_at(x, y);
+                let build_cost = kind.cost()
+                    + if terrain.needs_clearing() {
+                        terrain.clearing_cost()
+                    } else {
+                        0
+                    };
+                if city.cash < demo_cost + build_cost {
+                    continue;
+                }
+                actions.push(super::ai::AiAction::Replace { x, y, kind });
             }
-            actions.push(super::ai::AiAction::Demolish { x, y });
         }
     }
     // Idle を常に合法手として並べる。全候補が負評価 (= cash 浪費) な状況で

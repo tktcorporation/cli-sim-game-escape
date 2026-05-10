@@ -12,8 +12,15 @@
 
 use super::state::*;
 
-/// AI が選ぶ 1 アクション。Build/Demolish/Idle が同じ評価軸 (`action_value`) で
-/// 比較されることに注意 — 「建てる/壊す/待つ」を同じ天秤で max 選択する。
+/// AI が選ぶ 1 アクション。Build/Demolish/Replace/Idle が同じ評価軸
+/// (`action_value`) で比較される — 「建てる/壊す/壊して建て替える/待つ」を同じ
+/// 天秤で max 選択する。
+///
+/// `Replace` は「同セルで Demolish + Build」を 1 単位として扱う複合アクション。
+/// 探索の depth=1 で「撤去後に再建」のシーケンスが直接比較対象になり、
+/// beam pruning で Demolish 単体が切り落とされて 2 手目の再建が見えなくなる
+/// 問題を解消する。production 経路では `apply_ai_action` が Demolish 部分のみを
+/// 即時実行し、Build 部分は次 tick の `decide` が空きセルとして再評価して拾う。
 #[derive(Clone, Debug, PartialEq)]
 pub enum AiAction {
     Build {
@@ -24,6 +31,11 @@ pub enum AiAction {
     Demolish {
         x: usize,
         y: usize,
+    },
+    Replace {
+        x: usize,
+        y: usize,
+        kind: Building,
     },
     Idle,
 }
@@ -58,7 +70,8 @@ fn tier1_random(city: &mut City) -> AiAction {
         .iter()
         .filter(|a| match a {
             AiAction::Build { .. } => !want_demolish,
-            AiAction::Demolish { .. } => want_demolish,
+            // Replace は撤去枠扱い (= 1 worker で撤去。再建は次 tick 任せ)。
+            AiAction::Demolish { .. } | AiAction::Replace { .. } => want_demolish,
             AiAction::Idle => false,
         })
         .collect();
