@@ -43,3 +43,33 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install trunk
       - run: trunk build
+
+  e2e:
+    # Metropolis AI Web Worker が「沈黙」せず実際に応答することを検証する。
+    # tests/lint_worker_entry.rs (静的 lint) と Playwright (実 chromium で
+    # trunk build 後の dist/ を起動) の二段構え。lint は Test job に含まれる。
+    # untrusted input (PR title 等) を `run:` で展開していないので injection なし。
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: cargo install trunk
+      - run: trunk build
+      - run: npm install
+      # `--with-deps` で chromium 本体 + 必要 OS lib (libnss3 等) を一括導入。
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          if-no-files-found: ignore
+          retention-days: 7

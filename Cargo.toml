@@ -19,7 +19,19 @@ console_error_panic_hook = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Window", "Document", "Element", "DomRect", "HtmlCollection", "Performance", "Storage", "console"] }
+# wasm-bindgen は ratzilla 経由でも入るが、worker binary で `#[wasm_bindgen]`
+# 属性を直接書く必要があるため明示依存させる。ratzilla 0.3 が使う 0.2 系列を
+# 共有して、wasm-bindgen の二重リンクを防ぐ。
+wasm-bindgen = "0.2"
+web-sys = { version = "0.3", features = [
+    "Window", "Document", "Element", "DomRect", "HtmlCollection",
+    "Performance", "Storage", "console",
+    # AI を別 WASM の Web Worker に逃がすために Worker / MessageEvent を有効化。
+    # Trunk の `data-type="worker"` は --target no-modules で wasm-bindgen を
+    # 走らせるため、メイン側はクラシック Worker (= `Worker::new` のみ、
+    # `WorkerType::Module` は使わない) として spawn する。
+    "Worker", "MessageEvent",
+] }
 
 [dev-dependencies]
 proptest = "1.4"

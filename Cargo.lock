@@ -143,6 +143,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tachyonfx",
+ "wasm-bindgen",
  "web-sys",
 ]
 

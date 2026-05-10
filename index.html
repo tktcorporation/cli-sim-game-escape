@@ -8,7 +8,15 @@
          char 幅が環境差で揺れて grid のフィットが端末ごとに異なる。
          ratzilla 公式 example と同じ CDN 設定で metrics を全環境で固定。 -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/firacode/6.2.0/fira_code.min.css" />
-    <link data-trunk rel="rust" />
+    <!-- メインアプリ (cli-sim-game-escape バイナリ)。`data-type="main"` 明示。 -->
+    <link data-trunk rel="rust" data-bin="cli-sim-game-escape" data-type="main" />
+    <!-- Metropolis AI Web Worker (別 WASM インスタンス)。`data-type="worker"` で -->
+    <!-- Trunk が worker 向けの ESM bundle を emit する (DOM 初期化を含まない)。 -->
+    <!-- AI 探索のコストをメインスレッドの render から逃がすのが目的。 -->
+    <link data-trunk rel="rust" data-bin="metropolis_worker" data-type="worker" />
+    <!-- Trunk emit の `metropolis_worker.js` を取り込み、onmessage ハンドラから -->
+    <!-- `ai_decide` を呼ぶ薄いラッパー。dist 直下に丸コピーされる。 -->
+    <link data-trunk rel="copy-file" href="metropolis_worker_entry.js" />
     <title>Idle Games - 放置ゲーム</title>
     <style>
       /* line-height の SSOT。CSS と JS の両方がここから値を派生させる:

@@ -506,15 +506,15 @@ fn city_tier_from_u8(v: u8) -> CityTier {
 /// ロードする時にも欠損フィールドをデフォルト値で補完してくれる。
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Serialize, Deserialize)]
-struct SaveData {
-    version: u32,
-    game: GameSave,
+pub(super) struct SaveData {
+    pub(super) version: u32,
+    pub(super) game: GameSave,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
-struct GameSave {
+pub(super) struct GameSave {
     world_seed: u64,
     cash: i64,
     tick: u64,
@@ -537,7 +537,9 @@ struct GameSave {
     cash_spent_total: i64,
 
     /// イベントログ (新→旧)。`MAX_EVENTS` で切られている。
-    events: Vec<String>,
+    /// `pub(super)`: `ai_worker::build_request_json` が AI スナップショットを
+    /// 軽量化するために中身を空にするので、隣接モジュールから書き込めること。
+    pub(super) events: Vec<String>,
 
     /// v2 以降: 自動運用クールダウン用 tick。
     /// 旧データには無いので `serde(default)` の 0 を使う (= 「未着手」扱い、
@@ -570,7 +572,7 @@ struct GameSave {
 /// `City` にフィールドが追加された時に compile error で気付ける = 管理漏れ
 /// 防止の中核。新フィールドを足したら必ずどちらかの群に分類すること。
 #[cfg(any(target_arch = "wasm32", test))]
-fn extract_save(state: &City) -> SaveData {
+pub(super) fn extract_save(state: &City) -> SaveData {
     // ── 重要: ここで `..` を使わない ───────────────────────────────
     // `City` に新しいフィールドが追加されると compile error になる。
     // 永続化するなら `GameSave` への書き込みを足す。一時状態 (フラッシュ
@@ -676,7 +678,7 @@ fn extract_save(state: &City) -> SaveData {
 /// も `..` 無しで行うため、`GameSave` にフィールドを足したらここで未バインド
 /// になり compile error で気付ける。
 #[cfg(any(target_arch = "wasm32", test))]
-fn apply_save(state: &mut City, save: &GameSave) {
+pub(super) fn apply_save(state: &mut City, save: &GameSave) {
     let GameSave {
         world_seed,
         cash,

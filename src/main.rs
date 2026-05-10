@@ -1,16 +1,12 @@
-mod games;
-mod input;
-mod time;
-mod widgets;
-
 use std::{cell::RefCell, io, rc::Rc};
 
-use games::{create_game, AppState, GameChoice};
-use input::{
+use cli_sim_game_escape::games::{self, create_game, AppState, GameChoice};
+use cli_sim_game_escape::input::{
     is_narrow_layout, pixel_x_to_col, pixel_y_to_row, ClickScope, ClickState, InputEvent,
 };
-use widgets::{Clickable, ClickableList};
-use time::GameTime;
+use cli_sim_game_escape::widgets::{Clickable, ClickableList};
+use cli_sim_game_escape::time::GameTime;
+use cli_sim_game_escape::BACK_TO_MENU;
 
 use ratzilla::event::{KeyCode, MouseButton, MouseEventKind};
 use ratzilla::ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -33,7 +29,6 @@ pub const MENU_SELECT_TAMAGOTCHI: u16 = 9;
 pub const MENU_SELECT_SETTINGS: u16 = 10;
 pub const MENU_SCROLL_UP: u16 = 11;
 pub const MENU_SCROLL_DOWN: u16 = 12;
-pub const BACK_TO_MENU: u16 = 65535;
 
 /// Last valid index of the main menu cards (9 games + settings → 0..=9).
 const MENU_LAST_INDEX: u8 = 9;
