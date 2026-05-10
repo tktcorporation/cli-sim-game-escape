@@ -10,7 +10,9 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::games::metropolis::ai::AiAction;
     use crate::games::metropolis::logic;
+    use crate::games::metropolis::logic::ActionOutcome;
     use crate::games::metropolis::state::*;
 
     /// One row of the simulation log.
@@ -485,6 +487,244 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── 長時間診断ハーネス (Phase: AI 思考の観測) ──────────────────
+    //
+    // 目的: 「30 min / 3 hr / 5 hr 走らせて、AI が変な手を打っていないか観測する」
+    // ための test infra。集計値だけでは「停滞」「変な手」が見えないので、
+    // tick_observed 経由で **打った手すべて** を記録し、診断述語で炙り出す。
+    //
+    // 診断述語 (`is_stagnant_window` / `classify_suspicious_action`) は
+    // **ドメイン知識を伴う設計レバー**。ここの定義が「シミュレータが何を発見できるか」
+    // を決めるため、単体ロジックで完結する純関数として隔離してある。
+
+    /// AI が打った 1 手。production の `tick` の各 step で `tick_observed` の
+    /// observer に届く情報を、後段の診断で使う形に正規化したもの。
+    ///
+    /// `cash_after` / `pop_after` / `built_after` は「変な手」の判定述語で
+    /// 「Cash 余裕で Idle」「Demolish 後に pop が落ちすぎ」等を見るための材料。
+    /// 一部 field が unused 状態でも、述語拡張時にすぐ使える形にしておく。
+    #[derive(Debug, Clone)]
+    #[allow(dead_code)]
+    struct ActionRecord {
+        sec: u32,
+        action: AiAction,
+        outcome: ActionOutcome,
+        cash_after: i64,
+        pop_after: u32,
+        built_after: u32,
+    }
+
+    /// 周期サンプル。`Snapshot` より薄く、停滞検出向けの最低限フィールドだけ。
+    #[derive(Debug, Clone)]
+    struct PeriodicSample {
+        sec: u32,
+        cash: i64,
+        pop: u32,
+        built: u32,
+        income_per_sec: i64,
+        waste: u32,
+    }
+
+    fn periodic(city: &City, sec: u32) -> PeriodicSample {
+        PeriodicSample {
+            sec,
+            cash: city.cash,
+            pop: city.population(),
+            built: city.buildings_finished as u32,
+            income_per_sec: logic::compute_income_per_sec(city),
+            waste: waste_count(city),
+        }
+    }
+
+    /// 長時間ハーネス: 1 秒刻みで `tick_observed` を呼び、
+    ///   - AI の手 (Build/Demolish/Idle, outcome) を全件記録
+    ///   - sample_every_sec 秒ごとに City 状態を周期サンプリング
+    ///
+    /// 既存の `run` は集計値だけ返すが、こちらは「いつ何の手を打ったか」と
+    /// 「街がどう推移したか」をペアで返す。
+    fn run_diagnostic(
+        seed: u64,
+        tier: AiTier,
+        strategy: Strategy,
+        workers: u32,
+        total_seconds: u32,
+        sample_every_sec: u32,
+    ) -> (Vec<PeriodicSample>, Vec<ActionRecord>) {
+        let mut city = City::with_seed(seed);
+        city.ai_tier = tier;
+        city.strategy = strategy;
+        city.workers = workers;
+
+        let mut samples: Vec<PeriodicSample> = vec![periodic(&city, 0)];
+        let mut actions: Vec<ActionRecord> = Vec::new();
+
+        for sec in 1..=total_seconds {
+            // 1 秒分 (= TICKS_PER_SEC ticks) を回しながら observer で AI の手を集める
+            logic::tick_observed(&mut city, TICKS_PER_SEC, |c, action, outcome| {
+                actions.push(ActionRecord {
+                    sec,
+                    action: action.clone(),
+                    outcome,
+                    cash_after: c.cash,
+                    pop_after: c.population(),
+                    built_after: c.buildings_finished as u32,
+                });
+            });
+
+            if sec % sample_every_sec == 0 {
+                samples.push(periodic(&city, sec));
+            }
+        }
+        (samples, actions)
+    }
+
+    /// 停滞判定。`window` は時系列順の周期サンプル (典型的に直近 5 分)。
+    ///
+    /// 「街が止まった」を以下の段階で検出する。優先順位の高い (= 強い停滞) を
+    /// 先に評価し、最初にヒットした理由を返す。
+    ///
+    /// **段階**:
+    /// 1. **完全停滞**: pop も built も window 全体で完全に 0 増。最も強いシグナル。
+    /// 2. **資金過剰停滞**: cash が大きいのに pop/built がほぼ伸びない。
+    ///    「金は余っているが投資判断ができていない」状態。
+    /// 3. **散らかり高止まり**: waste が一定値以上で window 全体に居座り、
+    ///    かつ pop が伸びていない。機能不全建物の整理が回っていない。
+    ///
+    /// 各しきい値はマジックナンバー扱い。後で観測しながらチューニング前提。
+    fn is_stagnant_window(window: &[PeriodicSample]) -> Option<&'static str> {
+        if window.len() < 3 {
+            return None;
+        }
+        let first = window.first().unwrap();
+        let last = window.last().unwrap();
+        let pop_growth = last.pop.saturating_sub(first.pop);
+        let built_growth = last.built.saturating_sub(first.built);
+
+        if pop_growth == 0 && built_growth == 0 {
+            return Some("complete stall: pop and built both flat across window");
+        }
+        if last.cash >= 5_000 && pop_growth == 0 && built_growth <= 1 {
+            return Some("cash-rich stall: ample cash but no growth");
+        }
+        let waste_persistent = window.iter().all(|s| s.waste >= 5);
+        if waste_persistent && pop_growth == 0 {
+            return Some("waste-saturated stall: persistent dead infra + flat pop");
+        }
+        None
+    }
+
+    /// 「明らかに変な手」判定。
+    ///
+    /// 過剰検出より見逃し削減を優先する。誤検出 (= 正常な戦略を変と呼ぶ) は
+    /// 後段の集計で「件数が少なければ無視」できるが、見逃しは観測の死角になる。
+    ///
+    /// **判定軸**:
+    /// - `Idle` で cash が一定以上: 「候補から正の手が見えていない」シグナル。
+    ///   評価関数 or 列挙の問題を疑う。閾値 $2000 は「House 1 軒 + 余裕」程度。
+    /// - `Rejected` (stale な手): 直後の `start_construction` / `demolish_at`
+    ///   が条件を再評価して落ちた。1 件単位ではどう判定するか難しいので
+    ///   一旦すべて拾う (集計で頻度を見る)。
+    fn classify_suspicious_action(record: &ActionRecord) -> Option<&'static str> {
+        match (&record.action, record.outcome) {
+            (AiAction::Idle, _) if record.cash_after >= 2_000 => {
+                Some("Idle with cash >= $2000")
+            }
+            (_, ActionOutcome::Rejected) => Some("action rejected on apply"),
+            _ => None,
+        }
+    }
+
+    /// 長時間診断テスト本体: T4 を 30 分走らせて、停滞窓と変な手を炙り出す。
+    ///
+    /// 述語 (`is_stagnant_window` / `classify_suspicious_action`) が None を
+    /// 返している間は「観測のみ・assert 無し」で動き、test 失敗にはならない。
+    /// 述語が実装されたら panic で警告する所まで踏み込んで良い (要 user 判断)。
+    #[test]
+    fn diagnose_t4_30min() {
+        let seed = 0xC1A5_5EED;
+        let total = 1800;
+        let sample_every = 60;
+        let (samples, actions) = run_diagnostic(
+            seed,
+            AiTier::Planner,
+            Strategy::Income,
+            4,
+            total,
+            sample_every,
+        );
+
+        eprintln!("\n=== diagnose_t4_30min: {} samples, {} actions ===", samples.len(), actions.len());
+        for s in &samples {
+            eprintln!(
+                "│ t={:>4}s  cash=${:>8}  pop={:>4}  built={:>3}  inc=${}/s  waste={}",
+                s.sec, s.cash, s.pop, s.built, s.income_per_sec, s.waste
+            );
+        }
+
+        // 停滞窓を炙り出す: 直近 5 サンプル (5 分) を移動窓で評価。
+        let win = 5usize;
+        for i in win..=samples.len() {
+            let w = &samples[i - win..i];
+            if let Some(reason) = is_stagnant_window(w) {
+                eprintln!(
+                    "[stagnation] t={}s..{}s: {}",
+                    w.first().unwrap().sec,
+                    w.last().unwrap().sec,
+                    reason
+                );
+                // 周辺で打たれた手を 10 件だけ抜粋
+                let from = w.first().unwrap().sec;
+                let to = w.last().unwrap().sec;
+                let surrounding: Vec<&ActionRecord> = actions
+                    .iter()
+                    .filter(|r| r.sec >= from && r.sec <= to)
+                    .take(10)
+                    .collect();
+                for r in &surrounding {
+                    eprintln!(
+                        "    t={:>4}s {:?} ({:?}) cash=${} pop={}",
+                        r.sec, r.action, r.outcome, r.cash_after, r.pop_after
+                    );
+                }
+            }
+        }
+
+        // 変な手を理由ごとに集計。1 件 1 行だと 30 min で数千行出るので
+        // (reason → 件数 + 最初の数件の例) に圧縮して見せる。
+        use std::collections::BTreeMap;
+        let mut by_reason: BTreeMap<&'static str, (usize, Vec<&ActionRecord>)> =
+            BTreeMap::new();
+        for r in &actions {
+            if let Some(reason) = classify_suspicious_action(r) {
+                let entry = by_reason.entry(reason).or_default();
+                entry.0 += 1;
+                if entry.1.len() < 3 {
+                    entry.1.push(r);
+                }
+            }
+        }
+        eprintln!("\n[suspicious actions by reason]");
+        for (reason, (count, examples)) in &by_reason {
+            eprintln!("  {} × {}", reason, count);
+            for ex in examples {
+                eprintln!(
+                    "    e.g. t={:>4}s {:?} ({:?}) cash=${} pop={}",
+                    ex.sec, ex.action, ex.outcome, ex.cash_after, ex.pop_after
+                );
+            }
+        }
+        let suspicious_total: usize = by_reason.values().map(|(c, _)| *c).sum();
+        eprintln!(
+            "[diagnose_t4_30min] suspicious_total={} (out of {} actions)",
+            suspicious_total,
+            actions.len()
+        );
+
+        // 観測専用テスト: 述語が拾った件数を log に流すだけで assertion はしない。
+        // 異常水準が出たら手で確認 → 評価/列挙ロジックを直す → ここで regression
+        // テストとして閾値 assertion を追加する、という運用。
     }
 
     /// 「街の散らかり度」: 死に道路 (edge未接続 Road) + 機能不全建物 (inactive

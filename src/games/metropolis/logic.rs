@@ -419,6 +419,82 @@ fn drive_ai(city: &mut City) {
     }
 }
 
+/// シミュレータ診断用の `tick`。AI が `decide` を返すたびに `observer` を呼ぶ。
+///
+/// 本番経路は `tick` / `tick_without_ai` を使う。観測フックは「いつ何の手を
+/// 打ったか」を集めるためだけに存在し、ロジック分岐は加えない (= production と
+/// observable で挙動が乖離しない保証)。
+pub fn tick_observed<F>(city: &mut City, delta_ticks: u32, mut observer: F)
+where
+    F: FnMut(&City, &super::ai::AiAction, ActionOutcome),
+{
+    for _ in 0..delta_ticks {
+        advance_construction(city);
+        auto_strategy_actions(city);
+        drive_ai_with_observer(city, &mut observer);
+        accrue_income(city);
+        detect_tier_advance(city);
+        city.invalidate_population_cache();
+        city.tick = city.tick.wrapping_add(1);
+    }
+}
+
+/// `decide` が返した手が実際に通ったか、stale で reject されたかを区別する。
+/// 「AI が意図した手」と「ゲームに反映された手」が違うケース (cash 不足や
+/// セルが既に埋まっていた等) を診断側で識別するための情報。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionOutcome {
+    Applied,
+    Rejected,
+    Idle,
+}
+
+fn drive_ai_with_observer<F>(city: &mut City, observer: &mut F)
+where
+    F: FnMut(&City, &super::ai::AiAction, ActionOutcome),
+{
+    if city.free_workers() == 0 {
+        return;
+    }
+    for _ in 0..2 {
+        let action = decide(city);
+        match &action {
+            AiAction::Build { x, y, kind } => {
+                let applied = start_construction(city, *x, *y, *kind);
+                observer(
+                    city,
+                    &action,
+                    if applied {
+                        ActionOutcome::Applied
+                    } else {
+                        ActionOutcome::Rejected
+                    },
+                );
+                if applied {
+                    return;
+                }
+            }
+            AiAction::Demolish { x, y } => {
+                let applied = demolish_at(city, *x, *y);
+                observer(
+                    city,
+                    &action,
+                    if applied {
+                        ActionOutcome::Applied
+                    } else {
+                        ActionOutcome::Rejected
+                    },
+                );
+                return;
+            }
+            AiAction::Idle => {
+                observer(city, &action, ActionOutcome::Idle);
+                return;
+            }
+        }
+    }
+}
+
 /// Tech 戦略時の建設速度ブースト。`strategy_info` 経由で取得することで
 /// 「Strategy 副作用の唯一の集約点」を maintain。state/render は読取専用。
 fn build_ticks_for(city: &City, kind: Building) -> u32 {
@@ -2112,6 +2188,32 @@ pub(super) fn has_built_within_distance(city: &City, x: usize, y: usize, dist: i
     false
 }
 
+/// Manhattan 距離 `dist` 以内に House が 1 軒でもあるか。Park の demolish 候補化で
+/// 「周囲に House が無くなった Park = 触媒として死んでいる」を判定するために使う。
+pub(super) fn any_house_within_manhattan(city: &City, x: usize, y: usize, dist: i32) -> bool {
+    let xi = x as i32;
+    let yi = y as i32;
+    for dy in -dist..=dist {
+        for dx in -dist..=dist {
+            if dx.abs() + dy.abs() > dist {
+                continue;
+            }
+            let nx = xi + dx;
+            let ny = yi + dy;
+            if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                continue;
+            }
+            if matches!(
+                city.tile(nx as usize, ny as usize),
+                Tile::Built(Building::House)
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Try to upgrade the AI brain.  Returns true on success.
 pub fn upgrade_ai(city: &mut City) -> bool {
     let Some(next) = city.ai_tier.next() else {
@@ -2694,19 +2796,17 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
             });
         }
     }
-    // Demolish 候補は **「明らかに無駄」な Built tile のみ** に絞る:
-    //   - inactive な商業/雇用建物 (Shop/Mall/Workshop/Factory/Office)
-    //   - edge未接続 / Built 隣接無しの Road (= 孤立した死に道路)
-    //   - 周囲 Rock 無しの Outpost (= 役目を終えた拠点)
+    // Demolish 候補の方針: 「セルを別用途に転用する余地があるか」だけを enumerate
+    // 段階で判断し、転用が net-positive かは `action_value` (= Δevaluate − cost)
+    // に委ねる。enumerate で「明らかに健全」な建物 (active な Highrise / 接続 Road /
+    // 周囲 Rock 持ちの Outpost) を弾くことで saturated map での候補爆発を抑える。
     //
-    // 「健全な建物 (active な Shop、edge connected な Road、住人のいる House) を
-    // 撤去して上位建物に置換する」のような最適化はできなくなるが、saturated map で
-    // Demolish 候補が数百個に膨れ上がって AI tick が秒オーダで詰まる症状を回避する
-    // ためのトレードオフ。`inactive_building_penalty` / `road_network_value` の
-    // 機会コスト計上と合わせて、機能不全建物は引き続き自動撤去される。
+    // 「健全」の判定は **派生状態**: 周囲のセルから決まる純関数の出力を使う。
+    // ad-hoc に「House は永続資産」のような決め打ちはせず、
+    // 「この建物は今 active か / 上位 Tier か」を尺度にする。
     //
-    // 連結性は cache 済み。商業/雇用 active 判定の cache は無いので per-cell 計算するが、
-    // フィルタで弾かれた cell は最初から Demolish 候補にすらならず evaluate コストが消える。
+    // 連結性は cache 済み。House Tier の `gather_house_neighborhood_with` も
+    // `connected` を受け渡せば BFS は再計算しない。
     let reserve = automation_policy(city.strategy).min_cash_reserve;
     let connected = cached_edge_connected_roads(city);
     for y in 0..GRID_H {
@@ -2745,11 +2845,22 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
                     }
                     n == 0
                 }
-                // 直接収入を持たない触媒系 (House / Park / Plaza / Stadium) は
-                // 機能不全による自動撤去対象外。Plaza / Stadium は un-supported なら
-                // 撤去候補にしてよさそうだが、main 側の Park 同様に「永続資産」扱いにし、
-                // saturate しないキャラクター付けに揃える。
-                Building::House | Building::Park | Building::Plaza | Building::Stadium => false,
+                // House は **Cottage Tier の時のみ** 転用候補にする。Cottage は
+                // 「周囲が育成条件を満たしていない = この cell は今のままだと頭打ち」
+                // を表す派生状態。Apartment 以上に育っている House は実収入を生んで
+                // いるので、撤去は `action_value` 上ほぼ確実に負になり選ばれない。
+                // Cottage の場合だけ enumerate して、再開発 (Workshop / Road / Shop に
+                // 置き換える 2手目) を search に発見させる。
+                Building::House => {
+                    let nb = gather_house_neighborhood_with(city, x, y, &connected);
+                    matches!(house_tier_for(nb), HouseTier::Cottage)
+                }
+                // Park は周囲 House の Tier 押し上げに寄与する触媒。
+                // 周囲 4 マス以内に House が 1 軒も無ければ役目を終えているので転用可能。
+                Building::Park => !any_house_within_manhattan(city, x, y, 4),
+                // Plaza / Stadium は終盤の象徴施設で建設条件が厳しく、
+                // 一度建てたら「街のランドマーク」として残す設計。enumerate しない。
+                Building::Plaza | Building::Stadium => false,
             };
             if !worth_demolishing {
                 continue;
