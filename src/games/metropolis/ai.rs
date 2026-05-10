@@ -111,7 +111,7 @@ fn tier2_greedy(city: &mut City) -> AiAction {
 /// 全部見える。「ちゃんと考えてるが先は読まない」レベル。
 fn tier3_aware(city: &mut City) -> AiAction {
     let rng = city.next_rand();
-    let ranked = super::logic::rank_actions(city, &super::logic::evaluate, 8);
+    let ranked = super::logic::rank_actions_full(city, 8);
     super::logic::pick_with_noise(&ranked, 5, rng).unwrap_or(AiAction::Idle)
 }
 
@@ -120,8 +120,7 @@ fn tier3_aware(city: &mut City) -> AiAction {
 /// **キャラクター**: 「道路を引いて家を建てる」のような 1手目+2手目の連携を
 /// 発見できる。Tier 3 からの差は **探索深さだけ** (評価関数は同じ)。
 fn tier4_planner(city: &mut City) -> AiAction {
-    super::logic::search_best_action(city, 2, 4, &super::logic::evaluate)
-        .unwrap_or(AiAction::Idle)
+    super::logic::search_best_action_full(city, 2, 4).unwrap_or(AiAction::Idle)
 }
 
 /// Tier 5 (アマ高段) — 3手読み + フル評価 + 狭めの beam。
@@ -133,6 +132,5 @@ fn tier4_planner(city: &mut City) -> AiAction {
 /// 30 分シミュ (= 18000 ticks × 10 candidates) が現実時間で終わる範囲に絞る。
 /// 深さで「先読みできる」を表現し、K で広さは抑える将棋エンジン的バランス。
 fn tier5_master(city: &mut City) -> AiAction {
-    super::logic::search_best_action(city, 3, 4, &super::logic::evaluate)
-        .unwrap_or(AiAction::Idle)
+    super::logic::search_best_action_full(city, 3, 4).unwrap_or(AiAction::Idle)
 }
