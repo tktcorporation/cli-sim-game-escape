@@ -395,28 +395,7 @@ fn terrain_name(t: super::terrain::Terrain) -> &'static str {
 /// すぐに埋まる。City growth pace も実用上ほぼ変わらない (10 ticks/sec × 1 build/tick =
 /// 10 builds/sec の理論上限、実際は build 完了待ちで 1 build/sec 程度)。
 fn drive_ai(city: &mut City) {
-    if city.free_workers() == 0 {
-        return;
-    }
-    // attempts は最大 2 回: 1 回目で失敗 (start_construction reject 等) した場合の
-    // リトライ猶予。それでも駄目なら諦めて次 tick に回す (busy-loop 防止)。
-    for _ in 0..2 {
-        match decide(city) {
-            AiAction::Build { x, y, kind } => {
-                if start_construction(city, x, y, kind) {
-                    return;
-                }
-            }
-            AiAction::Demolish { x, y } => {
-                // 成否いずれでも 1 attempt 消費して return。失敗時 (cash 不足等) を
-                // リトライしても同条件で再失敗するだけなので、次 tick に回す方が
-                // 健全 (= busy-loop 防止)。
-                let _ = demolish_at(city, x, y);
-                return;
-            }
-            AiAction::Idle => return,
-        }
-    }
+    drive_ai_with_observer(city, &mut |_, _, _| {});
 }
 
 /// シミュレータ診断用の `tick`。AI が `decide` を返すたびに `observer` を呼ぶ。
@@ -449,6 +428,12 @@ pub enum ActionOutcome {
     Idle,
 }
 
+/// AI 駆動の単一実装。`drive_ai` は no-op closure 経由で呼び、
+/// `tick_observed` は記録 closure 経由で呼ぶ。経路を 2 つ持って片方を
+/// 直し忘れる回帰を構造的に防ぐ。
+///
+/// attempts は最大 2 回: 1 回目で失敗 (start_construction reject 等) した場合の
+/// リトライ猶予。それでも駄目なら諦めて次 tick に回す (busy-loop 防止)。
 fn drive_ai_with_observer<F>(city: &mut City, observer: &mut F)
 where
     F: FnMut(&City, &super::ai::AiAction, ActionOutcome),
@@ -461,30 +446,26 @@ where
         match &action {
             AiAction::Build { x, y, kind } => {
                 let applied = start_construction(city, *x, *y, *kind);
-                observer(
-                    city,
-                    &action,
-                    if applied {
-                        ActionOutcome::Applied
-                    } else {
-                        ActionOutcome::Rejected
-                    },
-                );
+                let outcome = if applied {
+                    ActionOutcome::Applied
+                } else {
+                    ActionOutcome::Rejected
+                };
+                observer(city, &action, outcome);
                 if applied {
                     return;
                 }
             }
             AiAction::Demolish { x, y } => {
+                // 成否いずれでも 1 attempt 消費して return。失敗時を retry しても
+                // 同条件で再失敗するだけ。
                 let applied = demolish_at(city, *x, *y);
-                observer(
-                    city,
-                    &action,
-                    if applied {
-                        ActionOutcome::Applied
-                    } else {
-                        ActionOutcome::Rejected
-                    },
-                );
+                let outcome = if applied {
+                    ActionOutcome::Applied
+                } else {
+                    ActionOutcome::Rejected
+                };
+                observer(city, &action, outcome);
                 return;
             }
             AiAction::Idle => {
@@ -2770,18 +2751,8 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
             });
         }
     }
-    // Demolish 候補は **すべての Built タイル**。状況に依存する per-Building
-    // フィルタ (「active な Shop は守る」「Cottage 以外の House は守る」等) は
-    // 一切置かない。理由:
-    //
-    //   - その種のフィルタはどれも「今この建物は健全なので保護」という状況依存の
-    //     決め打ちで、街がそのフェーズを抜けた時 (= 全 Shop が active、全 House が
-    //     Apartment) に同じ足かせになる。次の Tier への書き換えが起きなくなる。
-    //   - 健全な建物を撤去する手は `action_value = Δevaluate − cost` で大きく
-    //     負になるため、search が自動的に却下する。ロジック側で禁止する必要は無い。
-    //
-    // 唯一かける制約は **affordability** (cash + reserve) — これはどの建物にも
-    // 同じ式で当たる、状況非依存の純粋な物理制約。
+    // Demolish 候補は Built タイル + affordability のみ。判断は `action_value`
+    // (= Δevaluate − cost) に委ねる。設計根拠は docs/adr/0001。
     let reserve = automation_policy(city.strategy).min_cash_reserve;
     for y in 0..GRID_H {
         for x in 0..GRID_W {
@@ -2803,7 +2774,11 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
     actions
 }
 
-/// affordability + 建物前提条件ガード。`enumerate_actions` から呼ぶ。
+/// affordability ガード — Build 候補の唯一の事前フィルタ。判断は `action_value` に
+/// 委ねる方針 (docs/adr/0001) のため、per-Building の house-count や savings
+/// protection は置かない。Demolish 側の `min_cash_reserve` ガードは Build には
+/// 適用しない: Build は income 源を生む投資なので、reserve をかけると初期
+/// cash で何も建てられず永久停滞する (chicken-and-egg)。
 ///
 /// `extra_cost` は terrain の `clearing_cost` を渡す枠。`start_construction` は
 /// 整地必要セルでは「即時 `clearing_cost` を引いて Tile::Clearing にする」
@@ -2817,50 +2792,7 @@ fn action_passes_guards(city: &City, kind: Building, extra_cost: i64) -> bool {
     } else {
         kind.cost()
     };
-    if city.cash < immediate_cost {
-        return false;
-    }
-    // 即時消費後に House 1 軒分の余裕は残す (savings protection)。
-    let house_cost = Building::House.cost();
-    if !matches!(kind, Building::House | Building::Outpost)
-        && city.cash - immediate_cost < house_cost
-    {
-        return false;
-    }
-    if matches!(kind, Building::Shop) && city.count_built(Building::House) < 3 {
-        return false;
-    }
-    if matches!(kind, Building::Mall) && city.count_built(Building::House) < 6 {
-        return false;
-    }
-    if matches!(kind, Building::Workshop) && city.count_built(Building::House) < 2 {
-        return false;
-    }
-    if matches!(kind, Building::Factory) && city.count_built(Building::House) < 5 {
-        return false;
-    }
-    if matches!(kind, Building::Office) && city.count_built(Building::House) < 4 {
-        return false;
-    }
-    // 超上位建物は街がそれなりに育ってから建てる (cost が高く、機能には
-    // 一定数の House が必要)。ROI ペナルティだけだと序盤に空地スコアの
-    // 関係で誤って高評価されることがあるため、人口下限のガードで弾く。
-    if matches!(kind, Building::Refinery) && city.count_built(Building::House) < 12 {
-        return false;
-    }
-    if matches!(kind, Building::MegaMall) && city.count_built(Building::House) < 12 {
-        return false;
-    }
-    if matches!(kind, Building::Headquarters) && city.count_built(Building::House) < 10 {
-        return false;
-    }
-    if matches!(kind, Building::Plaza) && city.count_built(Building::House) < 8 {
-        return false;
-    }
-    if matches!(kind, Building::Stadium) && city.count_built(Building::House) < 20 {
-        return false;
-    }
-    true
+    city.cash >= immediate_cost
 }
 
 /// 探索: 全候補アクションを評価し、上位 K を返す (depth=1)。

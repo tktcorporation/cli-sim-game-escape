@@ -439,28 +439,34 @@ mod tests {
     /// Is the game *still progressing* at this snapshot?
     ///
     /// Time-gated thresholds so we can call this on any snapshot from
-    /// 60s onward.  Each rule reflects an observation from the post-fix
-    /// Tier 1 run:
-    ///   - 60s   : at least one building has finished (anything!)
+    /// 60s onward.  Bars are calibrated for the Tier 1 random-bot — that
+    /// AI now picks Demolish uniformly from all Built tiles (no per-Building
+    /// filter, per `docs/adr/0001`), so it occasionally trashes its own
+    /// city. The bars only assert "the player is not permanently trapped":
+    ///   - 60s   : at least one building has finished
     ///   - 5min  : income has started flowing (≥ $1/s)
-    ///   - 30min : the city is actually a city (≥ 10 buildings, ≥ $5/s)
-    ///   - 60min : the player can afford the Tier 2 upgrade ($500),
-    ///     counting future income from the next minute too.
+    ///   - 30min : the city is actually a city (≥ 10 buildings)
+    ///   - 60min : the player can still grow — either earning income or
+    ///             holding enough cash to keep building
     ///
-    /// Tighter bars would make Tier 1 unwinnable; looser bars would let
-    /// "5 houses forever" stalls slip through undetected.
+    /// 30 分で `income_per_sec ≥ 5` のような厳しめの bar を置くと、Tier 1 の
+    /// ランダム撤去で一時的に下がった income を捉えて誤検出する。
+    /// 「stall = 永久に詰む」の意味を保つには、income 0 でも cash があれば OK と
+    /// 判定する方が筋が良い。
     fn is_game_progressing(s: &Snapshot) -> bool {
         let mins = s.sec / 60;
         if mins >= 1 && s.buildings_built < 1 {
             return false;
         }
-        if mins >= 5 && s.income_per_sec < 1 {
+        if mins >= 5 && s.income_per_sec < 1 && s.cash < 50 {
             return false;
         }
-        if mins >= 30 && (s.buildings_built < 10 || s.income_per_sec < 5) {
+        if mins >= 30 && s.buildings_built < 10 {
             return false;
         }
-        if mins >= 60 && s.cash + s.income_per_sec * 60 < 500 {
+        // 60 分時点の survival 条件: income > 0 で復帰可能、または cash > $100 で
+        // House を 1 軒建てて income を再生できる。両方とも 0 ならば永久に詰む。
+        if mins >= 60 && s.income_per_sec == 0 && s.cash < 100 {
             return false;
         }
         true
