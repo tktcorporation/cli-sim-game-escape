@@ -910,6 +910,29 @@ pub(super) fn fill_pop_tier_target_maps(
     tiers: &mut [Vec<Option<HouseTier>>],
     targets: &mut [Vec<Option<HouseTier>>],
 ) {
+    let mut house_positions = Vec::new();
+    fill_pop_tier_target_with_positions(
+        city,
+        connected,
+        pop,
+        tiers,
+        targets,
+        &mut house_positions,
+    );
+}
+
+/// `fill_pop_tier_target_maps` + house 位置リスト出力版。
+/// `house_positions` は呼び側で `EvalScratch` から提供してもらう。
+/// `tier_promotion_forecast` 等の per-House 集計が全グリッド舐めずに済む。
+#[allow(clippy::needless_range_loop)]
+pub(super) fn fill_pop_tier_target_with_positions(
+    city: &City,
+    connected: &[Vec<bool>],
+    pop: &mut [Vec<u32>],
+    tiers: &mut [Vec<Option<HouseTier>>],
+    targets: &mut [Vec<Option<HouseTier>>],
+    house_positions: &mut Vec<(usize, usize)>,
+) {
     for row in pop.iter_mut() {
         row.fill(0);
     }
@@ -919,6 +942,7 @@ pub(super) fn fill_pop_tier_target_maps(
     for row in targets.iter_mut() {
         row.fill(None);
     }
+    house_positions.clear();
     for y in 0..GRID_H {
         for x in 0..GRID_W {
             if !matches!(city.tile(x, y), Tile::Built(Building::House)) {
@@ -930,6 +954,7 @@ pub(super) fn fill_pop_tier_target_maps(
             pop[y][x] = house_capacity(tier);
             tiers[y][x] = Some(tier);
             targets[y][x] = Some(target);
+            house_positions.push((x, y));
         }
     }
 }
@@ -1338,13 +1363,15 @@ pub fn cached_edge_connected_roads(city: &City) -> std::rc::Rc<Vec<Vec<bool>>> {
 pub fn compute_income_per_sec_cents_with(city: &City, connected: &[Vec<bool>]) -> i64 {
     let mut scratch_ref = city.eval_scratch.borrow_mut();
     let scratch = &mut *scratch_ref;
-    // target tier も同時に埋めて `tier_promotion_forecast` が再 scan を回避できるようにする。
-    fill_pop_tier_target_maps(
+    // target tier + House 位置リストも同時に埋めて `tier_promotion_forecast` が
+    // 再 scan / 全 grid iterate を回避できるようにする。
+    fill_pop_tier_target_with_positions(
         city,
         connected,
         &mut scratch.pop_map,
         &mut scratch.tier_map,
         &mut scratch.target_tier_map,
+        &mut scratch.house_positions,
     );
     let mut income_cents: i64 = 0;
     #[allow(clippy::needless_range_loop)]
@@ -2331,19 +2358,17 @@ pub fn evaluate(city: &City) -> i64 {
 fn tier_promotion_forecast(city: &City, _connected: &[Vec<bool>]) -> i64 {
     let scratch = city.eval_scratch.borrow();
     let mut bonus = 0i64;
-    for y in 0..GRID_H {
-        for x in 0..GRID_W {
-            let (Some(target), Some(effective)) =
-                (scratch.target_tier_map[y][x], scratch.tier_map[y][x])
-            else {
-                continue;
-            };
-            if effective == target {
-                continue;
-            }
-            let gap = tier_base_income_cents(target) - tier_base_income_cents(effective);
-            bonus += gap / 2;
+    for &(x, y) in &scratch.house_positions {
+        let (Some(target), Some(effective)) =
+            (scratch.target_tier_map[y][x], scratch.tier_map[y][x])
+        else {
+            continue;
+        };
+        if effective == target {
+            continue;
         }
+        let gap = tier_base_income_cents(target) - tier_base_income_cents(effective);
+        bonus += gap / 2;
     }
     bonus
 }

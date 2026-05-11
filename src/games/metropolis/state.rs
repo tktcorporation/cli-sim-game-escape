@@ -372,6 +372,10 @@ pub struct EvalScratch {
     pub local_pop: Vec<Vec<u32>>,
     /// `local_pop` と対応する tier 値。
     pub local_tier_map: Vec<Vec<Option<HouseTier>>>,
+    /// `fill_pop_tier_target_maps` が同時に埋める **House セル位置のリスト**。
+    /// `tier_promotion_forecast` 等の per-House 集計が「全 GRID_W×GRID_H を
+    /// 舐めて House を探す」コストを回避するためのインデックス。
+    pub house_positions: Vec<(usize, usize)>,
 }
 
 impl EvalScratch {
@@ -383,6 +387,7 @@ impl EvalScratch {
             frontier_visited: vec![vec![false; GRID_W]; GRID_H],
             local_pop: vec![vec![0u32; GRID_W]; GRID_H],
             local_tier_map: vec![vec![None; GRID_W]; GRID_H],
+            house_positions: Vec::with_capacity(GRID_W * GRID_H / 4),
         }
     }
 }
