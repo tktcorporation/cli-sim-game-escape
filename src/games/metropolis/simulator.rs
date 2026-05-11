@@ -806,6 +806,42 @@ mod tests {
         for (reason, count) in &by_reason {
             eprintln!("  {} × {}", reason, count);
         }
+
+        // 時系列バケット (5 分単位) × Action kind × Outcome の集計。
+        // slow start 期間 (0-1080s) に AI が何の kind を何回 Applied したか可視化する。
+        let bucket_sec = 300u32; // 5 min
+        let buckets = (total + bucket_sec - 1) / bucket_sec;
+        let mut by_bucket_kind: BTreeMap<(u32, String), usize> = BTreeMap::new();
+        for r in &actions {
+            if !matches!(r.outcome, ActionOutcome::Applied) {
+                continue;
+            }
+            let bucket = (r.sec.saturating_sub(1)) / bucket_sec;
+            let key = match &r.action {
+                AiAction::Build { kind, .. } => format!("Build {:?}", kind),
+                AiAction::Demolish { .. } => "Demolish".to_string(),
+                AiAction::Replace { kind, .. } => format!("Replace→{:?}", kind),
+                AiAction::Idle => "Idle".to_string(),
+            };
+            *by_bucket_kind.entry((bucket, key)).or_default() += 1;
+        }
+        eprintln!("\n[diagnose_t4_30min] action breakdown (Applied only, 5-min buckets):");
+        for b in 0..buckets {
+            let from = b * bucket_sec;
+            let to = ((b + 1) * bucket_sec).min(total);
+            let kinds: Vec<(&String, &usize)> = by_bucket_kind
+                .iter()
+                .filter(|((bb, _), _)| *bb == b)
+                .map(|((_, k), v)| (k, v))
+                .collect();
+            if kinds.is_empty() {
+                continue;
+            }
+            eprintln!("  t={:>4}-{:>4}s:", from, to);
+            for (k, v) in kinds {
+                eprintln!("    {} × {}", k, v);
+            }
+        }
     }
 
     /// 「街の散らかり度」: 死に道路 (edge未接続 Road) + 機能不全建物 (inactive
