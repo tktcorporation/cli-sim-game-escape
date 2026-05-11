@@ -2267,7 +2267,8 @@ pub const AI_PAYBACK_SECS: i64 = 1800;
 
 /// 評価関数 (アマ初段〜プロ相当)。
 /// 「街全体の cents/sec」+ thematic bonus + Outpost territory bonus
-/// + inactive 建物 penalty + 道路網健全性。Tier 3 以上で共通、Tier 差は探索深さで作る。
+/// + inactive 建物 penalty + 道路網健全性 + tier 昇格期待値。Tier 3 以上で共通、
+/// Tier 差は探索深さで作る。
 pub fn evaluate(city: &City) -> i64 {
     // `cached_edge_connected_roads` を経由することで、AI search の非 Road actions では
     // BFS を走らせず connected_cache から再利用される (Road change 時のみ city.tick を
@@ -2279,6 +2280,53 @@ pub fn evaluate(city: &City) -> i64 {
         + outpost_territory_bonus(city)
         + inactive_building_penalty_with(city, &connected)
         + road_network_value(city, &connected)
+        + tier_promotion_forecast(city, &connected)
+}
+
+/// House の **未実現 Tier 昇格** を期待値として加算する forecast 項。
+///
+/// **必要性**: depth=2 探索でも `dwell_required_ticks` (Apartment 60s / Highrise 5min)
+/// は届かない。新築 House の `effective_tier` は age=0 のため Cottage 据え置き
+/// だが、**target_tier が Apartment+** なら時間経過で必ず昇格する。この潜在価値を
+/// 評価に乗せないと、AI は「今 Cottage を建てても 50 cents/sec」としか見えず、
+/// House Build を低評価して街が育たない (= slow start の根本原因)。
+///
+/// **将棋の "駒の働き"**: 直接得点になっていないが、将来必ず効く価値を評価関数で
+/// 表現する。`outpost_territory_bonus` と同じ思想で、Δincome では届かない長期
+/// リターンを今の 1 手の天秤に乗せる。
+///
+/// 値: `(target_income - effective_income) × 50%` per House cell。50% 割引は
+/// 「実現までの不確実性」分。生産性ベースの cents/sec で他項と整合。
+fn tier_promotion_forecast(city: &City, connected: &[Vec<bool>]) -> i64 {
+    let mut bonus = 0i64;
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            if !matches!(city.tile(x, y), Tile::Built(Building::House)) {
+                continue;
+            }
+            let target = house_tier_for(gather_house_neighborhood_with(city, x, y, connected));
+            let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
+            let effective = effective_house_tier(target, age);
+            if effective == target {
+                continue;
+            }
+            let gap = tier_base_income_cents(target) - tier_base_income_cents(effective);
+            bonus += gap / 2;
+        }
+    }
+    bonus
+}
+
+/// House Tier ごとの基本 income (cents/sec、`tile_income_cents_with_tier` の
+/// House 分岐と同じ表)。`tier_promotion_forecast` で gap 計算に使う。
+fn tier_base_income_cents(tier: HouseTier) -> i64 {
+    match tier {
+        HouseTier::Cottage => 50,
+        HouseTier::Apartment => 150,
+        HouseTier::Highrise => 300,
+        HouseTier::Tower => 600,
+        HouseTier::Arcology => 1_200,
+    }
 }
 
 /// 道路網の「街にとっての価値」(cents/sec 単位)。2 成分の単一指標:
