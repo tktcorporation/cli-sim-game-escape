@@ -895,10 +895,28 @@ pub(super) fn fill_pop_and_tier_maps(
     pop: &mut [Vec<u32>],
     tiers: &mut [Vec<Option<HouseTier>>],
 ) {
+    let mut target_dummy = vec![vec![None; GRID_W]; GRID_H];
+    fill_pop_tier_target_maps(city, connected, pop, tiers, &mut target_dummy);
+}
+
+/// `fill_pop_and_tier_maps` の **target tier も埋める** 版。
+/// `tier_promotion_forecast` が target と effective の差分を per-House 再 scan
+/// なしに集計できる。
+#[allow(clippy::needless_range_loop)]
+pub(super) fn fill_pop_tier_target_maps(
+    city: &City,
+    connected: &[Vec<bool>],
+    pop: &mut [Vec<u32>],
+    tiers: &mut [Vec<Option<HouseTier>>],
+    targets: &mut [Vec<Option<HouseTier>>],
+) {
     for row in pop.iter_mut() {
         row.fill(0);
     }
     for row in tiers.iter_mut() {
+        row.fill(None);
+    }
+    for row in targets.iter_mut() {
         row.fill(None);
     }
     for y in 0..GRID_H {
@@ -911,6 +929,7 @@ pub(super) fn fill_pop_and_tier_maps(
             let tier = effective_house_tier(target, age);
             pop[y][x] = house_capacity(tier);
             tiers[y][x] = Some(tier);
+            targets[y][x] = Some(target);
         }
     }
 }
@@ -1319,7 +1338,14 @@ pub fn cached_edge_connected_roads(city: &City) -> std::rc::Rc<Vec<Vec<bool>>> {
 pub fn compute_income_per_sec_cents_with(city: &City, connected: &[Vec<bool>]) -> i64 {
     let mut scratch_ref = city.eval_scratch.borrow_mut();
     let scratch = &mut *scratch_ref;
-    fill_pop_and_tier_maps(city, connected, &mut scratch.pop_map, &mut scratch.tier_map);
+    // target tier も同時に埋めて `tier_promotion_forecast` が再 scan を回避できるようにする。
+    fill_pop_tier_target_maps(
+        city,
+        connected,
+        &mut scratch.pop_map,
+        &mut scratch.tier_map,
+        &mut scratch.target_tier_map,
+    );
     let mut income_cents: i64 = 0;
     #[allow(clippy::needless_range_loop)]
     for y in 0..GRID_H {
@@ -2297,16 +2323,21 @@ pub fn evaluate(city: &City) -> i64 {
 ///
 /// 値: `(target_income - effective_income) × 50%` per House cell。50% 割引は
 /// 「実現までの不確実性」分。生産性ベースの cents/sec で他項と整合。
-fn tier_promotion_forecast(city: &City, connected: &[Vec<bool>]) -> i64 {
+///
+/// **scratch 経由**: `compute_income_per_sec_cents_with` が直前で埋めた
+/// `target_tier_map` / `tier_map` を読むので per-House の再 scan は発生しない
+/// (= forecast 追加でも evaluate 全体の cost は微増のみ)。`evaluate(city)` から
+/// 呼ばれる順序で前提が成立する。
+fn tier_promotion_forecast(city: &City, _connected: &[Vec<bool>]) -> i64 {
+    let scratch = city.eval_scratch.borrow();
     let mut bonus = 0i64;
     for y in 0..GRID_H {
         for x in 0..GRID_W {
-            if !matches!(city.tile(x, y), Tile::Built(Building::House)) {
+            let (Some(target), Some(effective)) =
+                (scratch.target_tier_map[y][x], scratch.tier_map[y][x])
+            else {
                 continue;
-            }
-            let target = house_tier_for(gather_house_neighborhood_with(city, x, y, connected));
-            let age = city.tick.saturating_sub(city.built_at_tick[y][x]);
-            let effective = effective_house_tier(target, age);
+            };
             if effective == target {
                 continue;
             }

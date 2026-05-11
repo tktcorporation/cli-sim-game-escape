@@ -360,6 +360,11 @@ impl AiTier {
 pub struct EvalScratch {
     pub pop_map: Vec<Vec<u32>>,
     pub tier_map: Vec<Vec<Option<HouseTier>>>,
+    /// Per-House の **目標** Tier (周囲条件から `house_tier_for` が返す値)。
+    /// `tier_map` (= effective Tier、dwell time でキャップ済み) と組で持つことで、
+    /// `tier_promotion_forecast` が「target > effective」の差分を per-House
+    /// 再 scan なしに集計できる。
+    pub target_tier_map: Vec<Vec<Option<HouseTier>>>,
     pub frontier_visited: Vec<Vec<bool>>,
     /// 局所差分 evaluate 専用の pop_map バッファ。`evaluate_region_sum` が
     /// 領域内 House の tier/pop を埋めて使う。grid 全体で 0 初期化されている前提
@@ -374,6 +379,7 @@ impl EvalScratch {
         Self {
             pop_map: vec![vec![0u32; GRID_W]; GRID_H],
             tier_map: vec![vec![None; GRID_W]; GRID_H],
+            target_tier_map: vec![vec![None; GRID_W]; GRID_H],
             frontier_visited: vec![vec![false; GRID_W]; GRID_H],
             local_pop: vec![vec![0u32; GRID_W]; GRID_H],
             local_tier_map: vec![vec![None; GRID_W]; GRID_H],
