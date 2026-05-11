@@ -2463,30 +2463,33 @@ fn outpost_territory_bonus(city: &City) -> i64 {
     unlockable_rocks * 20
 }
 
-// ── 評価関数の per-cell 分解 (差分 evaluate 用) ─────────────────
+// ── 評価関数の per-cell 分解 (差分 evaluate 用 — 現状未使用) ─────
 //
-// `evaluate(city)` の各成分は per-cell の貢献和に分解できる。これを使って
-// 非 Road action の Δevaluate を「影響セルの近傍だけ」で計算する。
-// 影響範囲外のセルの貢献は before/after で同じなので相殺される。
+// `evaluate(city)` の各成分を per-cell の貢献和に分解する scaffold。差分
+// evaluate (action 影響セルだけ Δ 計算) と forecast 項追加で再利用する想定で
+// 残置している。
 //
-// ## 連結性の前提
-//
-// 非 Road action では `connected` (edge connectivity grid) が変化しないので、
-// `cached_edge_connected_roads` が同じ tick 内で再利用される (コードベース
-// 全体で守られている前提)。Road action の場合は connectivity 全体が変わり得る
-// ので local diff は使えず full evaluate にフォールバックする。
+// **未使用の理由**: 局所差分 path (`try_local_action_delta`) は実測で full evaluate
+// より遅延した (radius 5 拡張の tier scan overhead が full の 1 度限りの scan
+// より大きかった)。pre-rank で十分な高速化 (7x) が得られているので現状はこの
+// path を有効化していない。forecast 項を追加する際に cell_contribution を
+// 再利用する。
 
 /// `road_network_value` の frontier per-empty-cell ボーナス。
+#[allow(dead_code)]
 const FRONTIER_PER_CELL: i64 = 8;
 
 /// `road_network_value` の isolated road per-tile ペナルティ。
+#[allow(dead_code)]
 const ISOLATED_ROAD_PENALTY: i64 = 100;
 
 /// `outpost_territory_bonus` の per-rock-cell 解禁ボーナス。
+#[allow(dead_code)]
 const OUTPOST_UNLOCK_PER_ROCK: i64 = 20;
 
 /// `strategy_thematic_bonus` の per-tile bonus。`evaluate` の thematic 成分の
 /// 1 セル分。
+#[allow(dead_code)]
 fn strategy_thematic_per_tile(strategy: Strategy, kind: Building) -> i64 {
     match (strategy, kind) {
         (Strategy::Growth, Building::House) => 5,
@@ -2504,6 +2507,7 @@ fn strategy_thematic_per_tile(strategy: Strategy, kind: Building) -> i64 {
 }
 
 /// `inactive_building_penalty_with` の 1 セル分。
+#[allow(dead_code)]
 fn inactive_building_per_cell(city: &City, x: usize, y: usize, connected: &[Vec<bool>]) -> i64 {
     match city.tile(x, y) {
         Tile::Built(Building::Shop) if !shop_is_active_with(city, x, y, connected) => -50,
@@ -2519,6 +2523,7 @@ fn inactive_building_per_cell(city: &City, x: usize, y: usize, connected: &[Vec<
 }
 
 /// `road_network_value` の 1 セル分。Road なら isolated 判定、Empty なら frontier 判定。
+#[allow(dead_code)]
 fn road_network_per_cell(city: &City, x: usize, y: usize, connected: &[Vec<bool>]) -> i64 {
     match city.tile(x, y) {
         Tile::Built(Building::Road) => {
@@ -2548,6 +2553,7 @@ fn road_network_per_cell(city: &City, x: usize, y: usize, connected: &[Vec<bool>
 }
 
 /// `outpost_territory_bonus` の 1 セル分。Empty + Rock 地形 + Outpost 隣接で +20。
+#[allow(dead_code)]
 fn outpost_territory_per_cell(city: &City, x: usize, y: usize) -> i64 {
     if !matches!(city.tile(x, y), Tile::Empty) {
         return 0;
@@ -2572,6 +2578,7 @@ fn outpost_territory_per_cell(city: &City, x: usize, y: usize) -> i64 {
 /// `income_penalty_pct` が income 全体に掛かる。線形なので per-cell に分配して
 /// 加算しても合計は同じ (条件 `income_cents > 0` も per-cell でも全 cell 0 なら
 /// 全体 0 で同等)。
+#[allow(dead_code)]
 fn cell_contribution(
     city: &City,
     x: usize,
@@ -2600,6 +2607,7 @@ fn cell_contribution(
 }
 
 /// Manhattan 距離 `radius` 以内のセル座標を集める。
+#[allow(dead_code)]
 fn cells_in_manhattan(cx: usize, cy: usize, radius: i32) -> Vec<(usize, usize)> {
     let mut out = Vec::with_capacity((2 * radius * radius + 2 * radius + 1) as usize);
     for dy in -radius..=radius {
@@ -2630,6 +2638,7 @@ fn cells_in_manhattan(cx: usize, cy: usize, radius: i32) -> Vec<(usize, usize)> 
 /// **コスト**: region cells × 50 + pop region cells × 121。saturated map で
 /// region 200 + pop 約 400 として 200×50 + 400×121 ≈ 60K ops。full evaluate の
 /// ~140K ops に比べて 2-3x 高速化。
+#[allow(dead_code)]
 fn evaluate_region_sum(
     city: &City,
     region: &[(usize, usize)],
@@ -2685,6 +2694,7 @@ fn evaluate_region_sum(
 
 /// 非 Road action に対する Δevaluate を local diff で計算。
 /// Road が絡む action は connectivity 変化があり local diff が成立しないので `None`。
+#[allow(dead_code)]
 fn try_local_action_delta(city: &mut City, action: &super::ai::AiAction) -> Option<i64> {
     let (cx, cy) = match action {
         super::ai::AiAction::Build { x, y, kind } => {
@@ -2944,22 +2954,22 @@ pub(super) fn action_value_with_baseline<F: Fn(&City) -> i64>(
     (after - before) - amort_cents(city, action)
 }
 
-/// `evaluate` 専用版。non-Road action では `try_local_action_delta` で局所差分を
-/// 計算し、評価コストを ~3-5x 削る。Road action / Road セルへの操作は connectivity
-/// が変わるので fallback で full evaluate。
+/// `evaluate` 専用版。Tier 3+ が使う hot path。
 ///
-/// 旧 generic 版 (`action_value_with_baseline`) は Tier 2 の `evaluate_simple`
-/// 等の per-cell 分解できない eval 用に残す。
+/// **設計判断**: `try_local_action_delta` で per-cell 分解した局所差分を試したが、
+/// region 拡張 (radius 5 + 5) の tier scan overhead が full evaluate より重く、
+/// 実測で 4x 遅延した。pre-rank だけで十分な speedup (7x) が出ているため、
+/// 現状は full evaluate を直接呼ぶシンプルな実装。
+///
+/// 局所差分の scaffolding (`cell_contribution` / `evaluate_region_sum` /
+/// `try_local_action_delta`) は forecast 項追加や将来の最適化向けに残す。
 pub(super) fn action_value_with_baseline_full(
     city: &mut City,
     action: &super::ai::AiAction,
     before: i64,
 ) -> i64 {
-    let delta = match try_local_action_delta(city, action) {
-        Some(d) => d,
-        None => with_action_applied(city, action, |c| evaluate(c)) - before,
-    };
-    delta - amort_cents(city, action)
+    let after = with_action_applied(city, action, |c| evaluate(c));
+    (after - before) - amort_cents(city, action)
 }
 
 fn amort_cents(city: &City, action: &super::ai::AiAction) -> i64 {
