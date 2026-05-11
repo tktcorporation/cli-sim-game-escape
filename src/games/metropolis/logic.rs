@@ -2320,57 +2320,20 @@ pub const AI_PAYBACK_SECS: i64 = 1800;
 
 /// 評価関数 (アマ初段〜プロ相当)。
 /// 「街全体の cents/sec」+ thematic bonus + Outpost territory bonus
-/// + inactive 建物 penalty + 道路網健全性 + tier 昇格期待値。Tier 3 以上で共通、
+/// + inactive 建物 penalty + 道路網健全性。Tier 3 以上で共通、
 /// Tier 差は探索深さで作る。
+///
+/// House の未実現 Tier 昇格期待値 (forecast) は **`cheap_action_score`** に
+/// 入れており、ここには含めない。理由: forecast を per-evaluate に積むと AI
+/// 探索の hot path で重く、suite が桁オーダ遅延する。pre-rank 段階で候補選好
+/// を変える方が perf 影響なく serving と同じ効果を得られる。
 pub fn evaluate(city: &City) -> i64 {
-    // `cached_edge_connected_roads` を経由することで、AI search の非 Road actions では
-    // BFS を走らせず connected_cache から再利用される (Road change 時のみ city.tick を
-    // 進めて invalidate するか別経路で再計算)。同 tick 内で連続 evaluate しても
-    // BFS 1 回で済む。
     let connected = cached_edge_connected_roads(city);
     compute_income_per_sec_cents_with(city, &connected)
         + strategy_thematic_bonus(city)
         + outpost_territory_bonus(city)
         + inactive_building_penalty_with(city, &connected)
         + road_network_value(city, &connected)
-        + tier_promotion_forecast(city, &connected)
-}
-
-/// House の **未実現 Tier 昇格** を期待値として加算する forecast 項。
-///
-/// **必要性**: depth=2 探索でも `dwell_required_ticks` (Apartment 60s / Highrise 5min)
-/// は届かない。新築 House の `effective_tier` は age=0 のため Cottage 据え置き
-/// だが、**target_tier が Apartment+** なら時間経過で必ず昇格する。この潜在価値を
-/// 評価に乗せないと、AI は「今 Cottage を建てても 50 cents/sec」としか見えず、
-/// House Build を低評価して街が育たない (= slow start の根本原因)。
-///
-/// **将棋の "駒の働き"**: 直接得点になっていないが、将来必ず効く価値を評価関数で
-/// 表現する。`outpost_territory_bonus` と同じ思想で、Δincome では届かない長期
-/// リターンを今の 1 手の天秤に乗せる。
-///
-/// 値: `(target_income - effective_income) × 50%` per House cell。50% 割引は
-/// 「実現までの不確実性」分。生産性ベースの cents/sec で他項と整合。
-///
-/// **scratch 経由**: `compute_income_per_sec_cents_with` が直前で埋めた
-/// `target_tier_map` / `tier_map` を読むので per-House の再 scan は発生しない
-/// (= forecast 追加でも evaluate 全体の cost は微増のみ)。`evaluate(city)` から
-/// 呼ばれる順序で前提が成立する。
-fn tier_promotion_forecast(city: &City, _connected: &[Vec<bool>]) -> i64 {
-    let scratch = city.eval_scratch.borrow();
-    let mut bonus = 0i64;
-    for &(x, y) in &scratch.house_positions {
-        let (Some(target), Some(effective)) =
-            (scratch.target_tier_map[y][x], scratch.tier_map[y][x])
-        else {
-            continue;
-        };
-        if effective == target {
-            continue;
-        }
-        let gap = tier_base_income_cents(target) - tier_base_income_cents(effective);
-        bonus += gap / 2;
-    }
-    bonus
 }
 
 /// House Tier ごとの基本 income (cents/sec、`tile_income_cents_with_tier` の
@@ -3410,12 +3373,55 @@ pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i
             _ => 0,
         }
     }
+    /// House Build / Replace の forecast base。周囲 5 内に commercial があれば
+    /// Apartment 想定 (150 cents)、なければ Cottage (50)。`house_tier_for` の
+    /// `apartment_required >= 1` 条件を簡易近似したもので、AI に「先に House を
+    /// 1 軒置いて、後から Workshop 等で Apartment 化させる」シナリオを pre-rank
+    /// 段階で見せる。
+    fn house_forecast_base(city: &City, x: usize, y: usize) -> i64 {
+        let xi = x as i32;
+        let yi = y as i32;
+        for dy in -5i32..=5 {
+            for dx in -5i32..=5 {
+                if dx.abs() + dy.abs() > 5 {
+                    continue;
+                }
+                let nx = xi + dx;
+                let ny = yi + dy;
+                if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                    continue;
+                }
+                if let Tile::Built(b) = city.tile(nx as usize, ny as usize) {
+                    if matches!(
+                        b,
+                        Building::Workshop
+                            | Building::Factory
+                            | Building::Shop
+                            | Building::Mall
+                            | Building::MegaMall
+                            | Building::Office
+                            | Building::Park
+                    ) {
+                        return 150;
+                    }
+                }
+            }
+        }
+        50
+    }
+    fn build_base(city: &City, x: usize, y: usize, kind: Building) -> i64 {
+        if matches!(kind, Building::House) {
+            house_forecast_base(city, x, y)
+        } else {
+            cheap_base_cents(kind)
+        }
+    }
     match action {
         super::ai::AiAction::Build { x, y, kind } => {
             let t = city.terrain_at(*x, *y);
             let extra = if t.needs_clearing() { t.clearing_cost() } else { 0 };
             let m = neighborhood_match_factor(city, *x, *y, *kind);
-            cheap_base_cents(*kind) * m / 100 - cost_amort(kind.cost() + extra)
+            build_base(city, *x, *y, *kind) * m / 100 - cost_amort(kind.cost() + extra)
         }
         super::ai::AiAction::Demolish { x, y } => {
             -current_at(city, *x, *y) - cost_amort(demolish_cost(*x, *y))
@@ -3424,7 +3430,7 @@ pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i
             let t = city.terrain_at(*x, *y);
             let extra = if t.needs_clearing() { t.clearing_cost() } else { 0 };
             let m = neighborhood_match_factor(city, *x, *y, *kind);
-            cheap_base_cents(*kind) * m / 100
+            build_base(city, *x, *y, *kind) * m / 100
                 - current_at(city, *x, *y)
                 - cost_amort(demolish_cost(*x, *y) + kind.cost() + extra)
         }
