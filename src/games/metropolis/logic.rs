@@ -300,7 +300,7 @@ pub fn tier_aware_population(city: &City) -> u32 {
 /// 将来入っても、整地済みエリアは再露出しても Plain のままになる。
 fn advance_construction(city: &mut City) {
     let mut completions: Vec<(usize, usize, Building)> = Vec::new();
-    let mut clearings: Vec<(usize, usize, Option<Building>)> = Vec::new();
+    let mut clearings: Vec<(usize, usize)> = Vec::new();
     for y in 0..GRID_H {
         for x in 0..GRID_W {
             let tile = &mut city.grid[y][x];
@@ -322,14 +322,10 @@ fn advance_construction(city: &mut City) {
                         *ticks_remaining -= 1;
                     }
                 }
-                Tile::Clearing {
-                    ticks_remaining,
-                    target,
-                } => {
+                Tile::Clearing { ticks_remaining } => {
                     if *ticks_remaining <= 1 {
-                        let carryover = *target;
                         *tile = Tile::Empty;
-                        clearings.push((x, y, carryover));
+                        clearings.push((x, y));
                     } else {
                         *ticks_remaining -= 1;
                     }
@@ -339,48 +335,11 @@ fn advance_construction(city: &mut City) {
         }
     }
     let mutated = !clearings.is_empty() || !completions.is_empty();
-    // 整地完了: 地形を Plain に書き換え、target が指定されていればそのまま
-    // Construction に遷移して AI の意図 (= 建てたかった建物) を引き継ぐ。
-    // 引き継ぎが無いと AI は次の tick で別 cell に意識が移り、整地済み cell が
-    // 別 kind で埋められるか Empty のまま放置されて pop が伸びない (slow start)。
-    let mut clearing_followups: Vec<(usize, usize, Building)> = Vec::new();
-    for (x, y, target) in clearings {
+    // 整地完了: 地形を Plain に書き換え、軽いログを出す。
+    for (x, y) in clearings {
         city.terrain[y][x] = super::terrain::Terrain::Plain;
         city.completion_flash_until[y][x] = city.tick + COMPLETION_FLASH_TICKS;
-        match target {
-            Some(kind) => {
-                city.push_event(format!(
-                    "⛏ ({},{}) 整地完了 → {}",
-                    x,
-                    y,
-                    building_name(kind)
-                ));
-                clearing_followups.push((x, y, kind));
-            }
-            None => {
-                city.push_event(format!("⛏ ({},{}) 整地完了", x, y));
-            }
-        }
-    }
-    for (x, y, kind) in clearing_followups {
-        // cash が足りなくても引き継ぎは試みる。affordability は AI 側の
-        // `start_construction` を直接呼ばずにここで判定。
-        let cost = kind.cost();
-        if city.cash < cost {
-            // 資金不足: Empty のまま放置。AI が次の tick で再評価する。
-            continue;
-        }
-        city.cash -= cost;
-        city.cash_spent_total += cost;
-        let ticks = build_ticks_for(city, kind);
-        city.grid[y][x] = Tile::Construction {
-            target: kind,
-            ticks_remaining: ticks,
-        };
-        city.buildings_started += 1;
-        if matches!(kind, Building::Outpost) {
-            city.outposts_dispatched_total = city.outposts_dispatched_total.saturating_add(1);
-        }
+        city.push_event(format!("⛏ ({},{}) 整地完了", x, y));
     }
     for (x, y, kind) in completions {
         city.completion_flash_until[y][x] = city.tick + COMPLETION_FLASH_TICKS;
@@ -784,9 +743,6 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
     }
     if terrain.needs_clearing() {
         let clearing_cost = terrain.clearing_cost();
-        // 整地 cash のみ要求する。整地完了時の auto-transition で建設 cash が
-        // 足りなければ Empty に戻す fallback があるので、ここで kind.cost() を
-        // 厳格に要求すると Tier 1 random が初期マップで詰むケースが出る。
         if city.cash < clearing_cost {
             return false;
         }
@@ -794,7 +750,6 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
         city.cash_spent_total += clearing_cost;
         city.grid[y][x] = Tile::Clearing {
             ticks_remaining: terrain.clearing_ticks(),
-            target: Some(kind),
         };
         city.invalidate_population_cache();
         city.push_event(format!(
@@ -3286,11 +3241,6 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
 ///   - 整地必要 (extra_cost > 0): `clearing_cost` のみ
 ///   - そうでない (extra_cost == 0): `kind.cost()`
 fn action_passes_guards(city: &City, kind: Building, extra_cost: i64) -> bool {
-    // 整地必要セルでは clearing_cost (= extra_cost) のみを最初に必要とする。
-    // 整地完了時の auto-transition (`advance_construction`) で建設 cash が不足
-    // していれば Empty に戻る fallback があるので、列挙段階で厳密に kind.cost()
-    // まで要求すると Tier 1 random が完全停止 (= 0 House / 0 income) に追い込まれる
-    // seed が出る。
     let immediate_cost = if extra_cost > 0 {
         extra_cost
     } else {
@@ -3906,31 +3856,20 @@ mod tests {
     }
 
     /// 要整地の地形 (Forest) に建てようとすると、まず整地工程が起きる。
-    /// 整地完了後は terrain が Plain に書き換わり、AI の意図 (= House) を引き継いで
-    /// Construction に自動遷移する (AI の slow start 防止の中核ルール)。
+    /// 整地完了後に terrain が Plain に書き換わる。
     #[test]
-    fn forest_triggers_clearing_then_target_construction() {
+    fn forest_triggers_clearing_then_plain() {
         let mut city = City::new();
         city.cash = 1000;
+        // (5,5) を強制的に Forest に。
         city.terrain[5][5] = super::super::terrain::Terrain::Forest;
         let ok = start_construction(&mut city, 5, 5, Building::House);
         assert!(ok, "start_construction should succeed (triggers clearing)");
-        assert!(matches!(
-            city.tile(5, 5),
-            Tile::Clearing {
-                target: Some(Building::House),
-                ..
-            }
-        ));
-        // 整地時間 (Forest = 60 ticks) を進めると Construction に遷移する。
+        // 直後は Clearing タイル。
+        assert!(matches!(city.tile(5, 5), Tile::Clearing { .. }));
+        // 整地時間 (Forest = 60 ticks) を進めると Empty に戻り terrain が Plain に。
         tick(&mut city, 60);
-        assert!(matches!(
-            city.tile(5, 5),
-            Tile::Construction {
-                target: Building::House,
-                ..
-            }
-        ));
+        assert!(matches!(city.tile(5, 5), Tile::Empty));
         assert_eq!(
             city.terrain_at(5, 5),
             super::super::terrain::Terrain::Plain,

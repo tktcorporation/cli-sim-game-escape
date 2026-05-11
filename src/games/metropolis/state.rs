@@ -32,15 +32,10 @@ pub const MAX_WORKERS: u32 = 8;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Tile {
     Empty,
-    /// 整地中。Wasteland / Forest / Rock の地形を Plain 化する工程。
-    /// `target` を保持することで、整地完了時に AI の意図 (= 建てたかった建物) を
-    /// 引き継いで `Tile::Construction` に自動遷移する。clearing 完了の隙に AI が
-    /// 別 cell に意識を移して「整地したけど何も建たず Empty に戻る」を防ぐ。
-    /// `target = None` は「整地のみ要求 (将来 None 経路は無いが互換のため残置)」。
-    Clearing {
-        ticks_remaining: u32,
-        target: Option<Building>,
-    },
+    /// 整地中。Wasteland / Forest の地形を Plain 化する工程。
+    /// 完了すると下層の `terrain` が Plain に書き換わり、再び Empty タイルに戻る。
+    /// 続けて何を建てるかは AI が次の tick で決める設計 (= 建物自由度を保つ)。
+    Clearing { ticks_remaining: u32 },
     /// Construction in progress: target building, ticks remaining.
     Construction {
         target: Building,

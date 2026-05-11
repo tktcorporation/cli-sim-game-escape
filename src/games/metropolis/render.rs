@@ -2210,9 +2210,9 @@ fn selected_cell_lines(state: &City, x: usize, y: usize) -> Vec<Line<'static>> {
     // 1 行目: タイル種別
     let kind_label: String = match state.tile(x, y) {
         Tile::Empty => "空き地".to_string(),
-        Tile::Clearing {
-            ticks_remaining, ..
-        } => format!("整地中 (残 {}s)", ticks_remaining.div_ceil(10)),
+        Tile::Clearing { ticks_remaining } => {
+            format!("整地中 (残 {}s)", ticks_remaining.div_ceil(10))
+        }
         Tile::Construction {
             target,
             ticks_remaining,
@@ -2551,9 +2551,7 @@ fn worker_status_lines(state: &City) -> Vec<Line<'static>> {
                         ),
                     ]))
                 }
-                Tile::Clearing {
-                    ticks_remaining, ..
-                } => {
+                Tile::Clearing { ticks_remaining } => {
                     idx += 1;
                     let secs = (*ticks_remaining).div_ceil(10);
                     let terrain = state.terrain[y][x];
@@ -3022,14 +3020,7 @@ mod tests {
         city.workers = 3;
         // 1 ワーカーを Construction に、1 ワーカーを Clearing に割り当てる。
         city.set_tile(0, 0, Tile::Construction { target: Building::House, ticks_remaining: 50 });
-        city.set_tile(
-            1,
-            0,
-            Tile::Clearing {
-                ticks_remaining: 30,
-                target: None,
-            },
-        );
+        city.set_tile(1, 0, Tile::Clearing { ticks_remaining: 30 });
 
         let lines = worker_status_lines(&city);
         // 1 (header) + 2 (busy) + 1 (idle) = 4 行

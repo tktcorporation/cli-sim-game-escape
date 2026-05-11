@@ -372,14 +372,9 @@ fn tile_to_save(t: &Tile) -> TileSave {
             kind: TILE_EMPTY,
             ..Default::default()
         },
-        Tile::Clearing {
-            ticks_remaining,
-            target,
-        } => TileSave {
+        Tile::Clearing { ticks_remaining } => TileSave {
             kind: TILE_CLEARING,
-            // building == 0 は「target 無し」(古い save との互換)、
-            // それ以外は `building_to_u8(target)` で復元可能。
-            building: target.map(building_to_u8).unwrap_or(0),
+            building: 0,
             ticks: *ticks_remaining,
         },
         Tile::Construction {
@@ -403,7 +398,6 @@ fn tile_from_save(s: TileSave) -> Tile {
     match s.kind {
         TILE_CLEARING => Tile::Clearing {
             ticks_remaining: s.ticks,
-            target: building_from_u8(s.building),
         },
         TILE_CONSTRUCTION => match building_from_u8(s.building) {
             Some(b) => Tile::Construction {
@@ -1009,7 +1003,6 @@ mod tests {
         };
         original.grid[1][2] = Tile::Clearing {
             ticks_remaining: 30,
-            target: Some(Building::House),
         };
         // 整地で書き換わった想定の Plain (元 Forest だったセル)。
         original.terrain[5][5] = Terrain::Plain;
@@ -1058,11 +1051,7 @@ mod tests {
             _ => panic!("expected Construction at (1,1)"),
         }
         match restored.tile(2, 1) {
-            Tile::Clearing {
-                ticks_remaining,
-                target,
-            } => {
-                assert_eq!(*target, Some(Building::House));
+            Tile::Clearing { ticks_remaining } => {
                 assert_eq!(*ticks_remaining, 30);
             }
             _ => panic!("expected Clearing at (2,1)"),
