@@ -605,10 +605,11 @@ impl City {
             grid,
             terrain,
             world_seed: seed,
-            cash: 500, // 初期 cash $500: House 12 軒 or Workshop 5 軒 + 道路。
-            // 旧 $200 で takeoff まで全 seed 共通で 19-23 分かかる構造があり、
+            cash: 300, // 初期 cash $300: House 7 軒 + 道路数本。
+            // 多 seed 診断で takeoff まで 19-23 分かかる構造があり、
             // 序盤の cash 枯渇が「Road spam → income 不足 → House を建てられない」
             // 悪循環を生むため、initial cash を底上げして経済 jumpstart させる。
+            // $500 は AI 活動量が劇増して simulator が実用不能になるため $300 採用。
             tick: 0,
             ai_tier: AiTier::Random,
             strategy: Strategy::Growth,
