@@ -784,7 +784,10 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
     }
     if terrain.needs_clearing() {
         let clearing_cost = terrain.clearing_cost();
-        if city.cash < clearing_cost {
+        // 整地 + 建設の両方を最初に確保する。整地完了時に target を引き継いで
+        // 自動着工するため、後段の cash 不足で auto-transition が失敗するのを
+        // 防ぐ (= AI が clearing だけ走らせて Empty に戻して放置するのを防ぐ)。
+        if city.cash < clearing_cost + kind.cost() {
             return false;
         }
         city.cash -= clearing_cost;
@@ -3283,12 +3286,11 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
 ///   - 整地必要 (extra_cost > 0): `clearing_cost` のみ
 ///   - そうでない (extra_cost == 0): `kind.cost()`
 fn action_passes_guards(city: &City, kind: Building, extra_cost: i64) -> bool {
-    let immediate_cost = if extra_cost > 0 {
-        extra_cost
-    } else {
-        kind.cost()
-    };
-    city.cash >= immediate_cost
+    // 整地必要セルでは clearing_cost (extra_cost) + kind.cost() の両方を最初に
+    // 確保する。`start_construction` が同じ式で reject するので、列挙段階で
+    // 弾けば AI が「整地のみ起動して建設に届かない」候補を試行しなくて済む。
+    let required = extra_cost + kind.cost();
+    city.cash >= required
 }
 
 /// 任意の建物タイプを「最大時の単位 income (cents/sec)」で表す per-kind 定数。
