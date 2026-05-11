@@ -844,6 +844,45 @@ mod tests {
         }
     }
 
+    /// 複数 seed で slow start (= 序盤の pop 停滞時間) を計測する診断テスト。
+    /// 1 seed の偶然か普遍的な現象かを判別するために 4 seed × Tier 4 × 30 min を回す。
+    ///
+    /// 各 seed について「pop > 100 に到達した時刻」と最終 pop を集計する。
+    /// takeoff 時刻が seed 間でほぼ同じなら普遍的な構造問題、ばらつきが大きいなら
+    /// 個別の運の問題。
+    #[test]
+    #[ignore = "multi-seed diagnostic; run with --ignored"]
+    fn diagnose_slow_start_across_seeds() {
+        let seeds: [u64; 4] = [0xC1A5_5EED, 0xDEAD_BEEF, 42, 0xFEED_FACE];
+        let total = 1800;
+        let sample_every = 60;
+
+        eprintln!(
+            "\n=== diagnose_slow_start_across_seeds: 4 seeds × Tier 4 × {} sec ===",
+            total
+        );
+        for seed in seeds {
+            let (samples, _actions) = run_diagnostic(
+                seed,
+                AiTier::Planner,
+                Strategy::Income,
+                4,
+                total,
+                sample_every,
+            );
+            let takeoff_sec = samples
+                .iter()
+                .find(|s| s.pop > 100)
+                .map(|s| s.sec as i64)
+                .unwrap_or(-1);
+            let final_snap = samples.last().expect("at least final snapshot");
+            eprintln!(
+                "seed=0x{:08X}  takeoff_at={:>4}s  final pop={:>4}  built={:>3}  income=${}/s  cash=${}",
+                seed, takeoff_sec, final_snap.pop, final_snap.built, final_snap.income_per_sec, final_snap.cash
+            );
+        }
+    }
+
     /// 「街の散らかり度」: 死に道路 (edge未接続 Road) + 機能不全建物 (inactive
     /// Shop/Mall/Workshop/Factory/Office) の合計。低い方が綺麗。
     fn waste_count(city: &City) -> u32 {
