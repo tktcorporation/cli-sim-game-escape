@@ -597,21 +597,6 @@ impl City {
             terrain[y][cx] = super::terrain::Terrain::Plain;
             grid[y][cx] = Tile::Built(Building::Road);
         }
-        // **創設住宅**: 創設街路の中段に Cottage を 4 軒 pre-spawn する。
-        // 道路接続済みのため SOFT halve は適用されず、t=0 から income が流れ
-        // (≈ 4 × $0.5/s = $2/s)、cash 累積が早まる。これがないと初期 $200 が
-        // 「Road spam → income なし → House を建てられない」悪循環で takeoff
-        // まで全 seed 共通 19-23 分かかる。
-        // terrain も Plain にして「founder city は均一な平地」イメージを揃える。
-        let mid_y = GRID_H / 4;
-        for &(dx, dy) in &[(-1i32, 0i32), (1, 0), (-1, 1), (1, 1)] {
-            let x = (cx as i32 + dx) as usize;
-            let y = (mid_y as i32 + dy) as usize;
-            if x < GRID_W && y < GRID_H {
-                terrain[y][x] = super::terrain::Terrain::Plain;
-                grid[y][x] = Tile::Built(Building::House);
-            }
-        }
         // カメラ初期位置: マップ中央が画面中央に来るように。
         // (GRID_W - VIEW_W) / 2 = (64-32)/2 = 16, (32-16)/2 = 8。
         let cam_x = (GRID_W.saturating_sub(VIEW_W)) / 2;
