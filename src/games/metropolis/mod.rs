@@ -623,19 +623,13 @@ mod tests {
         assert_eq!(g.state.panel_scroll.get(), 0);
     }
 
-    /// AI が中央の inactive Shop を自分で撤去対象に選ぶ (= drive_ai が
-    /// `AiAction::Demolish` を生成して `demolish_at` を呼ぶ経路の sanity check)。
-    /// Tier 4 (`Planner`) は `evaluate` と `action_value` を比較し、
-    /// 機能不全建物 (= 物理的に救えない位置の inactive Shop) を AI が撤去する。
+    /// AI が中央の inactive Shop を **退かして他の建物に置き換える** ことを確認。
+    /// Tier 4 (`Planner`) は `evaluate` + `action_value` で機能不全 Shop を改修対象に
+    /// 選び、Demolish 単独 or Replace×他 kind のいずれかで処理する。
     ///
     /// **テスト前提**: 街全体に edge-connected Road が存在しない (= seed road を消去)
     /// 状態 + 中央の Shop の 4-近傍を Water 地形で囲んで Road/House の隣接配置を
-    /// 不可能にする。これで AI には:
-    ///     - Shop を救う手段が無い (= 隣接セルが全部 Water)
-    ///     - Build House すると unconnected Cottage で +22.8 action_value
-    ///     - Demolish Shop は中央なので cost $50、+39.3 action_value
-    ///
-    /// となり、Demolish が一意に最高評価。短い tick 数で確実に選ばれる。
+    /// 不可能にする。
     #[test]
     fn drive_ai_demolishes_inactive_shop() {
         use state::{AiTier, Building, Tile, GRID_H, GRID_W};
@@ -663,9 +657,12 @@ mod tests {
         }
 
         g.tick(60);
+        // Shop が居座らないことを確認。Demolish なら Empty、Replace なら別 kind
+        // (典型的には House) になる。いずれも「inactive Shop を AI が手放した」
+        // 証跡として OK。
         assert!(
-            matches!(g.state.tile(sx, sy), Tile::Empty),
-            "AI (Tier 4) should demolish unreachable inactive Shop"
+            !matches!(g.state.tile(sx, sy), Tile::Built(Building::Shop)),
+            "AI (Tier 4) should not leave the inactive Shop in place"
         );
     }
 }

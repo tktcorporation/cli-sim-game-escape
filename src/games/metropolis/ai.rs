@@ -12,8 +12,15 @@
 
 use super::state::*;
 
-/// AI が選ぶ 1 アクション。Build/Demolish/Idle が同じ評価軸 (`action_value`) で
-/// 比較されることに注意 — 「建てる/壊す/待つ」を同じ天秤で max 選択する。
+/// AI が選ぶ 1 アクション。Build/Demolish/Replace/Idle が同じ評価軸
+/// (`action_value`) で比較される — 「建てる/壊す/壊して建て替える/待つ」を同じ
+/// 天秤で max 選択する。
+///
+/// `Replace` は「同セルで Demolish + Build」を 1 単位として扱う複合アクション。
+/// 探索の depth=1 で「撤去後に再建」のシーケンスが直接比較対象になり、
+/// beam pruning で Demolish 単体が切り落とされて 2 手目の再建が見えなくなる
+/// 問題を解消する。production 経路では `apply_ai_action` が Demolish 部分のみを
+/// 即時実行し、Build 部分は次 tick の `decide` が空きセルとして再評価して拾う。
 #[derive(Clone, Debug, PartialEq)]
 pub enum AiAction {
     Build {
@@ -24,6 +31,11 @@ pub enum AiAction {
     Demolish {
         x: usize,
         y: usize,
+    },
+    Replace {
+        x: usize,
+        y: usize,
+        kind: Building,
     },
     Idle,
 }
@@ -59,6 +71,10 @@ fn tier1_random(city: &mut City) -> AiAction {
         .filter(|a| match a {
             AiAction::Build { .. } => !want_demolish,
             AiAction::Demolish { .. } => want_demolish,
+            // Replace は「撤去 + 再建の意図」がセットになった戦略的アクション。
+            // Tier 1 はランダム素人キャラなので「次の手まで考える」を持たない設計。
+            // Tier 2 以上の評価関数ベース AI が action_value で適切に判断する。
+            AiAction::Replace { .. } => false,
             AiAction::Idle => false,
         })
         .collect();
@@ -95,7 +111,7 @@ fn tier2_greedy(city: &mut City) -> AiAction {
 /// 全部見える。「ちゃんと考えてるが先は読まない」レベル。
 fn tier3_aware(city: &mut City) -> AiAction {
     let rng = city.next_rand();
-    let ranked = super::logic::rank_actions(city, &super::logic::evaluate, 8);
+    let ranked = super::logic::rank_actions_full(city, 8);
     super::logic::pick_with_noise(&ranked, 5, rng).unwrap_or(AiAction::Idle)
 }
 
@@ -104,8 +120,7 @@ fn tier3_aware(city: &mut City) -> AiAction {
 /// **キャラクター**: 「道路を引いて家を建てる」のような 1手目+2手目の連携を
 /// 発見できる。Tier 3 からの差は **探索深さだけ** (評価関数は同じ)。
 fn tier4_planner(city: &mut City) -> AiAction {
-    super::logic::search_best_action(city, 2, 4, &super::logic::evaluate)
-        .unwrap_or(AiAction::Idle)
+    super::logic::search_best_action_full(city, 2, 4).unwrap_or(AiAction::Idle)
 }
 
 /// Tier 5 (アマ高段) — 3手読み + フル評価 + 狭めの beam。
@@ -117,6 +132,5 @@ fn tier4_planner(city: &mut City) -> AiAction {
 /// 30 分シミュ (= 18000 ticks × 10 candidates) が現実時間で終わる範囲に絞る。
 /// 深さで「先読みできる」を表現し、K で広さは抑える将棋エンジン的バランス。
 fn tier5_master(city: &mut City) -> AiAction {
-    super::logic::search_best_action(city, 3, 4, &super::logic::evaluate)
-        .unwrap_or(AiAction::Idle)
+    super::logic::search_best_action_full(city, 3, 4).unwrap_or(AiAction::Idle)
 }
