@@ -2369,6 +2369,7 @@ fn road_network_value(city: &City, connected: &[Vec<bool>]) -> i64 {
     // for edge-connected House) を上回るには、penalty ≥ 距離 12 の amort + 48 = ~91。
     // 100 にすることで距離 ~12 までは確実に撤去候補として勝つ。
     const ISOLATED_PENALTY: i64 = 100;
+    let potential = frontier_potential_value(city, connected);
     let mut scratch = city.eval_scratch.borrow_mut();
     let visited = &mut scratch.frontier_visited;
     for row in visited.iter_mut() {
@@ -2413,7 +2414,107 @@ fn road_network_value(city: &City, connected: &[Vec<bool>]) -> i64 {
             }
         }
     }
-    frontier_count * FRONTIER_PER_CELL - isolated_roads * ISOLATED_PENALTY
+    frontier_count * FRONTIER_PER_CELL - isolated_roads * ISOLATED_PENALTY + potential
+}
+
+/// 「edge-connected Road から橋を伸ばせば届く Empty buildable セル」の見込み価値。
+///
+/// 既存の `frontier_count * FRONTIER_PER_CELL` は「距離 1 (= edge-connected Road の
+/// 4-近傍)」しか拾わないため、間に House や非接続 Road が挟まる「橋渡しすれば
+/// 開ける空き地」が AI からは見えない。本関数は edge-connected Road を起点とした
+/// BFS で、Empty buildable セル / 任意の Road を通過可能とした距離マップを作り、
+/// 距離に応じた減衰 credit を合算する。
+///
+/// **設計判断**: 距離→credit のカーブが「AI の遠視眼具合」を決める。
+/// - 急減衰 (γ ≈ 0.3): 「目の前 2-3 マス」しか見えない近視眼。stall は緩和されないが
+///   保守的で安全。
+/// - 緩減衰 (γ ≈ 0.7): 街全体の発展余地を見渡す大局観。橋渡し / 撤去置換が積極化。
+/// - 中庸 (γ ≈ 0.5): バランス型。distance 5-6 程度まで有意な credit。
+///
+/// 通過可能セル: edge-connected Road / 任意 Road / Empty (buildable な terrain のみ)。
+/// 「House の上を通る」は禁止 = 撤去意図を AI に表現させるため、Built タイルは
+/// 通過不可。Empty 非 buildable (水・山) も通過不可。
+fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
+    use std::collections::VecDeque;
+    // 距離 0 (= edge-connected Road) を起点、未訪問は u32::MAX。
+    let mut dist: Vec<Vec<u32>> = vec![vec![u32::MAX; GRID_W]; GRID_H];
+    let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            if matches!(city.tile(x, y), Tile::Built(Building::Road)) && connected[y][x] {
+                dist[y][x] = 0;
+                queue.push_back((x, y));
+            }
+        }
+    }
+    while let Some((x, y)) = queue.pop_front() {
+        let d = dist[y][x];
+        for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
+            let nx = x as i32 + dx;
+            let ny = y as i32 + dy;
+            if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
+                continue;
+            }
+            let (nx, ny) = (nx as usize, ny as usize);
+            if dist[ny][nx] != u32::MAX {
+                continue;
+            }
+            // 通過可能性: 任意 Road または buildable Empty。それ以外 (House 等の
+            // Built / 水・山) は壁扱い。これにより BFS の距離は「実際に Road を
+            // 伸ばせば届くまでの最短手数」と一致する。
+            let passable = match city.tile(nx, ny) {
+                Tile::Built(Building::Road) => true,
+                Tile::Empty => city.terrain_at(nx, ny).buildable(),
+                _ => false,
+            };
+            if !passable {
+                continue;
+            }
+            dist[ny][nx] = d + 1;
+            queue.push_back((nx, ny));
+        }
+    }
+    // 各 Empty buildable セルにポリシー関数で credit を計算して合算。distance 0
+    // セルは Road 自身なので credit 対象外 (Empty じゃない)。distance 1 セルは既存
+    // frontier_count で計上済みなので、ここでの加点は「2 マス以上先」が主役。
+    let mut total: i64 = 0;
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            if !matches!(city.tile(x, y), Tile::Empty) {
+                continue;
+            }
+            if !city.terrain_at(x, y).buildable() {
+                continue;
+            }
+            let d = dist[y][x];
+            if d == u32::MAX || d <= 1 {
+                continue;
+            }
+            total += potential_credit_for_distance(d);
+        }
+    }
+    total
+}
+
+/// 距離 d (>= 2) の Empty buildable セルに与えるポテンシャル credit (cents/sec 単位)。
+///
+/// **この関数が AI の "遠視眼" を決める**:
+///   - 距離 2 の credit が大きいほど「橋渡し 1 本で開く近隣」を AI が積極視
+///   - 遠距離まで減衰しない関数は「遠くの広大な空き地」を過大評価して非合理な
+///     Road 大量敷設を誘発
+///   - 減衰が急すぎると stall は解消しない
+///
+/// 制約 (TODO: 君が決める):
+///   - d=2 で `FRONTIER_PER_CELL = 8` より小さい (= 既存 frontier との二重計上を避ける)
+///   - 単調非増加 (距離が遠いほど credit は同じか小さい)
+///   - 大きな d (例 d >= 10) で 0 に収束 (探索の "幻想的な遠景" を防ぐ)
+fn potential_credit_for_distance(d: u32) -> i64 {
+    // TODO: ポリシーを定義。サンプル候補:
+    //   linear:   ((10u32.saturating_sub(d)) as i64).max(0)
+    //   geometric: 8 >> (d.saturating_sub(1))    // 4, 2, 1, 0, 0...
+    //   step:     match d { 2 => 4, 3 => 2, 4 => 1, _ => 0 }
+    let _ = d;
+    0
 }
 
 /// 機能不全の商業/雇用建物に対するマイナス bonus。
@@ -4773,4 +4874,70 @@ mod tests {
         );
     }
 
+    /// 評価関数は「橋渡し Road の長期価値」を見えていなければならない。
+    ///
+    /// edge-connected な Road chain の末端を塞ぐ House を Road に置換する手は、
+    /// 人間視点では「その先の広い空き地を街として開く」明確な価値がある。
+    /// しかし現状の `road_network_value` は frontier を **edge-connected Road の
+    /// 1 マス隣の Empty** だけにカウントするので、置換で得られる新規 frontier は
+    /// 高々 3 セル (置換 Road の 3 方向の Empty 隣接) × 8 = +24。これでは
+    /// 失う House income (≈50 cents/sec) を埋められず、AI は撤去/置換を選ばない。
+    ///
+    /// 期待: 置換 Road の「向こうに広大な空き地がある」配置と「向こうも詰まってる」
+    /// 配置で、前者の方が action_value が高くなる。後者は対照群。
+    ///
+    /// `potential_credit_for_distance` が実装されるまで `ignore`。実装後はずす。
+    #[test]
+    #[ignore = "awaiting potential_credit_for_distance policy implementation"]
+    fn replace_with_road_value_reflects_pocket_behind() {
+        fn setup_with_pocket(open_pocket: bool) -> City {
+            let mut city = City::new();
+            city.cash = 100_000;
+            city.ai_tier = AiTier::Master;
+            let col = 10;
+            // edge から y=3 まで Road chain (edge-connected)。
+            for y in 0..=3 {
+                city.set_tile(col, y, Tile::Built(Building::Road));
+            }
+            // y=4 に塞ぎ House。
+            city.set_tile(col, 4, Tile::Built(Building::House));
+            if !open_pocket {
+                // y=5 から下を全部 Built で埋めて「橋渡しの先に空き地が無い」状態。
+                for y in 5..GRID_H {
+                    for x in 0..GRID_W {
+                        if matches!(city.tile(x, y), Tile::Empty) {
+                            city.set_tile(x, y, Tile::Built(Building::House));
+                        }
+                    }
+                }
+            }
+            city
+        }
+
+        let action = AiAction::Replace {
+            x: 10,
+            y: 4,
+            kind: Building::Road,
+        };
+
+        let mut open = setup_with_pocket(true);
+        let v_open = action_value(&mut open, &action, &evaluate);
+
+        let mut closed = setup_with_pocket(false);
+        let v_closed = action_value(&mut closed, &action, &evaluate);
+
+        assert!(
+            v_open > v_closed,
+            "Replace→Road should be MORE valuable when there is open space behind \
+             the blocker than when there isn't. open={} closed={}",
+            v_open,
+            v_closed
+        );
+        assert!(
+            v_open > 0,
+            "Replace→Road into open pocket should be net-positive (a human would do \
+             this immediately), got {}",
+            v_open
+        );
+    }
 }
