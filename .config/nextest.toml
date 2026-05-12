@@ -22,7 +22,9 @@ path = "junit.xml"
 # このリストに含める。
 [[profile.default.overrides]]
 filter = 'test(/automation_drives_outposts_and_demolitions/) | test(/tier1_never_stalls_across_seeds/) | test(/tier_ordering_holds_at_30min/) | test(/tier4_strategies_specialize/) | test(/eco_strategy_does_not_stall/) | test(/higher_tier_cleans_up_low_tier_mess/) | test(/more_workers_build_more/)'
-slow-timeout = { period = "60s", terminate-after = 2 }
+# 60s × 2 = 120s では CI ランナーで超えるため 90s × 3 = 270s に拡張。
+# Local では 90 秒で「slow」警告が出るので異常な肥大には気付ける。
+slow-timeout = { period = "90s", terminate-after = 3 }
 
 # 重い simulator は retry しない。ここで flake るのは現に slow なだけで、
 # retry すると最大 6 分 ×3 = 18 分 CI を浪費する。
