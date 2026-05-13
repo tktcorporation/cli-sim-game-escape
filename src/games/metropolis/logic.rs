@@ -2478,6 +2478,7 @@ fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
     // セルは Road 自身なので credit 対象外 (Empty じゃない)。distance 1 セルは既存
     // frontier_count で計上済みなので、ここでの加点は「2 マス以上先」が主役。
     let mut total: i64 = 0;
+    #[allow(clippy::needless_range_loop)] // (y, x) を直接 dist[y][x] / city.tile(x, y) に使うため
     for y in 0..GRID_H {
         for x in 0..GRID_W {
             if !matches!(city.tile(x, y), Tile::Empty) {
@@ -2498,23 +2499,26 @@ fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
 
 /// 距離 d (>= 2) の Empty buildable セルに与えるポテンシャル credit (cents/sec 単位)。
 ///
-/// **この関数が AI の "遠視眼" を決める**:
-///   - 距離 2 の credit が大きいほど「橋渡し 1 本で開く近隣」を AI が積極視
-///   - 遠距離まで減衰しない関数は「遠くの広大な空き地」を過大評価して非合理な
-///     Road 大量敷設を誘発
-///   - 減衰が急すぎると stall は解消しない
+/// `FRONTIER_PER_CELL = 8` を起点に `γ ≈ 0.7` のジオメトリック減衰。読みやすさ
+/// 重視で step 表に固定 (浮動小数の roundoff 揺らぎを避ける)。
 ///
-/// 制約 (TODO: 君が決める):
-///   - d=2 で `FRONTIER_PER_CELL = 8` より小さい (= 既存 frontier との二重計上を避ける)
-///   - 単調非増加 (距離が遠いほど credit は同じか小さい)
-///   - 大きな d (例 d >= 10) で 0 に収束 (探索の "幻想的な遠景" を防ぐ)
+/// **キャリブレーション根拠**: Road 1 本の amort は約 0.55 cents/sec (= $10 ÷
+/// `AI_PAYBACK_SECS` × 100)。橋を伸ばすごとに失う期待値はその amort + 「途中で別の
+/// 優先手が現れる確率」。両方を 70% 程度の生存率に近似すると `8 × 0.7^(d-1)` で、
+/// 整数 step 化したのが下表。
+///
+/// **遠距離カットオフ**: d >= 8 で 0 に倒すことで、巨大な空きエリアが青天井で
+/// 評価を膨らませる事故 (= 「遠景の幻想」) を防ぐ。
 fn potential_credit_for_distance(d: u32) -> i64 {
-    // TODO: ポリシーを定義。サンプル候補:
-    //   linear:   ((10u32.saturating_sub(d)) as i64).max(0)
-    //   geometric: 8 >> (d.saturating_sub(1))    // 4, 2, 1, 0, 0...
-    //   step:     match d { 2 => 4, 3 => 2, 4 => 1, _ => 0 }
-    let _ = d;
-    0
+    match d {
+        2 => 6,
+        3 => 4,
+        4 => 3,
+        5 => 2,
+        6 => 1,
+        7 => 1,
+        _ => 0,
+    }
 }
 
 /// 機能不全の商業/雇用建物に対するマイナス bonus。
@@ -4885,25 +4889,27 @@ mod tests {
     ///
     /// 期待: 置換 Road の「向こうに広大な空き地がある」配置と「向こうも詰まってる」
     /// 配置で、前者の方が action_value が高くなる。後者は対照群。
-    ///
-    /// `potential_credit_for_distance` が実装されるまで `ignore`。実装後はずす。
     #[test]
-    #[ignore = "awaiting potential_credit_for_distance policy implementation"]
     fn replace_with_road_value_reflects_pocket_behind() {
-        fn setup_with_pocket(open_pocket: bool) -> City {
+        // demolish_cost は中央 (Manhattan 距離 0) で $50、外周で 2 桁高くなる
+        // (`distance_from_center` × ²)。テストの本旨は「ポケットの広さで評価が変わる」
+        // ことなので、demolish amort で結果が支配されないよう中央セルで検証する。
+        let col = GRID_W / 2;
+        let blocker_y = GRID_H / 2;
+
+        fn setup_with_pocket(open_pocket: bool, col: usize, blocker_y: usize) -> City {
             let mut city = City::new();
             city.cash = 100_000;
             city.ai_tier = AiTier::Master;
-            let col = 10;
-            // edge から y=3 まで Road chain (edge-connected)。
-            for y in 0..=3 {
+            // edge (y=0) から blocker の 1 手前まで Road chain (edge-connected)。
+            for y in 0..blocker_y {
                 city.set_tile(col, y, Tile::Built(Building::Road));
             }
-            // y=4 に塞ぎ House。
-            city.set_tile(col, 4, Tile::Built(Building::House));
+            // blocker_y に塞ぎ House。
+            city.set_tile(col, blocker_y, Tile::Built(Building::House));
             if !open_pocket {
-                // y=5 から下を全部 Built で埋めて「橋渡しの先に空き地が無い」状態。
-                for y in 5..GRID_H {
+                // blocker の下を全部 Built で埋めて「橋渡しの先に空き地が無い」状態。
+                for y in (blocker_y + 1)..GRID_H {
                     for x in 0..GRID_W {
                         if matches!(city.tile(x, y), Tile::Empty) {
                             city.set_tile(x, y, Tile::Built(Building::House));
@@ -4915,15 +4921,15 @@ mod tests {
         }
 
         let action = AiAction::Replace {
-            x: 10,
-            y: 4,
+            x: col,
+            y: blocker_y,
             kind: Building::Road,
         };
 
-        let mut open = setup_with_pocket(true);
+        let mut open = setup_with_pocket(true, col, blocker_y);
         let v_open = action_value(&mut open, &action, &evaluate);
 
-        let mut closed = setup_with_pocket(false);
+        let mut closed = setup_with_pocket(false, col, blocker_y);
         let v_closed = action_value(&mut closed, &action, &evaluate);
 
         assert!(
