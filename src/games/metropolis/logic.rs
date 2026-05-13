@@ -2464,8 +2464,17 @@ fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
         // potential 計算自体が無意味なので即 return。
         return 0;
     }
+    // BFS 訪問順に credit を合算する。Empty buildable で d >= 2 のセルを pop した
+    // タイミングで `potential_credit_for_distance` を呼ぶことで、全 grid を別途
+    // 舐め直す post-scan が要らない (= AI 評価ホットパスでの全 grid iterate を 1 本減らす)。
+    let mut total: i64 = 0;
     while let Some((x, y)) = queue.pop_front() {
         let d = dist[y][x];
+        if d >= 2 && matches!(city.tile(x, y), Tile::Empty) {
+            // BFS 通過可能性で既に `buildable() && (!needs_outpost() || has_outpost_neighbor)` を
+            // 担保しているので、ここでは tile が Empty であることだけ確認すれば十分。
+            total += potential_credit_for_distance(d);
+        }
         if d >= MAX_CREDIT_DIST {
             // 次のホップは d+1 で credit 0。enqueue せず打ち切る。
             continue;
@@ -2493,29 +2502,6 @@ fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
             }
             dist[ny][nx] = d + 1;
             queue.push_back((nx, ny));
-        }
-    }
-    let mut total: i64 = 0;
-    #[allow(clippy::needless_range_loop)] // (y, x) を直接 dist[y][x] / city.tile(x, y) に使うため
-    for y in 0..GRID_H {
-        for x in 0..GRID_W {
-            if !matches!(city.tile(x, y), Tile::Empty) {
-                continue;
-            }
-            let t = city.terrain_at(x, y);
-            if !t.buildable() {
-                continue;
-            }
-            // Rock セルは Outpost ガードを満たさない限り start_construction で
-            // 弾かれる。potential 評価から外して過剰credit を防ぐ。
-            if t.needs_outpost() && !has_outpost_neighbor(city, x, y) {
-                continue;
-            }
-            let d = dist[y][x];
-            if d == u32::MAX || d <= 1 {
-                continue;
-            }
-            total += potential_credit_for_distance(d);
         }
     }
     total
