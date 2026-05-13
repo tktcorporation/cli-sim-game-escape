@@ -2369,6 +2369,9 @@ fn road_network_value(city: &City, connected: &[Vec<bool>]) -> i64 {
     // for edge-connected House) を上回るには、penalty ≥ 距離 12 の amort + 48 = ~91。
     // 100 にすることで距離 ~12 までは確実に撤去候補として勝つ。
     const ISOLATED_PENALTY: i64 = 100;
+    // `frontier_potential_value` は `eval_scratch.borrow_mut()` を取るので、本関数の
+    // borrow_mut より前に呼んで guard を解放させる必要がある。順序を入れ替えると
+    // RefCell の二重 mut borrow で runtime panic。
     let potential = frontier_potential_value(city, connected);
     let mut scratch = city.eval_scratch.borrow_mut();
     let visited = &mut scratch.frontier_visited;
@@ -2419,26 +2422,31 @@ fn road_network_value(city: &City, connected: &[Vec<bool>]) -> i64 {
 
 /// 「edge-connected Road から橋を伸ばせば届く Empty buildable セル」の見込み価値。
 ///
-/// 既存の `frontier_count * FRONTIER_PER_CELL` は「距離 1 (= edge-connected Road の
-/// 4-近傍)」しか拾わないため、間に House や非接続 Road が挟まる「橋渡しすれば
-/// 開ける空き地」が AI からは見えない。本関数は edge-connected Road を起点とした
-/// BFS で、Empty buildable セル / 任意の Road を通過可能とした距離マップを作り、
-/// 距離に応じた減衰 credit を合算する。
+/// edge-connected Road 群を距離 0 として BFS し、Empty buildable / 任意 Road を
+/// 通過可能としてグリッド全体に距離マップを敷く。距離 d ≥ 2 の Empty buildable
+/// セルに `potential_credit_for_distance(d)` の credit を加算する。
 ///
-/// **設計判断**: 距離→credit のカーブが「AI の遠視眼具合」を決める。
-/// - 急減衰 (γ ≈ 0.3): 「目の前 2-3 マス」しか見えない近視眼。stall は緩和されないが
-///   保守的で安全。
-/// - 緩減衰 (γ ≈ 0.7): 街全体の発展余地を見渡す大局観。橋渡し / 撤去置換が積極化。
-/// - 中庸 (γ ≈ 0.5): バランス型。distance 5-6 程度まで有意な credit。
+/// 距離 1 セルは `road_network_value` の `frontier_count * FRONTIER_PER_CELL` で
+/// 既にカウントされる範囲なのでスキップする (二重計上回避)。
 ///
-/// 通過可能セル: edge-connected Road / 任意 Road / Empty (buildable な terrain のみ)。
-/// 「House の上を通る」は禁止 = 撤去意図を AI に表現させるため、Built タイルは
-/// 通過不可。Empty 非 buildable (水・山) も通過不可。
+/// **通過可能性**:
+/// - `Tile::Built(Building::Road)`: edge-connected 判定の前段で全 Road が同一
+///   グラフに繋がるので、非接続な Road クラスタの先にある Empty も拾える。
+/// - `Tile::Empty` で `terrain.buildable() && (!needs_outpost() || 隣接 Outpost あり)`:
+///   実際に Road を敷ける地形だけを橋として認める。Rock や水・山は壁扱い。
+/// - その他 (House 等 Built / Construction / Clearing): 壁扱い。撤去前提の橋渡しを
+///   AI に意識させたいので、Built の上を素通りさせない。
 fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
-    use std::collections::VecDeque;
-    // 距離 0 (= edge-connected Road) を起点、未訪問は u32::MAX。
-    let mut dist: Vec<Vec<u32>> = vec![vec![u32::MAX; GRID_W]; GRID_H];
-    let mut queue: VecDeque<(usize, usize)> = VecDeque::new();
+    let mut scratch = city.eval_scratch.borrow_mut();
+    let super::state::EvalScratch {
+        potential_dist: dist,
+        potential_queue: queue,
+        ..
+    } = &mut *scratch;
+    for row in dist.iter_mut() {
+        row.fill(u32::MAX);
+    }
+    queue.clear();
     for y in 0..GRID_H {
         for x in 0..GRID_W {
             if matches!(city.tile(x, y), Tile::Built(Building::Road)) && connected[y][x] {
@@ -2459,12 +2467,12 @@ fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
             if dist[ny][nx] != u32::MAX {
                 continue;
             }
-            // 通過可能性: 任意 Road または buildable Empty。それ以外 (House 等の
-            // Built / 水・山) は壁扱い。これにより BFS の距離は「実際に Road を
-            // 伸ばせば届くまでの最短手数」と一致する。
             let passable = match city.tile(nx, ny) {
                 Tile::Built(Building::Road) => true,
-                Tile::Empty => city.terrain_at(nx, ny).buildable(),
+                Tile::Empty => {
+                    let t = city.terrain_at(nx, ny);
+                    t.buildable() && (!t.needs_outpost() || has_outpost_neighbor(city, nx, ny))
+                }
                 _ => false,
             };
             if !passable {
@@ -2474,9 +2482,6 @@ fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
             queue.push_back((nx, ny));
         }
     }
-    // 各 Empty buildable セルにポリシー関数で credit を計算して合算。distance 0
-    // セルは Road 自身なので credit 対象外 (Empty じゃない)。distance 1 セルは既存
-    // frontier_count で計上済みなので、ここでの加点は「2 マス以上先」が主役。
     let mut total: i64 = 0;
     #[allow(clippy::needless_range_loop)] // (y, x) を直接 dist[y][x] / city.tile(x, y) に使うため
     for y in 0..GRID_H {
@@ -2484,7 +2489,13 @@ fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
             if !matches!(city.tile(x, y), Tile::Empty) {
                 continue;
             }
-            if !city.terrain_at(x, y).buildable() {
+            let t = city.terrain_at(x, y);
+            if !t.buildable() {
+                continue;
+            }
+            // Rock セルは Outpost ガードを満たさない限り start_construction で
+            // 弾かれる。potential 評価から外して過剰credit を防ぐ。
+            if t.needs_outpost() && !has_outpost_neighbor(city, x, y) {
                 continue;
             }
             let d = dist[y][x];
@@ -2499,8 +2510,8 @@ fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
 
 /// 距離 d (>= 2) の Empty buildable セルに与えるポテンシャル credit (cents/sec 単位)。
 ///
-/// `FRONTIER_PER_CELL = 8` を起点に `γ ≈ 0.7` のジオメトリック減衰。読みやすさ
-/// 重視で step 表に固定 (浮動小数の roundoff 揺らぎを避ける)。
+/// `FRONTIER_PER_CELL = 8` を起点に `γ ≈ 0.7` のジオメトリック減衰の step 表近似
+/// (浮動小数の roundoff 揺らぎを避けるため整数固定)。
 ///
 /// **キャリブレーション根拠**: Road 1 本の amort は約 0.55 cents/sec (= $10 ÷
 /// `AI_PAYBACK_SECS` × 100)。橋を伸ばすごとに失う期待値はその amort + 「途中で別の
@@ -2509,14 +2520,17 @@ fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
 ///
 /// **遠距離カットオフ**: d >= 8 で 0 に倒すことで、巨大な空きエリアが青天井で
 /// 評価を膨らませる事故 (= 「遠景の幻想」) を防ぐ。
+///
+/// **契約**: caller は d <= 1 のセルを除外してから呼ぶこと (距離 1 は既存
+/// `frontier_count * FRONTIER_PER_CELL` で計上済み、距離 0 は Road 自身)。
 fn potential_credit_for_distance(d: u32) -> i64 {
+    debug_assert!(d >= 2, "potential_credit_for_distance is for d >= 2 cells only");
     match d {
         2 => 6,
         3 => 4,
         4 => 3,
         5 => 2,
-        6 => 1,
-        7 => 1,
+        6 | 7 => 1,
         _ => 0,
     }
 }
@@ -4878,17 +4892,17 @@ mod tests {
         );
     }
 
-    /// 評価関数は「橋渡し Road の長期価値」を見えていなければならない。
+    /// 評価関数は「橋渡し Road の長期価値」を距離減衰 potential で見ている。
     ///
-    /// edge-connected な Road chain の末端を塞ぐ House を Road に置換する手は、
-    /// 人間視点では「その先の広い空き地を街として開く」明確な価値がある。
-    /// しかし現状の `road_network_value` は frontier を **edge-connected Road の
-    /// 1 マス隣の Empty** だけにカウントするので、置換で得られる新規 frontier は
-    /// 高々 3 セル (置換 Road の 3 方向の Empty 隣接) × 8 = +24。これでは
-    /// 失う House income (≈50 cents/sec) を埋められず、AI は撤去/置換を選ばない。
+    /// edge-connected Road chain の末端を塞ぐ House を Road に置換する手は、
+    /// 置換 Road が新たな edge-connected の終端となり、その先の Empty buildable
+    /// セル群が将来の frontier 候補として potential に加算される必要がある。
     ///
-    /// 期待: 置換 Road の「向こうに広大な空き地がある」配置と「向こうも詰まってる」
-    /// 配置で、前者の方が action_value が高くなる。後者は対照群。
+    /// 検証: 置換 Road の先に広い空き地がある配置 (open) と、先も House で詰まってる
+    /// 配置 (closed) で `action_value` を比較。potential が距離 d ≥ 2 のセルにも
+    /// credit を与えていれば open > closed > 0 にはならず、open > closed が成立する。
+    /// 加えて open は demolish_cost の amort を上回るプラスを返すべき (= 人間なら
+    /// 即決する手)。
     #[test]
     fn replace_with_road_value_reflects_pocket_behind() {
         // demolish_cost は中央 (Manhattan 距離 0) で $50、外周で 2 桁高くなる

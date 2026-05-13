@@ -366,6 +366,12 @@ pub struct EvalScratch {
     /// 再 scan なしに集計できる。
     pub target_tier_map: Vec<Vec<Option<HouseTier>>>,
     pub frontier_visited: Vec<Vec<bool>>,
+    /// `frontier_potential_value` の BFS 距離マップ。`u32::MAX` は未到達。
+    /// road_network_value の per-evaluate alloc を避けるため scratch に置く。
+    pub potential_dist: Vec<Vec<u32>>,
+    /// `frontier_potential_value` の BFS キュー。`Vec::clear` で再利用する
+    /// (グリッド固定なので最大要素数は `GRID_W * GRID_H`)。
+    pub potential_queue: std::collections::VecDeque<(usize, usize)>,
     /// 局所差分 evaluate 専用の pop_map バッファ。`evaluate_region_sum` が
     /// 領域内 House の tier/pop を埋めて使う。grid 全体で 0 初期化されている前提
     /// で、関数末尾で書き込んだセルだけ zero-back する規約。
@@ -385,6 +391,8 @@ impl EvalScratch {
             tier_map: vec![vec![None; GRID_W]; GRID_H],
             target_tier_map: vec![vec![None; GRID_W]; GRID_H],
             frontier_visited: vec![vec![false; GRID_W]; GRID_H],
+            potential_dist: vec![vec![u32::MAX; GRID_W]; GRID_H],
+            potential_queue: std::collections::VecDeque::with_capacity(GRID_W * GRID_H),
             local_pop: vec![vec![0u32; GRID_W]; GRID_H],
             local_tier_map: vec![vec![None; GRID_W]; GRID_H],
             house_positions: Vec::with_capacity(GRID_W * GRID_H / 4),
