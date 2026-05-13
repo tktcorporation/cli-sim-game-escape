@@ -2437,6 +2437,10 @@ fn road_network_value(city: &City, connected: &[Vec<bool>]) -> i64 {
 /// - その他 (House 等 Built / Construction / Clearing): 壁扱い。撤去前提の橋渡しを
 ///   AI に意識させたいので、Built の上を素通りさせない。
 fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
+    // `potential_credit_for_distance` の最大有意距離 — これ以上 enqueue しても credit 0。
+    // 巨大な open area でも BFS の訪問数を Manhattan ボール内に抑えるための上限。
+    const MAX_CREDIT_DIST: u32 = 7;
+
     let mut scratch = city.eval_scratch.borrow_mut();
     let super::state::EvalScratch {
         potential_dist: dist,
@@ -2455,8 +2459,17 @@ fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
             }
         }
     }
+    if queue.is_empty() {
+        // edge-connected Road が存在しない (= 街がまだ map 外周に届いてない初期)。
+        // potential 計算自体が無意味なので即 return。
+        return 0;
+    }
     while let Some((x, y)) = queue.pop_front() {
         let d = dist[y][x];
+        if d >= MAX_CREDIT_DIST {
+            // 次のホップは d+1 で credit 0。enqueue せず打ち切る。
+            continue;
+        }
         for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
             let nx = x as i32 + dx;
             let ny = y as i32 + dy;
