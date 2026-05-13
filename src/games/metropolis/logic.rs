@@ -3186,7 +3186,42 @@ fn amort_cents(city: &City, action: &super::ai::AiAction) -> i64 {
         }
         super::ai::AiAction::Idle => 0,
     };
-    cost_cents / AI_PAYBACK_SECS
+    let base = cost_cents / AI_PAYBACK_SECS;
+    base * cash_opportunity_factor(city.cash) / 100
+}
+
+/// 投資コスト按分 (`amort_cents`) に掛ける機会コスト係数 (%、`0..=100`)。
+///
+/// `100` を返すと amort を全額控除 (= 現金が貴重・序盤の挙動)、`5` (床値) を
+/// 返すと amort をほぼ無視して純粋な Δ(income/sec) で判断 (= 余剰 cash を
+/// 寝かせるより投資した方が ROI が上がる、という終盤の挙動)。
+///
+/// 床を `0` ではなく `5` にしているのは、Δevaluate=0 のタイ手で Idle と並んだ
+/// Demolish/Replace が無意味に発火するのを抑えるため。最低 1cent/sec 相当の
+/// 投資ハードルを残す。
+///
+/// しきい値の根拠:
+///   - `THRESHOLD_LOW = 500`: Outpost ($600)・基本建物 ($40〜$150) を踏まえた
+///     序盤の死守ライン。これ以下では amort 全額を効かせて慎重に。
+///   - `THRESHOLD_HIGH = 50_000`: saturated map の典型 income $30〜50/s で
+///     約 16〜28 分の reserve に相当。これを超えたら "余剰 cash" 扱いに倒し、
+///     ROI 改善行動を許容する。
+///
+/// `City::cash` は cents ではなく **dollars** (`i64`) で保持されている。
+fn cash_opportunity_factor(cash: i64) -> i64 {
+    const THRESHOLD_LOW: i64 = 500;
+    const THRESHOLD_HIGH: i64 = 50_000;
+    const FLOOR: i64 = 5;
+
+    if cash <= THRESHOLD_LOW {
+        return 100;
+    }
+    if cash >= THRESHOLD_HIGH {
+        return FLOOR;
+    }
+    let span = THRESHOLD_HIGH - THRESHOLD_LOW;
+    let progress = cash - THRESHOLD_LOW;
+    100 - (progress * (100 - FLOOR) / span)
 }
 
 /// 候補生成。Built 隣接 Empty cells (= 街の周辺 1 マス) と、Outpost 候補
@@ -3490,9 +3525,8 @@ fn neighborhood_match_factor(city: &City, x: usize, y: usize, kind: Building) ->
 /// 近隣互換性 (`neighborhood_match_factor`) を base income に乗じて「表面高評価で
 /// 実質ゼロ」を引き下げ、ヘテロな候補プールが pre-rank top に揃うようにする。
 pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i64 {
-    fn cost_amort(cost: i64) -> i64 {
-        cost * 100 / AI_PAYBACK_SECS
-    }
+    let cash_factor = cash_opportunity_factor(city.cash);
+    let cost_amort = |cost: i64| -> i64 { (cost * 100 / AI_PAYBACK_SECS) * cash_factor / 100 };
     fn current_at(city: &City, x: usize, y: usize) -> i64 {
         match city.tile(x, y) {
             Tile::Built(b) => cheap_base_cents(*b),
@@ -4970,6 +5004,64 @@ mod tests {
             "Replace→Road into open pocket should be net-positive (a human would do \
              this immediately), got {}",
             v_open
+        );
+    }
+
+    // ── cash_opportunity_factor: ROI 優先化のための機会コスト係数 ──
+
+    #[test]
+    fn opportunity_factor_full_when_cash_scarce() {
+        assert_eq!(cash_opportunity_factor(0), 100);
+        assert_eq!(cash_opportunity_factor(500), 100);
+    }
+
+    #[test]
+    fn opportunity_factor_floor_when_cash_abundant() {
+        assert_eq!(cash_opportunity_factor(50_000), 5);
+        assert_eq!(cash_opportunity_factor(1_000_000), 5);
+    }
+
+    #[test]
+    fn opportunity_factor_monotonically_decreases() {
+        let samples = [0, 500, 1_000, 5_000, 10_000, 25_000, 49_000, 50_000, 100_000];
+        for w in samples.windows(2) {
+            let a = cash_opportunity_factor(w[0]);
+            let b = cash_opportunity_factor(w[1]);
+            assert!(a >= b, "factor should be non-increasing: f({}) = {} > f({}) = {}", w[0], b, w[1], a);
+        }
+    }
+
+    #[test]
+    fn opportunity_factor_within_bounds() {
+        for cash in (0..=200_000).step_by(317) {
+            let f = cash_opportunity_factor(cash);
+            assert!((5..=100).contains(&f), "factor {} out of [5,100] for cash {}", f, cash);
+        }
+    }
+
+    /// 終盤の余剰 cash で amort が ~95% 減衰し、Replace の Δevaluate が
+    /// 数 cent でも黒字判定になることを確認。これが今回の挙動変更の核。
+    #[test]
+    fn amort_collapses_with_cash_surplus() {
+        let mut city = City::new();
+        let action = super::super::ai::AiAction::Build {
+            x: 5,
+            y: 5,
+            kind: Building::Shop,
+        };
+
+        city.cash = 100;
+        let amort_lean = amort_cents(&city, &action);
+
+        city.cash = 200_000;
+        let amort_flush = amort_cents(&city, &action);
+
+        assert!(amort_lean > 0, "amort should bite when cash is scarce, got {}", amort_lean);
+        assert!(
+            amort_flush * 10 < amort_lean,
+            "amort should collapse to <10% when cash is abundant: lean={} flush={}",
+            amort_lean,
+            amort_flush
         );
     }
 }
