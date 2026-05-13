@@ -2441,6 +2441,14 @@ fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
     // 巨大な open area でも BFS の訪問数を Manhattan ボール内に抑えるための上限。
     const MAX_CREDIT_DIST: u32 = 7;
 
+    // AI look-ahead の continuation 評価 (depth>=2) では potential をスキップ。
+    // depth=1 の rank で既に potential 込みで上位候補が決まり、その後の深さ探索は
+    // 「その手のあと相手 (実際は自分の次手) は何を打つか」の近似でしかないので、
+    // BFS コストをかけて再評価する利得がない。
+    if city.eval_skip_potential.get() {
+        return 0;
+    }
+
     let mut scratch = city.eval_scratch.borrow_mut();
     let super::state::EvalScratch {
         potential_dist: dist,
@@ -3693,6 +3701,10 @@ pub(super) fn search_best_action_full(
         return Some(depth1[0].0.clone());
     }
     let mut best: Option<(super::ai::AiAction, i64)> = None;
+    // 深さ探索中は frontier_potential_value を 0 返し化して BFS コストを除く。
+    // depth=1 の `rank_actions_full(city, top_k)` 上記呼び出しは既に通常 evaluate で
+    // potential 込みなので、その後の continuation だけが軽量化対象になる。
+    let prev_skip = city.eval_skip_potential.replace(true);
     for (a, v1) in &depth1 {
         let next_k = (top_k / 2).max(2);
         let next_total =
@@ -3706,6 +3718,7 @@ pub(super) fn search_best_action_full(
             best = Some((a.clone(), total));
         }
     }
+    city.eval_skip_potential.set(prev_skip);
     best.map(|(a, _)| a)
 }
 

@@ -544,6 +544,14 @@ pub struct City {
     /// 切り替えると alloc が消える (= 純粋に WASM スループット改善目的)。
     pub eval_scratch: std::cell::RefCell<EvalScratch>,
 
+    /// AI 探索の depth>=2 再帰中だけ true。`frontier_potential_value` がこのフラグを
+    /// 見て即 0 を返すことで、look-ahead の continuation 評価から BFS コストを外す。
+    /// depth=1 (= ranking 段階) は flag=false で full potential を使い、その出力に
+    /// 既に「将来 frontier 期待値」が織り込まれているため、深い層で BFS を回し直す
+    /// 必要は無い。`search_best_action_full` / `best_continuation_value_full` が
+    /// scope guard で立て、再帰から戻ったら必ず戻す。
+    pub eval_skip_potential: Cell<bool>,
+
     /// タブ復帰時のオフライン進行ボーナス通知。`Some` の間は `render` が
     /// 中央モーダルを上書き描画し、`handle_input` が通常操作をブロックして
     /// 任意の入力で `None` に戻す。
@@ -644,6 +652,7 @@ impl City {
             connected_cache: std::cell::RefCell::new(None),
             income_dollars_cache: Cell::new(None),
             eval_scratch: std::cell::RefCell::new(EvalScratch::new()),
+            eval_skip_potential: Cell::new(false),
             pending_offline_welcome: None,
         }
     }

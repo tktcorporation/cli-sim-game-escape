@@ -625,6 +625,7 @@ pub(super) fn extract_save(state: &City) -> SaveData {
         connected_cache: _,
         income_dollars_cache: _,
         eval_scratch: _,
+        eval_skip_potential: _,
     } = state;
 
     let mut tiles = Vec::with_capacity(GRID_W * GRID_H);
