@@ -22,13 +22,17 @@ pub const AUTOSAVE_INTERVAL: u32 = 300;
 /// - `Empty` = 0
 /// - `Generator(t)` = 100 + type_id  (固定位置から再構築するので保存不要だが
 ///   形式の対称性のため保存しておく)
-/// - `Item(t, lv)` = t*10 + lv  (1..=15)
+/// - `Item(t, lv)` = t*10 + lv  (lv は 1..=9)
+///
+/// level を 1 桁に閉じる前提で `decode_cell` が `v % 10` で復元するため、
+/// encode 側のキャップも 9 に揃える。`MAX_LEVEL` を 10 以上に引き上げる場合は
+/// この 1 桁エンコードを 2 バイトに拡張する必要がある。
 #[cfg(any(target_arch = "wasm32", test))]
 fn encode_cell(c: Cell) -> u8 {
     match c {
         Cell::Empty => 0,
         Cell::Generator(t) => 100 + t.to_save_id(),
-        Cell::Item(t, lv) => t.to_save_id() * 10 + lv.min(15),
+        Cell::Item(t, lv) => t.to_save_id() * 10 + lv.min(9),
     }
 }
 

@@ -145,18 +145,19 @@ fn render_grid(
         lines.push(Line::from(spans));
     }
 
-    let para = Paragraph::new(lines).block(block.clone()).alignment(Alignment::Left);
-    f.render_widget(para, area);
-
     // ClickableGrid::register_targets の padding_left は「inner 領域内での横
     // オフセット」。Paragraph を Alignment::Left で描いた時点でセルは inner.x
-    // から始まっているので 0。
+    // から始まっているので 0。`block` をこの後 Paragraph に move するので、
+    // 参照渡しの register_targets はこの順序で先に呼ぶ。
     let _ = inner;
     let grid = ClickableGrid::new(GRID_W, GRID_H, GRID_CLICK_BASE, CELL_W).with_cell_height(CELL_H);
     {
         let mut cs = click_state.borrow_mut();
         grid.register_targets(area, &block, &mut cs, 0);
     }
+
+    let para = Paragraph::new(lines).block(block).alignment(Alignment::Left);
+    f.render_widget(para, area);
 
     // 盤面外タップは hit_test が None になるだけで自然に「何もしない」扱い
     // になるため、明示的な解除ボタンは別配置にする。
