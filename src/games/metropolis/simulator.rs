@@ -109,6 +109,102 @@ mod tests {
         snaps
     }
 
+    /// AI 再評価が無駄になる ticks 数を返す。
+    ///
+    /// 「無駄」の定義: AI が `Idle` を返した直後は街の状態が変化しない限り
+    /// 再度 `Idle` を返すので、この間 AI を呼ぶのは時間の無駄。状態が変わる
+    /// 最速イベントは **建設/整地の完了** (= 工事中タイルのうち最小の
+    /// `ticks_remaining`)。
+    ///
+    /// 上限 `MAX_IDLE_SKIP_TICKS` (= 6 秒) は安全装置。House Tier 昇格の dwell
+    /// time は分オーダーなのでこの cap 内なら挙動 drift しない。cash が新候補の
+    /// `kind.cost()` を跨ぐイベントは現状追跡していないので、cap で間接的に
+    /// 捕まえる方針。
+    fn next_decision_event_ticks(city: &City) -> u32 {
+        const MAX_IDLE_SKIP_TICKS: u32 = 60;
+        let mut earliest = MAX_IDLE_SKIP_TICKS;
+        for y in 0..GRID_H {
+            for x in 0..GRID_W {
+                match city.tile(x, y) {
+                    Tile::Construction { ticks_remaining, .. }
+                    | Tile::Clearing { ticks_remaining } => {
+                        earliest = earliest.min(*ticks_remaining);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        earliest.max(1)
+    }
+
+    /// `run_with_strategy` の event-driven 版。AI が `Idle` を返した直後は
+    /// `tick_without_ai` で物理だけ batch 進行し、AI 呼び出しを大幅削減する。
+    ///
+    /// **挙動差**: `next_rand()` の呼ばれる回数が変わるため、`run_with_strategy`
+    /// と bit-identical にはならない (タイ手の選択で発散しうる)。集計指標
+    /// (cash / pop / built / income) では tolerance 内で一致するはず —
+    /// `fast_matches_baseline_within_tolerance` で実測検証。
+    ///
+    /// snapshot のタイミングは秒境界。skip は 1 秒を跨がないよう cap し、毎秒末で
+    /// 確実に snapshot を取る。
+    fn run_with_strategy_fast(
+        seed: u64,
+        tier: AiTier,
+        strategy: Strategy,
+        workers: u32,
+        total_seconds: u32,
+        report_at: &[u32],
+    ) -> Vec<Snapshot> {
+        let mut city = City::with_seed(seed);
+        city.ai_tier = tier;
+        city.strategy = strategy;
+        city.workers = workers;
+
+        let mut snaps: Vec<Snapshot> = Vec::new();
+        let mut report_idx = 0;
+
+        for sec in 1..=total_seconds {
+            let mut ticks_this_sec = 0u32;
+            while ticks_this_sec < TICKS_PER_SEC {
+                let mut last_action: Option<AiAction> = None;
+                logic::tick_observed(&mut city, 1, |_, action, _| {
+                    last_action = Some(action.clone());
+                });
+                ticks_this_sec += 1;
+
+                if ticks_this_sec >= TICKS_PER_SEC {
+                    break;
+                }
+                // None = AI が呼ばれなかった (free_workers=0)。Idle = AI が
+                // 何もしないと判断。どちらも次のイベントまで物理だけ進めて良い。
+                let can_skip = matches!(last_action, Some(AiAction::Idle) | None);
+                if !can_skip {
+                    continue;
+                }
+                let remaining_in_sec = TICKS_PER_SEC - ticks_this_sec;
+                let skip = next_decision_event_ticks(&city).min(remaining_in_sec);
+                if skip > 0 {
+                    logic::tick_without_ai(&mut city, skip);
+                    ticks_this_sec += skip;
+                }
+            }
+
+            if report_idx < report_at.len() && sec == report_at[report_idx] {
+                let s = snap(&city, sec);
+                snaps.push(s.clone());
+                print_snapshot(&s);
+                report_idx += 1;
+            }
+        }
+
+        if snaps.last().map(|s| s.sec) != Some(total_seconds) {
+            let s = snap(&city, total_seconds);
+            snaps.push(s.clone());
+            print_snapshot(&s);
+        }
+        snaps
+    }
+
     /// Sanity check: the *dumbest* AI must still make the city grow.
     /// If this test ever breaks, the lowest tier has become unwinnable
     /// and the player would be stuck forever.
@@ -993,6 +1089,91 @@ mod tests {
             "cleanup should not regress population (before={} after={})",
             pop_before,
             pop_after
+        );
+    }
+
+    /// `run_with_strategy_fast` の挙動が baseline と十分一致することを担保する。
+    ///
+    /// bit-identical は期待しない (`next_rand` の呼び出し回数差で AI のタイ手が
+    /// 発散しうる)。集計指標が tolerance 内で揃えば fast 版を sim 用途で信頼できる。
+    ///
+    /// Tier 3 + 600s + 2 workers の小さなケースで CI 時間を抑える (Tier 5 ×
+    /// 8 workers × 1800s の A/B は `--ignored` の長尺診断で別途観測する)。
+    #[test]
+    fn fast_matches_baseline_within_tolerance() {
+        let seed = 0xC1A5_5EED;
+        let total = 600;
+        let cps = [600];
+        let baseline =
+            run_with_strategy(seed, AiTier::Aware, Strategy::Income, 2, total, &cps);
+        let fast =
+            run_with_strategy_fast(seed, AiTier::Aware, Strategy::Income, 2, total, &cps);
+
+        let b = baseline.last().expect("baseline produced snapshots");
+        let f = fast.last().expect("fast produced snapshots");
+
+        // 「街として同じくらいに育っているか」を関係比で見る。タイ手発散で
+        // 各指標が ±絶対値で動くため、ratio 判定の方が頑健。
+        // `floor` は「これより小さい値同士の比較は実質的に無意味」とする閾値。
+        // 例: cash=$1 vs $36 は「どちらも 0 に近い」のでスケールを `max($1, $36, 50)`
+        // に持ち上げて diff/scale を 35/50 で評価する。
+        fn within(a: i64, b: i64, num: i64, den: i64, floor: i64) -> bool {
+            let diff = (a - b).abs();
+            let scale = a.abs().max(b.abs()).max(floor);
+            diff * den <= scale * num
+        }
+
+        // 30% tolerance: タイ手発散で 1〜2 割の差は出る。30% を超える drift は
+        // skip ロジックのバグを疑うサイン。
+        assert!(
+            within(b.cash, f.cash, 30, 100, 200),
+            "cash drift > 30%: baseline={} fast={}",
+            b.cash,
+            f.cash
+        );
+        assert!(
+            within(b.population as i64, f.population as i64, 30, 100, 50),
+            "population drift > 30%: baseline={} fast={}",
+            b.population,
+            f.population
+        );
+        assert!(
+            within(b.buildings_built as i64, f.buildings_built as i64, 30, 100, 50),
+            "built drift > 30%: baseline={} fast={}",
+            b.buildings_built,
+            f.buildings_built
+        );
+        assert!(
+            within(b.income_per_sec, f.income_per_sec, 30, 100, 5),
+            "income/sec drift > 30%: baseline={} fast={}",
+            b.income_per_sec,
+            f.income_per_sec
+        );
+    }
+
+    /// fast 版が baseline より明確に速く回ることを観測する診断テスト。
+    /// 観測専用なので `--ignored`。
+    #[test]
+    #[ignore = "speedup observation; run with --ignored to measure"]
+    fn fast_is_faster_than_baseline_t5() {
+        use std::time::Instant;
+        let seed = 0xC1A5_5EED;
+        let total = 600;
+        let cps: [u32; 0] = [];
+
+        let t0 = Instant::now();
+        let _baseline = run_with_strategy(seed, AiTier::Master, Strategy::Income, 4, total, &cps);
+        let baseline_ms = t0.elapsed().as_millis();
+
+        let t1 = Instant::now();
+        let _fast = run_with_strategy_fast(seed, AiTier::Master, Strategy::Income, 4, total, &cps);
+        let fast_ms = t1.elapsed().as_millis();
+
+        eprintln!(
+            "\n=== speedup: baseline={}ms fast={}ms ratio={:.2}x ===",
+            baseline_ms,
+            fast_ms,
+            baseline_ms as f64 / fast_ms.max(1) as f64
         );
     }
 }
