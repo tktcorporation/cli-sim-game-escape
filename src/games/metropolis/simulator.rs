@@ -27,6 +27,7 @@ mod tests {
         roads: u32,
         houses: u32,
         shops: u32,
+        outposts_dispatched: u64,
     }
 
     fn snap(city: &City, sec: u32) -> Snapshot {
@@ -41,6 +42,7 @@ mod tests {
             houses: city.count_built(Building::House),
             // 商業施設 = Shop + Mall (上位施設も商業特化の指標として合算)。
             shops: city.count_built(Building::Shop) + city.count_built(Building::Mall),
+            outposts_dispatched: city.outposts_dispatched_total,
         }
     }
 
@@ -498,22 +500,23 @@ mod tests {
             Strategy::Tech,
             Strategy::Eco,
         ] {
-            let mut city = City::with_seed(seed);
-            city.ai_tier = AiTier::Planner;
-            city.strategy = strategy;
-            city.workers = 1;
-            logic::tick(&mut city, TICKS_PER_SEC * span);
-
-            let dispatched = city.outposts_dispatched_total;
+            let snaps = run_with_strategy(seed, AiTier::Planner, strategy, 1, span, &[span]);
+            let final_snap = snaps.last().expect("run produced at least one snapshot");
+            let dispatched = final_snap.outposts_dispatched;
             eprintln!(
                 "[automation 30min] {:?} cash=${} pop={} built={} dispatched_total={}",
                 strategy,
-                city.cash,
-                city.population(),
-                city.buildings_finished,
+                final_snap.cash,
+                final_snap.population,
+                final_snap.buildings_built,
                 dispatched,
             );
-            report.push((strategy, dispatched, city.cash, city.population()));
+            report.push((
+                strategy,
+                dispatched,
+                final_snap.cash,
+                final_snap.population,
+            ));
         }
 
         // 「マップ全埋めで完全停滞しないこと」を担保する。判定軸は 2 つ:
