@@ -74,41 +74,6 @@ mod tests {
         run_with_strategy(seed, tier, Strategy::Income, workers, total_seconds, report_at)
     }
 
-    fn run_with_strategy(
-        seed: u64,
-        tier: AiTier,
-        strategy: Strategy,
-        workers: u32,
-        total_seconds: u32,
-        report_at: &[u32],
-    ) -> Vec<Snapshot> {
-        let mut city = City::with_seed(seed);
-        city.ai_tier = tier;
-        city.strategy = strategy;
-        city.workers = workers;
-
-        let mut snaps: Vec<Snapshot> = Vec::new();
-        let mut report_idx = 0;
-
-        for sec in 1..=total_seconds {
-            logic::tick(&mut city, TICKS_PER_SEC);
-            if report_idx < report_at.len() && sec == report_at[report_idx] {
-                let s = snap(&city, sec);
-                snaps.push(s.clone());
-                print_snapshot(&s);
-                report_idx += 1;
-            }
-        }
-
-        // Always include final.
-        if snaps.last().map(|s| s.sec) != Some(total_seconds) {
-            let s = snap(&city, total_seconds);
-            snaps.push(s.clone());
-            print_snapshot(&s);
-        }
-        snaps
-    }
-
     /// AI 再評価が無駄になる ticks 数を返す。
     ///
     /// 「無駄」の定義: AI が `Idle` を返した直後は街の状態が変化しない限り
@@ -137,17 +102,17 @@ mod tests {
         earliest.max(1)
     }
 
-    /// `run_with_strategy` の event-driven 版。AI が `Idle` を返した直後は
-    /// `tick_without_ai` で物理だけ batch 進行し、AI 呼び出しを大幅削減する。
+    /// event-driven な sim ループ。AI が `Idle` (または `free_workers=0` で
+    /// AI が呼ばれなかった) 直後は、次の建設/整地イベントまで `tick_without_ai`
+    /// で物理だけ batch 進行する。
     ///
-    /// **挙動差**: `next_rand()` の呼ばれる回数が変わるため、`run_with_strategy`
-    /// と bit-identical にはならない (タイ手の選択で発散しうる)。集計指標
-    /// (cash / pop / built / income) では tolerance 内で一致するはず —
-    /// `fast_matches_baseline_within_tolerance` で実測検証。
+    /// **挙動**: `logic::tick` を毎 tick 呼ぶ素朴ループに対して bit-identical
+    /// ではない (`next_rand` 呼び出し回数差で AI タイ手が発散しうる)。
+    /// 集計指標 (cash/pop/built/income) は behavioral test 群 (`tier_ordering`,
+    /// strategy specialization 等) が unchanged で通ることで担保する。
     ///
-    /// snapshot のタイミングは秒境界。skip は 1 秒を跨がないよう cap し、毎秒末で
-    /// 確実に snapshot を取る。
-    fn run_with_strategy_fast(
+    /// snapshot 粒度は秒。skip は 1 秒境界を跨がないよう cap する。
+    fn run_with_strategy(
         seed: u64,
         tier: AiTier,
         strategy: Strategy,
@@ -1092,88 +1057,4 @@ mod tests {
         );
     }
 
-    /// `run_with_strategy_fast` の挙動が baseline と十分一致することを担保する。
-    ///
-    /// bit-identical は期待しない (`next_rand` の呼び出し回数差で AI のタイ手が
-    /// 発散しうる)。集計指標が tolerance 内で揃えば fast 版を sim 用途で信頼できる。
-    ///
-    /// Tier 3 + 600s + 2 workers の小さなケースで CI 時間を抑える (Tier 5 ×
-    /// 8 workers × 1800s の A/B は `--ignored` の長尺診断で別途観測する)。
-    #[test]
-    fn fast_matches_baseline_within_tolerance() {
-        let seed = 0xC1A5_5EED;
-        let total = 600;
-        let cps = [600];
-        let baseline =
-            run_with_strategy(seed, AiTier::Aware, Strategy::Income, 2, total, &cps);
-        let fast =
-            run_with_strategy_fast(seed, AiTier::Aware, Strategy::Income, 2, total, &cps);
-
-        let b = baseline.last().expect("baseline produced snapshots");
-        let f = fast.last().expect("fast produced snapshots");
-
-        // 「街として同じくらいに育っているか」を関係比で見る。タイ手発散で
-        // 各指標が ±絶対値で動くため、ratio 判定の方が頑健。
-        // `floor` は「これより小さい値同士の比較は実質的に無意味」とする閾値。
-        // 例: cash=$1 vs $36 は「どちらも 0 に近い」のでスケールを `max($1, $36, 50)`
-        // に持ち上げて diff/scale を 35/50 で評価する。
-        fn within(a: i64, b: i64, num: i64, den: i64, floor: i64) -> bool {
-            let diff = (a - b).abs();
-            let scale = a.abs().max(b.abs()).max(floor);
-            diff * den <= scale * num
-        }
-
-        // 30% tolerance: タイ手発散で 1〜2 割の差は出る。30% を超える drift は
-        // skip ロジックのバグを疑うサイン。
-        assert!(
-            within(b.cash, f.cash, 30, 100, 200),
-            "cash drift > 30%: baseline={} fast={}",
-            b.cash,
-            f.cash
-        );
-        assert!(
-            within(b.population as i64, f.population as i64, 30, 100, 50),
-            "population drift > 30%: baseline={} fast={}",
-            b.population,
-            f.population
-        );
-        assert!(
-            within(b.buildings_built as i64, f.buildings_built as i64, 30, 100, 50),
-            "built drift > 30%: baseline={} fast={}",
-            b.buildings_built,
-            f.buildings_built
-        );
-        assert!(
-            within(b.income_per_sec, f.income_per_sec, 30, 100, 5),
-            "income/sec drift > 30%: baseline={} fast={}",
-            b.income_per_sec,
-            f.income_per_sec
-        );
-    }
-
-    /// fast 版が baseline より明確に速く回ることを観測する診断テスト。
-    /// 観測専用なので `--ignored`。
-    #[test]
-    #[ignore = "speedup observation; run with --ignored to measure"]
-    fn fast_is_faster_than_baseline_t5() {
-        use std::time::Instant;
-        let seed = 0xC1A5_5EED;
-        let total = 600;
-        let cps: [u32; 0] = [];
-
-        let t0 = Instant::now();
-        let _baseline = run_with_strategy(seed, AiTier::Master, Strategy::Income, 4, total, &cps);
-        let baseline_ms = t0.elapsed().as_millis();
-
-        let t1 = Instant::now();
-        let _fast = run_with_strategy_fast(seed, AiTier::Master, Strategy::Income, 4, total, &cps);
-        let fast_ms = t1.elapsed().as_millis();
-
-        eprintln!(
-            "\n=== speedup: baseline={}ms fast={}ms ratio={:.2}x ===",
-            baseline_ms,
-            fast_ms,
-            baseline_ms as f64 / fast_ms.max(1) as f64
-        );
-    }
 }
