@@ -2305,18 +2305,9 @@ pub fn hire_worker(city: &mut City) -> bool {
 // 評価関数自体は全 Tier 共通 (Stockfish Skill Level / ぴよ将棋 と同じ思想)。
 //
 // 評価値の単位は cents/sec (= compute_income_per_sec_cents 解像度)。
-// コストは「投資の回収期間 PAYBACK_SECS で按分」した cents/sec で評価値から減じる。
-
-/// AI 評価で投資コストを「秒単価」に按分する基準期間 (秒)。
-///
-/// **キャリブレーション**: 「街を 30 分育てた時のリターン」基準。1800 秒 (= 30 分)。
-///   - House $40 → 2.2 cents/sec amort: Cottage の +50 cents/sec で十分回収
-///   - Road $10 → 0.55 cents/sec: 隣接 House を edge-connected 化する +25 で容易回収
-///   - Outpost $600 → 33 cents/sec: 4 Rock セルで House +200 から十分回収可
-///
-/// 短い PAYBACK (60-120 sec) では Outpost のように「後続の建物で初めて価値が出る」
-/// 投資が永遠に評価されない。30 分は metropolis の標準的な 1 セッション長。
-pub const AI_PAYBACK_SECS: i64 = 1800;
+// 行動は純粋に Δevaluate (= 街の cents/sec 改善量) で比較する。affordability は
+// `enumerate_actions` の事前フィルタで担保されているので、cost を評価値から
+// 控除しなくても「買えない物を選び続ける」事故は起きない。
 
 /// 評価関数 (アマ初段〜プロ相当)。
 /// 「街全体の cents/sec」+ thematic bonus + Outpost territory bonus
@@ -2520,10 +2511,11 @@ fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
 /// `FRONTIER_PER_CELL = 8` を起点に `γ ≈ 0.7` のジオメトリック減衰の step 表近似
 /// (浮動小数の roundoff 揺らぎを避けるため整数固定)。
 ///
-/// **キャリブレーション根拠**: Road 1 本の amort は約 0.55 cents/sec (= $10 ÷
-/// `AI_PAYBACK_SECS` × 100)。橋を伸ばすごとに失う期待値はその amort + 「途中で別の
-/// 優先手が現れる確率」。両方を 70% 程度の生存率に近似すると `8 × 0.7^(d-1)` で、
-/// 整数 step 化したのが下表。
+/// **キャリブレーション根拠**: 隣接 Empty 1 セルに与えるベース credit 8
+/// (= Road 1 本敷設で隣接 House を edge-connected 化した時に期待できる income
+/// 改善のオーダー)。橋を伸ばすごとに「途中で別の優先手が現れる確率」で割引が
+/// 入るので、70% 程度の生存率に近似すると `8 × 0.7^(d-1)` で、整数 step 化
+/// したのが下表。
 ///
 /// **遠距離カットオフ**: d >= 8 で 0 に倒すことで、巨大な空きエリアが青天井で
 /// 評価を膨らませる事故 (= 「遠景の幻想」) を防ぐ。
@@ -3111,8 +3103,15 @@ pub fn with_action_applied<R, F: FnOnce(&mut City) -> R>(
 
 /// 1 アクションの評価値。
 ///
-/// `Δevaluate − cost_amortized` を返す。**Build/Demolish/Idle が同じ天秤に乗る**
-/// のがポイント (= AI は max を取るだけで「建てる/壊す/待つ」を統一的に選ぶ)。
+/// `Δevaluate` を返す (= 行動の前後で街の cents/sec がいくら変わるか)。
+/// **Build/Demolish/Idle が同じ天秤に乗る**のがポイント (= AI は max を取る
+/// だけで「建てる/壊す/待つ」を統一的に選ぶ)。`Idle` の Δevaluate=0 が他候補と
+/// 比較される基準点になる。
+///
+/// 「コストは評価値から控除しないのか」: しない。コストは `enumerate_actions`
+/// 側で affordability フィルタとして既に効いており、`apply_ai_action` も
+/// `start_construction` で前提条件を再検証する。買えない物を AI が選び続ける
+/// 事故は構造上起きない。
 ///
 /// `eval_fn` を引数に取ることで、Tier ごとに精緻 (`evaluate`) / 単純
 /// (`evaluate_simple`) を切り替えられる。
@@ -3144,7 +3143,7 @@ pub(super) fn action_value_with_baseline<F: Fn(&City) -> i64>(
     before: i64,
 ) -> i64 {
     let after = with_action_applied(city, action, |c| eval_fn(c));
-    (after - before) - amort_cents(city, action)
+    after - before
 }
 
 /// `evaluate` 専用版。Tier 3+ が使う hot path。
@@ -3162,66 +3161,7 @@ pub(super) fn action_value_with_baseline_full(
     before: i64,
 ) -> i64 {
     let after = with_action_applied(city, action, |c| evaluate(c));
-    (after - before) - amort_cents(city, action)
-}
-
-fn amort_cents(city: &City, action: &super::ai::AiAction) -> i64 {
-    let cost_cents = match action {
-        super::ai::AiAction::Build { x, y, kind } => {
-            let mut cost = kind.cost();
-            let t = city.terrain_at(*x, *y);
-            if t.needs_clearing() {
-                cost += t.clearing_cost();
-            }
-            cost * 100
-        }
-        super::ai::AiAction::Demolish { x, y } => demolish_cost(*x, *y) * 100,
-        super::ai::AiAction::Replace { x, y, kind } => {
-            let mut cost = demolish_cost(*x, *y) + kind.cost();
-            let t = city.terrain_at(*x, *y);
-            if t.needs_clearing() {
-                cost += t.clearing_cost();
-            }
-            cost * 100
-        }
-        super::ai::AiAction::Idle => 0,
-    };
-    let base = cost_cents / AI_PAYBACK_SECS;
-    base * cash_opportunity_factor(city.cash) / 100
-}
-
-/// 投資コスト按分 (`amort_cents`) に掛ける機会コスト係数 (%、`0..=100`)。
-///
-/// `100` を返すと amort を全額控除 (= 現金が貴重・序盤の挙動)、`5` (床値) を
-/// 返すと amort をほぼ無視して純粋な Δ(income/sec) で判断 (= 余剰 cash を
-/// 寝かせるより投資した方が ROI が上がる、という終盤の挙動)。
-///
-/// 床を `0` ではなく `5` にしているのは、Δevaluate=0 のタイ手で Idle と並んだ
-/// Demolish/Replace が無意味に発火するのを抑えるため。最低 1cent/sec 相当の
-/// 投資ハードルを残す。
-///
-/// しきい値の根拠:
-///   - `THRESHOLD_LOW = 500`: Outpost ($600)・基本建物 ($40〜$150) を踏まえた
-///     序盤の死守ライン。これ以下では amort 全額を効かせて慎重に。
-///   - `THRESHOLD_HIGH = 50_000`: saturated map の典型 income $30〜50/s で
-///     約 16〜28 分の reserve に相当。これを超えたら "余剰 cash" 扱いに倒し、
-///     ROI 改善行動を許容する。
-///
-/// `City::cash` は cents ではなく **dollars** (`i64`) で保持されている。
-fn cash_opportunity_factor(cash: i64) -> i64 {
-    const THRESHOLD_LOW: i64 = 500;
-    const THRESHOLD_HIGH: i64 = 50_000;
-    const FLOOR: i64 = 5;
-
-    if cash <= THRESHOLD_LOW {
-        return 100;
-    }
-    if cash >= THRESHOLD_HIGH {
-        return FLOOR;
-    }
-    let span = THRESHOLD_HIGH - THRESHOLD_LOW;
-    let progress = cash - THRESHOLD_LOW;
-    100 - (progress * (100 - FLOOR) / span)
+    after - before
 }
 
 /// 候補生成。Built 隣接 Empty cells (= 街の周辺 1 マス) と、Outpost 候補
@@ -3525,8 +3465,6 @@ fn neighborhood_match_factor(city: &City, x: usize, y: usize, kind: Building) ->
 /// 近隣互換性 (`neighborhood_match_factor`) を base income に乗じて「表面高評価で
 /// 実質ゼロ」を引き下げ、ヘテロな候補プールが pre-rank top に揃うようにする。
 pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i64 {
-    let cash_factor = cash_opportunity_factor(city.cash);
-    let cost_amort = |cost: i64| -> i64 { (cost * 100 / AI_PAYBACK_SECS) * cash_factor / 100 };
     fn current_at(city: &City, x: usize, y: usize) -> i64 {
         match city.tile(x, y) {
             Tile::Built(b) => cheap_base_cents(*b),
@@ -3578,21 +3516,13 @@ pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i
     }
     match action {
         super::ai::AiAction::Build { x, y, kind } => {
-            let t = city.terrain_at(*x, *y);
-            let extra = if t.needs_clearing() { t.clearing_cost() } else { 0 };
-            let m = neighborhood_match_factor(city, *x, *y, *kind);
-            build_base(city, *x, *y, *kind) * m / 100 - cost_amort(kind.cost() + extra)
-        }
-        super::ai::AiAction::Demolish { x, y } => {
-            -current_at(city, *x, *y) - cost_amort(demolish_cost(*x, *y))
-        }
-        super::ai::AiAction::Replace { x, y, kind } => {
-            let t = city.terrain_at(*x, *y);
-            let extra = if t.needs_clearing() { t.clearing_cost() } else { 0 };
             let m = neighborhood_match_factor(city, *x, *y, *kind);
             build_base(city, *x, *y, *kind) * m / 100
-                - current_at(city, *x, *y)
-                - cost_amort(demolish_cost(*x, *y) + kind.cost() + extra)
+        }
+        super::ai::AiAction::Demolish { x, y } => -current_at(city, *x, *y),
+        super::ai::AiAction::Replace { x, y, kind } => {
+            let m = neighborhood_match_factor(city, *x, *y, *kind);
+            build_base(city, *x, *y, *kind) * m / 100 - current_at(city, *x, *y)
         }
         super::ai::AiAction::Idle => 0,
     }
@@ -5004,64 +4934,6 @@ mod tests {
             "Replace→Road into open pocket should be net-positive (a human would do \
              this immediately), got {}",
             v_open
-        );
-    }
-
-    // ── cash_opportunity_factor: ROI 優先化のための機会コスト係数 ──
-
-    #[test]
-    fn opportunity_factor_full_when_cash_scarce() {
-        assert_eq!(cash_opportunity_factor(0), 100);
-        assert_eq!(cash_opportunity_factor(500), 100);
-    }
-
-    #[test]
-    fn opportunity_factor_floor_when_cash_abundant() {
-        assert_eq!(cash_opportunity_factor(50_000), 5);
-        assert_eq!(cash_opportunity_factor(1_000_000), 5);
-    }
-
-    #[test]
-    fn opportunity_factor_monotonically_decreases() {
-        let samples = [0, 500, 1_000, 5_000, 10_000, 25_000, 49_000, 50_000, 100_000];
-        for w in samples.windows(2) {
-            let a = cash_opportunity_factor(w[0]);
-            let b = cash_opportunity_factor(w[1]);
-            assert!(a >= b, "factor should be non-increasing: f({}) = {} > f({}) = {}", w[0], b, w[1], a);
-        }
-    }
-
-    #[test]
-    fn opportunity_factor_within_bounds() {
-        for cash in (0..=200_000).step_by(317) {
-            let f = cash_opportunity_factor(cash);
-            assert!((5..=100).contains(&f), "factor {} out of [5,100] for cash {}", f, cash);
-        }
-    }
-
-    /// 終盤の余剰 cash で amort が ~95% 減衰し、Replace の Δevaluate が
-    /// 数 cent でも黒字判定になることを確認。これが今回の挙動変更の核。
-    #[test]
-    fn amort_collapses_with_cash_surplus() {
-        let mut city = City::new();
-        let action = super::super::ai::AiAction::Build {
-            x: 5,
-            y: 5,
-            kind: Building::Shop,
-        };
-
-        city.cash = 100;
-        let amort_lean = amort_cents(&city, &action);
-
-        city.cash = 200_000;
-        let amort_flush = amort_cents(&city, &action);
-
-        assert!(amort_lean > 0, "amort should bite when cash is scarce, got {}", amort_lean);
-        assert!(
-            amort_flush * 10 < amort_lean,
-            "amort should collapse to <10% when cash is abundant: lean={} flush={}",
-            amort_lean,
-            amort_flush
         );
     }
 }
