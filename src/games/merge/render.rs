@@ -193,7 +193,9 @@ fn cell_display(state: &MergeState, x: usize, y: usize) -> (String, Style) {
             )
         }
         Cell::Item(t, lv) => (
-            format!("  {}{}  ", t.label().to_ascii_lowercase(), lv),
+            // CELL_W = 5 と揃えるため 2 + 1(label) + 1(digit) + 1 = 5 文字に。
+            // Empty の "  ·  " と中央位置を揃える効果もある。
+            format!("  {}{} ", t.label().to_ascii_lowercase(), lv),
             Style::default()
                 .fg(item_color(t, lv))
                 .add_modifier(if lv >= 4 { Modifier::BOLD } else { Modifier::empty() }),
@@ -350,15 +352,35 @@ mod tests {
     use super::super::state::{BASE_COOLDOWN, MAX_LEVEL};
 
     #[test]
-    fn cell_display_empty_has_neutral_color() {
-        let s = MergeState::new();
-        let (text, _) = cell_display(&s, 1, 1);
-        assert_eq!(text.chars().count(), CELL_W as usize);
-    }
+    fn cell_display_all_variants_have_uniform_width() {
+        // Empty / Generator / Item の 3 バリアント全てが CELL_W に揃っていない
+        // と、ClickableGrid の cell_display_width=CELL_W で登録した click target
+        // と実描画位置が列ごとにずれて誤タップが発生する。テーブル駆動で 3
+        // バリアントを必ず網羅する。
+        let mut s = MergeState::new();
+        s.set(1, 1, Cell::Item(ItemType::Flower, 1));
+        s.set(2, 2, Cell::Item(ItemType::Gem, 5));
+        s.set(3, 3, Cell::Item(ItemType::Tool, 3));
+        let probes: &[(usize, usize, &str)] = &[
+            (4, 4, "empty"),
+            (0, 0, "generator-ready"),
+            (1, 1, "item-lv1"),
+            (2, 2, "item-lv5"),
+            (3, 3, "item-lv3"),
+        ];
+        for &(x, y, label) in probes {
+            let (text, _) = cell_display(&s, x, y);
+            assert_eq!(
+                text.chars().count(),
+                CELL_W as usize,
+                "{} cell width: text={:?}",
+                label,
+                text,
+            );
+        }
 
-    #[test]
-    fn cell_display_generator_is_5_wide() {
-        let s = MergeState::new();
+        // cooldown 中の generator も同じ幅
+        s.gen_cooldown[0] = 10;
         let (text, _) = cell_display(&s, 0, 0);
         assert_eq!(text.chars().count(), CELL_W as usize);
     }

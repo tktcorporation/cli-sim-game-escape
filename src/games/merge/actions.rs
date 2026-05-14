@@ -18,10 +18,13 @@ pub const ACT_UPGRADE_GENERATORS: u16 = 220;
 pub const ACT_CLEAR_SELECTION: u16 = 221;
 
 /// `action_id` が盤面セル範囲 (`GRID_CLICK_BASE` から `GRID_W * GRID_H` 個)
-/// に収まっていれば `(col, row)` を返す。`ClickableGrid::decode` は範囲外で
-/// も `Some` を返してしまうので、ここで明示的に弾いて他のボタン (クエスト
-/// など) と被らないようにする。
+/// に収まっていれば `(col, row)` を返す。`ClickableGrid::decode` の境界に
+/// 依存せず、ここで上下とも明示的に弾いて他のボタン (クエストなど) と
+/// 被らないようにする。
 pub fn decode_grid(action_id: u16) -> Option<(usize, usize)> {
+    if action_id < GRID_CLICK_BASE {
+        return None;
+    }
     let max = GRID_CLICK_BASE as u32 + (GRID_W * GRID_H) as u32;
     if action_id as u32 >= max {
         return None;
