@@ -2304,10 +2304,11 @@ pub fn hire_worker(city: &mut City) -> bool {
 // エージェント版) で AI を構成する。Tier 差は **探索深さ + 評価ノイズ** で作り、
 // 評価関数自体は全 Tier 共通 (Stockfish Skill Level / ぴよ将棋 と同じ思想)。
 //
-// 評価値の単位は cents/sec (= compute_income_per_sec_cents 解像度)。
-// 行動は純粋に Δevaluate (= 街の cents/sec 改善量) で比較する。affordability は
-// `enumerate_actions` の事前フィルタで担保されているので、cost を評価値から
-// 控除しなくても「買えない物を選び続ける」事故は起きない。
+// 評価値の主成分は cents/sec (= `compute_income_per_sec_cents`) で、これに
+// strategy / outpost / inactive penalty / road network 等の heuristic bonus を
+// 加算した値が `evaluate` の戻り値。行動は **Δevaluate** (評価値の差分) で比較する。
+// affordability は `enumerate_actions` の事前フィルタで担保されているので、cost を
+// 評価値から控除しなくても「買えない物を選び続ける」事故は起きない。
 
 /// 評価関数 (アマ初段〜プロ相当)。
 /// 「街全体の cents/sec」+ thematic bonus + Outpost territory bonus

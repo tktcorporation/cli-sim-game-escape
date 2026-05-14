@@ -131,18 +131,31 @@ mod tests {
         for sec in 1..=total_seconds {
             let mut ticks_this_sec = 0u32;
             while ticks_this_sec < TICKS_PER_SEC {
-                let mut last_action: Option<AiAction> = None;
-                logic::tick_observed(&mut city, 1, |_, action, _| {
-                    last_action = Some(action.clone());
+                // 1 tick の中で `drive_ai_with_observer` は最大 2 回 observer を
+                // 呼ぶ (Build/Replace 失敗時の retry)。最後の 1 件だけ見ると
+                // 「Build 失敗 → Idle」のパスを純 Idle と誤判定するので、tick
+                // 内の全 outcome を集計して判定する。
+                let mut any_applied = false;
+                let mut any_non_idle_attempted = false;
+                logic::tick_observed(&mut city, 1, |_, action, outcome| match outcome {
+                    ActionOutcome::Applied => any_applied = true,
+                    ActionOutcome::Rejected => {
+                        if !matches!(action, AiAction::Idle) {
+                            any_non_idle_attempted = true;
+                        }
+                    }
+                    ActionOutcome::Idle => {}
                 });
                 ticks_this_sec += 1;
 
                 if ticks_this_sec >= TICKS_PER_SEC {
                     break;
                 }
-                // None = AI が呼ばれなかった (free_workers=0)。Idle = AI が
-                // 何もしないと判断。どちらも次のイベントまで物理だけ進めて良い。
-                let can_skip = matches!(last_action, Some(AiAction::Idle) | None);
+                // skip 条件: AI が観測的に「動きたくない」状態。`any_applied` は
+                // 街の状態が変わったので素朴に次 tick へ。`any_non_idle_attempted`
+                // は「動きたかったが reject (cash 不足等)」で、income 増加を
+                // 待たせるべきなので skip しない (= 1 tick ずつ進めて即時 retry)。
+                let can_skip = !any_applied && !any_non_idle_attempted;
                 if !can_skip {
                     continue;
                 }
