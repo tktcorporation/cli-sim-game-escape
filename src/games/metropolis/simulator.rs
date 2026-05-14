@@ -74,18 +74,20 @@ mod tests {
         run_with_strategy(seed, tier, Strategy::Income, workers, total_seconds, report_at)
     }
 
-    /// AI 再評価が無駄になる ticks 数を返す。
+    /// 物理だけで安全に進められる ticks 数 (= AI 再評価無しで `tick_without_ai`
+    /// に渡せる回数) を返す。
     ///
-    /// 「無駄」の定義: AI が `Idle` を返した直後は街の状態が変化しない限り
-    /// 再度 `Idle` を返すので、この間 AI を呼ぶのは時間の無駄。状態が変わる
-    /// 最速イベントは **建設/整地の完了** (= 工事中タイルのうち最小の
-    /// `ticks_remaining`)。
+    /// `step_one_tick` は 1 tick の中で `advance_construction` → `drive_ai` の
+    /// 順に走るので、建設/整地が完了する tick では「完了直後の街」を見て AI が
+    /// 判断する。これを batch 経路でも保つために、最も近い完了 tick の **1 つ手前**
+    /// までしか skip しない。`earliest - 1` ticks 進めた後、続く `tick_observed`
+    /// が完了 tick を担当して AI に新状態を見せる。
     ///
     /// 上限 `MAX_IDLE_SKIP_TICKS` (= 6 秒) は安全装置。House Tier 昇格の dwell
     /// time は分オーダーなのでこの cap 内なら挙動 drift しない。cash が新候補の
     /// `kind.cost()` を跨ぐイベントは現状追跡していないので、cap で間接的に
     /// 捕まえる方針。
-    fn next_decision_event_ticks(city: &City) -> u32 {
+    fn idle_skip_ticks(city: &City) -> u32 {
         const MAX_IDLE_SKIP_TICKS: u32 = 60;
         let mut earliest = MAX_IDLE_SKIP_TICKS;
         for y in 0..GRID_H {
@@ -99,7 +101,7 @@ mod tests {
                 }
             }
         }
-        earliest.max(1)
+        earliest.saturating_sub(1)
     }
 
     /// event-driven な sim ループ。AI が `Idle` (または `free_workers=0` で
@@ -160,7 +162,7 @@ mod tests {
                     continue;
                 }
                 let remaining_in_sec = TICKS_PER_SEC - ticks_this_sec;
-                let skip = next_decision_event_ticks(&city).min(remaining_in_sec);
+                let skip = idle_skip_ticks(&city).min(remaining_in_sec);
                 if skip > 0 {
                     logic::tick_without_ai(&mut city, skip);
                     ticks_this_sec += skip;
