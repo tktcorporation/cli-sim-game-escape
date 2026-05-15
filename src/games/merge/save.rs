@@ -120,8 +120,20 @@ fn extract_save(state: &MergeState) -> SaveData {
 fn apply_save(state: &mut MergeState, save: &GameSave) {
     // grid サイズが壊れていたら新規 state に戻す (ジェネレーター位置を保証)。
     if save.grid.len() == GRID_W * GRID_H {
+        // 固定位置以外に decode 結果として Generator が出てきても無視する。
+        // save data は localStorage 経由で外部書き換え可能なため、改ざんされた
+        // バイトが盤面の意外な位置に「動かせないジェネレーター」を生やして
+        // 進行不能化させないように、固定位置の Generator 以外は Empty に正規化。
+        let fixed: [(usize, usize); GENERATOR_POSITIONS.len()] =
+            GENERATOR_POSITIONS.map(|(gx, gy, _)| (gx, gy));
         for (i, v) in save.grid.iter().enumerate() {
-            state.grid[i] = decode_cell(*v);
+            let decoded = decode_cell(*v);
+            let x = i % GRID_W;
+            let y = i / GRID_W;
+            state.grid[i] = match decoded {
+                Cell::Generator(_) if !fixed.contains(&(x, y)) => Cell::Empty,
+                other => other,
+            };
         }
         // ジェネレーター位置は不変条件。save 経由で壊れても再設定する。
         for (gx, gy, t) in GENERATOR_POSITIONS {
@@ -270,6 +282,30 @@ mod tests {
         apply_save(&mut s, &save);
         // 不正な grid サイズは無視、新規状態を保持
         assert_eq!(s.get(0, 0), Cell::Generator(ItemType::Flower));
+    }
+
+    #[test]
+    fn apply_save_strips_generator_cells_outside_fixed_positions() {
+        // 改ざんされた save data が固定位置以外に Generator を持っていた場合、
+        // ロード後にそれらは Empty に正規化されていること。これがないと
+        // 「動かせない・マージできない」セルが盤面に残り進行不能化する。
+        let mut grid: Vec<u8> = (0..(GRID_W * GRID_H)).map(|_| 0u8).collect();
+        // 固定位置 (0,0) は元から Generator なので素通り。
+        // (1, 1) と (5, 4) (= 右下隅) に偽 Generator を仕込む。
+        grid[MergeState::idx(1, 1)] = 100 + ItemType::Flower.to_save_id();
+        grid[MergeState::idx(5, 4)] = 100 + ItemType::Tool.to_save_id();
+        let save = GameSave {
+            grid,
+            ..Default::default()
+        };
+        let mut s = MergeState::new();
+        apply_save(&mut s, &save);
+        assert_eq!(s.get(1, 1), Cell::Empty, "(1,1) の偽 Generator は剥がす");
+        assert_eq!(s.get(5, 4), Cell::Empty, "(5,4) の偽 Generator は剥がす");
+        // 固定 3 つは生き残っている
+        for (gx, gy, t) in GENERATOR_POSITIONS {
+            assert_eq!(s.get(gx, gy), Cell::Generator(t));
+        }
     }
 
     #[test]

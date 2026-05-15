@@ -134,6 +134,9 @@ pub fn deliver_quest(state: &mut MergeState, slot: usize) -> bool {
     }
     let removed = state.remove_items(quest.item_type, quest.level, quest.needed);
     debug_assert_eq!(removed, quest.needed);
+    // 削除されたセルを `selected` が指していると、次のタップが「無効遷移」
+    // 分岐に吸い取られて操作不能感が出る。納品成功時はカーソルを必ずリセット。
+    state.selected = None;
     state.coins = state.coins.saturating_add(quest.reward as u64);
     state.total_coins_earned = state.total_coins_earned.saturating_add(quest.reward as u64);
     state.quests[slot] = None;
@@ -337,6 +340,25 @@ mod tests {
         s.set(1, 1, Cell::Item(ItemType::Flower, 1));
         tap_cell(&mut s, 1, 1);
         tap_cell(&mut s, 1, 1);
+        assert!(s.selected.is_none());
+    }
+
+    #[test]
+    fn deliver_clears_selection_pointing_to_removed_item() {
+        // 納品で消えるセルを `selected` が指していたら、納品後に必ずクリアする。
+        // クリアしないと次のタップが「無効遷移」分岐に吸い取られ、操作不能感が出る。
+        let mut s = MergeState::new();
+        s.set(1, 1, Cell::Item(ItemType::Flower, 1));
+        s.set(2, 2, Cell::Item(ItemType::Flower, 1));
+        s.quests[0] = Some(Quest {
+            item_type: ItemType::Flower,
+            level: 1,
+            needed: 2,
+            reward: 40,
+        });
+        tap_cell(&mut s, 1, 1);
+        assert_eq!(s.selected, Some((1, 1)));
+        assert!(deliver_quest(&mut s, 0));
         assert!(s.selected.is_none());
     }
 
