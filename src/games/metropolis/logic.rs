@@ -2304,19 +2304,11 @@ pub fn hire_worker(city: &mut City) -> bool {
 // エージェント版) で AI を構成する。Tier 差は **探索深さ + 評価ノイズ** で作り、
 // 評価関数自体は全 Tier 共通 (Stockfish Skill Level / ぴよ将棋 と同じ思想)。
 //
-// 評価値の単位は cents/sec (= compute_income_per_sec_cents 解像度)。
-// コストは「投資の回収期間 PAYBACK_SECS で按分」した cents/sec で評価値から減じる。
-
-/// AI 評価で投資コストを「秒単価」に按分する基準期間 (秒)。
-///
-/// **キャリブレーション**: 「街を 30 分育てた時のリターン」基準。1800 秒 (= 30 分)。
-///   - House $40 → 2.2 cents/sec amort: Cottage の +50 cents/sec で十分回収
-///   - Road $10 → 0.55 cents/sec: 隣接 House を edge-connected 化する +25 で容易回収
-///   - Outpost $600 → 33 cents/sec: 4 Rock セルで House +200 から十分回収可
-///
-/// 短い PAYBACK (60-120 sec) では Outpost のように「後続の建物で初めて価値が出る」
-/// 投資が永遠に評価されない。30 分は metropolis の標準的な 1 セッション長。
-pub const AI_PAYBACK_SECS: i64 = 1800;
+// 評価値の主成分は cents/sec (= `compute_income_per_sec_cents`) で、これに
+// strategy / outpost / inactive penalty / road network 等の heuristic bonus を
+// 加算した値が `evaluate` の戻り値。行動は **Δevaluate** (評価値の差分) で比較する。
+// affordability は `enumerate_actions` の事前フィルタで担保されているので、cost を
+// 評価値から控除しなくても「買えない物を選び続ける」事故は起きない。
 
 /// 評価関数 (アマ初段〜プロ相当)。
 /// 「街全体の cents/sec」+ thematic bonus + Outpost territory bonus
@@ -2520,10 +2512,11 @@ fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
 /// `FRONTIER_PER_CELL = 8` を起点に `γ ≈ 0.7` のジオメトリック減衰の step 表近似
 /// (浮動小数の roundoff 揺らぎを避けるため整数固定)。
 ///
-/// **キャリブレーション根拠**: Road 1 本の amort は約 0.55 cents/sec (= $10 ÷
-/// `AI_PAYBACK_SECS` × 100)。橋を伸ばすごとに失う期待値はその amort + 「途中で別の
-/// 優先手が現れる確率」。両方を 70% 程度の生存率に近似すると `8 × 0.7^(d-1)` で、
-/// 整数 step 化したのが下表。
+/// **キャリブレーション根拠**: 隣接 Empty 1 セルに与えるベース credit 8
+/// (= Road 1 本敷設で隣接 House を edge-connected 化した時に期待できる income
+/// 改善のオーダー)。橋を伸ばすごとに「途中で別の優先手が現れる確率」で割引が
+/// 入るので、70% 程度の生存率に近似すると `8 × 0.7^(d-1)` で、整数 step 化
+/// したのが下表。
 ///
 /// **遠距離カットオフ**: d >= 8 で 0 に倒すことで、巨大な空きエリアが青天井で
 /// 評価を膨らませる事故 (= 「遠景の幻想」) を防ぐ。
@@ -3111,8 +3104,15 @@ pub fn with_action_applied<R, F: FnOnce(&mut City) -> R>(
 
 /// 1 アクションの評価値。
 ///
-/// `Δevaluate − cost_amortized` を返す。**Build/Demolish/Idle が同じ天秤に乗る**
-/// のがポイント (= AI は max を取るだけで「建てる/壊す/待つ」を統一的に選ぶ)。
+/// `Δevaluate` を返す (= 行動の前後で街の cents/sec がいくら変わるか)。
+/// **Build/Demolish/Idle が同じ天秤に乗る**のがポイント (= AI は max を取る
+/// だけで「建てる/壊す/待つ」を統一的に選ぶ)。`Idle` の Δevaluate=0 が他候補と
+/// 比較される基準点になる。
+///
+/// 「コストは評価値から控除しないのか」: しない。コストは `enumerate_actions`
+/// 側で affordability フィルタとして既に効いており、`apply_ai_action` も
+/// `start_construction` で前提条件を再検証する。買えない物を AI が選び続ける
+/// 事故は構造上起きない。
 ///
 /// `eval_fn` を引数に取ることで、Tier ごとに精緻 (`evaluate`) / 単純
 /// (`evaluate_simple`) を切り替えられる。
@@ -3144,7 +3144,7 @@ pub(super) fn action_value_with_baseline<F: Fn(&City) -> i64>(
     before: i64,
 ) -> i64 {
     let after = with_action_applied(city, action, |c| eval_fn(c));
-    (after - before) - amort_cents(city, action)
+    after - before
 }
 
 /// `evaluate` 専用版。Tier 3+ が使う hot path。
@@ -3162,31 +3162,7 @@ pub(super) fn action_value_with_baseline_full(
     before: i64,
 ) -> i64 {
     let after = with_action_applied(city, action, |c| evaluate(c));
-    (after - before) - amort_cents(city, action)
-}
-
-fn amort_cents(city: &City, action: &super::ai::AiAction) -> i64 {
-    let cost_cents = match action {
-        super::ai::AiAction::Build { x, y, kind } => {
-            let mut cost = kind.cost();
-            let t = city.terrain_at(*x, *y);
-            if t.needs_clearing() {
-                cost += t.clearing_cost();
-            }
-            cost * 100
-        }
-        super::ai::AiAction::Demolish { x, y } => demolish_cost(*x, *y) * 100,
-        super::ai::AiAction::Replace { x, y, kind } => {
-            let mut cost = demolish_cost(*x, *y) + kind.cost();
-            let t = city.terrain_at(*x, *y);
-            if t.needs_clearing() {
-                cost += t.clearing_cost();
-            }
-            cost * 100
-        }
-        super::ai::AiAction::Idle => 0,
-    };
-    cost_cents / AI_PAYBACK_SECS
+    after - before
 }
 
 /// 候補生成。Built 隣接 Empty cells (= 街の周辺 1 マス) と、Outpost 候補
@@ -3490,9 +3466,6 @@ fn neighborhood_match_factor(city: &City, x: usize, y: usize, kind: Building) ->
 /// 近隣互換性 (`neighborhood_match_factor`) を base income に乗じて「表面高評価で
 /// 実質ゼロ」を引き下げ、ヘテロな候補プールが pre-rank top に揃うようにする。
 pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i64 {
-    fn cost_amort(cost: i64) -> i64 {
-        cost * 100 / AI_PAYBACK_SECS
-    }
     fn current_at(city: &City, x: usize, y: usize) -> i64 {
         match city.tile(x, y) {
             Tile::Built(b) => cheap_base_cents(*b),
@@ -3544,21 +3517,13 @@ pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i
     }
     match action {
         super::ai::AiAction::Build { x, y, kind } => {
-            let t = city.terrain_at(*x, *y);
-            let extra = if t.needs_clearing() { t.clearing_cost() } else { 0 };
-            let m = neighborhood_match_factor(city, *x, *y, *kind);
-            build_base(city, *x, *y, *kind) * m / 100 - cost_amort(kind.cost() + extra)
-        }
-        super::ai::AiAction::Demolish { x, y } => {
-            -current_at(city, *x, *y) - cost_amort(demolish_cost(*x, *y))
-        }
-        super::ai::AiAction::Replace { x, y, kind } => {
-            let t = city.terrain_at(*x, *y);
-            let extra = if t.needs_clearing() { t.clearing_cost() } else { 0 };
             let m = neighborhood_match_factor(city, *x, *y, *kind);
             build_base(city, *x, *y, *kind) * m / 100
-                - current_at(city, *x, *y)
-                - cost_amort(demolish_cost(*x, *y) + kind.cost() + extra)
+        }
+        super::ai::AiAction::Demolish { x, y } => -current_at(city, *x, *y),
+        super::ai::AiAction::Replace { x, y, kind } => {
+            let m = neighborhood_match_factor(city, *x, *y, *kind);
+            build_base(city, *x, *y, *kind) * m / 100 - current_at(city, *x, *y)
         }
         super::ai::AiAction::Idle => 0,
     }

@@ -27,6 +27,7 @@ mod tests {
         roads: u32,
         houses: u32,
         shops: u32,
+        outposts_dispatched: u64,
     }
 
     fn snap(city: &City, sec: u32) -> Snapshot {
@@ -41,6 +42,7 @@ mod tests {
             houses: city.count_built(Building::House),
             // 商業施設 = Shop + Mall (上位施設も商業特化の指標として合算)。
             shops: city.count_built(Building::Shop) + city.count_built(Building::Mall),
+            outposts_dispatched: city.outposts_dispatched_total,
         }
     }
 
@@ -74,6 +76,46 @@ mod tests {
         run_with_strategy(seed, tier, Strategy::Income, workers, total_seconds, report_at)
     }
 
+    /// 物理だけで安全に進められる ticks 数 (= AI 再評価無しで `tick_without_ai`
+    /// に渡せる回数) を返す。
+    ///
+    /// `step_one_tick` は 1 tick の中で `advance_construction` → `drive_ai` の
+    /// 順に走るので、建設/整地が完了する tick では「完了直後の街」を見て AI が
+    /// 判断する。これを batch 経路でも保つために、最も近い完了 tick の **1 つ手前**
+    /// までしか skip しない。`earliest - 1` ticks 進めた後、続く `tick_observed`
+    /// が完了 tick を担当して AI に新状態を見せる。
+    ///
+    /// 上限 `MAX_IDLE_SKIP_TICKS` (= 6 秒) は安全装置。House Tier 昇格の dwell
+    /// time は分オーダーなのでこの cap 内なら挙動 drift しない。cash が新候補の
+    /// `kind.cost()` を跨ぐイベントは現状追跡していないので、cap で間接的に
+    /// 捕まえる方針。
+    fn idle_skip_ticks(city: &City) -> u32 {
+        const MAX_IDLE_SKIP_TICKS: u32 = 60;
+        let mut earliest = MAX_IDLE_SKIP_TICKS;
+        for y in 0..GRID_H {
+            for x in 0..GRID_W {
+                match city.tile(x, y) {
+                    Tile::Construction { ticks_remaining, .. }
+                    | Tile::Clearing { ticks_remaining } => {
+                        earliest = earliest.min(*ticks_remaining);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        earliest.saturating_sub(1)
+    }
+
+    /// event-driven な sim ループ。AI が `Idle` (または `free_workers=0` で
+    /// AI が呼ばれなかった) 直後は、次の建設/整地イベントまで `tick_without_ai`
+    /// で物理だけ batch 進行する。
+    ///
+    /// **挙動**: `logic::tick` を毎 tick 呼ぶ素朴ループに対して bit-identical
+    /// ではない (`next_rand` 呼び出し回数差で AI タイ手が発散しうる)。
+    /// 集計指標 (cash/pop/built/income) は behavioral test 群 (`tier_ordering`,
+    /// strategy specialization 等) が unchanged で通ることで担保する。
+    ///
+    /// snapshot 粒度は秒。skip は 1 秒境界を跨がないよう cap する。
     fn run_with_strategy(
         seed: u64,
         tier: AiTier,
@@ -91,7 +133,44 @@ mod tests {
         let mut report_idx = 0;
 
         for sec in 1..=total_seconds {
-            logic::tick(&mut city, TICKS_PER_SEC);
+            let mut ticks_this_sec = 0u32;
+            while ticks_this_sec < TICKS_PER_SEC {
+                // 1 tick の中で `drive_ai_with_observer` は最大 2 回 observer を
+                // 呼ぶ (Build/Replace 失敗時の retry)。最後の 1 件だけ見ると
+                // 「Build 失敗 → Idle」のパスを純 Idle と誤判定するので、tick
+                // 内の全 outcome を集計して判定する。
+                let mut any_applied = false;
+                let mut any_non_idle_attempted = false;
+                logic::tick_observed(&mut city, 1, |_, action, outcome| match outcome {
+                    ActionOutcome::Applied => any_applied = true,
+                    ActionOutcome::Rejected => {
+                        if !matches!(action, AiAction::Idle) {
+                            any_non_idle_attempted = true;
+                        }
+                    }
+                    ActionOutcome::Idle => {}
+                });
+                ticks_this_sec += 1;
+
+                if ticks_this_sec >= TICKS_PER_SEC {
+                    break;
+                }
+                // skip 条件: AI が観測的に「動きたくない」状態。`any_applied` は
+                // 街の状態が変わったので素朴に次 tick へ。`any_non_idle_attempted`
+                // は「動きたかったが reject (cash 不足等)」で、income 増加を
+                // 待たせるべきなので skip しない (= 1 tick ずつ進めて即時 retry)。
+                let can_skip = !any_applied && !any_non_idle_attempted;
+                if !can_skip {
+                    continue;
+                }
+                let remaining_in_sec = TICKS_PER_SEC - ticks_this_sec;
+                let skip = idle_skip_ticks(&city).min(remaining_in_sec);
+                if skip > 0 {
+                    logic::tick_without_ai(&mut city, skip);
+                    ticks_this_sec += skip;
+                }
+            }
+
             if report_idx < report_at.len() && sec == report_at[report_idx] {
                 let s = snap(&city, sec);
                 snaps.push(s.clone());
@@ -100,7 +179,6 @@ mod tests {
             }
         }
 
-        // Always include final.
         if snaps.last().map(|s| s.sec) != Some(total_seconds) {
             let s = snap(&city, total_seconds);
             snaps.push(s.clone());
@@ -422,22 +500,23 @@ mod tests {
             Strategy::Tech,
             Strategy::Eco,
         ] {
-            let mut city = City::with_seed(seed);
-            city.ai_tier = AiTier::Planner;
-            city.strategy = strategy;
-            city.workers = 1;
-            logic::tick(&mut city, TICKS_PER_SEC * span);
-
-            let dispatched = city.outposts_dispatched_total;
+            let snaps = run_with_strategy(seed, AiTier::Planner, strategy, 1, span, &[span]);
+            let final_snap = snaps.last().expect("run produced at least one snapshot");
+            let dispatched = final_snap.outposts_dispatched;
             eprintln!(
                 "[automation 30min] {:?} cash=${} pop={} built={} dispatched_total={}",
                 strategy,
-                city.cash,
-                city.population(),
-                city.buildings_finished,
+                final_snap.cash,
+                final_snap.population,
+                final_snap.buildings_built,
                 dispatched,
             );
-            report.push((strategy, dispatched, city.cash, city.population()));
+            report.push((
+                strategy,
+                dispatched,
+                final_snap.cash,
+                final_snap.population,
+            ));
         }
 
         // 「マップ全埋めで完全停滞しないこと」を担保する。判定軸は 2 つ:
@@ -995,4 +1074,5 @@ mod tests {
             pop_after
         );
     }
+
 }
