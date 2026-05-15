@@ -6,6 +6,7 @@ pub mod career;
 pub mod cookie;
 pub mod factory;
 pub mod godfield;
+pub mod merge;
 pub mod metropolis;
 pub mod rpg;
 pub mod tamagotchi;
@@ -46,6 +47,7 @@ pub enum GameChoice {
     Godfield,
     Metropolis,
     Tamagotchi,
+    Merge,
 }
 
 /// Top-level application state.
@@ -82,5 +84,6 @@ pub fn create_game(choice: &GameChoice) -> Box<dyn Game> {
         GameChoice::Godfield => Box::new(godfield::GodFieldGame::new()),
         GameChoice::Metropolis => Box::new(metropolis::MetropolisGame::new()),
         GameChoice::Tamagotchi => Box::new(tamagotchi::TamagotchiGame::new()),
+        GameChoice::Merge => Box::new(merge::MergeGame::new()),
     }
 }
