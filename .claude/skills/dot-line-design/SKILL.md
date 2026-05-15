@@ -11,12 +11,12 @@ description: |
   - ストーリー・世界観・伏線を設計するとき
   - チュートリアル・知識提示・情報UIを設計するとき
   - ゲームの「面白さが弱い」「淡々としている」「アハ体験がない」と感じたとき
-  - 既存のゲーム（cookie, factory, career, rpg）の面白さを強化する提案をするとき
+  - 既存のゲーム（cookie, factory, career, rpg, abyss, cafe, godfield, merge, metropolis, tamagotchi など）の面白さを強化する提案をするとき
   - 「点と線で考えて」「伏線として」「アンロックの設計」「アハ体験」といったキーワード
 user_invocable: true
 arguments:
   - name: target
-    description: "適用対象（cookie, factory, career, rpg, all, または設計中のメカニクス名）"
+    description: "適用対象（src/games/ 配下のゲーム名、all、または設計中のメカニクス名）"
     required: false
 ---
 
