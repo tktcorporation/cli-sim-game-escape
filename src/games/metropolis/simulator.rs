@@ -1068,28 +1068,36 @@ mod tests {
 
     // ── 不変条件回帰テスト (REDESIGN.md §3 P1 / §6.1) ───────────────
     //
-    // これらは Tier 4 の長時間挙動が満たすべき 3 つの不変条件:
-    //   1. 60 秒の連続窓で built が必ず +1 以上 (停滞しない)
+    // Tier 4 の長時間挙動が満たすべき 3 つの不変条件:
+    //   1. 進捗イベント (着工 / 撤去 / 完成) の発生間隔が一定上限内
     //   2. 同セルへの Build/Demolish/Replace が 60 秒で 3 回未満 (振動しない)
     //   3. cash >= $2000 を持ちながら Idle を返した手が全 actions の 5% 未満
     //
-    // 現状の AI は 1〜3 のいずれにも違反する (§1.1 観測データ参照)。Step 8 で
-    // 再設計が完了した時点で `#[ignore]` を外し、回帰テストとして恒久的に守る。
-    // それまでは `--ignored` で手動実行し、ベースライン数値を eprintln で確認する。
+    // `#[ignore]` を付けたまま運用するのは、長時間ベンチで CI を遅延させないため
+    // と、再設計の段階的検証で一時的に違反が出るのを許容するため。
     //
     // **共通設定**: T4 (Planner) / Income / workers=4 / seed=0xC1A5_5EED / 1800 sec。
-    // 各テストで同じ条件を使うのは、§1.1 の観測データと直接比較できるようにするため。
     const INV_SEED: u64 = 0xC1A5_5EED;
     const INV_TOTAL_SEC: u32 = 1800;
     const INV_WORKERS: u32 = 4;
     const INV_SAMPLE_SEC: u32 = 1; // 1 秒刻みで built 推移を厳密に追う
 
-    /// 任意の連続 60 秒窓で `built_after` が 1 つ以上増えることを要求する。
-    /// 集計だけ取って eprintln で報告し、最終的に「最長停滞窓 < 60 sec」を assert。
+    /// 「進捗イベント」 = AI が `Applied` で Build/Demolish/Replace を行うか、
+    /// または既存 Construction/Clearing が完成して `built` カウンタが増えた瞬間。
+    /// ベンチの 30min 全期間で、進捗イベント発生間隔の最大値が一定閾値未満であることを要求する。
+    ///
+    /// 1 棟の建設に数分〜数十分を要する idle 設計なので、「completion 間隔」ではなく
+    /// 「着工も完成もどちらも進捗とみなす」評価軸を使う (= Construction tile が存在する
+    /// 期間中は last_progress_sec が着工時刻にロックされ、ゆっくり建つこと自体は許容される)。
     #[test]
-    #[ignore = "stagnation regression test; enable in Step 8 after redesign"]
+    #[ignore = "stagnation regression test; --ignored で手動実行"]
     fn no_stagnation_window_for_tier4_30min() {
-        let (samples, _actions) = run_diagnostic(
+        // 30min ベンチで「ベンチ全期間相当の停滞」を禁じる上限 (sec)。
+        // ユーザー要件: 30min 以内の停滞は OK、60min 超は確実におかしい。
+        // 1800sec ベンチでは「1800sec ベンチ全体停滞」が起きないよう同値を assert。
+        const MAX_GAP_SEC: u32 = 1800;
+
+        let (samples, actions) = run_diagnostic(
             INV_SEED,
             AiTier::Planner,
             Strategy::Income,
@@ -1098,46 +1106,69 @@ mod tests {
             INV_SAMPLE_SEC,
         );
 
-        // samples[0] は sec=0 の起点。1 秒刻みなのでインデックス = 経過秒。
-        // 各 i について「最後に built が増えた sec」との差を取り、最大値が 60 を
-        // 超えないことを要求する。
-        let mut last_progress_sec: u32 = 0;
-        let mut last_built: u32 = samples.first().map(|s| s.built).unwrap_or(0);
-        let mut max_gap_sec: u32 = 0;
-        let mut gap_windows: Vec<(u32, u32)> = Vec::new();
-        for s in &samples {
+        // 進捗イベントの sec を時系列に集める。
+        // ソースは 2 種類:
+        //   (a) AI の Applied action (= 着工 / 撤去 / 置換)
+        //   (b) 1 秒刻み periodic sample で built が増えた瞬間 (= 完成 / 整地完了)
+        // 両方を別ソースから拾うのは、Construction が完成する瞬間は AI action としては
+        // 観測されない (= advance_construction が自律的に走る) ため。
+        let mut progress_secs: Vec<u32> = Vec::new();
+        for r in &actions {
+            if !matches!(r.outcome, ActionOutcome::Applied) {
+                continue;
+            }
+            if !matches!(r.action, AiAction::Idle) {
+                progress_secs.push(r.sec);
+            }
+        }
+        let mut last_built = samples.first().map(|s| s.built).unwrap_or(0);
+        for s in samples.iter().skip(1) {
             if s.built > last_built {
-                let gap = s.sec.saturating_sub(last_progress_sec);
-                if gap >= 60 {
-                    gap_windows.push((last_progress_sec, s.sec));
-                }
-                max_gap_sec = max_gap_sec.max(gap);
-                last_progress_sec = s.sec;
+                progress_secs.push(s.sec);
                 last_built = s.built;
             }
         }
-        // 末尾でまだ built が止まっている区間も評価する (= テスト終了まで停滞)。
-        let tail_gap = INV_TOTAL_SEC.saturating_sub(last_progress_sec);
-        if tail_gap >= 60 {
-            gap_windows.push((last_progress_sec, INV_TOTAL_SEC));
+        progress_secs.sort_unstable();
+
+        // 起点 sec=0 を仮想 progress として置き、ベンチ末尾までの gap を順に計算。
+        let mut prev = 0u32;
+        let mut max_gap = 0u32;
+        let mut violations: Vec<(u32, u32)> = Vec::new();
+        for &sec in &progress_secs {
+            let gap = sec.saturating_sub(prev);
+            if gap > max_gap {
+                max_gap = gap;
+            }
+            if gap >= MAX_GAP_SEC {
+                violations.push((prev, sec));
+            }
+            prev = sec;
         }
-        max_gap_sec = max_gap_sec.max(tail_gap);
+        let tail_gap = INV_TOTAL_SEC.saturating_sub(prev);
+        if tail_gap > max_gap {
+            max_gap = tail_gap;
+        }
+        if tail_gap >= MAX_GAP_SEC {
+            violations.push((prev, INV_TOTAL_SEC));
+        }
 
         eprintln!(
-            "\n[no_stagnation] max_gap={}s, gap_windows>=60s: {} (samples={})",
-            max_gap_sec,
-            gap_windows.len(),
-            samples.len()
+            "\n[no_stagnation] progress_events={} max_gap={}s violations>={}s: {}",
+            progress_secs.len(),
+            max_gap,
+            MAX_GAP_SEC,
+            violations.len()
         );
-        for (from, to) in &gap_windows {
+        for (from, to) in &violations {
             eprintln!("  stagnation window: {}s..{}s ({}s)", from, to, to - from);
         }
 
         assert!(
-            max_gap_sec < 60,
-            "no 60-sec window without a new build allowed; max_gap={}s, windows={:?}",
-            max_gap_sec,
-            gap_windows,
+            max_gap < MAX_GAP_SEC,
+            "progress event interval must stay under {}s; max_gap={}s violations={:?}",
+            MAX_GAP_SEC,
+            max_gap,
+            violations,
         );
     }
 

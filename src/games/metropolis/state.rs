@@ -532,15 +532,22 @@ pub struct City {
     /// (`frontier_potential_value`) は今後の Step で同時に廃止する予定。
     pub eval_skip_potential: Cell<bool>,
 
-    /// 最後に Build または Clearing が完成した tick。`advance_construction` が更新する。
-    /// 停滞検知 (stagnation breaker) が `city.tick` との差で判定する。
+    /// 最後に「進捗イベント」が発生した tick。停滞検知の唯一のソース。
+    ///
+    /// 進捗イベントの定義:
+    /// - `start_construction` 成功 (Build / Clearing 着工)
+    /// - `demolish_at` 成功 (撤去)
+    /// - `advance_construction` で建設完成 or 整地完了
+    ///
+    /// 1 棟に数十分かかる idle 設計を許容するため、完成だけでなく着工・撤去も
+    /// 進捗として扱う (= Construction tile が居続ける期間は着工 tick が記録されており、
+    /// その期間中の「何もしない」は停滞ではない)。
     /// 一時状態 (永続化しない、ロード後は 0 から再観測)。
-    pub last_build_finished_tick: u64,
+    pub last_progress_tick: u64,
 
     /// stagnation mode の発動 tick。`Some` の間は AI が breaker 経路に分岐し、
-    /// build/clearing 完了で `None` に戻る。
-    /// 一時状態 (永続化しない、ロード後は None から再観測)。
-    #[allow(dead_code)] // Step 7 で本格使用されるまで読み手なし
+    /// 進捗イベントで `None` に戻る。breaker 本体実装までは読み手なし。
+    #[allow(dead_code)]
     pub stagnation_started_tick: Option<u64>,
 
     /// タブ復帰時のオフライン進行ボーナス通知。`Some` の間は `render` が
@@ -644,7 +651,7 @@ impl City {
             income_dollars_cache: Cell::new(None),
             eval_scratch: std::cell::RefCell::new(EvalScratch::new()),
             eval_skip_potential: Cell::new(false),
-            last_build_finished_tick: 0,
+            last_progress_tick: 0,
             stagnation_started_tick: None,
             pending_offline_welcome: None,
         }

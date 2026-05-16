@@ -627,7 +627,7 @@ pub(super) fn extract_save(state: &City) -> SaveData {
         eval_scratch: _,
         eval_skip_potential: _,
         // 停滞検知用の一時状態 (再ロード後は 0 / None から再観測でよい)。
-        last_build_finished_tick: _,
+        last_progress_tick: _,
         stagnation_started_tick: _,
     } = state;
 

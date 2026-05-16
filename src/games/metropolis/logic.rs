@@ -350,11 +350,10 @@ fn advance_construction(city: &mut City) {
     // ここでも invalidate する。tick 終了時の一括クリアと二重防御。
     if mutated {
         city.invalidate_population_cache();
-        // 「街が前進した」最後の tick を記録する。stagnation breaker が
-        // `city.tick - last_build_finished_tick` の窓で「何も完成していない」を
-        // 判定する唯一のソース。Build と Clearing の両方を「前進」として扱う
-        // のは、整地完了が次の Build を解禁する前駆ステップだから。
-        city.last_build_finished_tick = city.tick;
+        // 完成・整地完了を進捗イベントとして記録。着工・撤去側 (`start_construction` /
+        // `demolish_at`) でも同様に更新するため、ここは「Construction が自律的に完了する
+        // 経路」専用の更新点として併存させる。
+        city.last_progress_tick = city.tick;
     }
 }
 
@@ -757,6 +756,7 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
             ticks_remaining: terrain.clearing_ticks(),
         };
         city.invalidate_population_cache();
+        city.last_progress_tick = city.tick;
         city.push_event(format!(
             "⛏ ({},{}) 整地着工 ({}) -${}",
             x,
@@ -778,6 +778,7 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
         ticks_remaining: ticks,
     };
     city.invalidate_population_cache();
+    city.last_progress_tick = city.tick;
     city.buildings_started += 1;
     // Outpost 派遣統計: AI が `evaluate` 経由で Outpost を選んだ時にも
     // カウントされるよう、start_construction でフックする (= 旧 dispatch_outpost
@@ -2210,6 +2211,7 @@ pub fn demolish_at(city: &mut City, x: usize, y: usize) -> bool {
     city.cash_spent_total += cost;
     city.grid[y][x] = Tile::Empty;
     city.invalidate_population_cache();
+    city.last_progress_tick = city.tick;
     // 既存フラッシュをリセット (古い完成フラッシュが残ると違和感)。
     city.completion_flash_until[y][x] = 0;
     city.payout_flash_until[y][x] = 0;
@@ -2302,12 +2304,13 @@ pub fn hire_worker(city: &mut City) -> bool {
     true
 }
 
-// ── 将棋AI 風 評価関数 / 探索 ─────────────────────────────────
+// ── 評価関数 / 1 手読み探索 ─────────────────────────────────
 //
-// **思想**: 「この街局面の良さを 1 つの数値で表す」評価関数 (= shogi 評価関数) と、
-// 「全合法手を仮想着手して評価値を最大化する手を選ぶ」探索 (= alpha-beta の単一
-// エージェント版) で AI を構成する。Tier 差は **探索深さ + 評価ノイズ** で作り、
-// 評価関数自体は全 Tier 共通 (Stockfish Skill Level / ぴよ将棋 と同じ思想)。
+// **思想**: 「この街局面の良さを 1 つの数値で表す」評価関数と、「全合法手を
+// 仮想着手して評価値を最大化する手を選ぶ」1 手読み探索で AI を構成する。
+// 探索は全 Tier で depth = 1 に統一し、Tier 差は **評価する候補数の広さ +
+// 評価ノイズ** で作る (Beam Search の知見: heuristic が悪ければ深く探しても
+// 無駄。広く正確に評価する方が深さより効く)。評価関数自体は全 Tier 共通。
 //
 // 評価値は 2 軸の単純加算: `compute_income_per_sec_cents`(現在の収益) +
 // `stagnation_penalty`(街が止まっているかの減点)。それ以外の戦略的選好
@@ -3028,7 +3031,9 @@ pub(super) fn rank_actions<F: Fn(&City) -> i64>(
 
 
 /// `rank_actions` の `evaluate` 専用版。`action_value_with_baseline_full` 経由で
-/// non-Road action は local diff で評価する。Tier 3+ が使う hot path。
+/// non-Road action は local diff で評価する。Tier 3/4/5 全てが共通で使う唯一の
+/// 探索インフラ。Tier 差は `top_k` の広さ (8 / 20 / 30) で表現する — 探索深さは
+/// 一律 1 に統一し、評価コストを抑えつつ「より広く候補を見る」方向で巧拙を作る。
 pub(super) fn rank_actions_full(
     city: &mut City,
     top_k: usize,
@@ -3075,64 +3080,6 @@ pub(super) fn rank_actions_full(
     scored.sort_by(|a, b| b.1.cmp(&a.1));
     scored.truncate(top_k.max(1));
     scored
-}
-
-/// `search_best_action` の `evaluate` 専用版。Tier 4/5 が使う。
-pub(super) fn search_best_action_full(
-    city: &mut City,
-    depth: u32,
-    top_k: usize,
-) -> Option<super::ai::AiAction> {
-    let depth1 = rank_actions_full(city, top_k);
-    if depth1.is_empty() {
-        return None;
-    }
-    if depth <= 1 {
-        return Some(depth1[0].0.clone());
-    }
-    let mut best: Option<(super::ai::AiAction, i64)> = None;
-    // 深さ探索中の look-ahead 軽量化フラグ。現在の `evaluate` には読み手が無く
-    // 実効果は 0 だが、深さ探索自体を廃止する次ステップまで guard 形だけ残置する。
-    let prev_skip = city.eval_skip_potential.replace(true);
-    for (a, v1) in &depth1 {
-        let next_k = (top_k / 2).max(2);
-        let next_total =
-            with_action_applied(city, a, |c| best_continuation_value_full(c, depth - 1, next_k));
-        let total = v1 + next_total;
-        let better = match &best {
-            None => true,
-            Some((_, prev)) => total > *prev,
-        };
-        if better {
-            best = Some((a.clone(), total));
-        }
-    }
-    city.eval_skip_potential.set(prev_skip);
-    best.map(|(a, _)| a)
-}
-
-fn best_continuation_value_full(city: &mut City, depth: u32, top_k: usize) -> i64 {
-    if depth == 0 {
-        return 0;
-    }
-    let ranked = rank_actions_full(city, top_k);
-    if ranked.is_empty() {
-        return 0;
-    }
-    if depth == 1 {
-        return ranked[0].1.max(0);
-    }
-    let next_k = (top_k / 2).max(2);
-    let mut best_total = ranked[0].1.max(0);
-    for (a, v1) in ranked.iter() {
-        let cont =
-            with_action_applied(city, a, |c| best_continuation_value_full(c, depth - 1, next_k));
-        let total = v1 + cont;
-        if total > best_total {
-            best_total = total;
-        }
-    }
-    best_total
 }
 
 /// Stockfish 流のノイズ付き選択: `noise_pct`% の確率で「上位 3 候補から random」を選ぶ。
