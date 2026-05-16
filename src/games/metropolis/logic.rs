@@ -350,6 +350,11 @@ fn advance_construction(city: &mut City) {
     // ここでも invalidate する。tick 終了時の一括クリアと二重防御。
     if mutated {
         city.invalidate_population_cache();
+        // 「街が前進した」最後の tick を記録する。stagnation breaker が
+        // `city.tick - last_build_finished_tick` の窓で「何も完成していない」を
+        // 判定する唯一のソース。Build と Clearing の両方を「前進」として扱う
+        // のは、整地完了が次の Build を解禁する前駆ステップだから。
+        city.last_build_finished_tick = city.tick;
     }
 }
 

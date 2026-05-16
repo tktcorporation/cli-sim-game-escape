@@ -1075,4 +1075,197 @@ mod tests {
         );
     }
 
+    // ── 不変条件回帰テスト (REDESIGN.md §3 P1 / §6.1) ───────────────
+    //
+    // これらは Tier 4 の長時間挙動が満たすべき 3 つの不変条件:
+    //   1. 60 秒の連続窓で built が必ず +1 以上 (停滞しない)
+    //   2. 同セルへの Build/Demolish/Replace が 60 秒で 3 回未満 (振動しない)
+    //   3. cash >= $2000 を持ちながら Idle を返した手が全 actions の 5% 未満
+    //
+    // 現状の AI は 1〜3 のいずれにも違反する (§1.1 観測データ参照)。Step 8 で
+    // 再設計が完了した時点で `#[ignore]` を外し、回帰テストとして恒久的に守る。
+    // それまでは `--ignored` で手動実行し、ベースライン数値を eprintln で確認する。
+    //
+    // **共通設定**: T4 (Planner) / Income / workers=4 / seed=0xC1A5_5EED / 1800 sec。
+    // 各テストで同じ条件を使うのは、§1.1 の観測データと直接比較できるようにするため。
+    const INV_SEED: u64 = 0xC1A5_5EED;
+    const INV_TOTAL_SEC: u32 = 1800;
+    const INV_WORKERS: u32 = 4;
+    const INV_SAMPLE_SEC: u32 = 1; // 1 秒刻みで built 推移を厳密に追う
+
+    /// 任意の連続 60 秒窓で `built_after` が 1 つ以上増えることを要求する。
+    /// 集計だけ取って eprintln で報告し、最終的に「最長停滞窓 < 60 sec」を assert。
+    #[test]
+    #[ignore = "stagnation regression test; enable in Step 8 after redesign"]
+    fn no_stagnation_window_for_tier4_30min() {
+        let (samples, _actions) = run_diagnostic(
+            INV_SEED,
+            AiTier::Planner,
+            Strategy::Income,
+            INV_WORKERS,
+            INV_TOTAL_SEC,
+            INV_SAMPLE_SEC,
+        );
+
+        // samples[0] は sec=0 の起点。1 秒刻みなのでインデックス = 経過秒。
+        // 各 i について「最後に built が増えた sec」との差を取り、最大値が 60 を
+        // 超えないことを要求する。
+        let mut last_progress_sec: u32 = 0;
+        let mut last_built: u32 = samples.first().map(|s| s.built).unwrap_or(0);
+        let mut max_gap_sec: u32 = 0;
+        let mut gap_windows: Vec<(u32, u32)> = Vec::new();
+        for s in &samples {
+            if s.built > last_built {
+                let gap = s.sec.saturating_sub(last_progress_sec);
+                if gap >= 60 {
+                    gap_windows.push((last_progress_sec, s.sec));
+                }
+                max_gap_sec = max_gap_sec.max(gap);
+                last_progress_sec = s.sec;
+                last_built = s.built;
+            }
+        }
+        // 末尾でまだ built が止まっている区間も評価する (= テスト終了まで停滞)。
+        let tail_gap = INV_TOTAL_SEC.saturating_sub(last_progress_sec);
+        if tail_gap >= 60 {
+            gap_windows.push((last_progress_sec, INV_TOTAL_SEC));
+        }
+        max_gap_sec = max_gap_sec.max(tail_gap);
+
+        eprintln!(
+            "\n[no_stagnation] max_gap={}s, gap_windows>=60s: {} (samples={})",
+            max_gap_sec,
+            gap_windows.len(),
+            samples.len()
+        );
+        for (from, to) in &gap_windows {
+            eprintln!("  stagnation window: {}s..{}s ({}s)", from, to, to - from);
+        }
+
+        assert!(
+            max_gap_sec < 60,
+            "no 60-sec window without a new build allowed; max_gap={}s, windows={:?}",
+            max_gap_sec,
+            gap_windows,
+        );
+    }
+
+    /// 同一セル `(x, y)` に対する Build/Demolish/Replace の **Applied** イベントが
+    /// 任意の 60 秒スライディング窓で 3 回以上発生してはならない (= 振動禁止)。
+    /// Idle や Rejected は数えない (cell 振動の物理現象としては起きていない)。
+    #[test]
+    #[ignore = "oscillation regression test; enable in Step 8 after redesign"]
+    fn no_oscillation_at_same_cell_tier4_30min() {
+        let (_samples, actions) = run_diagnostic(
+            INV_SEED,
+            AiTier::Planner,
+            Strategy::Income,
+            INV_WORKERS,
+            INV_TOTAL_SEC,
+            300, // periodic sample は使わない
+        );
+
+        // (x, y) -> 発生 sec のソート済みリスト。
+        use std::collections::BTreeMap;
+        let mut by_cell: BTreeMap<(usize, usize), Vec<u32>> = BTreeMap::new();
+        for r in &actions {
+            if !matches!(r.outcome, ActionOutcome::Applied) {
+                continue;
+            }
+            let cell = match &r.action {
+                AiAction::Build { x, y, .. }
+                | AiAction::Demolish { x, y }
+                | AiAction::Replace { x, y, .. } => Some((*x, *y)),
+                AiAction::Idle => None,
+            };
+            if let Some(c) = cell {
+                by_cell.entry(c).or_default().push(r.sec);
+            }
+        }
+
+        // 各 cell について 60 秒スライディング窓で count >= 3 を検出。
+        // ソート済みなので、左端を進めながら右端を追う O(N) 走査で十分。
+        let mut violations: Vec<((usize, usize), u32, u32, usize)> = Vec::new();
+        let mut total_oscillating_cells: usize = 0;
+        for (cell, secs) in &by_cell {
+            let mut left = 0usize;
+            let mut max_in_window = 0usize;
+            let mut worst: Option<(u32, u32, usize)> = None;
+            for right in 0..secs.len() {
+                while secs[right] - secs[left] >= 60 {
+                    left += 1;
+                }
+                let count = right - left + 1;
+                if count > max_in_window {
+                    max_in_window = count;
+                    worst = Some((secs[left], secs[right], count));
+                }
+            }
+            if max_in_window >= 3 {
+                total_oscillating_cells += 1;
+                if let Some((from, to, c)) = worst {
+                    violations.push((*cell, from, to, c));
+                }
+            }
+        }
+
+        eprintln!(
+            "\n[no_oscillation] oscillating_cells={}, sample violations:",
+            total_oscillating_cells
+        );
+        for ((x, y), from, to, count) in violations.iter().take(10) {
+            eprintln!(
+                "  cell=({},{}) {}..{}s count={}",
+                x, y, from, to, count
+            );
+        }
+
+        assert_eq!(
+            total_oscillating_cells, 0,
+            "no cell should see >=3 Build/Demolish/Replace within any 60s window; \
+             oscillating_cells={}, sample={:?}",
+            total_oscillating_cells,
+            violations.iter().take(5).collect::<Vec<_>>(),
+        );
+    }
+
+    /// `Idle` を返した時に `cash >= $2000` を持っていた割合が、全 actions の 5% 未満で
+    /// あること。「金は余っているのに何もしない」状態の頻度を上限として縛る。
+    #[test]
+    #[ignore = "idle-with-cash regression test; enable in Step 8 after redesign"]
+    fn idle_with_cash_under_5pct_tier4_30min() {
+        let (_samples, actions) = run_diagnostic(
+            INV_SEED,
+            AiTier::Planner,
+            Strategy::Income,
+            INV_WORKERS,
+            INV_TOTAL_SEC,
+            300,
+        );
+
+        let total = actions.len();
+        // `classify_suspicious_action` の "Idle with cash >= $2000" 判定と同条件。
+        let idle_with_cash = actions
+            .iter()
+            .filter(|r| matches!(r.action, AiAction::Idle) && r.cash_after >= 2_000)
+            .count();
+        let pct = if total == 0 {
+            0.0
+        } else {
+            (idle_with_cash as f64) / (total as f64) * 100.0
+        };
+
+        eprintln!(
+            "\n[idle_with_cash] {} / {} actions ({:.2}%)",
+            idle_with_cash, total, pct
+        );
+
+        assert!(
+            pct < 5.0,
+            "Idle with cash >= $2000 must be < 5% of all actions; got {:.2}% ({}/{})",
+            pct,
+            idle_with_cash,
+            total,
+        );
+    }
 }

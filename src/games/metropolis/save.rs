@@ -626,6 +626,9 @@ pub(super) fn extract_save(state: &City) -> SaveData {
         income_dollars_cache: _,
         eval_scratch: _,
         eval_skip_potential: _,
+        // 停滞検知用の一時状態 (再ロード後は 0 / None から再観測でよい)。
+        last_build_finished_tick: _,
+        stagnation_started_tick: _,
     } = state;
 
     let mut tiles = Vec::with_capacity(GRID_W * GRID_H);

@@ -552,6 +552,17 @@ pub struct City {
     /// scope guard で立て、再帰から戻ったら必ず戻す。
     pub eval_skip_potential: Cell<bool>,
 
+    /// 最後に Build または Clearing が完成した tick。`advance_construction` が更新する。
+    /// 停滞検知 (stagnation breaker) が `city.tick` との差で判定する。
+    /// 一時状態 (永続化しない、ロード後は 0 から再観測)。
+    pub last_build_finished_tick: u64,
+
+    /// stagnation mode の発動 tick。`Some` の間は AI が breaker 経路に分岐し、
+    /// build/clearing 完了で `None` に戻る。
+    /// 一時状態 (永続化しない、ロード後は None から再観測)。
+    #[allow(dead_code)] // Step 7 で本格使用されるまで読み手なし
+    pub stagnation_started_tick: Option<u64>,
+
     /// タブ復帰時のオフライン進行ボーナス通知。`Some` の間は `render` が
     /// 中央モーダルを上書き描画し、`handle_input` が通常操作をブロックして
     /// 任意の入力で `None` に戻す。
@@ -653,6 +664,8 @@ impl City {
             income_dollars_cache: Cell::new(None),
             eval_scratch: std::cell::RefCell::new(EvalScratch::new()),
             eval_skip_potential: Cell::new(false),
+            last_build_finished_tick: 0,
+            stagnation_started_tick: None,
             pending_offline_welcome: None,
         }
     }
