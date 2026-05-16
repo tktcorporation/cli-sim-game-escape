@@ -2662,30 +2662,96 @@ fn has_built_neighbor_built(city: &City, x: usize, y: usize) -> bool {
     false
 }
 
+/// `enumerate_actions` が Build / Replace に共通で使う「通常の建物種別」一覧。
+/// インフラ (Road / Park) と経済 (Shop 系・Workshop 系・Office 系) と特殊
+/// (Plaza / Stadium) を含む。Outpost は別経路 (`collect_candidates` の outpost
+/// 群) でのみ列挙されるのでここには含めない。
+const NORMAL_BUILD_KINDS: &[Building] = &[
+    Building::House,
+    Building::Road,
+    Building::Workshop,
+    Building::Factory,
+    Building::Refinery,
+    Building::Shop,
+    Building::Mall,
+    Building::MegaMall,
+    Building::Office,
+    Building::Headquarters,
+    Building::Park,
+    Building::Plaza,
+    Building::Stadium,
+];
+
+/// Replace の合法 `kind` 集合を返す。
+///
+/// **方針** (REDESIGN.md §3 P4): 「異種への Replace」は禁止し、以下の 2 つだけ
+/// 許可する。saturated map での Replace 候補爆発 (= N_built × 13 種) を抑える。
+///
+/// 1. `current` が **inactive な経済建物** (Shop/Mall/MegaMall は道路未接続 or 客
+///    なし、Workshop/Factory/Refinery/Office/Headquarters は道路未接続 or 隣接
+///    House なし) ならば、現セルは立地的に失敗している → ゼロベースで建て直す
+///    余地を AI に与えるため、`current` を除く全種別を候補にする。
+/// 2. `current` が**同系列の直接上位**を持つならばその 1 種類のみ。具体的には
+///    Shop→Mall, Mall→MegaMall, Workshop→Factory, Factory→Refinery,
+///    Office→Headquarters。
+///
+/// 上記いずれにも当てはまらない場合 (Road / House / Park / Plaza / Stadium /
+/// Outpost / 既に active な最上位 MegaMall・Refinery・Headquarters) は Replace
+/// 不可とし空 `Vec` を返す。House の Tier 上位は `effective_house_tier` 経由の
+/// 派生値で `Building` 種別ではないので、ここでの Replace 対象にはしない。
+fn allowed_replace_targets(
+    city: &City,
+    x: usize,
+    y: usize,
+    current: Building,
+    connected: &[Vec<bool>],
+) -> Vec<Building> {
+    let upgrade = match current {
+        Building::Shop => Some(Building::Mall),
+        Building::Mall => Some(Building::MegaMall),
+        Building::Workshop => Some(Building::Factory),
+        Building::Factory => Some(Building::Refinery),
+        Building::Office => Some(Building::Headquarters),
+        _ => None,
+    };
+
+    let inactive = match current {
+        Building::Shop | Building::Mall | Building::MegaMall => {
+            !shop_is_active_with(city, x, y, connected)
+        }
+        Building::Workshop
+        | Building::Factory
+        | Building::Refinery
+        | Building::Office
+        | Building::Headquarters => !workshop_is_active_with(city, x, y, connected),
+        _ => false,
+    };
+
+    if inactive {
+        // 失敗した立地はゼロベースで建て直したいので `current` を除く全種別を返す。
+        // 上位への上書きだけ許すと「inactive Shop を Mall に置き換えても活性化
+        // しない」袋小路で終わってしまうため、別用途への転用を含めて広く許可する。
+        return NORMAL_BUILD_KINDS
+            .iter()
+            .copied()
+            .filter(|k| *k != current)
+            .collect();
+    }
+
+    upgrade.into_iter().collect()
+}
+
 /// 全候補アクションを列挙。Build × 全種別 + Demolish × 全 Built + Idle。
 ///
 /// affordability ガード + 建物別の前提条件 (Shop なら House 3 軒以上) を適用。
 pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
     let mut actions: Vec<super::ai::AiAction> = Vec::new();
     let (regular, outpost) = collect_candidates(city);
-    // 上位建物 (Refinery / MegaMall / Headquarters / Plaza / Stadium) も候補に
-    // 含める。cost が高いため `action_passes_guards` の cash + house-count
-    // ガードで序盤は自然に落選し、終盤 (cash と街の規模が揃った時) のみ浮上する。
-    let normal_kinds: &[Building] = &[
-        Building::House,
-        Building::Road,
-        Building::Workshop,
-        Building::Factory,
-        Building::Refinery,
-        Building::Shop,
-        Building::Mall,
-        Building::MegaMall,
-        Building::Office,
-        Building::Headquarters,
-        Building::Park,
-        Building::Plaza,
-        Building::Stadium,
-    ];
+    let connected = cached_edge_connected_roads(city);
+    let connected_ref: &[Vec<bool>] = &connected;
+    // 上位建物 (Refinery / MegaMall / Headquarters / Plaza / Stadium) も Build
+    // 候補に含める。cost が高いため `action_passes_guards` の cash ガードで
+    // 序盤は自然に落選し、終盤 (cash が揃った時) のみ浮上する。
     for &(x, y) in &regular {
         let terrain = city.terrain_at(x, y);
         let extra = if terrain.needs_clearing() {
@@ -2693,7 +2759,7 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
         } else {
             0
         };
-        for &kind in normal_kinds {
+        for &kind in NORMAL_BUILD_KINDS {
             if action_passes_guards(city, kind, extra) {
                 actions.push(super::ai::AiAction::Build { x, y, kind });
             }
@@ -2717,10 +2783,9 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
     // Demolish 候補は Built タイル + affordability のみ。判断は `action_value`
     // (= Δevaluate − cost) に委ねる。設計根拠は docs/adr/0001。
     //
-    // Replace 候補も同じセル群から派生させる。「同セル Demolish + Build kind」を
-    // 1 アクションとして列挙することで、撤去だけだと Δevaluate が負で beam pruning
-    // に切り落とされる「再建で取り戻すシーケンス」が depth=1 比較に直接乗る。
-    // `kind != current` の制約だけ置いて、その他は cost で判断させる。
+    // Replace 候補は `allowed_replace_targets` で「inactive 経済建物の再生」と
+    // 「同系列の直接上位」だけに絞る (REDESIGN.md §3 P4)。これで saturated map
+    // でも Replace 候補数が線形 → 1〜数件 / cell に抑えられる。
     let reserve = automation_policy(city.strategy).min_cash_reserve;
     for y in 0..GRID_H {
         for x in 0..GRID_W {
@@ -2732,10 +2797,8 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
             if city.cash >= demo_cost + reserve {
                 actions.push(super::ai::AiAction::Demolish { x, y });
             }
-            for &kind in normal_kinds {
-                if kind == current {
-                    continue;
-                }
+            let allowed = allowed_replace_targets(city, x, y, current, connected_ref);
+            for &kind in allowed.iter() {
                 let terrain = city.terrain_at(x, y);
                 let build_cost = kind.cost()
                     + if terrain.needs_clearing() {
