@@ -244,10 +244,20 @@ pub fn apply_ai_action(city: &mut City, action: super::ai::AiAction) -> bool {
         // demolish + start_construction を続けて走らせ、worker は Construction
         // phase で 1 つだけ消費 (Build alone と同じコスト)。
         super::ai::AiAction::Replace { x, y, kind } => {
+            // Replace は同セルの建て替えなので、aging factor は連続した経年として
+            // 扱う。Mall→MegaMall のように繰り返し置換しても築年数は積算され、
+            // 収入減衰が dampener として効くことで連続 Replace の旨味を奪う。
+            // 「撤去して別用途に転用」したい場合は Demolish (= built_at_tick=0) を
+            // 経由する別経路があるので、そちらでは新築扱いになる。
+            let saved_built_at = city.built_at_tick[y][x];
             if !demolish_at(city, x, y) {
                 return false;
             }
-            start_construction(city, x, y, kind)
+            let ok = start_construction(city, x, y, kind);
+            if ok {
+                city.built_at_tick[y][x] = saved_built_at;
+            }
+            ok
         }
         super::ai::AiAction::Idle => true,
     }
@@ -314,9 +324,14 @@ fn advance_construction(city: &mut City) {
                         *tile = Tile::Built(kind);
                         city.buildings_finished += 1;
                         // 「築 0 の起点」を記録。aging_factor / effective_house_tier の
-                        // 基準点になる。撤去/再建で常に上書きされるため、その建物の
-                        // 経年と Tier 昇格 dwell time の唯一のソース。
-                        city.built_at_tick[y][x] = city.tick;
+                        // 基準点になる。撤去経由 (`demolish_at`) で built_at_tick=0 に
+                        // 戻ったセルは新築扱いで city.tick を打つ。一方、Replace は
+                        // `apply_ai_action` 側で旧 tick を継承させた状態でこの経路に
+                        // 入るため、ここで上書きしてはならない (継承値を維持して
+                        // aging factor が積算されるようにする)。
+                        if city.built_at_tick[y][x] == 0 {
+                            city.built_at_tick[y][x] = city.tick;
+                        }
                         completions.push((x, y, kind));
                     } else {
                         *ticks_remaining -= 1;
@@ -2512,7 +2527,11 @@ pub fn with_action_applied<R, F: FnOnce(&mut City) -> R>(
             let total_cost = demolish_amt + build_amt;
 
             city.grid[*y][*x] = Tile::Built(*kind);
-            city.built_at_tick[*y][*x] = city.tick;
+            // Replace は実 apply 経路 (`apply_ai_action`) で built_at_tick を継承する。
+            // 仮想評価でも同じ意味論を保ち、aging penalty が積算された income で
+            // ROI を見積もる (= AI が「Replace で aging が一新される」と勘違いして
+            // 連続 Replace を過大評価する事故を防ぐ)。
+            city.built_at_tick[*y][*x] = saved_built_at;
             city.cash -= total_cost;
             if touches_road {
                 city.invalidate_population_cache();
@@ -3853,6 +3872,39 @@ mod tests {
         city.built_at_tick[5][5] = 1000;
         assert!(demolish_at(&mut city, 5, 5));
         assert_eq!(city.built_at_tick[5][5], 0);
+    }
+
+    /// Replace は同セル建て替えなので built_at_tick を継承する。これにより aging
+    /// factor が連続置換でも積算され、Mall→MegaMall のような繰り返しの収入減衰
+    /// dampener として機能する (REDESIGN.md §3 P6)。
+    #[test]
+    fn replace_inherits_built_at_tick() {
+        let mut city = City::new();
+        city.terrain[5][5] = super::super::terrain::Terrain::Plain;
+        city.cash = 100_000;
+        city.tick = 200;
+        // 元建物として Shop を直接設置 (Construction を回避してテストを短く)。
+        city.set_tile(5, 5, Tile::Built(Building::Shop));
+        city.built_at_tick[5][5] = 200;
+
+        // Replace 後の完成 tick を含む十分な時間を進める。
+        city.tick = 1_000;
+        let replace = super::super::ai::AiAction::Replace {
+            x: 5,
+            y: 5,
+            kind: Building::Mall,
+        };
+        assert!(apply_ai_action(&mut city, replace));
+        // 建設完了まで進める (Mall: build_ticks = 320)。
+        tick(&mut city, 320);
+
+        assert!(matches!(city.tile(5, 5), Tile::Built(Building::Mall)));
+        // 旧 Shop の built_at_tick (= 200) が継承され、新築 city.tick (= 1000) に
+        // 上書きされていないことを確認する。
+        assert_eq!(
+            city.built_at_tick[5][5], 200,
+            "Replace は旧 built_at_tick を継承する設計 (aging dampener として必須)"
+        );
     }
 
     /// Cottage 1 軒だけでは fallback で $1 になる (死スパイラル防止)。
