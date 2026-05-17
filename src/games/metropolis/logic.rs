@@ -2925,17 +2925,39 @@ fn neighborhood_match_factor(city: &City, x: usize, y: usize, kind: Building) ->
     }
 
     match kind {
-        // 商業: 近くに House がないと活性化しない (= shop_is_active_with の demand 側)
-        Building::Shop | Building::Mall | Building::MegaMall => {
+        // 商業: shop_is_active_with の活性条件は「半径 3 に House あり」+
+        // 「4-近傍に edge_connected な Road あり」。前者だけ満たして後者を欠くと
+        // 建物が建ち上がっても inactive のまま居座り、`demolish_cleanup_hint` が
+        // 即撤去 → 再建の振動を生む。Road 隣接の有無を pre-rank の段階で見て、
+        // 活性化見込みのない場所に商業を建てさせない。
+        //
+        // Mall / MegaMall は容量が大きく House 1〜2 軒では需要を満たさないため、
+        // 要求 House 数も規模に応じて引き上げる (Mall ≥ 3、MegaMall ≥ 5)。
+        Building::Shop => {
             let houses = count_built_within(city, x, y, 3, |b| matches!(b, Building::House));
-            if houses == 0 { 5 } else { 100 }
+            let road_near = has_neighbor_kind(city, x, y, Building::Road);
+            if houses == 0 || !road_near { 5 } else { 100 }
         }
-        // 雇用: 近隣 House が労働力供給。Workshop は radius 4、Office も同等で扱う。
+        Building::Mall => {
+            let houses = count_built_within(city, x, y, 3, |b| matches!(b, Building::House));
+            let road_near = has_neighbor_kind(city, x, y, Building::Road);
+            if houses < 3 || !road_near { 10 } else { 100 }
+        }
+        Building::MegaMall => {
+            let houses = count_built_within(city, x, y, 3, |b| matches!(b, Building::House));
+            let road_near = has_neighbor_kind(city, x, y, Building::Road);
+            if houses < 5 || !road_near { 10 } else { 100 }
+        }
+        // 雇用: 近隣 House が労働力供給 + edge_connected な Road 隣接が active 条件。
+        // Road 不足の場所に建てると inactive のまま居座り demolish_cleanup_hint で
+        // 即撤去される振動を生むため、商業と同じく Road 隣接を pre-rank で要求する。
         Building::Workshop
         | Building::Factory
         | Building::Refinery
         | Building::Office
         | Building::Headquarters => {
+            let road_near = has_neighbor_kind(city, x, y, Building::Road);
+            if !road_near { return 10; }
             let houses = count_built_within(city, x, y, 4, |b| matches!(b, Building::House));
             if houses == 0 { 10 } else { 100 }
         }
@@ -2970,12 +2992,172 @@ fn neighborhood_match_factor(city: &City, x: usize, y: usize, kind: Building) ->
     }
 }
 
+/// 街の発展段階。`cheap_action_score` が建物種別ごとの重みを変えるための区分。
+///
+/// 単純な人口だけではなく `count_built(House)` と `population` と Road 数を併用する。
+/// 「お金が足りずに進めない」状態と「整地が進んで上位建物に進む」状態を切り分けて、
+/// 序盤の Road 偏重 (cash 不足で安い Road しか買えない) を打ち破るのが目的。
+///
+/// 段階の意味:
+/// - `Seed`: House が皆無 / 極少。まず人口供給源を建てる。
+/// - `Village`: House がいくつか建ち、基礎経済 (Shop / Workshop) を整える。
+/// - `Town`: 経済が回り始め、Apartment 化を狙う触媒 (Park / Office) を厚くする。
+/// - `City`: 上位経済建物 (Mall / Factory / Office / HQ / Plaza) で街を厚くする。
+/// - `Metropolis`: メガ施設 (MegaMall / Headquarters / Stadium / Refinery / Plaza)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CityStage {
+    Seed,
+    Village,
+    Town,
+    City,
+    Metropolis,
+}
+
+/// 現在の `City` を 5 段階の `CityStage` に分類する。
+///
+/// `population()` は per-frame cache 済みなので追加コストは軽い。`count_built` は
+/// GRID 全走査だが、`rank_actions` / `rank_actions_full` の入口で 1 度だけ呼び、
+/// 結果を引数で `cheap_action_score` に渡すことで pre-rank ループでの再計算を避ける。
+pub(super) fn city_stage(city: &City) -> CityStage {
+    let houses = city.count_built(Building::House);
+    let pop = city.population();
+    if houses < 3 {
+        return CityStage::Seed;
+    }
+    if houses < 15 || pop < 50 {
+        return CityStage::Village;
+    }
+    if pop < 250 {
+        return CityStage::Town;
+    }
+    if pop < 600 {
+        return CityStage::City;
+    }
+    CityStage::Metropolis
+}
+
+/// `cheap_action_score` の段階別重み。100 を基準とし、その建物を「今この段階で
+/// 建てたいか」を相対倍率で表す。
+///
+/// 加減の方針 (チューニングメモ):
+/// - Seed: House 最優先 (×5)。Road は最低限の脊柱として ×1.0。商業や上位建物は
+///   抑制 (×0.2) — まず住人を作らないと商業は活性しないので回らない。
+/// - Village: House (×3) と基礎経済 (Shop / Workshop ×2.5) を厚く。
+///   Park は弱い触媒として ×0.8、上位建物はまだ早いので ×0.3。
+/// - Town: Apartment 化触媒 (Park / Office) と Mall を 2.5 倍。House はもう
+///   過剰生産しないように ×1.5、Road は伸ばし続けるほどでもないので ×1.0。
+/// - City: 上位経済建物 (Mall / Factory / Office / HQ / Plaza) ×2.5。House は ×1.0
+///   に絞り、Demolish→Replace 経由の高層化を促す。
+/// - Metropolis: メガ施設 (MegaMall / Headquarters / Stadium / Refinery / Plaza) ×2.5。
+///   それ以外は ×1.0 でフラット。
+fn stage_weight(stage: CityStage, kind: Building) -> i64 {
+    match (stage, kind) {
+        (CityStage::Seed, Building::House) => 500,
+        (CityStage::Seed, Building::Road) => 100,
+        (CityStage::Seed, _) => 20,
+
+        (CityStage::Village, Building::House) => 300,
+        (CityStage::Village, Building::Road) => 100,
+        (CityStage::Village, Building::Shop | Building::Workshop) => 250,
+        (CityStage::Village, Building::Park) => 80,
+        (CityStage::Village, _) => 30,
+
+        (CityStage::Town, Building::Park | Building::Office | Building::Mall) => 250,
+        (CityStage::Town, Building::House | Building::Shop | Building::Workshop) => 150,
+        (CityStage::Town, Building::Road | Building::Factory) => 100,
+        (CityStage::Town, _) => 50,
+
+        (
+            CityStage::City,
+            Building::Mall
+            | Building::Factory
+            | Building::Office
+            | Building::Headquarters
+            | Building::Plaza,
+        ) => 250,
+        (CityStage::City, Building::House) => 100,
+        (CityStage::City, _) => 80,
+
+        (
+            CityStage::Metropolis,
+            Building::MegaMall
+            | Building::Headquarters
+            | Building::Refinery
+            | Building::Stadium
+            | Building::Plaza,
+        ) => 250,
+        (CityStage::Metropolis, _) => 100,
+    }
+}
+
+/// 「明らかな死に建物」 (= 撤去すべきもの) の Demolish hint。
+///
+/// `stagnation_penalty` が inactive 経済建物を -50 で減点する設計のため、Δevaluate
+/// 側でも +50 程度の改善は読める。だが Build hint が stage bias で 250〜500 まで
+/// 膨らむと相対的に弱くなり、AI が「inactive Shop の隣にもう 1 軒 House を建てる」
+/// のような迂回行動を選んでしまう。明示 hint で「掃除動機」を Build と拮抗させる。
+///
+/// 対象:
+/// - 経済建物 (Shop/Mall/MegaMall/Workshop/Factory/Refinery/Office/Headquarters) が
+///   inactive (`*_is_active` が false)
+/// - Road が edge_connected でない (= 死に道路)
+///
+/// その他の建物 (House、Park、Plaza、Stadium、Outpost) は hint=0 中立。
+/// `evaluate` の Δ が示す方向 (= 大抵は減点) に従う。
+///
+/// hint 値 1100 の根拠: Seed 段階で `cheap_action_score` の Build House が
+/// (build_base=150 [Apartment forecast]) × (neighborhood=100) × (stage=500) / 10000 = 750
+/// を返し、加えて Δevaluate の `any_finished_house` 改善 (+200) と Cottage 収入
+/// (+25) を含めると合計 ~975 まで膨らむ。Demolish が明確に勝つには 1000 を
+/// 超える hint が必要 — 1100 で安全側に置くことで「inactive 建物の周りに House
+/// を建て続ける」迂回行動を抑え、まず掃除させる。
+fn demolish_cleanup_hint(city: &City, x: usize, y: usize, kind: Building) -> i64 {
+    // クールダウン: AI 自身が建てた直後 (= built_at_tick > 0 かつ年齢 < 60 sec)
+    // の建物には撤去 hint を出さない。直前に建てた建物を即撤去するのは Build と
+    // Demolish の評価が拮抗する局面での振動の典型パターン。「街が育って活性化
+    // 条件が満たされるか」を試す猶予を与える。
+    //
+    // built_at_tick == 0 (初期マップ / テストの set_tile / Demolish 経由で
+    // リセット済) は経過時間が無く、AI 由来でないため即撤去候補に乗せる。
+    let built_at = city.built_at_tick[y][x];
+    if built_at > 0 {
+        let age = city.tick.saturating_sub(built_at);
+        if age < 600 {
+            return 0;
+        }
+    }
+    let connected = cached_edge_connected_roads(city);
+    let is_waste = match kind {
+        Building::Shop | Building::Mall | Building::MegaMall => {
+            !shop_is_active_with(city, x, y, &connected)
+        }
+        Building::Workshop
+        | Building::Factory
+        | Building::Refinery
+        | Building::Office
+        | Building::Headquarters => !workshop_is_active_with(city, x, y, &connected),
+        Building::Road => !connected[y][x],
+        _ => false,
+    };
+    if is_waste { 1100 } else { 0 }
+}
+
 /// O(R²) で計算できる action の近隣考慮スコア。`rank_actions` の事前 rank に使う。
 ///
 /// 目的: saturated map で候補数千 → full evaluate を全候補に回せない。
 /// 近隣互換性 (`neighborhood_match_factor`) を base income に乗じて「表面高評価で
 /// 実質ゼロ」を引き下げ、ヘテロな候補プールが pre-rank top に揃うようにする。
-pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i64 {
+///
+/// `stage` は街の発展段階。`stage_weight` で kind ごとに優先度倍率を掛け、
+/// 「序盤は House、Town は触媒、終盤はメガ施設」のような段階遷移を表現する。
+/// 呼び出し側 (`rank_actions` / `rank_actions_full`) で 1 度だけ計算した値を
+/// 渡すこと — pre-rank ループ内で再計算すると count_built の GRID 走査が
+/// O(N×GRID²) に膨らむ。
+pub(super) fn cheap_action_score(
+    city: &City,
+    action: &super::ai::AiAction,
+    stage: CityStage,
+) -> i64 {
     fn current_at(city: &City, x: usize, y: usize) -> i64 {
         match city.tile(x, y) {
             Tile::Built(b) => cheap_base_cents(*b),
@@ -3028,12 +3210,44 @@ pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i
     match action {
         super::ai::AiAction::Build { x, y, kind } => {
             let m = neighborhood_match_factor(city, *x, *y, *kind);
-            build_base(city, *x, *y, *kind) * m / 100
+            let s = stage_weight(stage, *kind);
+            let raw = build_base(city, *x, *y, *kind) * m * s / 10_000;
+            // Road は cost $10 と最安だが、income への寄与は間接的 (House を
+            // edge-connected にする触媒)。cash 不足の段階で Road を量産すると
+            // 「House 貯金が永遠に貯まらない → pop が伸びない」のデッドロックに
+            // 陥る (Step 5 まで観測された病状で、cash=$9 / pop=16 が 30min 持続)。
+            //
+            // 対策: Metropolis 以前の全段階で Road の raw を負に固定し、
+            // 上位建物 (House / Mall / Office / etc.) が affordable でないとき
+            // Idle (= 0) に明確に負けるよう補正する。Metropolis 段階のみ Road
+            // の自由化を許容する (saturated 終盤の細かい再整備で必要)。
+            //
+            // 値 -10 は cheap_score レンジで Idle (0) より小さく、他の Build の
+            // raw (50〜500) よりも明確に下になる程度の小さな負数 — Idle に
+            // 負けつつ、他に何も候補がない極端状況での影響を最小にする狙い。
+            if !matches!(stage, CityStage::Metropolis) && matches!(kind, Building::Road) {
+                return -10;
+            }
+            raw
         }
-        super::ai::AiAction::Demolish { x, y } => -current_at(city, *x, *y),
+        // Demolish の hint は「掃除動機」として正の値を返す。
+        //
+        // Build 側の raw が stage bias で ×500 (Seed × House) まで膨らむため、
+        // Demolish を生 income (~50-200) で残すと、inactive 経済建物が居座る
+        // (`drive_ai_demolishes_inactive_shop` が落ちる)。
+        //
+        // 対象セルが「明らかに死に建物」(inactive Shop/Mall/Workshop/Factory/
+        // Office、未接続 Road) なら +250 のヒントを与えて Build の上位 hint と
+        // 拮抗させる。それ以外 (active な建物、House、Park など) は 0 中立 ——
+        // Δevaluate で実値変化が示す方向に従う。
+        super::ai::AiAction::Demolish { x, y } => match city.tile(*x, *y) {
+            Tile::Built(b) => demolish_cleanup_hint(city, *x, *y, *b),
+            _ => 0,
+        },
         super::ai::AiAction::Replace { x, y, kind } => {
             let m = neighborhood_match_factor(city, *x, *y, *kind);
-            build_base(city, *x, *y, *kind) * m / 100 - current_at(city, *x, *y)
+            let s = stage_weight(stage, *kind);
+            build_base(city, *x, *y, *kind) * m * s / 10_000 - current_at(city, *x, *y)
         }
         super::ai::AiAction::Idle => 0,
     }
@@ -3057,6 +3271,10 @@ pub(super) fn rank_actions<F: Fn(&City) -> i64>(
     const PRE_RANK_LIMIT: usize = 200;
 
     let mut actions = enumerate_actions(city);
+    // stage は pre-rank ループに渡す前に 1 度だけ計算する。
+    // count_built が GRID 全走査のため、pre-rank ループ内で再計算すると O(N×GRID²)
+    // に膨らむ。pre-rank 中 city 状態は不変なので 1 度の評価で全候補に共有できる。
+    let stage = city_stage(city);
     if actions.len() > PRE_RANK_LIMIT {
         // cheap rank の上位 + 「Demolish と Idle は常時パススルー」で構成する。
         //
@@ -3071,7 +3289,7 @@ pub(super) fn rank_actions<F: Fn(&City) -> i64>(
         let mut indexed: Vec<(usize, i64)> = actions
             .iter()
             .enumerate()
-            .map(|(i, a)| (i, cheap_action_score(city, a)))
+            .map(|(i, a)| (i, cheap_action_score(city, a, stage)))
             .collect();
         indexed.sort_by(|a, b| b.1.cmp(&a.1));
         let mut keep_set: std::collections::HashSet<usize> = indexed
@@ -3102,8 +3320,13 @@ pub(super) fn rank_actions<F: Fn(&City) -> i64>(
     let mut scored: Vec<(super::ai::AiAction, i64)> = actions
         .into_iter()
         .map(|a| {
+            // `rank_actions_full` と同じく Δeval + stage hint で sort する。
+            // Tier 2 (evaluate_simple = House 数) でも stage bias で「Seed では
+            // House」「Town では商業」が優先され、純粋な House 量産にならず
+            // 段階的な街作りに沿う。
             let v = action_value_with_baseline(city, &a, eval_fn, before);
-            (a, v)
+            let hint = cheap_action_score(city, &a, stage);
+            (a, v + hint)
         })
         .collect();
     scored.sort_by(|a, b| b.1.cmp(&a.1));
@@ -3123,11 +3346,13 @@ pub(super) fn rank_actions_full(
     const PRE_RANK_LIMIT: usize = 200;
 
     let mut actions = enumerate_actions(city);
+    // stage は `rank_actions` 同様に 1 度だけ計算して pre-rank ループに渡す。
+    let stage = city_stage(city);
     if actions.len() > PRE_RANK_LIMIT {
         let mut indexed: Vec<(usize, i64)> = actions
             .iter()
             .enumerate()
-            .map(|(i, a)| (i, cheap_action_score(city, a)))
+            .map(|(i, a)| (i, cheap_action_score(city, a, stage)))
             .collect();
         indexed.sort_by(|a, b| b.1.cmp(&a.1));
         let mut keep_set: std::collections::HashSet<usize> = indexed
@@ -3155,8 +3380,19 @@ pub(super) fn rank_actions_full(
     let mut scored: Vec<(super::ai::AiAction, i64)> = actions
         .into_iter()
         .map(|a| {
+            // Δevaluate (= 実 income/sec の差) に `cheap_action_score` を hint として
+            // 加算する。cheap_score 自体は「将来期待値 × stage 倍率 × 近隣互換率」を
+            // 表しており、序盤の House Build (Δevaluate=+25, hint=250) のような
+            // 「実値は小さいが段階的に取りたい手」を最終 sort で正しく上位に
+            // 持ち上げる。PRE_RANK_LIMIT を超えていない序盤でも stage bias が効く
+            // ように、pre-rank の有無に依らず常に hint を加える。
+            //
+            // hint 側の数値は cheap_action_score 側で base_cents (~50-200) × stage
+            // (~100-500) × neighborhood (~50-100) / 10000 = ~25-1000 のレンジ。
+            // Δevaluate の方は cents/sec = 同レンジで噛み合う。
             let v = action_value_with_baseline_full(city, &a, before);
-            (a, v)
+            let hint = cheap_action_score(city, &a, stage);
+            (a, v + hint)
         })
         .collect();
     scored.sort_by(|a, b| b.1.cmp(&a.1));
