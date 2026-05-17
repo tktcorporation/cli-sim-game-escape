@@ -30,6 +30,7 @@ use ratzilla::ratatui::Frame;
 
 use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
+use crate::sound;
 
 use crate::widgets::ClickableGrid;
 
@@ -271,6 +272,7 @@ impl Game for MetropolisGame {
         // 残るため、振り返りは可能。
         if self.state.pending_offline_welcome.is_some() {
             self.state.pending_offline_welcome = None;
+            sound::play(sound::CLICK);
             return true;
         }
 
@@ -298,6 +300,7 @@ impl Game for MetropolisGame {
                             // 見切れる。
                             switch_tab(&mut self.state, PanelTab::Status);
                         }
+                        sound::play(sound::CLICK);
                         return true;
                     }
                 }
@@ -333,40 +336,57 @@ impl Game for MetropolisGame {
         match action_id {
             ACT_STRATEGY_GROWTH => {
                 set_strategy(&mut self.state, Strategy::Growth, "📈");
+                sound::play(sound::CLICK);
                 true
             }
             ACT_STRATEGY_INCOME => {
                 set_strategy(&mut self.state, Strategy::Income, "💰");
+                sound::play(sound::CLICK);
                 true
             }
             ACT_STRATEGY_TECH => {
                 set_strategy(&mut self.state, Strategy::Tech, "⚙");
+                sound::play(sound::CLICK);
                 true
             }
             ACT_STRATEGY_ECO => {
                 set_strategy(&mut self.state, Strategy::Eco, "🌳");
+                sound::play(sound::CLICK);
                 true
             }
-            ACT_HIRE_WORKER => logic::hire_worker(&mut self.state),
-            ACT_UPGRADE_AI => logic::upgrade_ai(&mut self.state),
+            ACT_HIRE_WORKER => {
+                let ok = logic::hire_worker(&mut self.state);
+                sound::play(if ok { sound::PURCHASE } else { sound::ERROR });
+                ok
+            }
+            ACT_UPGRADE_AI => {
+                let ok = logic::upgrade_ai(&mut self.state);
+                sound::play(if ok { sound::LEVEL_UP } else { sound::ERROR });
+                ok
+            }
             ACT_TAB_STATUS => {
                 switch_tab(&mut self.state, PanelTab::Status);
+                sound::play(sound::CLICK);
                 true
             }
             ACT_TAB_MANAGER => {
                 switch_tab(&mut self.state, PanelTab::Manager);
+                sound::play(sound::CLICK);
                 true
             }
             ACT_TAB_EVENTS => {
                 switch_tab(&mut self.state, PanelTab::Events);
+                sound::play(sound::CLICK);
                 true
             }
             ACT_TAB_WORLD => {
                 switch_tab(&mut self.state, PanelTab::World);
+                sound::play(sound::CLICK);
                 true
             }
             ACT_TAB_CATALOG => {
                 switch_tab(&mut self.state, PanelTab::Catalog);
+                sound::play(sound::CLICK);
                 true
             }
             ACT_SCROLL_LEFT => {

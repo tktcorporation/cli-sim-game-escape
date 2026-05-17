@@ -30,6 +30,7 @@ use tachyonfx::Duration;
 
 use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
+use crate::sound;
 
 fn now_ms() -> Option<f64> {
     web_sys::window().and_then(|w| w.performance()).map(|p| p.now())
@@ -113,20 +114,26 @@ impl AbyssGame {
 
         if s.floor > prev.floor {
             effects.push_descend(area);
+            sound::play(sound::FLOOR_CLEAR);
         } else if s.floor < prev.floor {
             effects.push_ascend_or_death(area);
+            sound::play(sound::ERROR);
         }
 
+        // 雑魚への通常ヒット (enemy_hurt_flash) は 1 戦闘で何度も鳴って耳障りなので
+        // 音は付けない。被弾とクリティカルとボス周りだけにフィードバックを集約。
         if prev.enemy_hurt_flash == 0 && s.enemy_hurt_flash > 0 {
             effects.push_enemy_hit(layout.enemy_panel);
         }
 
         if prev.hero_hurt_flash == 0 && s.hero_hurt_flash > 0 {
             effects.push_hero_hit(layout.hero_panel);
+            sound::play(sound::HIT_HERO);
         }
 
         if !prev.enemy_is_boss && s.current_enemy.is_boss {
             effects.push_boss_appearance(layout.combat);
+            sound::play(sound::BOSS_APPEAR);
         }
 
         if prev.enemy_is_boss && !s.current_enemy.is_boss && s.floor > prev.floor {
@@ -137,6 +144,7 @@ impl AbyssGame {
         if cur_dmg != prev.last_enemy_dmg {
             if let Some((_, true)) = cur_dmg {
                 effects.push_critical(layout.combat);
+                sound::play(sound::CRITICAL);
             }
         }
 
@@ -289,7 +297,45 @@ impl Game for AbyssGame {
         };
         if let Some(a) = action {
             let save_after = is_save_worthy(a);
+            // logic::apply_action は () を返すので、消費したリソース (gold / souls /
+            // total_pulls) の変化で「コストが実際に発生した = 成功」と判定する。
+            // 失敗 (条件不足) なら state が動かないので ERROR を鳴らす。
+            let prev_gold = self.state.gold;
+            let prev_souls = self.state.souls;
+            let prev_pulls = self.state.total_pulls;
+            let prev_level = if let PlayerAction::EnhanceEquipment(id) = a {
+                self.state.equipment_levels[id.index()]
+            } else {
+                0
+            };
+
             logic::apply_action(&mut self.state, a);
+
+            let s = &self.state;
+            match a {
+                PlayerAction::BuyEquipment(_) | PlayerAction::BuySoulPerk(_) => {
+                    let consumed = s.gold < prev_gold || s.souls < prev_souls;
+                    sound::play(if consumed { sound::PURCHASE } else { sound::ERROR });
+                }
+                PlayerAction::EnhanceEquipment(id) => {
+                    let leveled_up = s.equipment_levels[id.index()] > prev_level;
+                    sound::play(if leveled_up { sound::ENHANCE } else { sound::ERROR });
+                }
+                PlayerAction::GachaPull(_) => {
+                    let pulled = s.total_pulls > prev_pulls;
+                    sound::play(if pulled { sound::GACHA } else { sound::ERROR });
+                }
+                PlayerAction::EquipItem(_)
+                | PlayerAction::SetTab(_)
+                | PlayerAction::ToggleAutoDescend
+                | PlayerAction::Retreat => {
+                    sound::play(sound::CLICK);
+                }
+                PlayerAction::ScrollUp | PlayerAction::ScrollDown => {
+                    // スクロールは連打されるので無音にする。
+                }
+            }
+
             if save_after {
                 self.flush_save();
             }

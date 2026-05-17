@@ -10,6 +10,7 @@
 
 pub mod games;
 pub mod input;
+pub mod sound;
 pub mod time;
 pub mod widgets;
 
