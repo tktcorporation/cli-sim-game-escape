@@ -12,8 +12,7 @@
 //! - 汎用: `click`, `select`, `error`
 //! - 購入系: `purchase`, `enhance`
 //! - 進化系: `level_up`
-//! - metropolis: `build_complete`
-//! - abyss: `gacha`, `hit_enemy`, `hit_hero`, `boss_appear`, `floor_clear`, `critical`
+//! - abyss: `gacha`, `hit_hero`, `boss_appear`, `floor_clear`, `critical`
 
 #[cfg(target_arch = "wasm32")]
 mod imp {
@@ -52,9 +51,7 @@ pub const ERROR: &str = "error";
 pub const PURCHASE: &str = "purchase";
 pub const ENHANCE: &str = "enhance";
 pub const LEVEL_UP: &str = "level_up";
-pub const BUILD_COMPLETE: &str = "build_complete";
 pub const GACHA: &str = "gacha";
-pub const HIT_ENEMY: &str = "hit_enemy";
 pub const HIT_HERO: &str = "hit_hero";
 pub const BOSS_APPEAR: &str = "boss_appear";
 pub const FLOOR_CLEAR: &str = "floor_clear";

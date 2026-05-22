@@ -297,33 +297,19 @@ impl Game for AbyssGame {
         };
         if let Some(a) = action {
             let save_after = is_save_worthy(a);
-            // logic::apply_action は () を返すので、消費したリソース (gold / souls /
-            // total_pulls) の変化で「コストが実際に発生した = 成功」と判定する。
-            // 失敗 (条件不足) なら state が動かないので ERROR を鳴らす。
-            let prev_gold = self.state.gold;
-            let prev_souls = self.state.souls;
-            let prev_pulls = self.state.total_pulls;
-            let prev_level = if let PlayerAction::EnhanceEquipment(id) = a {
-                self.state.equipment_levels[id.index()]
-            } else {
-                0
-            };
+            let ok = logic::apply_action(&mut self.state, a);
 
-            logic::apply_action(&mut self.state, a);
-
-            let s = &self.state;
+            // apply_action の成否でフィードバック音を出し分ける。失敗 (条件不足)
+            // は ERROR、成功は操作種別ごとの音。スクロールは連打されるので無音。
             match a {
                 PlayerAction::BuyEquipment(_) | PlayerAction::BuySoulPerk(_) => {
-                    let consumed = s.gold < prev_gold || s.souls < prev_souls;
-                    sound::play(if consumed { sound::PURCHASE } else { sound::ERROR });
+                    sound::play(if ok { sound::PURCHASE } else { sound::ERROR });
                 }
-                PlayerAction::EnhanceEquipment(id) => {
-                    let leveled_up = s.equipment_levels[id.index()] > prev_level;
-                    sound::play(if leveled_up { sound::ENHANCE } else { sound::ERROR });
+                PlayerAction::EnhanceEquipment(_) => {
+                    sound::play(if ok { sound::ENHANCE } else { sound::ERROR });
                 }
                 PlayerAction::GachaPull(_) => {
-                    let pulled = s.total_pulls > prev_pulls;
-                    sound::play(if pulled { sound::GACHA } else { sound::ERROR });
+                    sound::play(if ok { sound::GACHA } else { sound::ERROR });
                 }
                 PlayerAction::EquipItem(_)
                 | PlayerAction::SetTab(_)
@@ -331,9 +317,7 @@ impl Game for AbyssGame {
                 | PlayerAction::Retreat => {
                     sound::play(sound::CLICK);
                 }
-                PlayerAction::ScrollUp | PlayerAction::ScrollDown => {
-                    // スクロールは連打されるので無音にする。
-                }
+                PlayerAction::ScrollUp | PlayerAction::ScrollDown => {}
             }
 
             if save_after {
