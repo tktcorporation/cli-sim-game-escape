@@ -59,6 +59,7 @@ fn is_save_worthy(action: PlayerAction) -> bool {
             | PlayerAction::BuySoulPerk(_)
             | PlayerAction::GachaPull(_)
             | PlayerAction::Retreat
+            | PlayerAction::RetreatTo(_)
             | PlayerAction::ToggleAutoDescend
     )
 }
@@ -195,7 +196,12 @@ impl AbyssGame {
             TAB_GROUP_GACHA => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Gacha))),
             TAB_GROUP_SETTINGS => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Settings))),
             TOGGLE_AUTO_DESCEND => Some(PlayerAction::ToggleAutoDescend),
-            RETREAT_TO_SURFACE => Some(PlayerAction::Retreat),
+            RETREAT_TO_SURFACE => Some(PlayerAction::OpenRetreatDialog),
+            RETREAT_DIALOG_FULL => Some(PlayerAction::RetreatTo(1)),
+            RETREAT_DIALOG_PARTIAL => Some(PlayerAction::RetreatTo(
+                self.state.floor.saturating_sub(logic::RETREAT_PARTIAL_STEPS),
+            )),
+            RETREAT_DIALOG_CANCEL => Some(PlayerAction::CloseRetreatDialog),
             GACHA_PULL_1 => Some(PlayerAction::GachaPull(1)),
             GACHA_PULL_10 => Some(PlayerAction::GachaPull(10)),
             SCROLL_UP => Some(PlayerAction::ScrollUp),
@@ -241,6 +247,17 @@ impl AbyssGame {
     }
 
     fn key_to_action(&self, ch: char) -> Option<PlayerAction> {
+        // 撤退ダイアログ表示中はキー入力をダイアログ選択に占有させる。
+        if self.state.retreat_dialog_open {
+            return match ch {
+                '1' => Some(PlayerAction::RetreatTo(1)),
+                '2' => Some(PlayerAction::RetreatTo(
+                    self.state.floor.saturating_sub(logic::RETREAT_PARTIAL_STEPS),
+                )),
+                'p' | 'P' | 'q' | 'Q' => Some(PlayerAction::CloseRetreatDialog),
+                _ => None,
+            };
+        }
         match ch {
             // タブグループ切替。
             '{' => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Growth))),
@@ -248,7 +265,7 @@ impl AbyssGame {
             '}' => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Gacha))),
             '~' => Some(PlayerAction::SetTab(self.preserve_or_default(TabGroup::Settings))),
             'a' | 'A' => Some(PlayerAction::ToggleAutoDescend),
-            'p' | 'P' => Some(PlayerAction::Retreat),
+            'p' | 'P' if self.state.floor > 1 => Some(PlayerAction::OpenRetreatDialog),
             // 強化サブタブ: 1=武器 / 2=防具 / 3=装飾 lane の装着中装備を強化。
             // 「装着中の 3 装備しか強化できない」設計なので、数字キーは lane 番号に対応する。
             '1'..='3' if matches!(self.state.tab, Tab::Upgrades) => {
@@ -314,7 +331,10 @@ impl Game for AbyssGame {
                 PlayerAction::EquipItem(_)
                 | PlayerAction::SetTab(_)
                 | PlayerAction::ToggleAutoDescend
-                | PlayerAction::Retreat => {
+                | PlayerAction::Retreat
+                | PlayerAction::RetreatTo(_)
+                | PlayerAction::OpenRetreatDialog
+                | PlayerAction::CloseRetreatDialog => {
                     sound::play(sound::CLICK);
                 }
                 PlayerAction::ScrollUp | PlayerAction::ScrollDown => {}
@@ -496,12 +516,38 @@ mod tests {
         assert!(g.state.current_enemy.max_hp > 0);
     }
 
+    /// 'p' は即時撤退ではなく確認ダイアログを開く。'1' で B1F まで全撤退。
     #[test]
-    fn retreat_via_key() {
+    fn retreat_via_key_opens_dialog_then_confirms() {
         let mut g = AbyssGame::new();
         g.state.floor = 5;
         g.handle_input(&InputEvent::Key('p'));
+        assert!(g.state.retreat_dialog_open, "'p' はダイアログを開くだけ");
+        assert_eq!(g.state.floor, 5, "ダイアログを開いた時点では撤退しない");
+        g.handle_input(&InputEvent::Key('1'));
         assert_eq!(g.state.floor, 1);
+        assert!(!g.state.retreat_dialog_open, "撤退後はダイアログを閉じる");
+    }
+
+    /// '2' は RETREAT_PARTIAL_STEPS 階だけ戻る (現在地より浅いフロアへ)。
+    #[test]
+    fn retreat_dialog_partial_step() {
+        let mut g = AbyssGame::new();
+        g.state.floor = 50;
+        g.handle_input(&InputEvent::Key('p'));
+        g.handle_input(&InputEvent::Key('2'));
+        assert_eq!(g.state.floor, 50 - logic::RETREAT_PARTIAL_STEPS);
+        assert!(!g.state.retreat_dialog_open);
+    }
+
+    /// B1F では 'p' でダイアログを開かない (戻る先がない)。
+    #[test]
+    fn retreat_key_noop_at_surface() {
+        let mut g = AbyssGame::new();
+        assert_eq!(g.state.floor, 1);
+        let handled = g.handle_input(&InputEvent::Key('p'));
+        assert!(!handled);
+        assert!(!g.state.retreat_dialog_open);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ratzilla::ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
+use ratzilla::ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
@@ -24,7 +24,6 @@ pub struct AbyssLayout {
     pub combat: Rect,
     pub hero_panel: Rect,
     pub enemy_panel: Rect,
-    pub toggle: Rect,
     pub tab_bar: Rect,
     pub body: Rect,
 }
@@ -38,7 +37,6 @@ pub fn compute_layout(area: Rect) -> AbyssLayout {
         .constraints([
             Constraint::Length(header_height),
             Constraint::Length(combat_height),
-            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Min(8),
         ])
@@ -56,9 +54,8 @@ pub fn compute_layout(area: Rect) -> AbyssLayout {
         combat,
         hero_panel: halves[0],
         enemy_panel: halves[1],
-        toggle: chunks[2],
-        tab_bar: chunks[3],
-        body: chunks[4],
+        tab_bar: chunks[2],
+        body: chunks[3],
     }
 }
 
@@ -68,7 +65,6 @@ pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<Re
 
     render_header(state, f, l.header, narrow);
     render_combat(state, f, l.combat, narrow);
-    render_toggle_bar(state, f, l.toggle, click_state);
     render_tab_bar(state, f, l.tab_bar, click_state);
 
     let group = TabGroup::from_tab(state.tab);
@@ -103,6 +99,12 @@ pub fn render(state: &AbyssState, f: &mut Frame, area: Rect, click_state: &Rc<Re
         Tab::Souls => render_souls(state, f, body_chunks[content_idx], click_state),
     }
     render_log(state, f, body_chunks[log_idx]);
+
+    // 撤退ダイアログは全画面モーダル。同じ `<pre>` に上書き描画する
+    // (CLAUDE.md: オーバーレイは別 DOM 要素を生やさない)。
+    if state.retreat_dialog_open {
+        render_retreat_dialog(state, f, area, click_state);
+    }
 }
 
 // ── ヘッダ ─────────────────────────────────────────────────
@@ -375,25 +377,86 @@ fn make_progress_line(label: &'static str, frac: f32, width: u16, color: Color) 
     ]
 }
 
-// ── トグル行 ───────────────────────────────────────────────
+// ── 撤退ダイアログ ─────────────────────────────────────────
 
-fn render_toggle_bar(
-    _state: &AbyssState,
+/// 「浅瀬に戻る」確認ダイアログ。誤タップで一気に B1F へ戻る事故を防ぐため、
+/// 戻る深さを明示的に選ばせるモーダル。全画面に被せ、ポップアップ外のタップは
+/// キャンセル扱いにする (modal dismiss)。
+fn render_retreat_dialog(
+    state: &AbyssState,
     f: &mut Frame,
-    area: Rect,
+    full_area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    if area.height == 0 {
-        return;
-    }
-    let retreat_para = Paragraph::new(Line::from(Span::styled(
-        " 浅瀬に戻る △",
-        Style::default().fg(Color::LightCyan),
-    )))
-    .alignment(Alignment::Right);
+    let partial_target = state.floor.saturating_sub(logic::RETREAT_PARTIAL_STEPS).max(1);
+
+    let popup_w = 40u16.min(full_area.width.saturating_sub(2)).max(24);
+    let popup_h = 11u16.min(full_area.height.saturating_sub(2)).max(7);
+    let popup_x = full_area.x + (full_area.width.saturating_sub(popup_w)) / 2;
+    let popup_y = full_area.y + (full_area.height.saturating_sub(popup_h)) / 2;
+    let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::LightCyan))
+        .title(Span::styled(
+            " 浅瀬に戻る ",
+            Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+        ));
+
+    let mut cl = ClickableList::new();
+    cl.push(Line::from(Span::styled(
+        format!(" 現在 B{}F — どこまで戻りますか？", state.floor),
+        Style::default().fg(Color::White),
+    )));
+    cl.push(Line::from(""));
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(
+                " [1] ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "浅瀬 (B1F) まで戻る",
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        RETREAT_DIALOG_FULL,
+    );
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(
+                " [2] ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "{}階戻る → B{}F",
+                    logic::RETREAT_PARTIAL_STEPS,
+                    partial_target
+                ),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        RETREAT_DIALOG_PARTIAL,
+    );
+    cl.push(Line::from(""));
+    cl.push_clickable(
+        Line::from(Span::styled(
+            " [×] キャンセル",
+            Style::default().fg(Color::DarkGray),
+        )),
+        RETREAT_DIALOG_CANCEL,
+    );
 
     let mut cs = click_state.borrow_mut();
-    Clickable::new(retreat_para, RETREAT_TO_SURFACE).render(f, area, &mut cs);
+    // ポップアップ外のタップをキャンセル扱いにする (modal dismiss)。空 Paragraph は
+    // セルを書き換えないので下地は残る。ClickableList より先に登録するので、
+    // hit_test の reverse 走査でポップアップ内ボタンが優先される。
+    Clickable::new(Paragraph::new(""), RETREAT_DIALOG_CANCEL).render(f, full_area, &mut cs);
+    // 下地が透けないよう、まず不透明ブロックで塗りつぶしてから内容を描く。
+    f.render_widget(Paragraph::new("").block(block.clone()), popup_area);
+    cl.render(f, popup_area, block, &mut cs, true, 0);
 }
 
 // ── タブバー ───────────────────────────────────────────────
@@ -1235,6 +1298,34 @@ fn render_settings(
         )));
     }
 
+    cl.push(Line::from(""));
+    if state.floor > 1 {
+        cl.push_clickable(
+            Line::from(vec![
+                Span::styled(
+                    " 浅瀬に戻る △  ",
+                    Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("(タップで確認)", Style::default().fg(Color::DarkGray)),
+            ]),
+            RETREAT_TO_SURFACE,
+        );
+        if !narrow {
+            cl.push(Line::from(Span::styled(
+                format!("   現在 B{}F — 戻る深さを選んでから撤退する", state.floor),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    } else {
+        cl.push(Line::from(vec![
+            Span::styled(
+                " 浅瀬に戻る △  ",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("(B1F 滞在中)", Style::default().fg(Color::DarkGray)),
+        ]));
+    }
+
     render_scrollable_tab(
         state,
         f,
@@ -1721,6 +1812,69 @@ mod tests {
             }
         }
         assert!(found, "購入ターゲット {} が登録されていない", target);
+    }
+
+    /// 設定タブ: 潜行中 (floor>1) は「浅瀬に戻る」ボタンが登録される。
+    #[test]
+    fn settings_tab_registers_retreat_open_when_deep() {
+        let mut state = AbyssState::new();
+        state.tab = Tab::Settings;
+        state.floor = 5;
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
+        let cs = cs.borrow();
+        let mut found = false;
+        for y in 0..30 {
+            for x in 0..80 {
+                if cs.hit_test(x, y) == Some(RETREAT_TO_SURFACE) {
+                    found = true;
+                }
+            }
+        }
+        assert!(found, "潜行中は浅瀬に戻るボタンが登録されるべき");
+    }
+
+    /// B1F では「浅瀬に戻る」ボタンを登録しない (戻る先がない)。
+    #[test]
+    fn settings_tab_no_retreat_button_at_surface() {
+        let mut state = AbyssState::new();
+        state.tab = Tab::Settings;
+        assert_eq!(state.floor, 1);
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
+        let cs = cs.borrow();
+        for y in 0..30 {
+            for x in 0..80 {
+                assert_ne!(cs.hit_test(x, y), Some(RETREAT_TO_SURFACE));
+            }
+        }
+    }
+
+    /// 撤退ダイアログ表示中: 3 つの選択肢と、外側タップのキャンセル領域が登録される。
+    #[test]
+    fn retreat_dialog_registers_choice_targets() {
+        let mut state = AbyssState::new();
+        state.tab = Tab::Settings;
+        state.floor = 30;
+        state.retreat_dialog_open = true;
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
+        let cs = cs.borrow();
+        let (mut full, mut partial, mut cancel) = (false, false, false);
+        for y in 0..30 {
+            for x in 0..80 {
+                match cs.hit_test(x, y) {
+                    Some(RETREAT_DIALOG_FULL) => full = true,
+                    Some(RETREAT_DIALOG_PARTIAL) => partial = true,
+                    Some(RETREAT_DIALOG_CANCEL) => cancel = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(full && partial && cancel, "撤退ダイアログの選択肢が揃うべき");
     }
 
     /// 所持済み (未装着) の装備に EQUIP_ITEM_BASE クリックターゲットが登録されること。

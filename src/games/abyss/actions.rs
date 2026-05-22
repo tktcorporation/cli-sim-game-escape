@@ -20,7 +20,16 @@ pub const TAB_GROUP_SETTINGS: u16 = 53;
 
 // ── トグル / 操作 ─────────────────────────────────────────
 pub const TOGGLE_AUTO_DESCEND: u16 = 20;
+/// 「浅瀬に戻る」確認ダイアログを開く (設定タブのボタン)。
 pub const RETREAT_TO_SURFACE: u16 = 21;
+
+// ── 浅瀬に戻る確認ダイアログ ──────────────────────────────
+/// 一気に B1F まで戻る。
+pub const RETREAT_DIALOG_FULL: u16 = 22;
+/// `RETREAT_PARTIAL_STEPS` 階分だけ戻る。
+pub const RETREAT_DIALOG_PARTIAL: u16 = 23;
+/// ダイアログを閉じる (撤退しない)。
+pub const RETREAT_DIALOG_CANCEL: u16 = 24;
 
 // ── 魂強化購入 (base + SoulPerk::index, 0..4) ─────────────
 pub const BUY_SOUL_PERK_BASE: u16 = 200;

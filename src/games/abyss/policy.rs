@@ -23,7 +23,14 @@ pub enum PlayerAction {
     /// 魂強化を 1 段階購入する。
     BuySoulPerk(SoulPerk),
     ToggleAutoDescend,
+    /// 一気に B1F へ戻る。simulator / policy 用の撤退表現。
     Retreat,
+    /// 指定フロアまで撤退する (target は 1 以上にクランプ)。確認ダイアログの選択肢から発火。
+    RetreatTo(u32),
+    /// 浅瀬に戻る確認ダイアログを開く。**UI only**。
+    OpenRetreatDialog,
+    /// 浅瀬に戻る確認ダイアログを閉じる。**UI only**。
+    CloseRetreatDialog,
     SetTab(Tab),
     /// ガチャを `count` 回引く。
     GachaPull(u32),

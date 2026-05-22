@@ -502,6 +502,19 @@ pub fn apply_action(state: &mut AbyssState, action: PlayerAction) -> bool {
             retreat(state);
             true
         }
+        PlayerAction::RetreatTo(target) => {
+            retreat_to(state, target);
+            state.retreat_dialog_open = false;
+            true
+        }
+        PlayerAction::OpenRetreatDialog => {
+            state.retreat_dialog_open = true;
+            true
+        }
+        PlayerAction::CloseRetreatDialog => {
+            state.retreat_dialog_open = false;
+            true
+        }
         PlayerAction::SetTab(tab) => {
             set_tab(state, tab);
             true
@@ -668,14 +681,24 @@ fn base_normal_gold(floor: u32, config: &BalanceConfig) -> u64 {
     g.round().max(1.0) as u64
 }
 
+/// 「○階だけ戻る」選択肢で一度に戻れる階数。
+pub const RETREAT_PARTIAL_STEPS: u32 = 10;
+
 /// 自分の意思で浅瀬 (B1F) に戻る。
 pub fn retreat(state: &mut AbyssState) {
-    if state.floor == 1 {
-        state.add_log("既に B1F に居る");
+    retreat_to(state, 1);
+}
+
+/// 自分の意思で指定フロアまで戻る (target は 1 以上にクランプ)。
+/// 現在地より浅いフロアにしか戻れない (潜行は通常の戦闘でのみ進む)。
+pub fn retreat_to(state: &mut AbyssState, target: u32) {
+    let target = target.max(1);
+    if state.floor <= target {
+        state.add_log("既にその深さより浅い");
         return;
     }
-    state.add_log(format!("△ 自主撤退: B{}F → B1F", state.floor));
-    state.floor = 1;
+    state.add_log(format!("△ 自主撤退: B{}F → B{}F", state.floor, target));
+    state.floor = target;
     state.floor_kind = FloorKind::Normal;
     state.kills_on_floor = 0;
     state.hero_hp = state.hero_max_hp();
