@@ -1052,8 +1052,7 @@ mod tests {
         // House や Road がまだ整っていないセルでは一時的に inactive 状態が発生し、
         // waste カウントが配置時より増えることがある。本テストの本来意図は
         // 「上位 Tier の AI が街を成長させる」点にあるため、ここでは絶対 waste 量
-        // ではなく成長軸 (pop / cash) で進行を担保する。inactive 比率の縛りは
-        // stagnation breaker (`stagnation_started_tick` 経由) と一緒に再導入する。
+        // ではなく成長軸 (pop / cash) で進行を担保する。
         assert!(
             pop_after > pop_before,
             "cleanup should grow population (before={} after={})",
@@ -1290,5 +1289,96 @@ mod tests {
             idle_with_cash,
             total,
         );
+    }
+
+    /// 複数 seed で「進捗イベント間隔が破滅的に空かない」「同セル振動が起きない」
+    /// を横断確認する頑健性テスト。単一 seed (INV_SEED) の不変条件 pass が、
+    /// たまたまその seed の地形に依存していないことを担保する。
+    ///
+    /// 各 seed 10 分 (= 600 sec) と短めにするのは、停滞・振動は序盤〜中盤で
+    /// 顕在化するため (30 分まで回さなくても検出できる) と、4 seed 分の実行
+    /// 時間を抑えるため。停滞の上限は 30 分 (1800 sec) 基準より短い 600 sec 窓
+    /// では「ベンチ期間 = 600 sec を丸ごと停滞」を禁じる形で 600 を使う。
+    #[test]
+    #[ignore = "multi-seed robustness; --ignored で手動実行"]
+    fn no_stagnation_across_seeds_tier4() {
+        let seeds: [u64; 4] = [0xC1A5_5EED, 0xDEAD_BEEF, 42, 0xFEED_FACE];
+        let span = 600u32;
+        for seed in seeds {
+            let (samples, actions) =
+                run_diagnostic(seed, AiTier::Planner, Strategy::Income, INV_WORKERS, span, 1);
+
+            // 進捗イベント間隔の最大値。
+            let mut progress_secs: Vec<u32> = Vec::new();
+            for r in &actions {
+                if matches!(r.outcome, ActionOutcome::Applied)
+                    && !matches!(r.action, AiAction::Idle)
+                {
+                    progress_secs.push(r.sec);
+                }
+            }
+            let mut last_built = samples.first().map(|s| s.built).unwrap_or(0);
+            for s in samples.iter().skip(1) {
+                if s.built > last_built {
+                    progress_secs.push(s.sec);
+                    last_built = s.built;
+                }
+            }
+            progress_secs.sort_unstable();
+            let mut prev = 0u32;
+            let mut max_gap = 0u32;
+            for &sec in &progress_secs {
+                max_gap = max_gap.max(sec.saturating_sub(prev));
+                prev = sec;
+            }
+            max_gap = max_gap.max(span.saturating_sub(prev));
+
+            // 同セル 60s 窓 3 回振動チェック。
+            use std::collections::BTreeMap;
+            let mut by_cell: BTreeMap<(usize, usize), Vec<u32>> = BTreeMap::new();
+            for r in &actions {
+                if !matches!(r.outcome, ActionOutcome::Applied) {
+                    continue;
+                }
+                if let AiAction::Build { x, y, .. }
+                | AiAction::Demolish { x, y }
+                | AiAction::Replace { x, y, .. } = &r.action
+                {
+                    by_cell.entry((*x, *y)).or_default().push(r.sec);
+                }
+            }
+            let mut oscillating = 0usize;
+            for secs in by_cell.values() {
+                let mut left = 0usize;
+                for right in 0..secs.len() {
+                    while secs[right] - secs[left] >= 60 {
+                        left += 1;
+                    }
+                    if right - left + 1 >= 3 {
+                        oscillating += 1;
+                        break;
+                    }
+                }
+            }
+
+            let final_snap = samples.last().expect("at least one sample");
+            eprintln!(
+                "[multi-seed] seed=0x{:08X} max_gap={}s oscillating_cells={} final_pop={} built={}",
+                seed, max_gap, oscillating, final_snap.pop, final_snap.built
+            );
+
+            assert!(
+                max_gap < span,
+                "seed 0x{:08X}: progress gap {}s spans the whole {}s bench (= total stall)",
+                seed,
+                max_gap,
+                span
+            );
+            assert_eq!(
+                oscillating, 0,
+                "seed 0x{:08X}: {} cells oscillate (>=3 events in 60s)",
+                seed, oscillating
+            );
+        }
     }
 }

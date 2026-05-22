@@ -375,10 +375,6 @@ fn advance_construction(city: &mut City) {
     // ここでも invalidate する。tick 終了時の一括クリアと二重防御。
     if mutated {
         city.invalidate_population_cache();
-        // 完成・整地完了を進捗イベントとして記録。着工・撤去側 (`start_construction` /
-        // `demolish_at`) でも同様に更新するため、ここは「Construction が自律的に完了する
-        // 経路」専用の更新点として併存させる。
-        city.last_progress_tick = city.tick;
     }
 }
 
@@ -781,7 +777,6 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
             ticks_remaining: terrain.clearing_ticks(),
         };
         city.invalidate_population_cache();
-        city.last_progress_tick = city.tick;
         city.push_event(format!(
             "⛏ ({},{}) 整地着工 ({}) -${}",
             x,
@@ -803,7 +798,6 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
         ticks_remaining: ticks,
     };
     city.invalidate_population_cache();
-    city.last_progress_tick = city.tick;
     city.buildings_started += 1;
     // Outpost 派遣統計: AI が `evaluate` 経由で Outpost を選んだ時にも
     // カウントされるよう、start_construction でフックする (= 旧 dispatch_outpost
@@ -2236,7 +2230,6 @@ pub fn demolish_at(city: &mut City, x: usize, y: usize) -> bool {
     city.cash_spent_total += cost;
     city.grid[y][x] = Tile::Empty;
     city.invalidate_population_cache();
-    city.last_progress_tick = city.tick;
     // 既存フラッシュをリセット (古い完成フラッシュが残ると違和感)。
     city.completion_flash_until[y][x] = 0;
     city.payout_flash_until[y][x] = 0;
