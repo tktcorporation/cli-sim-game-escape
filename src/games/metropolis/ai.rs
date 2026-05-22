@@ -1,14 +1,15 @@
-//! AI brains — 将棋AI 風のレベル別設計。
+//! AI brains — レベル別設計。
 //!
-//! **アーキテクチャ**: 各 Tier は **同じ評価関数 + 探索インフラ**
-//! (`logic::evaluate` / `logic::action_value` / `logic::search_best_action`) を
-//! 使い、差分は次の3つだけ:
+//! **アーキテクチャ**: 全 Tier が共通の 1 手読み探索 (`logic::rank_actions` /
+//! `logic::rank_actions_full`) を使い、差分は次の3つだけ:
 //!   - 評価関数: Tier 1 はなし、Tier 2 は簡易、Tier 3+ はフル
-//!   - 探索深さ: Tier 2/3 は depth=1、Tier 4 は depth=2、Tier 5 は depth=3
+//!   - 候補数 (top_k): Tier 2 は 6、Tier 3 は 8、Tier 4 は 20、Tier 5 は 30
 //!   - ノイズ%: Tier 2 は 30%、Tier 3 は 5%、Tier 4/5 は 0%
 //!
-//! Stockfish Skill Level / ぴよ将棋の段位設計と同じ「自然な弱さ」思想 —
-//! 視野 (探索深さ) を狭めることで自然に悪手が出る。明示ブランダーは入れない。
+//! 探索深さは全 Tier で 1 に固定する。Beam Search の知見 (heuristic が悪ければ
+//! 深く探しても無駄、広く正確に評価する方が深さより効く) に従い、巧拙は
+//! 「評価する候補数の広さ」で表現する。明示ブランダーは入れず、上位 Tier
+//! ほど広い候補を漏れなく見ることで自然に良い手を選ぶ。
 
 use super::state::*;
 
@@ -115,22 +116,29 @@ fn tier3_aware(city: &mut City) -> AiAction {
     super::logic::pick_with_noise(&ranked, 5, rng).unwrap_or(AiAction::Idle)
 }
 
-/// Tier 4 (三段) — 2手読み + フル評価。
+/// Tier 4 (三段) — 1手読み + フル評価 + 広めの候補数。
 ///
-/// **キャラクター**: 「道路を引いて家を建てる」のような 1手目+2手目の連携を
-/// 発見できる。Tier 3 からの差は **探索深さだけ** (評価関数は同じ)。
+/// **キャラクター**: Tier 3 と同じ評価軸を、より広い候補集合に当てる。
+/// Tier 3 の top 8 では `rank_actions_full` の pre-rank に依存して落ちる
+/// 「cheap_score では微妙だが full evaluate では伸びる手」を top 20 で
+/// 拾い切る。「広く正確に見るから良い手が選べる」型の巧さ。
 fn tier4_planner(city: &mut City) -> AiAction {
-    super::logic::search_best_action_full(city, 2, 4).unwrap_or(AiAction::Idle)
+    super::logic::rank_actions_full(city, 20)
+        .into_iter()
+        .next()
+        .map(|(a, _)| a)
+        .unwrap_or(AiAction::Idle)
 }
 
-/// Tier 5 (アマ高段) — 3手読み + フル評価 + 狭めの beam。
+/// Tier 5 (アマ高段) — 1手読み + フル評価 + 最広候補数。
 ///
-/// **キャラクター**: 「Outpost を派遣 → 道路を伸ばす → Highrise化」のような
-/// 3手目までの長期投資が見える。Tier 4 からの差は **探索深さ**。
-///
-/// beam 幅 K=4 と狭め: depth=3 で計算量が `K × K/2 × N` まで膨らむため、
-/// 30 分シミュ (= 18000 ticks × 10 candidates) が現実時間で終わる範囲に絞る。
-/// 深さで「先読みできる」を表現し、K で広さは抑える将棋エンジン的バランス。
+/// **キャラクター**: Tier 4 を更に拡張し、Demolish / Replace を含む全候補から
+/// 全 evaluate を回せる広さ (top 30) を取る。saturated map で「どのセルを
+/// 再開発するか」のような微差勝負の局面で Tier 4 を上回る。
 fn tier5_master(city: &mut City) -> AiAction {
-    super::logic::search_best_action_full(city, 3, 4).unwrap_or(AiAction::Idle)
+    super::logic::rank_actions_full(city, 30)
+        .into_iter()
+        .next()
+        .map(|(a, _)| a)
+        .unwrap_or(AiAction::Idle)
 }

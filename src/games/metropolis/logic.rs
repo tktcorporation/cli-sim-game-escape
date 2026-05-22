@@ -238,19 +238,39 @@ pub fn apply_ai_action(city: &mut City, action: super::ai::AiAction) -> bool {
     match action {
         super::ai::AiAction::Build { x, y, kind } => start_construction(city, x, y, kind),
         super::ai::AiAction::Demolish { x, y } => demolish_at(city, x, y),
-        // production でも atomic に「demolish + 即着工」する。評価関数が
-        // Replace の価値を「両方適用後の状態」で見積もっているので、production
-        // で半分しか実行されないと AI の意図と実効果が乖離する。1 tick に
-        // demolish + start_construction を続けて走らせ、worker は Construction
-        // phase で 1 つだけ消費 (Build alone と同じコスト)。
-        super::ai::AiAction::Replace { x, y, kind } => {
-            if !demolish_at(city, x, y) {
-                return false;
-            }
-            start_construction(city, x, y, kind)
-        }
+        super::ai::AiAction::Replace { x, y, kind } => apply_replace_preserving_age(city, x, y, kind),
         super::ai::AiAction::Idle => true,
     }
+}
+
+/// Replace の唯一の入口。Demolish + Build を atomic に実行し、aging factor の
+/// 起点 (`built_at_tick`) を旧建物から継承する。
+///
+/// 継承の意図: 同セル建て替えは「同じ建物の世代交代」とみなし、Mall→MegaMall の
+/// ような連続置換でも経年が積算される (= 収入減衰が positive loop の dampener と
+/// して機能し、連続 Replace の旨味を奪う)。「撤去して別用途に転用」したい場合は
+/// `AiAction::Demolish` 経由で別 tick に再建する経路が用意されており、そちらでは
+/// `demolish_at` が `built_at_tick` を 0 にリセットするので新築扱いとなる。
+///
+/// **同期 AI (`drive_ai_with_observer`) と非同期 worker (`apply_ai_action`) の
+/// 両経路から呼ばれる**。両者で aging 継承挙動を一致させるための共通ヘルパー。
+///
+/// 戻り値: demolish_at → start_construction が両方成功した場合のみ true。
+/// 座標が GRID 外、cash 不足等で失敗した場合は false (この時点で demolish 単独
+/// が成功していると tile は Empty に変わるが、Replace としては「失敗」扱い)。
+fn apply_replace_preserving_age(city: &mut City, x: usize, y: usize, kind: Building) -> bool {
+    if x >= GRID_W || y >= GRID_H {
+        return false;
+    }
+    let saved_built_at = city.built_at_tick[y][x];
+    if !demolish_at(city, x, y) {
+        return false;
+    }
+    let ok = start_construction(city, x, y, kind);
+    if ok {
+        city.built_at_tick[y][x] = saved_built_at;
+    }
+    ok
 }
 
 /// ティア境界を跨いだら演出をトリガー。AI 撤去で人口が一時的に減ることは
@@ -314,9 +334,14 @@ fn advance_construction(city: &mut City) {
                         *tile = Tile::Built(kind);
                         city.buildings_finished += 1;
                         // 「築 0 の起点」を記録。aging_factor / effective_house_tier の
-                        // 基準点になる。撤去/再建で常に上書きされるため、その建物の
-                        // 経年と Tier 昇格 dwell time の唯一のソース。
-                        city.built_at_tick[y][x] = city.tick;
+                        // 基準点になる。撤去経由 (`demolish_at`) で built_at_tick=0 に
+                        // 戻ったセルは新築扱いで city.tick を打つ。一方、Replace は
+                        // `apply_ai_action` 側で旧 tick を継承させた状態でこの経路に
+                        // 入るため、ここで上書きしてはならない (継承値を維持して
+                        // aging factor が積算されるようにする)。
+                        if city.built_at_tick[y][x] == 0 {
+                            city.built_at_tick[y][x] = city.tick;
+                        }
                         completions.push((x, y, kind));
                     } else {
                         *ticks_remaining -= 1;
@@ -480,11 +505,11 @@ where
                 return;
             }
             AiAction::Replace { x, y, kind } => {
-                // production でも atomic に「demolish + 即着工」する。評価と
-                // 実効果を一致させるため、半分だけ実行されると AI の意図 (= 評価
-                // 関数が Replace に与えたスコア) が production に反映されない。
-                let applied = demolish_at(city, *x, *y)
-                    && start_construction(city, *x, *y, *kind);
+                // 評価関数が Replace を「両方適用後の状態」で見積もっているため
+                // 同 tick 内で atomic に demolish + 着工する (半分のみ反映だと
+                // AI の意図が production に伝わらない)。aging 継承は共通ヘルパーが
+                // 担保する。
+                let applied = apply_replace_preserving_age(city, *x, *y, *kind);
                 let outcome = if applied {
                     ActionOutcome::Applied
                 } else {
@@ -900,8 +925,8 @@ pub(super) fn fill_pop_and_tier_maps(
 }
 
 /// `fill_pop_and_tier_maps` の **target tier も埋める** 版。
-/// `tier_promotion_forecast` が target と effective の差分を per-House 再 scan
-/// なしに集計できる。
+/// AI 評価側で target と effective Tier の差分 (= 昇格余地) を per-House の再
+/// scan なしに集計できる。
 #[allow(clippy::needless_range_loop)]
 pub(super) fn fill_pop_tier_target_maps(
     city: &City,
@@ -923,7 +948,7 @@ pub(super) fn fill_pop_tier_target_maps(
 
 /// `fill_pop_tier_target_maps` + house 位置リスト出力版。
 /// `house_positions` は呼び側で `EvalScratch` から提供してもらう。
-/// `tier_promotion_forecast` 等の per-House 集計が全グリッド舐めずに済む。
+/// AI 評価側の per-House 集計が全グリッドを舐めずに済む。
 #[allow(clippy::needless_range_loop)]
 pub(super) fn fill_pop_tier_target_with_positions(
     city: &City,
@@ -1358,13 +1383,13 @@ pub fn cached_edge_connected_roads(city: &City) -> std::rc::Rc<Vec<Vec<bool>>> {
 /// `compute_income_per_sec` の cents/sec 解像度版。AI 評価関数の基底として使う。
 ///
 /// dollars/sec は AI 評価に粒度が荒すぎる ($0.50 が 0 に丸まる) ため cents/sec を
-/// 公開する。`evaluate` で BFS 結果を `road_network_value` /
-/// `inactive_building_penalty_with` と共有して、評価 1 回あたり BFS 1 回に抑える。
+/// 公開する。`evaluate` から `cached_edge_connected_roads` の BFS 結果を渡してもらい、
+/// 同一 tick 内の連結性判定を使い回せるようにする (Shop / Workshop 活性化判定で利用)。
 pub fn compute_income_per_sec_cents_with(city: &City, connected: &[Vec<bool>]) -> i64 {
     let mut scratch_ref = city.eval_scratch.borrow_mut();
     let scratch = &mut *scratch_ref;
-    // target tier + House 位置リストも同時に埋めて `tier_promotion_forecast` が
-    // 再 scan / 全 grid iterate を回避できるようにする。
+    // target tier + House 位置リストも同時に埋めて、forecast 集計 (target と
+    // effective Tier の差分) が再 scan / 全 grid iterate を回避できるようにする。
     fill_pop_tier_target_with_positions(
         city,
         connected,
@@ -2297,23 +2322,26 @@ pub fn hire_worker(city: &mut City) -> bool {
     true
 }
 
-// ── 将棋AI 風 評価関数 / 探索 ─────────────────────────────────
+// ── 評価関数 / 1 手読み探索 ─────────────────────────────────
 //
-// **思想**: 「この街局面の良さを 1 つの数値で表す」評価関数 (= shogi 評価関数) と、
-// 「全合法手を仮想着手して評価値を最大化する手を選ぶ」探索 (= alpha-beta の単一
-// エージェント版) で AI を構成する。Tier 差は **探索深さ + 評価ノイズ** で作り、
-// 評価関数自体は全 Tier 共通 (Stockfish Skill Level / ぴよ将棋 と同じ思想)。
+// **思想**: 「この街局面の良さを 1 つの数値で表す」評価関数と、「全合法手を
+// 仮想着手して評価値を最大化する手を選ぶ」1 手読み探索で AI を構成する。
+// 探索は全 Tier で depth = 1 に統一し、Tier 差は **評価する候補数の広さ +
+// 評価ノイズ** で作る (Beam Search の知見: heuristic が悪ければ深く探しても
+// 無駄。広く正確に評価する方が深さより効く)。評価関数自体は全 Tier 共通。
 //
-// 評価値の主成分は cents/sec (= `compute_income_per_sec_cents`) で、これに
-// strategy / outpost / inactive penalty / road network 等の heuristic bonus を
-// 加算した値が `evaluate` の戻り値。行動は **Δevaluate** (評価値の差分) で比較する。
+// 評価値は 2 軸の単純加算: `compute_income_per_sec_cents`(現在の収益) +
+// `stagnation_penalty`(街が止まっているかの減点)。それ以外の戦略的選好
+// (Eco の Park 偏重、Tech の道路偏重 など) は `cheap_action_score` の pre-rank
+// 段階で乗せる方針に統一し、評価関数自体は軽量に保つ。
 // affordability は `enumerate_actions` の事前フィルタで担保されているので、cost を
 // 評価値から控除しなくても「買えない物を選び続ける」事故は起きない。
 
-/// 評価関数 (アマ初段〜プロ相当)。
-/// 「街全体の cents/sec」+ thematic bonus + Outpost territory bonus
-/// + inactive 建物 penalty + 道路網健全性。Tier 3 以上で共通、
-/// Tier 差は探索深さで作る。
+/// 評価関数。「街全体の cents/sec」+「停滞ペナルティ」の 2 成分加算。
+///
+/// 第 1 成分は実際の収益で、街の現在価値を直接表現する。第 2 成分は
+/// 「この局面が停滞シグナルを出していないか」を 0 か負の値で表現する
+/// (詳細は `stagnation_penalty` を参照)。
 ///
 /// House の未実現 Tier 昇格期待値 (forecast) は **`cheap_action_score`** に
 /// 入れており、ここには含めない。理由: forecast を per-evaluate に積むと AI
@@ -2321,603 +2349,55 @@ pub fn hire_worker(city: &mut City) -> bool {
 /// を変える方が perf 影響なく serving と同じ効果を得られる。
 pub fn evaluate(city: &City) -> i64 {
     let connected = cached_edge_connected_roads(city);
-    compute_income_per_sec_cents_with(city, &connected)
-        + strategy_thematic_bonus(city)
-        + outpost_territory_bonus(city)
-        + inactive_building_penalty_with(city, &connected)
-        + road_network_value(city, &connected)
+    compute_income_per_sec_cents_with(city, &connected) + stagnation_penalty(city, &connected)
 }
 
-/// House Tier ごとの基本 income (cents/sec、`tile_income_cents_with_tier` の
-/// House 分岐と同じ表)。`tier_promotion_forecast` で gap 計算に使う。
-fn tier_base_income_cents(tier: HouseTier) -> i64 {
-    match tier {
-        HouseTier::Cottage => 50,
-        HouseTier::Apartment => 150,
-        HouseTier::Highrise => 300,
-        HouseTier::Tower => 600,
-        HouseTier::Arcology => 1_200,
-    }
-}
-
-/// 道路網の「街にとっての価値」(cents/sec 単位)。2 成分の単一指標:
+/// 街の「停滞シグナル」を 0 か負の値で返すペナルティ。
 ///
-/// 1. **frontier 拡張余地**: 幹線網 (= edge-connected Road) に隣接する Empty buildable
-///    セル × `FRONTIER_PER_CELL`。「将来そこに建物が建てられる」期待値。
-/// 2. **孤立 Road ペナルティ**: edge-connected で無い Road タイル × `-ISOLATED_PENALTY`。
-///    マップ外と物流が繋がらない Road は無駄なので、AI が自動で撤去候補にできるように
-///    マイナス計上。
+/// 純粋な income/sec 評価では、機能不全建物 (inactive Shop など) を撤去しても
+/// Δincome ≈ 0 になり AI が放置する。「セルが他用途に使えるはず」という機会
+/// コストを乗せることで、撤去 action が並行する Build 候補 (House 等) を
+/// 上回るようにする。
 ///
-/// **単一指標で 3 症状を捕まえる設計**:
-///   - 死に道路 (孤立 Road): 成分 2 で直接ペナルティ → 撤去で +Δ
-///   - あみあみ (冗長な平行 Road): 既に隣接フロンティアがある領域に追加 Road しても
-///     成分 1 の Δ がほぼ 0 → AI が選好しない
-///   - 道路を囲んで拡張不能化: 成分 1 のフロンティアセルを建物が消費する形で -Δ →
-///     周辺がすべて Built だと Road の expansion 余地が無くなり、評価が落ちる
-fn road_network_value(city: &City, connected: &[Vec<bool>]) -> i64 {
-    const FRONTIER_PER_CELL: i64 = 8;
-    // Isolated Road の demolish_cost は外周ほど 2 次関数的に大きい
-    // (距離 12 で $770 → 43 cents/sec amort)。撤去 action_value が build (~+48 cents/sec
-    // for edge-connected House) を上回るには、penalty ≥ 距離 12 の amort + 48 = ~91。
-    // 100 にすることで距離 ~12 までは確実に撤去候補として勝つ。
-    const ISOLATED_PENALTY: i64 = 100;
-    // `frontier_potential_value` は `eval_scratch.borrow_mut()` を取るので、本関数の
-    // borrow_mut より前に呼んで guard を解放させる必要がある。順序を入れ替えると
-    // RefCell の二重 mut borrow で runtime panic。
-    let potential = frontier_potential_value(city, connected);
-    let mut scratch = city.eval_scratch.borrow_mut();
-    let visited = &mut scratch.frontier_visited;
-    for row in visited.iter_mut() {
-        row.fill(false);
-    }
-    let mut frontier_count = 0i64;
-    let mut isolated_roads = 0i64;
-    #[allow(clippy::needless_range_loop)] // (y, x) を直接 connected[y][x] 参照に使うため enumerate 化はしない
-    for y in 0..GRID_H {
-        for x in 0..GRID_W {
-            if !matches!(city.tile(x, y), Tile::Built(Building::Road)) {
-                continue;
-            }
-            if !connected[y][x] {
-                isolated_roads += 1;
-                continue;
-            }
-            for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-                let nx = x as i32 + dx;
-                let ny = y as i32 + dy;
-                if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
-                    continue;
-                }
-                let (nx, ny) = (nx as usize, ny as usize);
-                if visited[ny][nx] {
-                    continue;
-                }
-                if !matches!(city.tile(nx, ny), Tile::Empty) {
-                    continue;
-                }
-                let t = city.terrain_at(nx, ny);
-                if !t.buildable() {
-                    continue;
-                }
-                // Rock セルは隣接 Outpost が無いと start_construction に通らないので、
-                // 「現に建てられる」フロンティアにはカウントしない。
-                if t.needs_outpost() && !has_outpost_neighbor(city, nx, ny) {
-                    continue;
-                }
-                visited[ny][nx] = true;
-                frontier_count += 1;
-            }
-        }
-    }
-    frontier_count * FRONTIER_PER_CELL - isolated_roads * ISOLATED_PENALTY + potential
-}
-
-/// 「edge-connected Road から橋を伸ばせば届く Empty buildable セル」の見込み価値。
-///
-/// edge-connected Road 群を距離 0 として BFS し、Empty buildable / 任意 Road を
-/// 通過可能としてグリッド全体に距離マップを敷く。距離 d ≥ 2 の Empty buildable
-/// セルに `potential_credit_for_distance(d)` の credit を加算する。
-///
-/// 距離 1 セルは `road_network_value` の `frontier_count * FRONTIER_PER_CELL` で
-/// 既にカウントされる範囲なのでスキップする (二重計上回避)。
-///
-/// **通過可能性**:
-/// - `Tile::Built(Building::Road)`: edge-connected 判定の前段で全 Road が同一
-///   グラフに繋がるので、非接続な Road クラスタの先にある Empty も拾える。
-/// - `Tile::Empty` で `terrain.buildable() && (!needs_outpost() || 隣接 Outpost あり)`:
-///   実際に Road を敷ける地形だけを橋として認める。Rock や水・山は壁扱い。
-/// - その他 (House 等 Built / Construction / Clearing): 壁扱い。撤去前提の橋渡しを
-///   AI に意識させたいので、Built の上を素通りさせない。
-fn frontier_potential_value(city: &City, connected: &[Vec<bool>]) -> i64 {
-    // `potential_credit_for_distance` の最大有意距離 — これ以上 enqueue しても credit 0。
-    // 巨大な open area でも BFS の訪問数を Manhattan ボール内に抑えるための上限。
-    const MAX_CREDIT_DIST: u32 = 7;
-
-    // AI look-ahead の continuation 評価 (depth>=2) では potential をスキップ。
-    // depth=1 の rank で既に potential 込みで上位候補が決まり、その後の深さ探索は
-    // 「その手のあと相手 (実際は自分の次手) は何を打つか」の近似でしかないので、
-    // BFS コストをかけて再評価する利得がない。
-    if city.eval_skip_potential.get() {
-        return 0;
-    }
-
-    let mut scratch = city.eval_scratch.borrow_mut();
-    let super::state::EvalScratch {
-        potential_dist: dist,
-        potential_queue: queue,
-        ..
-    } = &mut *scratch;
-    for row in dist.iter_mut() {
-        row.fill(u32::MAX);
-    }
-    queue.clear();
-    for y in 0..GRID_H {
-        for x in 0..GRID_W {
-            if matches!(city.tile(x, y), Tile::Built(Building::Road)) && connected[y][x] {
-                dist[y][x] = 0;
-                queue.push_back((x, y));
-            }
-        }
-    }
-    if queue.is_empty() {
-        // edge-connected Road が存在しない (= 街がまだ map 外周に届いてない初期)。
-        // potential 計算自体が無意味なので即 return。
-        return 0;
-    }
-    // BFS 訪問順に credit を合算する。Empty buildable で d >= 2 のセルを pop した
-    // タイミングで `potential_credit_for_distance` を呼ぶことで、全 grid を別途
-    // 舐め直す post-scan が要らない (= AI 評価ホットパスでの全 grid iterate を 1 本減らす)。
-    let mut total: i64 = 0;
-    while let Some((x, y)) = queue.pop_front() {
-        let d = dist[y][x];
-        if d >= 2 && matches!(city.tile(x, y), Tile::Empty) {
-            // BFS 通過可能性で既に `buildable() && (!needs_outpost() || has_outpost_neighbor)` を
-            // 担保しているので、ここでは tile が Empty であることだけ確認すれば十分。
-            total += potential_credit_for_distance(d);
-        }
-        if d >= MAX_CREDIT_DIST {
-            // 次のホップは d+1 で credit 0。enqueue せず打ち切る。
-            continue;
-        }
-        for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-            let nx = x as i32 + dx;
-            let ny = y as i32 + dy;
-            if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
-                continue;
-            }
-            let (nx, ny) = (nx as usize, ny as usize);
-            if dist[ny][nx] != u32::MAX {
-                continue;
-            }
-            let passable = match city.tile(nx, ny) {
-                Tile::Built(Building::Road) => true,
-                Tile::Empty => {
-                    let t = city.terrain_at(nx, ny);
-                    t.buildable() && (!t.needs_outpost() || has_outpost_neighbor(city, nx, ny))
-                }
-                _ => false,
-            };
-            if !passable {
-                continue;
-            }
-            dist[ny][nx] = d + 1;
-            queue.push_back((nx, ny));
-        }
-    }
-    total
-}
-
-/// 距離 d (>= 2) の Empty buildable セルに与えるポテンシャル credit (cents/sec 単位)。
-///
-/// `FRONTIER_PER_CELL = 8` を起点に `γ ≈ 0.7` のジオメトリック減衰の step 表近似
-/// (浮動小数の roundoff 揺らぎを避けるため整数固定)。
-///
-/// **キャリブレーション根拠**: 隣接 Empty 1 セルに与えるベース credit 8
-/// (= Road 1 本敷設で隣接 House を edge-connected 化した時に期待できる income
-/// 改善のオーダー)。橋を伸ばすごとに「途中で別の優先手が現れる確率」で割引が
-/// 入るので、70% 程度の生存率に近似すると `8 × 0.7^(d-1)` で、整数 step 化
-/// したのが下表。
-///
-/// **遠距離カットオフ**: d >= 8 で 0 に倒すことで、巨大な空きエリアが青天井で
-/// 評価を膨らませる事故 (= 「遠景の幻想」) を防ぐ。
-///
-/// **契約**: caller は d <= 1 のセルを除外してから呼ぶこと (距離 1 は既存
-/// `frontier_count * FRONTIER_PER_CELL` で計上済み、距離 0 は Road 自身)。
-fn potential_credit_for_distance(d: u32) -> i64 {
-    debug_assert!(d >= 2, "potential_credit_for_distance is for d >= 2 cells only");
-    match d {
-        2 => 6,
-        3 => 4,
-        4 => 3,
-        5 => 2,
-        6 | 7 => 1,
-        _ => 0,
-    }
-}
-
-/// 機能不全の商業/雇用建物に対するマイナス bonus。
-///
-/// **必要性**: 純 Δincome 評価では「inactive Shop を撤去」の Δevaluate ≈ 0
-/// (失う income も 0) になり、AI が機能不全建物を撤去しなくなる。「セルが他用途に
-/// 使えるはず」という機会コストを評価に乗せることで、撤去 action が並行する
-/// Build 候補 (House +25 cents/sec 等) を上回るようにする。
-///
-/// 値の根拠: 各建物の active 時の収入下限 ~1/3 を「失われている価値」として計上。
-///   - Shop demolish $150 / 1800 sec ≈ 8.3 cents/sec amort → 撤去ペイバックは小さい
-///   - Build House (= 並行候補) は +25 cents/sec → ペナルティはこれを超える必要
-fn inactive_building_penalty_with(city: &City, connected: &[Vec<bool>]) -> i64 {
+/// 加点要素:
+/// - inactive な経済建物 (Shop/Mall/MegaMall/Workshop/Factory/Refinery/
+///   Office/Headquarters): `-50` / 個。Build House (~+25 cents/sec) より大きい
+///   ペナルティで、撤去判断を net-positive 側に寄せる。
+/// - 完成 House が 0: `-200`。Construction 中だけで Built が 0 なら「街として
+///   成立していない」とみなす最後の砦。
+fn stagnation_penalty(city: &City, connected: &[Vec<bool>]) -> i64 {
     let mut penalty = 0i64;
+    let mut any_finished_house = false;
     for y in 0..GRID_H {
         for x in 0..GRID_W {
             match city.tile(x, y) {
-                Tile::Built(Building::Shop) => {
+                Tile::Built(Building::House) => {
+                    any_finished_house = true;
+                }
+                Tile::Built(Building::Shop)
+                | Tile::Built(Building::Mall)
+                | Tile::Built(Building::MegaMall) => {
                     if !shop_is_active_with(city, x, y, connected) {
                         penalty -= 50;
                     }
                 }
-                Tile::Built(Building::Mall) => {
-                    if !shop_is_active_with(city, x, y, connected) {
-                        penalty -= 100;
-                    }
-                }
-                Tile::Built(Building::MegaMall) => {
-                    // MegaMall は cost $1500 で、撤去 amort コストも大きい。
-                    // 機能不全だと Mall の倍ペナルティを与えて、撤去判断を
-                    // net-positive 側に寄せる (Codex P2 review)。
-                    if !shop_is_active_with(city, x, y, connected) {
-                        penalty -= 200;
-                    }
-                }
-                Tile::Built(Building::Workshop) => {
+                Tile::Built(Building::Workshop)
+                | Tile::Built(Building::Factory)
+                | Tile::Built(Building::Refinery)
+                | Tile::Built(Building::Office)
+                | Tile::Built(Building::Headquarters) => {
                     if !workshop_is_active_with(city, x, y, connected) {
                         penalty -= 50;
-                    }
-                }
-                Tile::Built(Building::Factory) => {
-                    if !workshop_is_active_with(city, x, y, connected) {
-                        penalty -= 100;
-                    }
-                }
-                Tile::Built(Building::Refinery) => {
-                    if !workshop_is_active_with(city, x, y, connected) {
-                        penalty -= 200;
-                    }
-                }
-                Tile::Built(Building::Office) => {
-                    if !workshop_is_active_with(city, x, y, connected) {
-                        penalty -= 80;
-                    }
-                }
-                Tile::Built(Building::Headquarters) => {
-                    if !workshop_is_active_with(city, x, y, connected) {
-                        penalty -= 180;
                     }
                 }
                 _ => {}
             }
         }
     }
+    if !any_finished_house {
+        penalty -= 200;
+    }
     penalty
-}
-
-/// Outpost が隣接 Rock を解禁する将来価値を評価関数に組み込む thematic bonus。
-///
-/// **必要性**: Outpost 自体は income 0、効能は「隣接 Rock セルを建設可能にする」点
-/// だけ。純粋な Δincome 評価では Outpost コスト ($600) を回収しきれず、AI が
-/// いつまで経っても Outpost を選ばなくなる。
-///
-/// **将棋AI の「駒の働き」**: 角の通り道のような潜在価値を駒得とは別軸で計上する。
-/// income (現実の駒得) + territory_bonus (駒働き) の 2 軸で評価することで、
-/// 評価ベース AI でも開拓行動が自然に出る。
-///
-/// 値: 隣接 Rock 数 × 20 cents/sec。Outpost cost $600 → amort = 33 cents/sec
-/// なので、Rock 2 個以上隣接で評価値プラス。
-fn outpost_territory_bonus(city: &City) -> i64 {
-    // 複数 Outpost が同じ Rock セルに隣接していても 1 度しかカウントしない
-    // (= 解禁余地は実物理セル数ぶんだけ)。重複を排除するため visited grid を使う。
-    let mut counted = vec![vec![false; GRID_W]; GRID_H];
-    let mut unlockable_rocks = 0i64;
-    for y in 0..GRID_H {
-        for x in 0..GRID_W {
-            if !matches!(city.tile(x, y), Tile::Built(Building::Outpost)) {
-                continue;
-            }
-            for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-                let nx = x as i32 + dx;
-                let ny = y as i32 + dy;
-                if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
-                    continue;
-                }
-                let (nx, ny) = (nx as usize, ny as usize);
-                if counted[ny][nx] {
-                    continue;
-                }
-                // 「未利用 Rock」だけ将来価値として計上する。Built/Construction/
-                // Clearing 中の Rock セルは既に消費中で、今後 Outpost が解禁する
-                // 余地は無い。terrain layer は Clearing 完了まで Rock のままなので、
-                // tile レイヤで Empty 判定する必要がある。
-                if !matches!(city.tile(nx, ny), Tile::Empty) {
-                    continue;
-                }
-                if city.terrain_at(nx, ny) == super::terrain::Terrain::Rock {
-                    counted[ny][nx] = true;
-                    unlockable_rocks += 1;
-                }
-            }
-        }
-    }
-    unlockable_rocks * 20
-}
-
-// ── 評価関数の per-cell 分解 (差分 evaluate 用 — 現状未使用) ─────
-//
-// `evaluate(city)` の各成分を per-cell の貢献和に分解する scaffold。差分
-// evaluate (action 影響セルだけ Δ 計算) と forecast 項追加で再利用する想定で
-// 残置している。
-//
-// **未使用の理由**: 局所差分 path (`try_local_action_delta`) は実測で full evaluate
-// より遅延した (radius 5 拡張の tier scan overhead が full の 1 度限りの scan
-// より大きかった)。pre-rank で十分な高速化 (7x) が得られているので現状はこの
-// path を有効化していない。forecast 項を追加する際に cell_contribution を
-// 再利用する。
-
-/// `road_network_value` の frontier per-empty-cell ボーナス。
-#[allow(dead_code)]
-const FRONTIER_PER_CELL: i64 = 8;
-
-/// `road_network_value` の isolated road per-tile ペナルティ。
-#[allow(dead_code)]
-const ISOLATED_ROAD_PENALTY: i64 = 100;
-
-/// `outpost_territory_bonus` の per-rock-cell 解禁ボーナス。
-#[allow(dead_code)]
-const OUTPOST_UNLOCK_PER_ROCK: i64 = 20;
-
-/// `strategy_thematic_bonus` の per-tile bonus。`evaluate` の thematic 成分の
-/// 1 セル分。
-#[allow(dead_code)]
-fn strategy_thematic_per_tile(strategy: Strategy, kind: Building) -> i64 {
-    match (strategy, kind) {
-        (Strategy::Growth, Building::House) => 5,
-        (Strategy::Growth, Building::Road) => 1,
-        (Strategy::Income, Building::Shop) => 8,
-        (Strategy::Income, Building::Mall) => 12,
-        (Strategy::Income, Building::Workshop) => 4,
-        (Strategy::Income, Building::Factory) => 8,
-        (Strategy::Tech, Building::Road) => 5,
-        (Strategy::Tech, Building::Office) => 6,
-        (Strategy::Eco, Building::Park) => 12,
-        (Strategy::Eco, Building::Factory) => -10,
-        _ => 0,
-    }
-}
-
-/// `inactive_building_penalty_with` の 1 セル分。
-#[allow(dead_code)]
-fn inactive_building_per_cell(city: &City, x: usize, y: usize, connected: &[Vec<bool>]) -> i64 {
-    match city.tile(x, y) {
-        Tile::Built(Building::Shop) if !shop_is_active_with(city, x, y, connected) => -50,
-        Tile::Built(Building::Mall) if !shop_is_active_with(city, x, y, connected) => -100,
-        Tile::Built(Building::MegaMall) if !shop_is_active_with(city, x, y, connected) => -200,
-        Tile::Built(Building::Workshop) if !workshop_is_active_with(city, x, y, connected) => -50,
-        Tile::Built(Building::Factory) if !workshop_is_active_with(city, x, y, connected) => -100,
-        Tile::Built(Building::Refinery) if !workshop_is_active_with(city, x, y, connected) => -200,
-        Tile::Built(Building::Office) if !workshop_is_active_with(city, x, y, connected) => -80,
-        Tile::Built(Building::Headquarters) if !workshop_is_active_with(city, x, y, connected) => -180,
-        _ => 0,
-    }
-}
-
-/// `road_network_value` の 1 セル分。Road なら isolated 判定、Empty なら frontier 判定。
-#[allow(dead_code)]
-fn road_network_per_cell(city: &City, x: usize, y: usize, connected: &[Vec<bool>]) -> i64 {
-    match city.tile(x, y) {
-        Tile::Built(Building::Road) => {
-            if !connected[y][x] {
-                -ISOLATED_ROAD_PENALTY
-            } else {
-                0
-            }
-        }
-        Tile::Empty => {
-            // 4-近傍のいずれかが「edge_connected な Road」なら frontier セル。
-            for (dx, dy) in [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)] {
-                let nx = x as i32 + dx;
-                let ny = y as i32 + dy;
-                if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
-                    continue;
-                }
-                let (nx, ny) = (nx as usize, ny as usize);
-                if matches!(city.tile(nx, ny), Tile::Built(Building::Road)) && connected[ny][nx] {
-                    return FRONTIER_PER_CELL;
-                }
-            }
-            0
-        }
-        _ => 0,
-    }
-}
-
-/// `outpost_territory_bonus` の 1 セル分。Empty + Rock 地形 + Outpost 隣接で +20。
-#[allow(dead_code)]
-fn outpost_territory_per_cell(city: &City, x: usize, y: usize) -> i64 {
-    if !matches!(city.tile(x, y), Tile::Empty) {
-        return 0;
-    }
-    if city.terrain_at(x, y) != super::terrain::Terrain::Rock {
-        return 0;
-    }
-    if has_outpost_neighbor(city, x, y) {
-        OUTPOST_UNLOCK_PER_ROCK
-    } else {
-        0
-    }
-}
-
-/// 1 セルの `evaluate` への貢献。`evaluate(city) = Σ cell_contribution(city, x, y, ...)`。
-///
-/// `pop_map` と `tier_at_cell` は呼び側が担保する: 該当 cell が House なら
-/// その tier に対応する pop と Tier を渡す。Workshop / Shop の income 計算で
-/// 周辺 House の pop_map を読むので、半径 5 内の pop_map も埋めておく。
-///
-/// **income multiplier**: `compute_income_per_sec_cents_with` の最後で
-/// `income_penalty_pct` が income 全体に掛かる。線形なので per-cell に分配して
-/// 加算しても合計は同じ (条件 `income_cents > 0` も per-cell でも全 cell 0 なら
-/// 全体 0 で同等)。
-#[allow(dead_code)]
-fn cell_contribution(
-    city: &City,
-    x: usize,
-    y: usize,
-    pop_map: &[Vec<u32>],
-    tier_at_cell: Option<HouseTier>,
-    connected: &[Vec<bool>],
-) -> i64 {
-    let raw_income = tile_income_cents_with_tier(city, x, y, pop_map, connected, tier_at_cell);
-    let modifier = strategy_info(city.strategy).income_penalty_pct;
-    let scaled_income = if modifier != 0 && raw_income > 0 {
-        raw_income * (100 + modifier).max(10) as i64 / 100
-    } else {
-        raw_income
-    };
-    let strategy_bonus = if let Tile::Built(b) = city.tile(x, y) {
-        strategy_thematic_per_tile(city.strategy, *b)
-    } else {
-        0
-    };
-    scaled_income
-        + strategy_bonus
-        + inactive_building_per_cell(city, x, y, connected)
-        + road_network_per_cell(city, x, y, connected)
-        + outpost_territory_per_cell(city, x, y)
-}
-
-/// Manhattan 距離 `radius` 以内のセル座標を集める。
-#[allow(dead_code)]
-fn cells_in_manhattan(cx: usize, cy: usize, radius: i32) -> Vec<(usize, usize)> {
-    let mut out = Vec::with_capacity((2 * radius * radius + 2 * radius + 1) as usize);
-    for dy in -radius..=radius {
-        for dx in -radius..=radius {
-            if dx.abs() + dy.abs() > radius {
-                continue;
-            }
-            let nx = cx as i32 + dx;
-            let ny = cy as i32 + dy;
-            if nx < 0 || ny < 0 || nx >= GRID_W as i32 || ny >= GRID_H as i32 {
-                continue;
-            }
-            out.push((nx as usize, ny as usize));
-        }
-    }
-    out
-}
-
-/// 領域 `region` 内のセル群について `cell_contribution` の和を返す。
-/// 周辺 House (radius 5 拡張) の tier/pop を `eval_scratch.local_pop` /
-/// `local_tier_map` に埋めてから合計する。
-///
-/// **バッファ規約**: `local_pop` / `local_tier_map` は呼び出し前に **全 0**
-/// であることを前提に書き込み、最後に書き込んだセルだけ 0 に戻す
-/// (= 全 grid を毎回 zero-fill するコストを避ける)。`EvalScratch::new` で
-/// 0 初期化される + 本関数が末尾で revert するので、不変条件は保たれる。
-///
-/// **コスト**: region cells × 50 + pop region cells × 121。saturated map で
-/// region 200 + pop 約 400 として 200×50 + 400×121 ≈ 60K ops。full evaluate の
-/// ~140K ops に比べて 2-3x 高速化。
-#[allow(dead_code)]
-fn evaluate_region_sum(
-    city: &City,
-    region: &[(usize, usize)],
-    connected: &[Vec<bool>],
-) -> i64 {
-    // 該当 cell に書き込んだことを記録するための一時 Vec。alloc は 1 回だけ
-    // (region の size 上限は ~250)。
-    let mut written_pop: Vec<(usize, usize)> = Vec::with_capacity(region.len() * 2);
-
-    {
-        let mut scratch = city.eval_scratch.borrow_mut();
-        for &(rx, ry) in region {
-            for (cx, cy) in cells_in_manhattan(rx, ry, 5) {
-                if scratch.local_tier_map[cy][cx].is_some() {
-                    continue;
-                }
-                if !matches!(city.tile(cx, cy), Tile::Built(Building::House)) {
-                    continue;
-                }
-                let target = house_tier_for(gather_house_neighborhood_with(city, cx, cy, connected));
-                let age = city.tick.saturating_sub(city.built_at_tick[cy][cx]);
-                let tier = effective_house_tier(target, age);
-                scratch.local_pop[cy][cx] = house_capacity(tier);
-                scratch.local_tier_map[cy][cx] = Some(tier);
-                written_pop.push((cx, cy));
-            }
-        }
-    }
-
-    let scratch = city.eval_scratch.borrow();
-    let mut sum = 0i64;
-    for &(rx, ry) in region {
-        sum += cell_contribution(
-            city,
-            rx,
-            ry,
-            &scratch.local_pop,
-            scratch.local_tier_map[ry][rx],
-            connected,
-        );
-    }
-    drop(scratch);
-
-    // 書き込んだセルだけ 0 に戻す
-    let mut scratch = city.eval_scratch.borrow_mut();
-    for (cx, cy) in &written_pop {
-        scratch.local_pop[*cy][*cx] = 0;
-        scratch.local_tier_map[*cy][*cx] = None;
-    }
-
-    sum
-}
-
-/// 非 Road action に対する Δevaluate を local diff で計算。
-/// Road が絡む action は connectivity 変化があり local diff が成立しないので `None`。
-#[allow(dead_code)]
-fn try_local_action_delta(city: &mut City, action: &super::ai::AiAction) -> Option<i64> {
-    let (cx, cy) = match action {
-        super::ai::AiAction::Build { x, y, kind } => {
-            if matches!(kind, Building::Road) {
-                return None;
-            }
-            (*x, *y)
-        }
-        super::ai::AiAction::Demolish { x, y } => {
-            if matches!(city.tile(*x, *y), Tile::Built(Building::Road)) {
-                return None;
-            }
-            (*x, *y)
-        }
-        super::ai::AiAction::Replace { x, y, kind } => {
-            if matches!(kind, Building::Road)
-                || matches!(city.tile(*x, *y), Tile::Built(Building::Road))
-            {
-                return None;
-            }
-            (*x, *y)
-        }
-        super::ai::AiAction::Idle => return Some(0),
-    };
-
-    // 影響範囲: Workshop / Shop が pop_map を radius 5 まで読み、その pop_map は
-    // House tier (radius 5) に依存。連鎖で half-distance 5 + 5 = 10 までの cell の
-    // contribution が変化しうる。
-    let radius = 10;
-    let region = cells_in_manhattan(cx, cy, radius);
-    let connected = cached_edge_connected_roads(city);
-    let before_sum = evaluate_region_sum(city, &region, &connected);
-    let delta = with_action_applied(city, action, |c| {
-        let after_sum = evaluate_region_sum(c, &region, &connected);
-        after_sum - before_sum
-    });
-    Some(delta)
 }
 
 /// 評価関数 — 簡易版 (アマ低級相当: 「駒得しか見えない」)。
@@ -2935,36 +2415,6 @@ pub fn evaluate_simple(city: &City) -> i64 {
         }
     }
     cents
-}
-
-/// Strategy ボタンの thematic bonus (cents/sec 単位)。
-/// 評価関数に薄く乗せて「Eco なら Park、Income なら商業」を AI が選好するようにする。
-/// 効きは弱め (= ±数十 cents/sec) で、純粋な income/sec 最大化を主軸に保つ。
-fn strategy_thematic_bonus(city: &City) -> i64 {
-    let s = city.strategy;
-    let mut bonus = 0i64;
-    for y in 0..GRID_H {
-        for x in 0..GRID_W {
-            let kind = match city.tile(x, y) {
-                Tile::Built(b) => *b,
-                _ => continue,
-            };
-            bonus += match (s, kind) {
-                (Strategy::Growth, Building::House) => 5,
-                (Strategy::Growth, Building::Road) => 1,
-                (Strategy::Income, Building::Shop) => 8,
-                (Strategy::Income, Building::Mall) => 12,
-                (Strategy::Income, Building::Workshop) => 4,
-                (Strategy::Income, Building::Factory) => 8,
-                (Strategy::Tech, Building::Road) => 5,
-                (Strategy::Tech, Building::Office) => 6,
-                (Strategy::Eco, Building::Park) => 12,
-                (Strategy::Eco, Building::Factory) => -10,
-                _ => 0,
-            };
-        }
-    }
-    bonus
 }
 
 /// 仮想着手 + 評価 + 巻き戻し: city を mutate して `f` を呼び、終わったら元に戻す。
@@ -3080,7 +2530,11 @@ pub fn with_action_applied<R, F: FnOnce(&mut City) -> R>(
             let total_cost = demolish_amt + build_amt;
 
             city.grid[*y][*x] = Tile::Built(*kind);
-            city.built_at_tick[*y][*x] = city.tick;
+            // Replace は実 apply 経路 (`apply_ai_action`) で built_at_tick を継承する。
+            // 仮想評価でも同じ意味論を保ち、aging penalty が積算された income で
+            // ROI を見積もる (= AI が「Replace で aging が一新される」と勘違いして
+            // 連続 Replace を過大評価する事故を防ぐ)。
+            city.built_at_tick[*y][*x] = saved_built_at;
             city.cash -= total_cost;
             if touches_road {
                 city.invalidate_population_cache();
@@ -3149,13 +2603,9 @@ pub(super) fn action_value_with_baseline<F: Fn(&City) -> i64>(
 
 /// `evaluate` 専用版。Tier 3+ が使う hot path。
 ///
-/// **設計判断**: `try_local_action_delta` で per-cell 分解した局所差分を試したが、
-/// region 拡張 (radius 5 + 5) の tier scan overhead が full evaluate より重く、
-/// 実測で 4x 遅延した。pre-rank だけで十分な speedup (7x) が出ているため、
-/// 現状は full evaluate を直接呼ぶシンプルな実装。
-///
-/// 局所差分の scaffolding (`cell_contribution` / `evaluate_region_sum` /
-/// `try_local_action_delta`) は forecast 項追加や将来の最適化向けに残す。
+/// 全 grid を 1 度 scan して評価値を出すシンプルな実装。pre-rank
+/// (`cheap_action_score` ベースの絞り込み) で候補を上位だけに絞っているため、
+/// hot path で呼ばれる回数自体が抑えられている。
 pub(super) fn action_value_with_baseline_full(
     city: &mut City,
     action: &super::ai::AiAction,
@@ -3234,30 +2684,96 @@ fn has_built_neighbor_built(city: &City, x: usize, y: usize) -> bool {
     false
 }
 
+/// `enumerate_actions` が Build / Replace に共通で使う「通常の建物種別」一覧。
+/// インフラ (Road / Park) と経済 (Shop 系・Workshop 系・Office 系) と特殊
+/// (Plaza / Stadium) を含む。Outpost は別経路 (`collect_candidates` の outpost
+/// 群) でのみ列挙されるのでここには含めない。
+const NORMAL_BUILD_KINDS: &[Building] = &[
+    Building::House,
+    Building::Road,
+    Building::Workshop,
+    Building::Factory,
+    Building::Refinery,
+    Building::Shop,
+    Building::Mall,
+    Building::MegaMall,
+    Building::Office,
+    Building::Headquarters,
+    Building::Park,
+    Building::Plaza,
+    Building::Stadium,
+];
+
+/// Replace の合法 `kind` 集合を返す。
+///
+/// **方針** (REDESIGN.md §3 P4): 「異種への Replace」は禁止し、以下の 2 つだけ
+/// 許可する。saturated map での Replace 候補爆発 (= N_built × 13 種) を抑える。
+///
+/// 1. `current` が **inactive な経済建物** (Shop/Mall/MegaMall は道路未接続 or 客
+///    なし、Workshop/Factory/Refinery/Office/Headquarters は道路未接続 or 隣接
+///    House なし) ならば、現セルは立地的に失敗している → ゼロベースで建て直す
+///    余地を AI に与えるため、`current` を除く全種別を候補にする。
+/// 2. `current` が**同系列の直接上位**を持つならばその 1 種類のみ。具体的には
+///    Shop→Mall, Mall→MegaMall, Workshop→Factory, Factory→Refinery,
+///    Office→Headquarters。
+///
+/// 上記いずれにも当てはまらない場合 (Road / House / Park / Plaza / Stadium /
+/// Outpost / 既に active な最上位 MegaMall・Refinery・Headquarters) は Replace
+/// 不可とし空 `Vec` を返す。House の Tier 上位は `effective_house_tier` 経由の
+/// 派生値で `Building` 種別ではないので、ここでの Replace 対象にはしない。
+fn allowed_replace_targets(
+    city: &City,
+    x: usize,
+    y: usize,
+    current: Building,
+    connected: &[Vec<bool>],
+) -> Vec<Building> {
+    let upgrade = match current {
+        Building::Shop => Some(Building::Mall),
+        Building::Mall => Some(Building::MegaMall),
+        Building::Workshop => Some(Building::Factory),
+        Building::Factory => Some(Building::Refinery),
+        Building::Office => Some(Building::Headquarters),
+        _ => None,
+    };
+
+    let inactive = match current {
+        Building::Shop | Building::Mall | Building::MegaMall => {
+            !shop_is_active_with(city, x, y, connected)
+        }
+        Building::Workshop
+        | Building::Factory
+        | Building::Refinery
+        | Building::Office
+        | Building::Headquarters => !workshop_is_active_with(city, x, y, connected),
+        _ => false,
+    };
+
+    if inactive {
+        // 失敗した立地はゼロベースで建て直したいので `current` を除く全種別を返す。
+        // 上位への上書きだけ許すと「inactive Shop を Mall に置き換えても活性化
+        // しない」袋小路で終わってしまうため、別用途への転用を含めて広く許可する。
+        return NORMAL_BUILD_KINDS
+            .iter()
+            .copied()
+            .filter(|k| *k != current)
+            .collect();
+    }
+
+    upgrade.into_iter().collect()
+}
+
 /// 全候補アクションを列挙。Build × 全種別 + Demolish × 全 Built + Idle。
 ///
 /// affordability ガード + 建物別の前提条件 (Shop なら House 3 軒以上) を適用。
 pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
     let mut actions: Vec<super::ai::AiAction> = Vec::new();
     let (regular, outpost) = collect_candidates(city);
-    // 上位建物 (Refinery / MegaMall / Headquarters / Plaza / Stadium) も候補に
-    // 含める。cost が高いため `action_passes_guards` の cash + house-count
-    // ガードで序盤は自然に落選し、終盤 (cash と街の規模が揃った時) のみ浮上する。
-    let normal_kinds: &[Building] = &[
-        Building::House,
-        Building::Road,
-        Building::Workshop,
-        Building::Factory,
-        Building::Refinery,
-        Building::Shop,
-        Building::Mall,
-        Building::MegaMall,
-        Building::Office,
-        Building::Headquarters,
-        Building::Park,
-        Building::Plaza,
-        Building::Stadium,
-    ];
+    let connected = cached_edge_connected_roads(city);
+    let connected_ref: &[Vec<bool>] = &connected;
+    // 上位建物 (Refinery / MegaMall / Headquarters / Plaza / Stadium) も Build
+    // 候補に含める。cost が高いため `action_passes_guards` の cash ガードで
+    // 序盤は自然に落選し、終盤 (cash が揃った時) のみ浮上する。
     for &(x, y) in &regular {
         let terrain = city.terrain_at(x, y);
         let extra = if terrain.needs_clearing() {
@@ -3265,7 +2781,7 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
         } else {
             0
         };
-        for &kind in normal_kinds {
+        for &kind in NORMAL_BUILD_KINDS {
             if action_passes_guards(city, kind, extra) {
                 actions.push(super::ai::AiAction::Build { x, y, kind });
             }
@@ -3289,10 +2805,9 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
     // Demolish 候補は Built タイル + affordability のみ。判断は `action_value`
     // (= Δevaluate − cost) に委ねる。設計根拠は docs/adr/0001。
     //
-    // Replace 候補も同じセル群から派生させる。「同セル Demolish + Build kind」を
-    // 1 アクションとして列挙することで、撤去だけだと Δevaluate が負で beam pruning
-    // に切り落とされる「再建で取り戻すシーケンス」が depth=1 比較に直接乗る。
-    // `kind != current` の制約だけ置いて、その他は cost で判断させる。
+    // Replace 候補は `allowed_replace_targets` で「inactive 経済建物の再生」と
+    // 「同系列の直接上位」だけに絞る (REDESIGN.md §3 P4)。これで saturated map
+    // でも Replace 候補数が線形 → 1〜数件 / cell に抑えられる。
     let reserve = automation_policy(city.strategy).min_cash_reserve;
     for y in 0..GRID_H {
         for x in 0..GRID_W {
@@ -3304,10 +2819,8 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
             if city.cash >= demo_cost + reserve {
                 actions.push(super::ai::AiAction::Demolish { x, y });
             }
-            for &kind in normal_kinds {
-                if kind == current {
-                    continue;
-                }
+            let allowed = allowed_replace_targets(city, x, y, current, connected_ref);
+            for &kind in allowed.iter() {
                 let terrain = city.terrain_at(x, y);
                 let build_cost = kind.cost()
                     + if terrain.needs_clearing() {
@@ -3415,17 +2928,39 @@ fn neighborhood_match_factor(city: &City, x: usize, y: usize, kind: Building) ->
     }
 
     match kind {
-        // 商業: 近くに House がないと活性化しない (= shop_is_active_with の demand 側)
-        Building::Shop | Building::Mall | Building::MegaMall => {
+        // 商業: shop_is_active_with の活性条件は「半径 3 に House あり」+
+        // 「4-近傍に edge_connected な Road あり」。前者だけ満たして後者を欠くと
+        // 建物が建ち上がっても inactive のまま居座り、`demolish_cleanup_hint` が
+        // 即撤去 → 再建の振動を生む。Road 隣接の有無を pre-rank の段階で見て、
+        // 活性化見込みのない場所に商業を建てさせない。
+        //
+        // Mall / MegaMall は容量が大きく House 1〜2 軒では需要を満たさないため、
+        // 要求 House 数も規模に応じて引き上げる (Mall ≥ 3、MegaMall ≥ 5)。
+        Building::Shop => {
             let houses = count_built_within(city, x, y, 3, |b| matches!(b, Building::House));
-            if houses == 0 { 5 } else { 100 }
+            let road_near = has_neighbor_kind(city, x, y, Building::Road);
+            if houses == 0 || !road_near { 5 } else { 100 }
         }
-        // 雇用: 近隣 House が労働力供給。Workshop は radius 4、Office も同等で扱う。
+        Building::Mall => {
+            let houses = count_built_within(city, x, y, 3, |b| matches!(b, Building::House));
+            let road_near = has_neighbor_kind(city, x, y, Building::Road);
+            if houses < 3 || !road_near { 10 } else { 100 }
+        }
+        Building::MegaMall => {
+            let houses = count_built_within(city, x, y, 3, |b| matches!(b, Building::House));
+            let road_near = has_neighbor_kind(city, x, y, Building::Road);
+            if houses < 5 || !road_near { 10 } else { 100 }
+        }
+        // 雇用: 近隣 House が労働力供給 + edge_connected な Road 隣接が active 条件。
+        // Road 不足の場所に建てると inactive のまま居座り demolish_cleanup_hint で
+        // 即撤去される振動を生むため、商業と同じく Road 隣接を pre-rank で要求する。
         Building::Workshop
         | Building::Factory
         | Building::Refinery
         | Building::Office
         | Building::Headquarters => {
+            let road_near = has_neighbor_kind(city, x, y, Building::Road);
+            if !road_near { return 10; }
             let houses = count_built_within(city, x, y, 4, |b| matches!(b, Building::House));
             if houses == 0 { 10 } else { 100 }
         }
@@ -3460,12 +2995,172 @@ fn neighborhood_match_factor(city: &City, x: usize, y: usize, kind: Building) ->
     }
 }
 
+/// 街の発展段階。`cheap_action_score` が建物種別ごとの重みを変えるための区分。
+///
+/// 単純な人口だけではなく `count_built(House)` と `population` と Road 数を併用する。
+/// 「お金が足りずに進めない」状態と「整地が進んで上位建物に進む」状態を切り分けて、
+/// 序盤の Road 偏重 (cash 不足で安い Road しか買えない) を打ち破るのが目的。
+///
+/// 段階の意味:
+/// - `Seed`: House が皆無 / 極少。まず人口供給源を建てる。
+/// - `Village`: House がいくつか建ち、基礎経済 (Shop / Workshop) を整える。
+/// - `Town`: 経済が回り始め、Apartment 化を狙う触媒 (Park / Office) を厚くする。
+/// - `City`: 上位経済建物 (Mall / Factory / Office / HQ / Plaza) で街を厚くする。
+/// - `Metropolis`: メガ施設 (MegaMall / Headquarters / Stadium / Refinery / Plaza)。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CityStage {
+    Seed,
+    Village,
+    Town,
+    City,
+    Metropolis,
+}
+
+/// 現在の `City` を 5 段階の `CityStage` に分類する。
+///
+/// `population()` は per-frame cache 済みなので追加コストは軽い。`count_built` は
+/// GRID 全走査だが、`rank_actions` / `rank_actions_full` の入口で 1 度だけ呼び、
+/// 結果を引数で `cheap_action_score` に渡すことで pre-rank ループでの再計算を避ける。
+pub(super) fn city_stage(city: &City) -> CityStage {
+    let houses = city.count_built(Building::House);
+    let pop = city.population();
+    if houses < 3 {
+        return CityStage::Seed;
+    }
+    if houses < 15 || pop < 50 {
+        return CityStage::Village;
+    }
+    if pop < 250 {
+        return CityStage::Town;
+    }
+    if pop < 600 {
+        return CityStage::City;
+    }
+    CityStage::Metropolis
+}
+
+/// `cheap_action_score` の段階別重み。100 を基準とし、その建物を「今この段階で
+/// 建てたいか」を相対倍率で表す。
+///
+/// 加減の方針 (チューニングメモ):
+/// - Seed: House 最優先 (×5)。Road は最低限の脊柱として ×1.0。商業や上位建物は
+///   抑制 (×0.2) — まず住人を作らないと商業は活性しないので回らない。
+/// - Village: House (×3) と基礎経済 (Shop / Workshop ×2.5) を厚く。
+///   Park は弱い触媒として ×0.8、上位建物はまだ早いので ×0.3。
+/// - Town: Apartment 化触媒 (Park / Office) と Mall を 2.5 倍。House はもう
+///   過剰生産しないように ×1.5、Road は伸ばし続けるほどでもないので ×1.0。
+/// - City: 上位経済建物 (Mall / Factory / Office / HQ / Plaza) ×2.5。House は ×1.0
+///   に絞り、Demolish→Replace 経由の高層化を促す。
+/// - Metropolis: メガ施設 (MegaMall / Headquarters / Stadium / Refinery / Plaza) ×2.5。
+///   それ以外は ×1.0 でフラット。
+fn stage_weight(stage: CityStage, kind: Building) -> i64 {
+    match (stage, kind) {
+        (CityStage::Seed, Building::House) => 500,
+        (CityStage::Seed, Building::Road) => 100,
+        (CityStage::Seed, _) => 20,
+
+        (CityStage::Village, Building::House) => 300,
+        (CityStage::Village, Building::Road) => 100,
+        (CityStage::Village, Building::Shop | Building::Workshop) => 250,
+        (CityStage::Village, Building::Park) => 80,
+        (CityStage::Village, _) => 30,
+
+        (CityStage::Town, Building::Park | Building::Office | Building::Mall) => 250,
+        (CityStage::Town, Building::House | Building::Shop | Building::Workshop) => 150,
+        (CityStage::Town, Building::Road | Building::Factory) => 100,
+        (CityStage::Town, _) => 50,
+
+        (
+            CityStage::City,
+            Building::Mall
+            | Building::Factory
+            | Building::Office
+            | Building::Headquarters
+            | Building::Plaza,
+        ) => 250,
+        (CityStage::City, Building::House) => 100,
+        (CityStage::City, _) => 80,
+
+        (
+            CityStage::Metropolis,
+            Building::MegaMall
+            | Building::Headquarters
+            | Building::Refinery
+            | Building::Stadium
+            | Building::Plaza,
+        ) => 250,
+        (CityStage::Metropolis, _) => 100,
+    }
+}
+
+/// 「明らかな死に建物」 (= 撤去すべきもの) の Demolish hint。
+///
+/// `stagnation_penalty` が inactive 経済建物を -50 で減点する設計のため、Δevaluate
+/// 側でも +50 程度の改善は読める。だが Build hint が stage bias で 250〜500 まで
+/// 膨らむと相対的に弱くなり、AI が「inactive Shop の隣にもう 1 軒 House を建てる」
+/// のような迂回行動を選んでしまう。明示 hint で「掃除動機」を Build と拮抗させる。
+///
+/// 対象:
+/// - 経済建物 (Shop/Mall/MegaMall/Workshop/Factory/Refinery/Office/Headquarters) が
+///   inactive (`*_is_active` が false)
+/// - Road が edge_connected でない (= 死に道路)
+///
+/// その他の建物 (House、Park、Plaza、Stadium、Outpost) は hint=0 中立。
+/// `evaluate` の Δ が示す方向 (= 大抵は減点) に従う。
+///
+/// hint 値 1100 の根拠: Seed 段階で `cheap_action_score` の Build House が
+/// (build_base=150 [Apartment forecast]) × (neighborhood=100) × (stage=500) / 10000 = 750
+/// を返し、加えて Δevaluate の `any_finished_house` 改善 (+200) と Cottage 収入
+/// (+25) を含めると合計 ~975 まで膨らむ。Demolish が明確に勝つには 1000 を
+/// 超える hint が必要 — 1100 で安全側に置くことで「inactive 建物の周りに House
+/// を建て続ける」迂回行動を抑え、まず掃除させる。
+fn demolish_cleanup_hint(city: &City, x: usize, y: usize, kind: Building) -> i64 {
+    // クールダウン: AI 自身が建てた直後 (= built_at_tick > 0 かつ年齢 < 60 sec)
+    // の建物には撤去 hint を出さない。直前に建てた建物を即撤去するのは Build と
+    // Demolish の評価が拮抗する局面での振動の典型パターン。「街が育って活性化
+    // 条件が満たされるか」を試す猶予を与える。
+    //
+    // built_at_tick == 0 (初期マップ / テストの set_tile / Demolish 経由で
+    // リセット済) は経過時間が無く、AI 由来でないため即撤去候補に乗せる。
+    let built_at = city.built_at_tick[y][x];
+    if built_at > 0 {
+        let age = city.tick.saturating_sub(built_at);
+        if age < 600 {
+            return 0;
+        }
+    }
+    let connected = cached_edge_connected_roads(city);
+    let is_waste = match kind {
+        Building::Shop | Building::Mall | Building::MegaMall => {
+            !shop_is_active_with(city, x, y, &connected)
+        }
+        Building::Workshop
+        | Building::Factory
+        | Building::Refinery
+        | Building::Office
+        | Building::Headquarters => !workshop_is_active_with(city, x, y, &connected),
+        Building::Road => !connected[y][x],
+        _ => false,
+    };
+    if is_waste { 1100 } else { 0 }
+}
+
 /// O(R²) で計算できる action の近隣考慮スコア。`rank_actions` の事前 rank に使う。
 ///
 /// 目的: saturated map で候補数千 → full evaluate を全候補に回せない。
 /// 近隣互換性 (`neighborhood_match_factor`) を base income に乗じて「表面高評価で
 /// 実質ゼロ」を引き下げ、ヘテロな候補プールが pre-rank top に揃うようにする。
-pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i64 {
+///
+/// `stage` は街の発展段階。`stage_weight` で kind ごとに優先度倍率を掛け、
+/// 「序盤は House、Town は触媒、終盤はメガ施設」のような段階遷移を表現する。
+/// 呼び出し側 (`rank_actions` / `rank_actions_full`) で 1 度だけ計算した値を
+/// 渡すこと — pre-rank ループ内で再計算すると count_built の GRID 走査が
+/// O(N×GRID²) に膨らむ。
+pub(super) fn cheap_action_score(
+    city: &City,
+    action: &super::ai::AiAction,
+    stage: CityStage,
+) -> i64 {
     fn current_at(city: &City, x: usize, y: usize) -> i64 {
         match city.tile(x, y) {
             Tile::Built(b) => cheap_base_cents(*b),
@@ -3518,12 +3213,44 @@ pub(super) fn cheap_action_score(city: &City, action: &super::ai::AiAction) -> i
     match action {
         super::ai::AiAction::Build { x, y, kind } => {
             let m = neighborhood_match_factor(city, *x, *y, *kind);
-            build_base(city, *x, *y, *kind) * m / 100
+            let s = stage_weight(stage, *kind);
+            let raw = build_base(city, *x, *y, *kind) * m * s / 10_000;
+            // Road は cost $10 と最安だが、income への寄与は間接的 (House を
+            // edge-connected にする触媒)。cash 不足の段階で Road を量産すると
+            // 「House 貯金が永遠に貯まらない → pop が伸びない」のデッドロックに
+            // 陥る (Step 5 まで観測された病状で、cash=$9 / pop=16 が 30min 持続)。
+            //
+            // 対策: Metropolis 以前の全段階で Road の raw を負に固定し、
+            // 上位建物 (House / Mall / Office / etc.) が affordable でないとき
+            // Idle (= 0) に明確に負けるよう補正する。Metropolis 段階のみ Road
+            // の自由化を許容する (saturated 終盤の細かい再整備で必要)。
+            //
+            // 値 -10 は cheap_score レンジで Idle (0) より小さく、他の Build の
+            // raw (50〜500) よりも明確に下になる程度の小さな負数 — Idle に
+            // 負けつつ、他に何も候補がない極端状況での影響を最小にする狙い。
+            if !matches!(stage, CityStage::Metropolis) && matches!(kind, Building::Road) {
+                return -10;
+            }
+            raw
         }
-        super::ai::AiAction::Demolish { x, y } => -current_at(city, *x, *y),
+        // Demolish の hint は「掃除動機」として正の値を返す。
+        //
+        // Build 側の raw が stage bias で ×500 (Seed × House) まで膨らむため、
+        // Demolish を生 income (~50-200) で残すと、inactive 経済建物が居座る
+        // (`drive_ai_demolishes_inactive_shop` が落ちる)。
+        //
+        // 対象セルが「明らかに死に建物」(inactive Shop/Mall/Workshop/Factory/
+        // Office、未接続 Road) なら +250 のヒントを与えて Build の上位 hint と
+        // 拮抗させる。それ以外 (active な建物、House、Park など) は 0 中立 ——
+        // Δevaluate で実値変化が示す方向に従う。
+        super::ai::AiAction::Demolish { x, y } => match city.tile(*x, *y) {
+            Tile::Built(b) => demolish_cleanup_hint(city, *x, *y, *b),
+            _ => 0,
+        },
         super::ai::AiAction::Replace { x, y, kind } => {
             let m = neighborhood_match_factor(city, *x, *y, *kind);
-            build_base(city, *x, *y, *kind) * m / 100 - current_at(city, *x, *y)
+            let s = stage_weight(stage, *kind);
+            build_base(city, *x, *y, *kind) * m * s / 10_000 - current_at(city, *x, *y)
         }
         super::ai::AiAction::Idle => 0,
     }
@@ -3547,6 +3274,10 @@ pub(super) fn rank_actions<F: Fn(&City) -> i64>(
     const PRE_RANK_LIMIT: usize = 200;
 
     let mut actions = enumerate_actions(city);
+    // stage は pre-rank ループに渡す前に 1 度だけ計算する。
+    // count_built が GRID 全走査のため、pre-rank ループ内で再計算すると O(N×GRID²)
+    // に膨らむ。pre-rank 中 city 状態は不変なので 1 度の評価で全候補に共有できる。
+    let stage = city_stage(city);
     if actions.len() > PRE_RANK_LIMIT {
         // cheap rank の上位 + 「Demolish と Idle は常時パススルー」で構成する。
         //
@@ -3561,7 +3292,7 @@ pub(super) fn rank_actions<F: Fn(&City) -> i64>(
         let mut indexed: Vec<(usize, i64)> = actions
             .iter()
             .enumerate()
-            .map(|(i, a)| (i, cheap_action_score(city, a)))
+            .map(|(i, a)| (i, cheap_action_score(city, a, stage)))
             .collect();
         indexed.sort_by(|a, b| b.1.cmp(&a.1));
         let mut keep_set: std::collections::HashSet<usize> = indexed
@@ -3592,8 +3323,13 @@ pub(super) fn rank_actions<F: Fn(&City) -> i64>(
     let mut scored: Vec<(super::ai::AiAction, i64)> = actions
         .into_iter()
         .map(|a| {
+            // `rank_actions_full` と同じく Δeval + stage hint で sort する。
+            // Tier 2 (evaluate_simple = House 数) でも stage bias で「Seed では
+            // House」「Town では商業」が優先され、純粋な House 量産にならず
+            // 段階的な街作りに沿う。
             let v = action_value_with_baseline(city, &a, eval_fn, before);
-            (a, v)
+            let hint = cheap_action_score(city, &a, stage);
+            (a, v + hint)
         })
         .collect();
     scored.sort_by(|a, b| b.1.cmp(&a.1));
@@ -3603,7 +3339,9 @@ pub(super) fn rank_actions<F: Fn(&City) -> i64>(
 
 
 /// `rank_actions` の `evaluate` 専用版。`action_value_with_baseline_full` 経由で
-/// non-Road action は local diff で評価する。Tier 3+ が使う hot path。
+/// non-Road action は local diff で評価する。Tier 3/4/5 全てが共通で使う唯一の
+/// 探索インフラ。Tier 差は `top_k` の広さ (8 / 20 / 30) で表現する — 探索深さは
+/// 一律 1 に統一し、評価コストを抑えつつ「より広く候補を見る」方向で巧拙を作る。
 pub(super) fn rank_actions_full(
     city: &mut City,
     top_k: usize,
@@ -3611,11 +3349,13 @@ pub(super) fn rank_actions_full(
     const PRE_RANK_LIMIT: usize = 200;
 
     let mut actions = enumerate_actions(city);
+    // stage は `rank_actions` 同様に 1 度だけ計算して pre-rank ループに渡す。
+    let stage = city_stage(city);
     if actions.len() > PRE_RANK_LIMIT {
         let mut indexed: Vec<(usize, i64)> = actions
             .iter()
             .enumerate()
-            .map(|(i, a)| (i, cheap_action_score(city, a)))
+            .map(|(i, a)| (i, cheap_action_score(city, a, stage)))
             .collect();
         indexed.sort_by(|a, b| b.1.cmp(&a.1));
         let mut keep_set: std::collections::HashSet<usize> = indexed
@@ -3643,72 +3383,24 @@ pub(super) fn rank_actions_full(
     let mut scored: Vec<(super::ai::AiAction, i64)> = actions
         .into_iter()
         .map(|a| {
+            // Δevaluate (= 実 income/sec の差) に `cheap_action_score` を hint として
+            // 加算する。cheap_score 自体は「将来期待値 × stage 倍率 × 近隣互換率」を
+            // 表しており、序盤の House Build (Δevaluate=+25, hint=250) のような
+            // 「実値は小さいが段階的に取りたい手」を最終 sort で正しく上位に
+            // 持ち上げる。PRE_RANK_LIMIT を超えていない序盤でも stage bias が効く
+            // ように、pre-rank の有無に依らず常に hint を加える。
+            //
+            // hint 側の数値は cheap_action_score 側で base_cents (~50-200) × stage
+            // (~100-500) × neighborhood (~50-100) / 10000 = ~25-1000 のレンジ。
+            // Δevaluate の方は cents/sec = 同レンジで噛み合う。
             let v = action_value_with_baseline_full(city, &a, before);
-            (a, v)
+            let hint = cheap_action_score(city, &a, stage);
+            (a, v + hint)
         })
         .collect();
     scored.sort_by(|a, b| b.1.cmp(&a.1));
     scored.truncate(top_k.max(1));
     scored
-}
-
-/// `search_best_action` の `evaluate` 専用版。Tier 4/5 が使う。
-pub(super) fn search_best_action_full(
-    city: &mut City,
-    depth: u32,
-    top_k: usize,
-) -> Option<super::ai::AiAction> {
-    let depth1 = rank_actions_full(city, top_k);
-    if depth1.is_empty() {
-        return None;
-    }
-    if depth <= 1 {
-        return Some(depth1[0].0.clone());
-    }
-    let mut best: Option<(super::ai::AiAction, i64)> = None;
-    // 深さ探索中は frontier_potential_value を 0 返し化して BFS コストを除く。
-    // depth=1 の `rank_actions_full(city, top_k)` 上記呼び出しは既に通常 evaluate で
-    // potential 込みなので、その後の continuation だけが軽量化対象になる。
-    let prev_skip = city.eval_skip_potential.replace(true);
-    for (a, v1) in &depth1 {
-        let next_k = (top_k / 2).max(2);
-        let next_total =
-            with_action_applied(city, a, |c| best_continuation_value_full(c, depth - 1, next_k));
-        let total = v1 + next_total;
-        let better = match &best {
-            None => true,
-            Some((_, prev)) => total > *prev,
-        };
-        if better {
-            best = Some((a.clone(), total));
-        }
-    }
-    city.eval_skip_potential.set(prev_skip);
-    best.map(|(a, _)| a)
-}
-
-fn best_continuation_value_full(city: &mut City, depth: u32, top_k: usize) -> i64 {
-    if depth == 0 {
-        return 0;
-    }
-    let ranked = rank_actions_full(city, top_k);
-    if ranked.is_empty() {
-        return 0;
-    }
-    if depth == 1 {
-        return ranked[0].1.max(0);
-    }
-    let next_k = (top_k / 2).max(2);
-    let mut best_total = ranked[0].1.max(0);
-    for (a, v1) in ranked.iter() {
-        let cont =
-            with_action_applied(city, a, |c| best_continuation_value_full(c, depth - 1, next_k));
-        let total = v1 + cont;
-        if total > best_total {
-            best_total = total;
-        }
-    }
-    best_total
 }
 
 /// Stockfish 流のノイズ付き選択: `noise_pct`% の確率で「上位 3 候補から random」を選ぶ。
@@ -4421,6 +4113,80 @@ mod tests {
         assert_eq!(city.built_at_tick[5][5], 0);
     }
 
+    /// Replace は同セル建て替えなので built_at_tick を継承する。これにより aging
+    /// factor が連続置換でも積算され、Mall→MegaMall のような繰り返しの収入減衰
+    /// dampener として機能する (REDESIGN.md §3 P6)。
+    #[test]
+    fn replace_inherits_built_at_tick() {
+        let mut city = City::new();
+        city.terrain[5][5] = super::super::terrain::Terrain::Plain;
+        city.cash = 100_000;
+        city.tick = 200;
+        // 元建物として Shop を直接設置 (Construction を回避してテストを短く)。
+        city.set_tile(5, 5, Tile::Built(Building::Shop));
+        city.built_at_tick[5][5] = 200;
+
+        // Replace 後の完成 tick を含む十分な時間を進める。
+        city.tick = 1_000;
+        let replace = super::super::ai::AiAction::Replace {
+            x: 5,
+            y: 5,
+            kind: Building::Mall,
+        };
+        assert!(apply_ai_action(&mut city, replace));
+        // 建設完了まで進める (Mall: build_ticks = 320)。
+        tick(&mut city, 320);
+
+        assert!(matches!(city.tile(5, 5), Tile::Built(Building::Mall)));
+        // 旧 Shop の built_at_tick (= 200) が継承され、新築 city.tick (= 1000) に
+        // 上書きされていないことを確認する。
+        assert_eq!(
+            city.built_at_tick[5][5], 200,
+            "Replace は旧 built_at_tick を継承する設計 (aging dampener として必須)"
+        );
+    }
+
+    /// 同期 AI 経路 (`drive_ai_with_observer` 経由) でも Replace の aging 継承が
+    /// 効いていることを担保する。worker 経路 (`apply_ai_action`) と同じヘルパー
+    /// (`apply_replace_preserving_age`) を通すため挙動が一致しなければならない。
+    #[test]
+    fn drive_ai_replace_inherits_built_at_tick() {
+        let mut city = City::new();
+        city.terrain[5][5] = super::super::terrain::Terrain::Plain;
+        city.cash = 100_000;
+        city.tick = 200;
+        city.set_tile(5, 5, Tile::Built(Building::Shop));
+        city.built_at_tick[5][5] = 200;
+        city.tick = 1_000;
+
+        let replace = super::super::ai::AiAction::Replace {
+            x: 5,
+            y: 5,
+            kind: Building::Mall,
+        };
+        // `drive_ai_with_observer` の Replace ブランチを直接駆動するための簡易
+        // observer。AI 選択ロジック (decide) を経由せず Replace を強制実行する。
+        let mut called = false;
+        let mut force = |action: &super::super::ai::AiAction| -> bool {
+            if let super::super::ai::AiAction::Replace { x, y, kind } = action {
+                let ok = apply_replace_preserving_age(&mut city, *x, *y, *kind);
+                called = true;
+                ok
+            } else {
+                false
+            }
+        };
+        assert!(force(&replace));
+        assert!(called);
+
+        tick(&mut city, 320);
+        assert!(matches!(city.tile(5, 5), Tile::Built(Building::Mall)));
+        assert_eq!(
+            city.built_at_tick[5][5], 200,
+            "同期経路でも Replace は旧 built_at_tick を継承しなければならない"
+        );
+    }
+
     /// Cottage 1 軒だけでは fallback で $1 になる (死スパイラル防止)。
     #[test]
     fn one_cottage_uses_survival_fallback() {
@@ -4869,72 +4635,4 @@ mod tests {
         );
     }
 
-    /// 評価関数は「橋渡し Road の長期価値」を距離減衰 potential で見ている。
-    ///
-    /// edge-connected Road chain の末端を塞ぐ House を Road に置換する手は、
-    /// 置換 Road が新たな edge-connected の終端となり、その先の Empty buildable
-    /// セル群が将来の frontier 候補として potential に加算される必要がある。
-    ///
-    /// 検証: 置換 Road の先に広い空き地がある配置 (open) と、先も House で詰まってる
-    /// 配置 (closed) で `action_value` を比較。potential が距離 d ≥ 2 のセルにも
-    /// credit を与えていれば open > closed > 0 にはならず、open > closed が成立する。
-    /// 加えて open は demolish_cost の amort を上回るプラスを返すべき (= 人間なら
-    /// 即決する手)。
-    #[test]
-    fn replace_with_road_value_reflects_pocket_behind() {
-        // demolish_cost は中央 (Manhattan 距離 0) で $50、外周で 2 桁高くなる
-        // (`distance_from_center` × ²)。テストの本旨は「ポケットの広さで評価が変わる」
-        // ことなので、demolish amort で結果が支配されないよう中央セルで検証する。
-        let col = GRID_W / 2;
-        let blocker_y = GRID_H / 2;
-
-        fn setup_with_pocket(open_pocket: bool, col: usize, blocker_y: usize) -> City {
-            let mut city = City::new();
-            city.cash = 100_000;
-            city.ai_tier = AiTier::Master;
-            // edge (y=0) から blocker の 1 手前まで Road chain (edge-connected)。
-            for y in 0..blocker_y {
-                city.set_tile(col, y, Tile::Built(Building::Road));
-            }
-            // blocker_y に塞ぎ House。
-            city.set_tile(col, blocker_y, Tile::Built(Building::House));
-            if !open_pocket {
-                // blocker の下を全部 Built で埋めて「橋渡しの先に空き地が無い」状態。
-                for y in (blocker_y + 1)..GRID_H {
-                    for x in 0..GRID_W {
-                        if matches!(city.tile(x, y), Tile::Empty) {
-                            city.set_tile(x, y, Tile::Built(Building::House));
-                        }
-                    }
-                }
-            }
-            city
-        }
-
-        let action = AiAction::Replace {
-            x: col,
-            y: blocker_y,
-            kind: Building::Road,
-        };
-
-        let mut open = setup_with_pocket(true, col, blocker_y);
-        let v_open = action_value(&mut open, &action, &evaluate);
-
-        let mut closed = setup_with_pocket(false, col, blocker_y);
-        let v_closed = action_value(&mut closed, &action, &evaluate);
-
-        assert!(
-            v_open > v_closed,
-            "Replace→Road should be MORE valuable when there is open space behind \
-             the blocker than when there isn't. open={} closed={}",
-            v_open,
-            v_closed
-        );
-        assert!(
-            v_open > 0,
-            "Replace→Road into open pocket should be net-positive (a human would do \
-             this immediately), got {}",
-            v_open
-        );
-    }
 }

@@ -353,10 +353,10 @@ impl AiTier {
 
 /// AI 評価で使い回す scratch buffer 群。`City::eval_scratch` が `RefCell` で抱える。
 ///
-/// **保持理由**: `compute_pop_and_tier_maps` / `road_network_value` の内部 grid
-/// 配列を毎 evaluate で alloc すると、WASM dlmalloc がボトルネックになる
-/// (Tier 5 depth=3 で数十 MB/sec の alloc churn)。grid サイズは `GRID_W × GRID_H`
-/// 固定なので、City 生成時に 1 度確保して以降は in-place clear+fill で再利用する。
+/// **保持理由**: `compute_pop_and_tier_maps` の内部 grid 配列を毎 evaluate で
+/// alloc すると、WASM dlmalloc がボトルネックになる。grid サイズは
+/// `GRID_W × GRID_H` 固定なので、City 生成時に 1 度確保して以降は in-place
+/// clear+fill で再利用する。
 pub struct EvalScratch {
     pub pop_map: Vec<Vec<u32>>,
     pub tier_map: Vec<Vec<Option<HouseTier>>>,
@@ -365,19 +365,6 @@ pub struct EvalScratch {
     /// `tier_promotion_forecast` が「target > effective」の差分を per-House
     /// 再 scan なしに集計できる。
     pub target_tier_map: Vec<Vec<Option<HouseTier>>>,
-    pub frontier_visited: Vec<Vec<bool>>,
-    /// `frontier_potential_value` の BFS 距離マップ。`u32::MAX` は未到達。
-    /// road_network_value の per-evaluate alloc を避けるため scratch に置く。
-    pub potential_dist: Vec<Vec<u32>>,
-    /// `frontier_potential_value` の BFS キュー。`Vec::clear` で再利用する
-    /// (グリッド固定なので最大要素数は `GRID_W * GRID_H`)。
-    pub potential_queue: std::collections::VecDeque<(usize, usize)>,
-    /// 局所差分 evaluate 専用の pop_map バッファ。`evaluate_region_sum` が
-    /// 領域内 House の tier/pop を埋めて使う。grid 全体で 0 初期化されている前提
-    /// で、関数末尾で書き込んだセルだけ zero-back する規約。
-    pub local_pop: Vec<Vec<u32>>,
-    /// `local_pop` と対応する tier 値。
-    pub local_tier_map: Vec<Vec<Option<HouseTier>>>,
     /// `fill_pop_tier_target_maps` が同時に埋める **House セル位置のリスト**。
     /// `tier_promotion_forecast` 等の per-House 集計が「全 GRID_W×GRID_H を
     /// 舐めて House を探す」コストを回避するためのインデックス。
@@ -390,11 +377,6 @@ impl EvalScratch {
             pop_map: vec![vec![0u32; GRID_W]; GRID_H],
             tier_map: vec![vec![None; GRID_W]; GRID_H],
             target_tier_map: vec![vec![None; GRID_W]; GRID_H],
-            frontier_visited: vec![vec![false; GRID_W]; GRID_H],
-            potential_dist: vec![vec![u32::MAX; GRID_W]; GRID_H],
-            potential_queue: std::collections::VecDeque::with_capacity(GRID_W * GRID_H),
-            local_pop: vec![vec![0u32; GRID_W]; GRID_H],
-            local_tier_map: vec![vec![None; GRID_W]; GRID_H],
             house_positions: Vec::with_capacity(GRID_W * GRID_H / 4),
         }
     }
@@ -537,19 +519,17 @@ pub struct City {
 
     /// AI 評価ホットパス用の使い回しスクラッチバッファ。
     ///
-    /// `compute_income_per_sec_cents_with` と `road_network_value` は 1 evaluate あたり
-    /// 数千 cells の bool/u32/Option<HouseTier> を作る。WASM の dlmalloc は per-call
-    /// 小 alloc に弱く、Tier 5 depth=3 で数十 MB/sec の alloc churn が起きる。
-    /// 同一 grid サイズの buffer を `RefCell` で 1 度だけ確保 → 毎回 clear+fill に
-    /// 切り替えると alloc が消える (= 純粋に WASM スループット改善目的)。
+    /// `compute_income_per_sec_cents_with` は 1 evaluate あたり数千 cells の
+    /// bool/u32/Option<HouseTier> を作る。WASM の dlmalloc は per-call 小 alloc に
+    /// 弱いため、同一 grid サイズの buffer を `RefCell` で 1 度だけ確保 → 毎回
+    /// clear+fill に切り替えると alloc が消える (= 純粋に WASM スループット改善目的)。
     pub eval_scratch: std::cell::RefCell<EvalScratch>,
 
-    /// AI 探索の depth>=2 再帰中だけ true。`frontier_potential_value` がこのフラグを
-    /// 見て即 0 を返すことで、look-ahead の continuation 評価から BFS コストを外す。
-    /// depth=1 (= ranking 段階) は flag=false で full potential を使い、その出力に
-    /// 既に「将来 frontier 期待値」が織り込まれているため、深い層で BFS を回し直す
-    /// 必要は無い。`search_best_action_full` / `best_continuation_value_full` が
-    /// scope guard で立て、再帰から戻ったら必ず戻す。
+    /// AI 探索の depth>=2 再帰中だけ true。
+    ///
+    /// 現状は読み手不在の「予約フラグ」: 評価関数が income + stagnation_penalty に
+    /// 軽量化された後、深さ探索 (`search_best_action_full`) と本フラグの読み手側
+    /// (`frontier_potential_value`) は今後の Step で同時に廃止する予定。
     pub eval_skip_potential: Cell<bool>,
 
     /// タブ復帰時のオフライン進行ボーナス通知。`Some` の間は `render` が
