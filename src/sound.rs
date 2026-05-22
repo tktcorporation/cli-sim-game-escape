@@ -1,10 +1,11 @@
 //! 操作フィードバック (効果音 + ハプティクス) の薄いラッパー。
 //!
-//! 実体は `index.html` の `window.__playSound(name)`。同じ name で 2 系統の
-//! フィードバックを駆動する:
+//! 実体は `index.html` の `window.__playSound(name)`。同じ name で
 //! - 効果音: Web Audio API で oscillator + envelope を合成 (`SOUNDS` テーブル)
-//! - 振動:   Vibration API (`navigator.vibrate`) で触覚フィードバック
-//!           (`VIBRATION` テーブル、対応端末のみ)
+//! - 振動:   Vibration API (`navigator.vibrate`) で触覚 (`VIBRATION` テーブル)
+//! を駆動する。振動は Android Chrome 等のみで、iOS Safari は Vibration API
+//! 非対応のため別途 index.html 側の touch ハンドラが `<input switch>` トリック
+//! でタップ触覚を出す (こちらは `play()` 経由ではなく実ジェスチャ駆動)。
 //!
 //! Rust 側はキー名を渡すだけで、音色・振動パターンの定義や AudioContext の
 //! ライフサイクルは JS 側が握る。

@@ -551,6 +551,44 @@
       var swipeAccum = 0;
       var swipeTargetIsPanel = false;  // touchstart 時に確定、touchmove で参照
 
+      // iOS Safari 向けタップ触覚。iOS は Vibration API (navigator.vibrate) を
+      // 一切実装しないため、Safari 17.4+ の <input type="checkbox" switch> を
+      // label 経由で click() するとシステム触覚 (Taptic Engine) が鳴る挙動で
+      // 代替する。label 経由でしか発火しない (input を直接 click しても鳴らない)。
+      //
+      // - navigator.vibrate がある環境 (Android Chrome 等) では __playSound 側の
+      //   Vibration API が触覚を担うので、こちらは何もしない (二重発火防止)。
+      // - 触覚は「実ユーザー操作のコールスタック内」でしか発火しないため、合成
+      //   mousedown 経由の WASM ハンドラ (= __playSound) ではなく、実 touchend で
+      //   タップ確定した瞬間に鳴らす。tick 由来 (自動戦闘の被弾など) の触覚は
+      //   iOS では出せない — 許容する graceful degradation。
+      // - iOS は触覚の種類が 1 つだけで、Android のような強弱・パターンの作り
+      //   分けはできない (タップごとに同じ「コツッ」)。
+      // - 注意: iOS 26.5 でこの挙動が塞がれたため、それ以降の iPhone では鳴らない。
+      var supportsVibrate = !!(navigator && typeof navigator.vibrate === 'function');
+      var iosHapticLabel = null;
+      function iosTapHaptic() {
+        if (supportsVibrate) return;
+        if (!iosHapticLabel) {
+          try {
+            var input = document.createElement('input');
+            input.type = 'checkbox';
+            input.setAttribute('switch', '');
+            var label = document.createElement('label');
+            label.setAttribute('aria-hidden', 'true');
+            // 画面外かつ pointer-events:none で隠す。elementFromPoint による
+            // <pre> ヒット検出 (dom_element_to_cell) を絶対に奪わないため。
+            label.style.cssText =
+              'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;'
+              + 'opacity:0;pointer-events:none;';
+            label.appendChild(input);
+            document.body.appendChild(label);
+            iosHapticLabel = label;
+          } catch (_e) { return; }
+        }
+        try { iosHapticLabel.click(); } catch (_e) {}
+      }
+
       // metropolis 以外のゲーム (cafe / abyss など) に切り替えた時に古い
       // rect が残ると、その範囲のスワイプが J/K に化けて他ゲームのスクロール
       // を奪う。Rust 側が毎フレーム `updatedAt` (performance.now()) を更新する
@@ -645,6 +683,9 @@
         // tap として確定 (swipe してない) → 既存通り synthetic mousedown を発火。
         // swipe だった場合は何もしない (key dispatch は touchmove 内で完了)。
         if (!isSwipe) {
+          // iOS の触覚は実ジェスチャ内でしか鳴らないため、合成 mousedown を
+          // dispatch する前にこの実 touchend のコールスタックで発火させる。
+          iosTapHaptic();
           document.dispatchEvent(new MouseEvent('mousedown', {
             clientX: startX,
             clientY: startY,
