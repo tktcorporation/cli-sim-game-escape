@@ -319,6 +319,173 @@
   </script>
   <script>
 
+    // 効果音プレイヤー (Web Audio API による合成音)。
+    //
+    // Rust 側は `window.__playSound("click")` のように name だけ渡す。
+    // 音源ファイルは持たず、その場で oscillator + envelope を組んで再生する。
+    //
+    // 設計メモ:
+    // - AudioContext は最初の `__playSound` 呼び出しまで遅延生成する (page load
+    //   時点で作ると Chrome の autoplay policy で suspended のまま残る)。
+    // - それでも user gesture を踏む前に呼ばれる可能性に備え、
+    //   mousedown / keydown / touchstart の最初の発火で resume() する。
+    // - 未知の name は no-op (落とさず無視)。
+    // - エラーは握りつぶす (音が出ないだけでゲーム本体は止めない)。
+    (function() {
+      var ctx = null;
+      var resumed = false;
+
+      function getCtx() {
+        if (!ctx) {
+          var AC = window.AudioContext || window.webkitAudioContext;
+          if (!AC) return null;
+          try { ctx = new AC(); } catch (_e) { return null; }
+        }
+        if (!resumed && ctx.state === 'suspended' && ctx.resume) {
+          ctx.resume().catch(function(){});
+          resumed = true;
+        }
+        return ctx;
+      }
+
+      // 単音 (oscillator + gain envelope) を鳴らす共通ヘルパー。
+      // duration は秒。startAt は ctx.currentTime からのオフセット (秒) で
+      // アルペジオの並べ替えに使う。
+      function tone(c, type, freq, duration, gain, startAt) {
+        var t0 = c.currentTime + (startAt || 0);
+        var osc = c.createOscillator();
+        var g = c.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, t0);
+        // 短い attack → 線形 decay。クリック音を残さないため exp 終端ではなく
+        // linearRampToValueAtTime(0, end) で確実に 0 まで落とす。
+        g.gain.setValueAtTime(0, t0);
+        g.gain.linearRampToValueAtTime(gain, t0 + 0.005);
+        g.gain.linearRampToValueAtTime(0, t0 + duration);
+        osc.connect(g).connect(c.destination);
+        osc.start(t0);
+        osc.stop(t0 + duration + 0.02);
+      }
+
+      // 周波数スイープ (購入音・ガチャ用)。f0 → f1 を duration 秒で。
+      function sweep(c, type, f0, f1, duration, gain) {
+        var t0 = c.currentTime;
+        var osc = c.createOscillator();
+        var g = c.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(f0, t0);
+        osc.frequency.linearRampToValueAtTime(f1, t0 + duration);
+        g.gain.setValueAtTime(0, t0);
+        g.gain.linearRampToValueAtTime(gain, t0 + 0.005);
+        g.gain.linearRampToValueAtTime(0, t0 + duration);
+        osc.connect(g).connect(c.destination);
+        osc.start(t0);
+        osc.stop(t0 + duration + 0.02);
+      }
+
+      // ホワイトノイズ短バースト (敵被弾用)。filter で帯域を狭める。
+      function noiseBurst(c, duration, gain, cutoff) {
+        var t0 = c.currentTime;
+        var bufSize = Math.floor(c.sampleRate * duration);
+        var buf = c.createBuffer(1, bufSize, c.sampleRate);
+        var data = buf.getChannelData(0);
+        for (var i = 0; i < bufSize; i++) data[i] = Math.random() * 2 - 1;
+        var src = c.createBufferSource();
+        src.buffer = buf;
+        var filt = c.createBiquadFilter();
+        filt.type = 'bandpass';
+        filt.frequency.value = cutoff;
+        var g = c.createGain();
+        g.gain.setValueAtTime(0, t0);
+        g.gain.linearRampToValueAtTime(gain, t0 + 0.003);
+        g.gain.linearRampToValueAtTime(0, t0 + duration);
+        src.connect(filt).connect(g).connect(c.destination);
+        src.start(t0);
+        src.stop(t0 + duration + 0.02);
+      }
+
+      // 音色テーブル。Rust 側からは name でしか指定しないので、ここが
+      // 唯一の音色定義点。汎用 + metropolis + abyss でカテゴリ分け。
+      var SOUNDS = {
+        // ── 汎用 ──
+        // 短く軽いクリック音。連打されても耳障りにならないよう gain は控えめ。
+        click:    function(c) { tone(c, 'square',   880, 0.04, 0.05); },
+        // メニュー選択 / ゲーム入場。click より少し低く存在感を出す。
+        select:   function(c) { tone(c, 'triangle', 660, 0.08, 0.08); },
+        // 操作失敗 / 残高不足。
+        error:    function(c) { tone(c, 'square',   180, 0.15, 0.07); },
+
+        // ── 購入系 (汎用 + metropolis + abyss で共有) ──
+        purchase: function(c) { sweep(c, 'triangle', 520, 880, 0.10, 0.10); },
+        // 装備強化 (abyss)。ベル風の高音 1 発。
+        enhance:  function(c) {
+          tone(c, 'triangle', 1320, 0.08, 0.10);
+          tone(c, 'sine',     1980, 0.10, 0.06, 0.01);
+        },
+        // ガチャ (abyss)。長めの上昇スイープ + 終端に高音 1 発。
+        gacha:    function(c) {
+          sweep(c, 'sawtooth', 220, 880, 0.25, 0.06);
+          tone(c, 'triangle', 1320, 0.10, 0.08, 0.25);
+        },
+        // レベルアップ / AI 進化。3 音アルペジオ (C - E - G)。
+        level_up: function(c) {
+          tone(c, 'triangle', 523, 0.08, 0.10, 0.00);
+          tone(c, 'triangle', 659, 0.08, 0.10, 0.08);
+          tone(c, 'triangle', 784, 0.14, 0.10, 0.16);
+        },
+
+        // ── abyss ──
+        // 自分が被弾。低音 + 短ノイズ。
+        hit_hero:  function(c) {
+          tone(c, 'square', 140, 0.10, 0.10);
+          noiseBurst(c, 0.06, 0.05, 400);
+        },
+        // ボス出現。低音アルペジオ (下降)。
+        boss_appear: function(c) {
+          tone(c, 'sawtooth', 220, 0.12, 0.10, 0.00);
+          tone(c, 'sawtooth', 165, 0.12, 0.10, 0.10);
+          tone(c, 'sawtooth', 110, 0.30, 0.10, 0.20);
+        },
+        // フロア突破。4 音上昇アルペジオ。
+        floor_clear: function(c) {
+          tone(c, 'triangle', 523, 0.07, 0.10, 0.00);
+          tone(c, 'triangle', 659, 0.07, 0.10, 0.07);
+          tone(c, 'triangle', 784, 0.07, 0.10, 0.14);
+          tone(c, 'triangle', 1046, 0.18, 0.12, 0.21);
+        },
+        // クリティカル。鋭い高音 1 発。
+        critical: function(c) { tone(c, 'sawtooth', 1760, 0.08, 0.10); },
+      };
+
+      window.__playSound = function(name) {
+        try {
+          var fn = SOUNDS[name];
+          if (!fn) return;
+          var c = getCtx();
+          if (!c) return;
+          fn(c);
+        } catch (_e) {
+          // 何もしない (音が出ないだけ)。
+        }
+      };
+
+      // user gesture を踏んだら AudioContext を resume する保険。
+      // __playSound 内でも resume するが、最初の音再生より前に gesture を
+      // 踏んでおきたい (resume は非同期なので最初の音が無音になることがある)。
+      function primeOnGesture() {
+        var c = getCtx();
+        if (c && c.state === 'suspended' && c.resume) {
+          c.resume().catch(function(){});
+        }
+      }
+      document.addEventListener('mousedown',  primeOnGesture, { once: true, capture: true });
+      document.addEventListener('keydown',    primeOnGesture, { once: true, capture: true });
+      document.addEventListener('touchstart', primeOnGesture, { once: true, capture: true, passive: true });
+    })();
+
+  </script>
+  <script>
+
     // Touch / wheel handler: スワイプ・ホイールを keydown に変換する state
     // machine。タップは mousedown 経由で ratzilla に流す。
     //

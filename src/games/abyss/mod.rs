@@ -30,6 +30,7 @@ use tachyonfx::Duration;
 
 use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
+use crate::sound;
 
 fn now_ms() -> Option<f64> {
     web_sys::window().and_then(|w| w.performance()).map(|p| p.now())
@@ -113,20 +114,26 @@ impl AbyssGame {
 
         if s.floor > prev.floor {
             effects.push_descend(area);
+            sound::play(sound::FLOOR_CLEAR);
         } else if s.floor < prev.floor {
             effects.push_ascend_or_death(area);
+            sound::play(sound::ERROR);
         }
 
+        // 雑魚への通常ヒット (enemy_hurt_flash) は 1 戦闘で何度も鳴って耳障りなので
+        // 音は付けない。被弾とクリティカルとボス周りだけにフィードバックを集約。
         if prev.enemy_hurt_flash == 0 && s.enemy_hurt_flash > 0 {
             effects.push_enemy_hit(layout.enemy_panel);
         }
 
         if prev.hero_hurt_flash == 0 && s.hero_hurt_flash > 0 {
             effects.push_hero_hit(layout.hero_panel);
+            sound::play(sound::HIT_HERO);
         }
 
         if !prev.enemy_is_boss && s.current_enemy.is_boss {
             effects.push_boss_appearance(layout.combat);
+            sound::play(sound::BOSS_APPEAR);
         }
 
         if prev.enemy_is_boss && !s.current_enemy.is_boss && s.floor > prev.floor {
@@ -137,6 +144,7 @@ impl AbyssGame {
         if cur_dmg != prev.last_enemy_dmg {
             if let Some((_, true)) = cur_dmg {
                 effects.push_critical(layout.combat);
+                sound::play(sound::CRITICAL);
             }
         }
 
@@ -289,7 +297,29 @@ impl Game for AbyssGame {
         };
         if let Some(a) = action {
             let save_after = is_save_worthy(a);
-            logic::apply_action(&mut self.state, a);
+            let ok = logic::apply_action(&mut self.state, a);
+
+            // apply_action の成否でフィードバック音を出し分ける。失敗 (条件不足)
+            // は ERROR、成功は操作種別ごとの音。スクロールは連打されるので無音。
+            match a {
+                PlayerAction::BuyEquipment(_) | PlayerAction::BuySoulPerk(_) => {
+                    sound::play(if ok { sound::PURCHASE } else { sound::ERROR });
+                }
+                PlayerAction::EnhanceEquipment(_) => {
+                    sound::play(if ok { sound::ENHANCE } else { sound::ERROR });
+                }
+                PlayerAction::GachaPull(_) => {
+                    sound::play(if ok { sound::GACHA } else { sound::ERROR });
+                }
+                PlayerAction::EquipItem(_)
+                | PlayerAction::SetTab(_)
+                | PlayerAction::ToggleAutoDescend
+                | PlayerAction::Retreat => {
+                    sound::play(sound::CLICK);
+                }
+                PlayerAction::ScrollUp | PlayerAction::ScrollDown => {}
+            }
+
             if save_after {
                 self.flush_save();
             }

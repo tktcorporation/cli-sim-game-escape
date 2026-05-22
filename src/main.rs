@@ -4,6 +4,7 @@ use cli_sim_game_escape::games::{self, create_game, AppState, GameChoice};
 use cli_sim_game_escape::input::{
     is_narrow_layout, pixel_x_to_col, pixel_y_to_row, ClickScope, ClickState, InputEvent,
 };
+use cli_sim_game_escape::sound;
 use cli_sim_game_escape::widgets::{Clickable, ClickableList};
 use cli_sim_game_escape::time::GameTime;
 use cli_sim_game_escape::BACK_TO_MENU;
@@ -298,6 +299,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 _ => None,
             };
             if let Some(pick) = direct {
+                sound::play(sound::SELECT);
                 match pick {
                     MenuPick::Game(choice) => {
                         let game = create_game(&choice);
@@ -313,18 +315,26 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     // selection always stays visible (keeps the UX usable
                     // when the menu list is taller than the viewport).
                     InputEvent::Key('k') | InputEvent::Click(_, MENU_SCROLL_UP) => {
+                        let before = *selected;
                         *selected = selected.saturating_sub(1);
                         // 3 lines per game card → keep ~one card above
                         let target = (*selected as u16) * 3;
                         if *scroll > target {
                             *scroll = target;
                         }
+                        if *selected != before {
+                            sound::play(sound::CLICK);
+                        }
                     }
                     InputEvent::Key('j') | InputEvent::Click(_, MENU_SCROLL_DOWN) => {
+                        let before = *selected;
                         *selected = (*selected + 1).min(MENU_LAST_INDEX);
                         // No upper-bound auto-scroll here — render_menu
                         // re-clamps `scroll` against the actual viewport.
                         *scroll = scroll.saturating_add(0);
+                        if *selected != before {
+                            sound::play(sound::CLICK);
+                        }
                     }
                     _ => {}
                 }
