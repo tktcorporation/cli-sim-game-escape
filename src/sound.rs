@@ -1,13 +1,19 @@
-//! 効果音 (Web Audio API 経由の合成音) の薄いラッパー。
+//! 操作フィードバック (効果音 + ハプティクス) の薄いラッパー。
 //!
-//! 実体は `index.html` の `window.__playSound(name)` (Web Audio API で
-//! oscillator + envelope を組む)。Rust 側はキー名を渡すだけで、音色定義や
-//! AudioContext のライフサイクルは JS 側が握る。
+//! 実体は `index.html` の `window.__playSound(name)`。同じ name で
+//! - 効果音: Web Audio API で oscillator + envelope を合成 (`SOUNDS` テーブル)
+//! - 振動:   Vibration API (`navigator.vibrate`) で触覚 (`VIBRATION` テーブル)
+//! を駆動する。振動は Android Chrome 等のみで、iOS Safari は Vibration API
+//! 非対応のため別途 index.html 側の touch ハンドラが `<input switch>` トリック
+//! でタップ触覚を出す (こちらは `play()` 経由ではなく実ジェスチャ駆動)。
 //!
-//! WASM ビルドでのみ実音を鳴らし、native (cargo test) では no-op。
+//! Rust 側はキー名を渡すだけで、音色・振動パターンの定義や AudioContext の
+//! ライフサイクルは JS 側が握る。
+//!
+//! WASM ビルドでのみ実フィードバックを出し、native (cargo test) では no-op。
 //! `play("...")` を呼ぶ箇所はゲームロジックの好きな場所に置いてよい。
 //!
-//! ## 音色一覧 (JS 側 `SOUNDS` テーブルと同期させる)
+//! ## イベント名一覧 (JS 側 `SOUNDS` / `VIBRATION` テーブルと同期させる)
 //!
 //! - 汎用: `click`, `select`, `error`
 //! - 購入系: `purchase`, `enhance`

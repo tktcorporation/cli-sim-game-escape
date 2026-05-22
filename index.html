@@ -457,7 +457,45 @@
         critical: function(c) { tone(c, 'sawtooth', 1760, 0.08, 0.10); },
       };
 
+      // ハプティクス (Vibration API)。効果音と同じ「操作イベント名」で振動
+      // パターンを引く。音と振動はどちらも同じ操作イベントへのフィードバック
+      // なので、名前を共有して __playSound 1 箇所から両方を駆動する。Rust 側は
+      // sound::play(name) を呼ぶだけで、対応端末では音と振動の両方が出る。
+      //
+      // navigator.vibrate は Android Chrome 等でのみ動作し、iOS Safari は非対応
+      // (未対応環境では振動しないだけの no-op)。Chrome は user gesture 外からの
+      // vibrate を無視するため、tick 由来 (自動戦闘の被弾など) の振動は鳴らない
+      // ことがある — これは許容する graceful degradation。
+      //
+      // パターンは ms 単位の数値 1 つ、または [振動, 停止, 振動, ...] の配列。
+      // SOUNDS テーブルと同じ name をキーにするので、両テーブルを揃えて保つ。
+      var VIBRATION = {
+        // ── 汎用 ──
+        click:    8,
+        select:   15,
+        error:    [25, 40, 25],
+        // ── 購入系 ──
+        purchase: 18,
+        enhance:  [10, 30, 10],
+        level_up: [12, 30, 12, 30, 20],
+        // ── abyss ──
+        gacha:       [30, 20, 50],
+        hit_hero:    40,
+        boss_appear: [60, 40, 60, 40, 90],
+        floor_clear: [12, 25, 12, 25, 12, 25, 30],
+        critical:    [15, 20, 15],
+      };
+
+      function vibrate(name) {
+        if (!navigator || typeof navigator.vibrate !== 'function') return;
+        var pattern = VIBRATION[name];
+        if (pattern === undefined) return;
+        try { navigator.vibrate(pattern); } catch (_e) {}
+      }
+
       window.__playSound = function(name) {
+        // 振動は音と独立に発火する (AudioContext 非対応でも振動はさせたい)。
+        vibrate(name);
         try {
           var fn = SOUNDS[name];
           if (!fn) return;
@@ -512,6 +550,44 @@
       var isSwipe = false;
       var swipeAccum = 0;
       var swipeTargetIsPanel = false;  // touchstart 時に確定、touchmove で参照
+
+      // iOS Safari 向けタップ触覚。iOS は Vibration API (navigator.vibrate) を
+      // 一切実装しないため、Safari 17.4+ の <input type="checkbox" switch> を
+      // label 経由で click() するとシステム触覚 (Taptic Engine) が鳴る挙動で
+      // 代替する。label 経由でしか発火しない (input を直接 click しても鳴らない)。
+      //
+      // - navigator.vibrate がある環境 (Android Chrome 等) では __playSound 側の
+      //   Vibration API が触覚を担うので、こちらは何もしない (二重発火防止)。
+      // - 触覚は「実ユーザー操作のコールスタック内」でしか発火しないため、合成
+      //   mousedown 経由の WASM ハンドラ (= __playSound) ではなく、実 touchend で
+      //   タップ確定した瞬間に鳴らす。tick 由来 (自動戦闘の被弾など) の触覚は
+      //   iOS では出せない — 許容する graceful degradation。
+      // - iOS は触覚の種類が 1 つだけで、Android のような強弱・パターンの作り
+      //   分けはできない (タップごとに同じ「コツッ」)。
+      // - 注意: iOS 26.5 でこの挙動が塞がれたため、それ以降の iPhone では鳴らない。
+      var supportsVibrate = !!(navigator && typeof navigator.vibrate === 'function');
+      var iosHapticLabel = null;
+      function iosTapHaptic() {
+        if (supportsVibrate) return;
+        if (!iosHapticLabel) {
+          try {
+            var input = document.createElement('input');
+            input.type = 'checkbox';
+            input.setAttribute('switch', '');
+            var label = document.createElement('label');
+            label.setAttribute('aria-hidden', 'true');
+            // 画面外かつ pointer-events:none で隠す。elementFromPoint による
+            // <pre> ヒット検出 (dom_element_to_cell) を絶対に奪わないため。
+            label.style.cssText =
+              'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;'
+              + 'opacity:0;pointer-events:none;';
+            label.appendChild(input);
+            document.body.appendChild(label);
+            iosHapticLabel = label;
+          } catch (_e) { return; }
+        }
+        try { iosHapticLabel.click(); } catch (_e) {}
+      }
 
       // metropolis 以外のゲーム (cafe / abyss など) に切り替えた時に古い
       // rect が残ると、その範囲のスワイプが J/K に化けて他ゲームのスクロール
@@ -607,6 +683,9 @@
         // tap として確定 (swipe してない) → 既存通り synthetic mousedown を発火。
         // swipe だった場合は何もしない (key dispatch は touchmove 内で完了)。
         if (!isSwipe) {
+          // iOS の触覚は実ジェスチャ内でしか鳴らないため、合成 mousedown を
+          // dispatch する前にこの実 touchend のコールスタックで発火させる。
+          iosTapHaptic();
           document.dispatchEvent(new MouseEvent('mousedown', {
             clientX: startX,
             clientY: startY,
