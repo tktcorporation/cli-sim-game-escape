@@ -457,7 +457,45 @@
         critical: function(c) { tone(c, 'sawtooth', 1760, 0.08, 0.10); },
       };
 
+      // ハプティクス (Vibration API)。効果音と同じ「操作イベント名」で振動
+      // パターンを引く。音と振動はどちらも同じ操作イベントへのフィードバック
+      // なので、名前を共有して __playSound 1 箇所から両方を駆動する。Rust 側は
+      // sound::play(name) を呼ぶだけで、対応端末では音と振動の両方が出る。
+      //
+      // navigator.vibrate は Android Chrome 等でのみ動作し、iOS Safari は非対応
+      // (未対応環境では振動しないだけの no-op)。Chrome は user gesture 外からの
+      // vibrate を無視するため、tick 由来 (自動戦闘の被弾など) の振動は鳴らない
+      // ことがある — これは許容する graceful degradation。
+      //
+      // パターンは ms 単位の数値 1 つ、または [振動, 停止, 振動, ...] の配列。
+      // SOUNDS テーブルと同じ name をキーにするので、両テーブルを揃えて保つ。
+      var VIBRATION = {
+        // ── 汎用 ──
+        click:    8,
+        select:   15,
+        error:    [25, 40, 25],
+        // ── 購入系 ──
+        purchase: 18,
+        enhance:  [10, 30, 10],
+        level_up: [12, 30, 12, 30, 20],
+        // ── abyss ──
+        gacha:       [30, 20, 50],
+        hit_hero:    40,
+        boss_appear: [60, 40, 60, 40, 90],
+        floor_clear: [12, 25, 12, 25, 12, 25, 30],
+        critical:    [15, 20, 15],
+      };
+
+      function vibrate(name) {
+        if (!navigator || typeof navigator.vibrate !== 'function') return;
+        var pattern = VIBRATION[name];
+        if (pattern === undefined) return;
+        try { navigator.vibrate(pattern); } catch (_e) {}
+      }
+
       window.__playSound = function(name) {
+        // 振動は音と独立に発火する (AudioContext 非対応でも振動はさせたい)。
+        vibrate(name);
         try {
           var fn = SOUNDS[name];
           if (!fn) return;
