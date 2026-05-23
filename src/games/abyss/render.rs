@@ -393,9 +393,8 @@ fn render_retreat_dialog(
     let partial_available = partial_target > 1;
 
     let popup_w = 40u16.min(full_area.width.saturating_sub(2)).max(24);
-    let popup_h = if partial_available { 11u16 } else { 9u16 }
-        .min(full_area.height.saturating_sub(2))
-        .max(7);
+    let popup_h_target = if partial_available { 11u16 } else { 9u16 };
+    let popup_h = popup_h_target.min(full_area.height.saturating_sub(2)).max(7);
     let popup_x = full_area.x + (full_area.width.saturating_sub(popup_w)) / 2;
     let popup_y = full_area.y + (full_area.height.saturating_sub(popup_h)) / 2;
     let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
