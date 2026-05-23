@@ -596,6 +596,10 @@ pub struct AbyssState {
     /// 現在のタブ本体の縦スクロール量 (visual rows)。
     /// **UI only**: simulator / logic は本質的には触らない、永続化もしない。
     pub tab_scroll: Cell<u16>,
+    /// 「浅瀬に戻る」確認ダイアログの表示中フラグ。
+    /// **UI only**: 誤タップでの一気撤退を防ぐためのモーダル。永続化しない
+    /// (ロード時は常に閉じた状態で開始する)。
+    pub retreat_dialog_open: bool,
 
     // ── ガチャ ──
     pub keys: u64,
@@ -649,6 +653,7 @@ impl AbyssState {
             auto_descend: true,
             tab: Tab::Upgrades,
             tab_scroll: Cell::new(0),
+            retreat_dialog_open: false,
             keys: 0,
             pulls_since_epic: 0,
             total_pulls: 0,
