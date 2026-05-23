@@ -198,9 +198,13 @@ impl AbyssGame {
             TOGGLE_AUTO_DESCEND => Some(PlayerAction::ToggleAutoDescend),
             RETREAT_TO_SURFACE => Some(PlayerAction::OpenRetreatDialog),
             RETREAT_DIALOG_FULL => Some(PlayerAction::RetreatTo(1)),
-            RETREAT_DIALOG_PARTIAL => Some(PlayerAction::RetreatTo(
-                self.state.floor.saturating_sub(logic::RETREAT_PARTIAL_STEPS),
-            )),
+            // partial == 1 では render 側がボタンを描画しないので通常は発火しないが、
+            // 直近 30ms の dedup タイミングや古い state での誤発火を弾く防御。
+            RETREAT_DIALOG_PARTIAL if self.state.floor > logic::RETREAT_PARTIAL_STEPS + 1 => {
+                Some(PlayerAction::RetreatTo(
+                    self.state.floor.saturating_sub(logic::RETREAT_PARTIAL_STEPS),
+                ))
+            }
             RETREAT_DIALOG_CANCEL => Some(PlayerAction::CloseRetreatDialog),
             GACHA_PULL_1 => Some(PlayerAction::GachaPull(1)),
             GACHA_PULL_10 => Some(PlayerAction::GachaPull(10)),
@@ -251,9 +255,11 @@ impl AbyssGame {
         if self.state.retreat_dialog_open {
             return match ch {
                 '1' => Some(PlayerAction::RetreatTo(1)),
-                '2' => Some(PlayerAction::RetreatTo(
-                    self.state.floor.saturating_sub(logic::RETREAT_PARTIAL_STEPS),
-                )),
+                '2' if self.state.floor > logic::RETREAT_PARTIAL_STEPS + 1 => {
+                    Some(PlayerAction::RetreatTo(
+                        self.state.floor.saturating_sub(logic::RETREAT_PARTIAL_STEPS),
+                    ))
+                }
                 'p' | 'P' | 'q' | 'Q' => Some(PlayerAction::CloseRetreatDialog),
                 _ => None,
             };
@@ -538,6 +544,19 @@ mod tests {
         g.handle_input(&InputEvent::Key('2'));
         assert_eq!(g.state.floor, 50 - logic::RETREAT_PARTIAL_STEPS);
         assert!(!g.state.retreat_dialog_open);
+    }
+
+    /// '2' は partial 戻り先が B1F と同じになる低フロアでは no-op ([1] と差別化)。
+    #[test]
+    fn retreat_dialog_partial_noop_when_target_equals_surface() {
+        let mut g = AbyssGame::new();
+        g.state.floor = logic::RETREAT_PARTIAL_STEPS + 1;
+        g.handle_input(&InputEvent::Key('p'));
+        assert!(g.state.retreat_dialog_open);
+        let handled = g.handle_input(&InputEvent::Key('2'));
+        assert!(!handled, "'2' は無視される");
+        assert!(g.state.retreat_dialog_open, "ダイアログは開いたまま");
+        assert_eq!(g.state.floor, logic::RETREAT_PARTIAL_STEPS + 1);
     }
 
     /// B1F では 'p' でダイアログを開かない (戻る先がない)。

@@ -389,9 +389,13 @@ fn render_retreat_dialog(
     click_state: &Rc<RefCell<ClickState>>,
 ) {
     let partial_target = state.floor.saturating_sub(logic::RETREAT_PARTIAL_STEPS).max(1);
+    // partial_target == 1 のときは [2] が [1] と同義になるので選択肢を隠す。
+    let partial_available = partial_target > 1;
 
     let popup_w = 40u16.min(full_area.width.saturating_sub(2)).max(24);
-    let popup_h = 11u16.min(full_area.height.saturating_sub(2)).max(7);
+    let popup_h = if partial_available { 11u16 } else { 9u16 }
+        .min(full_area.height.saturating_sub(2))
+        .max(7);
     let popup_x = full_area.x + (full_area.width.saturating_sub(popup_w)) / 2;
     let popup_y = full_area.y + (full_area.height.saturating_sub(popup_h)) / 2;
     let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
@@ -423,23 +427,25 @@ fn render_retreat_dialog(
         ]),
         RETREAT_DIALOG_FULL,
     );
-    cl.push_clickable(
-        Line::from(vec![
-            Span::styled(
-                " [2] ",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(
-                    "{}階戻る → B{}F",
-                    logic::RETREAT_PARTIAL_STEPS,
-                    partial_target
+    if partial_available {
+        cl.push_clickable(
+            Line::from(vec![
+                Span::styled(
+                    " [2] ",
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 ),
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        RETREAT_DIALOG_PARTIAL,
-    );
+                Span::styled(
+                    format!(
+                        "{}階戻る → B{}F",
+                        logic::RETREAT_PARTIAL_STEPS,
+                        partial_target
+                    ),
+                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            RETREAT_DIALOG_PARTIAL,
+        );
+    }
     cl.push(Line::from(""));
     cl.push_clickable(
         Line::from(Span::styled(
@@ -1875,6 +1881,28 @@ mod tests {
             }
         }
         assert!(full && partial && cancel, "撤退ダイアログの選択肢が揃うべき");
+    }
+
+    /// partial 撤退先が B1F と同じになる低フロアでは [2] を出さない (full と同義になるため)。
+    #[test]
+    fn retreat_dialog_hides_partial_when_target_equals_surface() {
+        let mut state = AbyssState::new();
+        state.tab = Tab::Settings;
+        state.floor = super::super::logic::RETREAT_PARTIAL_STEPS + 1; // = 11 → partial も B1F
+        state.retreat_dialog_open = true;
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
+        let cs = cs.borrow();
+        let mut partial_seen = false;
+        for y in 0..30 {
+            for x in 0..80 {
+                if cs.hit_test(x, y) == Some(RETREAT_DIALOG_PARTIAL) {
+                    partial_seen = true;
+                }
+            }
+        }
+        assert!(!partial_seen, "partial 戻り先が B1F と同じなら [2] は登録しない");
     }
 
     /// 所持済み (未装着) の装備に EQUIP_ITEM_BASE クリックターゲットが登録されること。
