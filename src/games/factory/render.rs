@@ -401,6 +401,20 @@ fn trail_visual(b: &Belt) -> Option<(String, Style)> {
     }
 }
 
+/// 待機中ベルトの表示。対角線状の光沢 (sheen) が約 1.6 秒周期で盤面を
+/// 流れ、ラインが動いている空気感を出す。ベルトは無方向 (ルーティングは
+/// 自動) なので、向きを誤解させる矢印ではなく方向中立な波で表現する。
+/// 座標は grid 絶対座標を使い、ビューポートをスクロールしても波が連続する。
+fn belt_idle_visual(x: usize, y: usize, anim_frame: u32) -> (String, Style) {
+    const SHEEN_PERIOD: u32 = 8;
+    let phase = (x as u32 + y as u32 + anim_frame / 2) % SHEEN_PERIOD;
+    if phase == 0 {
+        ("▒ ".to_string(), Style::default().fg(Color::Gray))
+    } else {
+        ("░ ".to_string(), Style::default().fg(Color::DarkGray))
+    }
+}
+
 /// Check if cursor is on any part of the 2×2 machine anchored at (ax, ay).
 fn cursor_on_machine(state: &FactoryState, ax: usize, ay: usize) -> bool {
     let cx = state.cursor_x;
@@ -488,7 +502,7 @@ fn render_grid(
                     } else if let Some(trail) = trail_visual(b) {
                         trail
                     } else {
-                        ("░ ".to_string(), Style::default().fg(Color::DarkGray))
+                        belt_idle_visual(x, y, state.anim_frame)
                     }
                 }
             };
@@ -809,3 +823,36 @@ fn render_tool_panel(
     cl.render(f, area, block, &mut cs, false, 0);
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 待機ベルトの光沢は周期位相のセルだけ明るくなる() {
+        // x+y+anim/2 が 8 の倍数のセルが sheen (▒)、それ以外は ░。
+        let (sheen, _) = belt_idle_visual(0, 0, 0);
+        assert_eq!(sheen, "▒ ");
+        let (idle, _) = belt_idle_visual(1, 0, 0);
+        assert_eq!(idle, "░ ");
+        let (idle2, _) = belt_idle_visual(3, 2, 0);
+        assert_eq!(idle2, "░ ");
+    }
+
+    #[test]
+    fn 待機ベルトの光沢はanim_frameの進行で隣のセルへ移動する() {
+        // anim_frame が 2 進むごとに位相が 1 ずれ、波が対角方向へ流れる。
+        let (before, _) = belt_idle_visual(7, 0, 0);
+        assert_eq!(before, "░ ");
+        let (after, _) = belt_idle_visual(7, 0, 2);
+        assert_eq!(after, "▒ ");
+    }
+
+    #[test]
+    fn 待機ベルトの表示は常にセル幅2文字() {
+        for x in 0..8 {
+            let (s, _) = belt_idle_visual(x, 0, 0);
+            assert_eq!(s.chars().count(), 2, "セル幅が崩れるとグリッドがずれる");
+        }
+    }
+}

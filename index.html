@@ -33,9 +33,21 @@
         height: 100vh;
         height: 100dvh;
         background-color: #0a0a0a;
+        /* CRT 風ビネット: 中央をわずかに持ち上げ、四隅を沈める。
+           bg 未指定セルは transparent なので body の gradient が透ける。
+           彩度はごく控えめ (緑 +3) に留め、ゲーム側の配色を邪魔しない。 */
+        background-image: radial-gradient(ellipse at center, #0e110e 0%, #0a0a0a 65%, #060706 100%);
         overflow: hidden;
         touch-action: manipulation;
         -webkit-tap-highlight-color: transparent;
+      }
+      /* フォスファーグロー: currentColor なので各 span が自分の文字色で発光し、
+         色のハードコードなしに全ゲームへ効く。text-shadow は文字数比例で
+         paint コストが嵩むため、モバイル (coarse pointer) では無効化する。 */
+      @media (hover: hover) and (pointer: fine) {
+        pre {
+          text-shadow: 0 0 3px currentColor;
+        }
       }
       body > div {
         margin: 0;
