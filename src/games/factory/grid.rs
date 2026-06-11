@@ -210,6 +210,10 @@ pub struct Belt {
     pub item: Option<ItemKind>,
     /// Direction the current item entered from (to avoid backtracking).
     pub item_from: Option<Direction>,
+    /// 直前に通過したアイテム（残像演出用。ルーティングには影響しない）。
+    pub trail_item: Option<ItemKind>,
+    /// 残像の残り表示 tick 数（0 で非表示）。
+    pub trail_ticks: u8,
 }
 
 impl Belt {
@@ -217,6 +221,8 @@ impl Belt {
         Self {
             item: None,
             item_from: None,
+            trail_item: None,
+            trail_ticks: 0,
         }
     }
 }

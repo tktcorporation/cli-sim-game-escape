@@ -45,6 +45,9 @@ pub struct FactoryState {
     pub total_money_earned: u64,
     /// Tick counter for income rate calculation.
     pub total_ticks: u64,
+    /// 直近の出荷が発生した tick の履歴（スループット表示用）。
+    /// ウィンドウ外の古い分は logic 側の tick で剪定される。
+    pub recent_export_ticks: Vec<u64>,
     /// Viewport top-left corner (scroll offset).
     pub viewport_x: usize,
     pub viewport_y: usize,
@@ -68,6 +71,7 @@ impl FactoryState {
             last_export_value: 0,
             total_money_earned: 0,
             total_ticks: 0,
+            recent_export_ticks: Vec::new(),
             viewport_x: 0,
             viewport_y: 0,
         }

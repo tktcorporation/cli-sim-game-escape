@@ -13,7 +13,8 @@ use crate::input::{is_narrow_layout, ClickState};
 use crate::widgets::{ClickableGrid, ClickableList};
 
 use super::actions::*;
-use super::grid::{anchor_of, machine_at, Cell, MachineKind, MinerMode, GRID_H, GRID_W, VIEW_H, VIEW_W};
+use super::grid::{anchor_of, machine_at, Belt, Cell, MachineKind, MinerMode, GRID_H, GRID_W, VIEW_H, VIEW_W};
+use super::logic::throughput_per_sec;
 use super::state::{FactoryState, PlacementTool};
 
 /// Spinner for active machines.
@@ -133,11 +134,20 @@ fn render_header(state: &FactoryState, f: &mut Frame, area: Rect, is_narrow: boo
             .add_modifier(Modifier::BOLD)
     };
 
+    // 出荷フラッシュ中の「+$X」はグリッドの Exporter と同じ金色反転で揃える
     let flash_style = Style::default()
-        .fg(Color::Green)
-        .add_modifier(Modifier::BOLD);
+        .fg(Color::LightYellow)
+        .add_modifier(Modifier::BOLD | Modifier::REVERSED);
 
     let income_style = Style::default().fg(Color::Cyan);
+
+    // ナローレイアウトには Stats パネルがないため、出荷ペースはヘッダーで補う
+    let narrow_tput_str = if is_narrow && state.total_exported > 0 {
+        let tput = throughput_per_sec(&state.recent_export_ticks, state.total_ticks);
+        format!(" {:.1}個/s", tput)
+    } else {
+        String::new()
+    };
 
     let spans = if is_narrow {
         vec![
@@ -147,6 +157,7 @@ fn render_header(state: &FactoryState, f: &mut Frame, area: Rect, is_narrow: boo
             ),
             Span::styled(flash_str, flash_style),
             Span::styled(income_str, income_style),
+            Span::styled(narrow_tput_str, Style::default().fg(Color::Green)),
         ]
     } else {
         vec![
@@ -376,6 +387,20 @@ fn miner_color(mode: MinerMode) -> Color {
     }
 }
 
+/// 残像の表示。通過直後はアイテム記号の薄表示、消える間際は「·」で
+/// フェードアウトを表現する（本物のアイテムは BOLD + アイテム色なので区別できる）。
+fn trail_visual(b: &Belt) -> Option<(String, Style)> {
+    let item = b.trail_item?;
+    match b.trail_ticks {
+        0 => None,
+        1 => Some(("· ".to_string(), Style::default().fg(Color::DarkGray))),
+        _ => Some((
+            format!("{} ", item.symbol()),
+            Style::default().fg(Color::DarkGray),
+        )),
+    }
+}
+
 /// Check if cursor is on any part of the 2×2 machine anchored at (ax, ay).
 fn cursor_on_machine(state: &FactoryState, ax: usize, ay: usize) -> bool {
     let cx = state.cursor_x;
@@ -435,9 +460,10 @@ fn render_grid(
                         machine_cell_chars(m.kind, dx, dy, m).to_string()
                     };
                     let style = if m.kind == MachineKind::Exporter && state.export_flash > 0 {
+                        // 出荷フラッシュ: 金色の反転表示で「売れた！」を強調
                         Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD)
+                            .fg(Color::LightYellow)
+                            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
                     } else if blocked {
                         Style::default()
                             .fg(Color::Red)
@@ -459,6 +485,8 @@ fn render_grid(
                                 .fg(item.color())
                                 .add_modifier(Modifier::BOLD),
                         )
+                    } else if let Some(trail) = trail_visual(b) {
+                        trail
                     } else {
                         ("░ ".to_string(), Style::default().fg(Color::DarkGray))
                     }
@@ -628,6 +656,13 @@ fn render_stats(state: &FactoryState, f: &mut Frame, area: Rect) {
         lines.push(Line::from(Span::styled(
             format!(" 収入: ${:.1}/s", rate),
             Style::default().fg(Color::Yellow),
+        )));
+        // 出荷ペース（直近10秒窓）: 0.0 でも表示してラインの停滞に気付けるようにする
+        let tput = throughput_per_sec(&state.recent_export_ticks, state.total_ticks);
+        let tput_color = if tput > 0.0 { Color::Green } else { Color::DarkGray };
+        lines.push(Line::from(Span::styled(
+            format!(" 出荷ペース: {:.1}個/秒", tput),
+            Style::default().fg(tput_color),
         )));
     }
 
