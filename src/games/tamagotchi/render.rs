@@ -13,7 +13,8 @@ use crate::input::{is_narrow_layout, ClickState};
 use crate::widgets::{Clickable, ClickableList};
 
 use super::actions::*;
-use super::state::{LastAction, Stage, TamaState};
+use super::logic;
+use super::state::{LastAction, Milestone, Stage, TamaState};
 
 pub fn render(
     state: &TamaState,
@@ -55,7 +56,7 @@ fn render_header(state: &TamaState, f: &mut Frame, area: Rect, borders: Borders)
     } else {
         format_age(state.best_age_ticks)
     };
-    let title = Paragraph::new(Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             "🥚 たまごっち  ",
             Style::default()
@@ -70,13 +71,23 @@ fn render_header(state: &TamaState, f: &mut Frame, area: Rect, borders: Borders)
             format!("ベスト寿命: {}", best_label),
             Style::default().fg(Color::DarkGray),
         ),
-    ]))
-    .block(
-        Block::default()
-            .borders(borders)
-            .border_style(Style::default().fg(Color::Yellow)),
-    )
-    .alignment(Alignment::Center);
+    ];
+    if let Some(top) = state.highest_milestone() {
+        // ナローでは桁あふれしないよう獲得数のみ、ワイドでは最高位の称号名。
+        let text = if is_narrow_layout(area.width) {
+            format!(" 🏅{}", state.milestones.len())
+        } else {
+            format!(" 🏅 {}", top.label())
+        };
+        spans.push(Span::styled(text, Style::default().fg(Color::LightYellow)));
+    }
+    let title = Paragraph::new(Line::from(spans))
+        .block(
+            Block::default()
+                .borders(borders)
+                .border_style(Style::default().fg(Color::Yellow)),
+        )
+        .alignment(Alignment::Center);
     f.render_widget(title, area);
 }
 
@@ -202,29 +213,97 @@ fn render_pet_pane(
     click_state: &Rc<RefCell<ClickState>>,
     borders: Borders,
 ) {
+    // ステージ遷移直後は枠とペットを明滅する黄色で強調し、成長の節目を
+    // 「達成の瞬間」として見せる。
+    let celebrating = state.stage_celebration > 0 && state.is_alive();
+    let border_style = if celebrating {
+        let blink = if (state.anim_frame / 3).is_multiple_of(2) {
+            Color::LightYellow
+        } else {
+            Color::Yellow
+        };
+        Style::default().fg(blink).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::LightMagenta)
+    };
     let block = Block::default()
         .borders(borders)
-        .border_style(Style::default().fg(Color::LightMagenta))
-        .title(" ペット ");
+        .border_style(border_style)
+        .title(if celebrating {
+            " 🎉 おいわい "
+        } else {
+            " ペット "
+        });
     let inner = block.inner(area);
 
-    let lines = pet_art(state);
-    // ペット ASCII art を中央揃えで縦中央に配置。
-    let mut rendered: Vec<Line> = Vec::new();
-    let pad_top = inner.height.saturating_sub(lines.len() as u16) / 2;
-    for _ in 0..pad_top {
-        rendered.push(Line::from(""));
-    }
-    rendered.extend(lines);
+    let art_style = if celebrating {
+        Style::default()
+            .fg(Color::LightYellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+    };
+    let mut content = pet_art(state, art_style);
 
-    // 吹き出し / メッセージ
-    if let Some(bubble) = speech_bubble(state) {
-        rendered.push(Line::from(""));
-        rendered.push(Line::from(Span::styled(
+    // 吹き出し / メッセージ。祝福中は専用メッセージが通常の吹き出しに優先する。
+    if celebrating {
+        if let Some(msg) = logic::celebration_message(state.stage) {
+            content.push(Line::from(""));
+            content.push(Line::from(Span::styled(
+                msg,
+                Style::default()
+                    .fg(Color::LightYellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
+    } else if let Some(bubble) = speech_bubble(state) {
+        content.push(Line::from(""));
+        content.push(Line::from(Span::styled(
             bubble,
             Style::default().fg(Color::White),
         )));
     }
+
+    // 死亡画面では世代をまたぐ実績 (称号) と次の目標を見せて、新世代を
+    // 始める動機につなげる。
+    if state.is_dead() {
+        content.push(Line::from(""));
+        content.push(Line::from(Span::styled(
+            format!(
+                "🏅 称号 {}/{}",
+                state.milestones.len(),
+                Milestone::ALL.len()
+            ),
+            Style::default().fg(Color::LightYellow),
+        )));
+        match logic::next_milestone(&state.milestones) {
+            Some(next) => {
+                content.push(Line::from(Span::styled(
+                    format!("つぎの目標: 「{}」", next.label()),
+                    Style::default().fg(Color::White),
+                )));
+                content.push(Line::from(Span::styled(
+                    format!("({})", next.goal_hint()),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+            None => {
+                content.push(Line::from(Span::styled(
+                    "すべての称号を獲得した！",
+                    Style::default().fg(Color::LightYellow),
+                )));
+            }
+        }
+    }
+
+    // コンテンツ全体 (art + メッセージ) を縦中央に配置。低い画面でも
+    // 死亡画面の称号情報が下に切れにくいよう、art 単体ではなく全体で計算する。
+    let mut rendered: Vec<Line> = Vec::new();
+    let pad_top = inner.height.saturating_sub(content.len() as u16) / 2;
+    for _ in 0..pad_top {
+        rendered.push(Line::from(""));
+    }
+    rendered.extend(content);
 
     let para = Paragraph::new(rendered).alignment(Alignment::Center);
 
@@ -245,7 +324,9 @@ fn render_pet_pane(
     }
 }
 
-fn pet_art(state: &TamaState) -> Vec<Line<'static>> {
+/// `art_style` は祝福演出などでペット全体の色を差し替えるための基調スタイル。
+/// うんちなど固有色を持つ要素には適用しない。
+fn pet_art(state: &TamaState, art_style: Style) -> Vec<Line<'static>> {
     let frame = (state.anim_frame / 5) % 2;
     let face = match (state.stage, state.last_action, state.sleeping) {
         (Stage::Dead, _, _) => "  ✟",
@@ -306,12 +387,12 @@ fn pet_art(state: &TamaState) -> Vec<Line<'static>> {
         _ => "U U",
     };
 
-    let mut lines = vec![Line::from(face.to_string())];
+    let mut lines = vec![Line::from(Span::styled(face.to_string(), art_style))];
     if !body.is_empty() {
-        lines.push(Line::from(body.to_string()));
+        lines.push(Line::from(Span::styled(body.to_string(), art_style)));
     }
     if !feet.is_empty() {
-        lines.push(Line::from(feet.to_string()));
+        lines.push(Line::from(Span::styled(feet.to_string(), art_style)));
     }
 
     if state.poop_count > 0 && !state.is_egg() && !state.is_dead() {
@@ -345,6 +426,10 @@ fn speech_bubble(state: &TamaState) -> Option<String> {
     }
     if state.stats.happiness < 25 {
         return Some("つまんない…".into());
+    }
+    // 緊急の要求がない時だけ、晩年の思い出セリフを流す (世話の情報が優先)。
+    if let Some(memory) = logic::elder_memory_line(state) {
+        return Some(memory.into());
     }
     None
 }

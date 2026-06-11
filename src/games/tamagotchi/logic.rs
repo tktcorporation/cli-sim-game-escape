@@ -3,10 +3,13 @@
 //! tick / アクション処理は state.rs の `TamaState` を引数で受け取って
 //! 状態遷移を行う。乱数や I/O は使わない (再現テスト可能にするため)。
 
-use super::state::{LastAction, Stage, TamaState};
+use super::state::{LastAction, Milestone, Stage, TamaState};
 
 /// アクション後の演出が画面に残る tick 数 (10 = 1 秒)。
 const ACTION_FLASH_TICKS: u32 = 12;
+
+/// ステージ遷移直後の祝福演出が続く tick 数 (2.5 秒)。
+pub const STAGE_CELEBRATION_TICKS: u32 = 25;
 
 /// 各成長段階の継続時間 (tick)。10 tick = 1 秒。
 /// Baby = 60 sec, Child = 120 sec, Teen = 180 sec, Adult = 300 sec で
@@ -17,6 +20,22 @@ const TEEN_DURATION: u64 = 1800;
 const ADULT_DURATION: u64 = 3000;
 /// Adult から Elder までの累計 tick。
 const ADULT_END: u64 = BABY_DURATION + CHILD_DURATION + TEEN_DURATION + ADULT_DURATION;
+
+/// Elder の HP がここまで下がると晩年セリフが始まる。HP 警告 (30 未満) より
+/// 先に「思い出を振り返る」段階を作り、終盤を物語として見せるための閾値。
+const ELDER_MEMORY_HP: u8 = 50;
+/// 健康でも、この年齢 (Elder 突入から 5 分) を超えたら晩年セリフが始まる。
+const ELDER_MEMORY_AGE: u64 = ADULT_END + 3000;
+/// 晩年セリフの切り替え周期 (8 秒)。読み終えられる長さで次の思い出へ。
+const ELDER_MEMORY_ROTATE_TICKS: u64 = 80;
+
+const ELDER_MEMORY_LINES: [&str; 5] = [
+    "たのしかったなぁ…",
+    "いっぱい あそんだね",
+    "ごはん おいしかったなぁ",
+    "おふろ きもちよかったね",
+    "ずっと いっしょだったね",
+];
 
 /// ステータス減衰タイマー。tick 周期ごとに該当ステータスを 1 減らす。
 /// 数値は「満タン (100) から 0 になるまでの秒数」基準で逆算してある。
@@ -102,6 +121,10 @@ fn tick_once(state: &mut TamaState) {
         }
     }
 
+    if state.stage_celebration > 0 {
+        state.stage_celebration -= 1;
+    }
+
     if state.is_dead() || state.is_egg() {
         return;
     }
@@ -113,6 +136,13 @@ fn tick_once(state: &mut TamaState) {
     if next_stage != state.stage && state.stage != Stage::Elder {
         state.stage = next_stage;
         state.add_log(format!("{} に成長した！", next_stage.label()));
+        // 成長の節目を数秒の祝福演出 + 称号で「達成した」体験にする。
+        state.stage_celebration = STAGE_CELEBRATION_TICKS;
+        if let Some(m) = milestone_for_stage(next_stage) {
+            if state.unlock_milestone(m) {
+                state.add_log(format!("称号「{}」を獲得！", m.label()));
+            }
+        }
     }
 
     // ── ステータス減衰 ──
@@ -196,6 +226,9 @@ fn hp_damage_period(state: &TamaState) -> Option<u32> {
 }
 
 fn die(state: &mut TamaState) {
+    // 「でんせつ」は過去世代のベストを超えた時だけ。初代は比較対象がなく
+    // 必ずベスト更新になってしまうので対象外にして称号の重みを守る。
+    let broke_record = state.best_age_ticks > 0 && state.age_ticks > state.best_age_ticks;
     if state.age_ticks > state.best_age_ticks {
         state.best_age_ticks = state.age_ticks;
     }
@@ -203,8 +236,74 @@ fn die(state: &mut TamaState) {
     state.sleeping = false;
     state.poop_count = 0;
     state.add_log("お別れの時がきました…");
+    if broke_record && state.unlock_milestone(Milestone::Legend) {
+        state.add_log(format!("称号「{}」を獲得！", Milestone::Legend.label()));
+    }
     state.last_action = None;
     state.action_flash = 0;
+    state.stage_celebration = 0;
+}
+
+/// ステージ到達で獲得する称号。Baby までは「全員通る道」なので称号なし。
+pub fn milestone_for_stage(stage: Stage) -> Option<Milestone> {
+    match stage {
+        Stage::Child => Some(Milestone::Sprout),
+        Stage::Teen => Some(Milestone::Rebel),
+        Stage::Adult => Some(Milestone::FineAdult),
+        Stage::Elder => Some(Milestone::LongLifeStar),
+        Stage::Egg | Stage::Baby | Stage::Dead => None,
+    }
+}
+
+/// 進行順 (`Milestone::ALL`) で最初の未獲得称号。「つぎの目標」表示用。
+pub fn next_milestone(milestones: &[Milestone]) -> Option<Milestone> {
+    Milestone::ALL
+        .iter()
+        .copied()
+        .find(|m| !milestones.contains(m))
+}
+
+/// 現在のステージまでに到達済みのはずの称号を補完する。称号導入前の save を
+/// ロードした時に、既に通過したステージの称号が失われないようにするための関数。
+#[cfg(any(target_arch = "wasm32", test))]
+pub fn backfill_stage_milestones(state: &mut TamaState) {
+    let reached: &[Stage] = match state.stage {
+        // Dead はどのステージで死んだか save に残らないので補完しない
+        Stage::Egg | Stage::Baby | Stage::Dead => &[],
+        Stage::Child => &[Stage::Child],
+        Stage::Teen => &[Stage::Child, Stage::Teen],
+        Stage::Adult => &[Stage::Child, Stage::Teen, Stage::Adult],
+        Stage::Elder => &[Stage::Child, Stage::Teen, Stage::Adult, Stage::Elder],
+    };
+    for &st in reached {
+        if let Some(m) = milestone_for_stage(st) {
+            state.unlock_milestone(m);
+        }
+    }
+}
+
+/// ステージ遷移直後の祝福メッセージ。遷移先になり得ないステージは `None`。
+pub fn celebration_message(stage: Stage) -> Option<&'static str> {
+    match stage {
+        Stage::Child => Some("🎉 チャイルドに そだった！"),
+        Stage::Teen => Some("🎉 ティーンに なった！"),
+        Stage::Adult => Some("🎉 りっぱな おとなに なった！"),
+        Stage::Elder => Some("🎉 ながいきの シニアに なった！"),
+        Stage::Egg | Stage::Baby | Stage::Dead => None,
+    }
+}
+
+/// Elder 期の晩年に表示する「思い出」セリフ。寿命が見えてきた段階
+/// (HP 低下 or Elder 後半) でのみ発動し、年齢で決定論的にローテーションする。
+pub fn elder_memory_line(state: &TamaState) -> Option<&'static str> {
+    if state.stage != Stage::Elder {
+        return None;
+    }
+    if state.stats.health > ELDER_MEMORY_HP && state.age_ticks < ELDER_MEMORY_AGE {
+        return None;
+    }
+    let idx = (state.age_ticks / ELDER_MEMORY_ROTATE_TICKS) as usize % ELDER_MEMORY_LINES.len();
+    Some(ELDER_MEMORY_LINES[idx])
 }
 
 fn flash(state: &mut TamaState, action: LastAction) {
@@ -232,10 +331,13 @@ pub fn start_new_generation(state: &mut TamaState) {
     let best = state.best_age_ticks;
     let gen = state.generation.saturating_add(1);
     let total = state.total_ticks;
+    // 称号は世代をまたぐ実績なのでリセットしない
+    let milestones = std::mem::take(&mut state.milestones);
     *state = TamaState::new();
     state.generation = gen;
     state.best_age_ticks = best;
     state.total_ticks = total;
+    state.milestones = milestones;
     state.add_log(format!("第 {} 世代の卵が届いた", gen));
 }
 
@@ -630,5 +732,205 @@ mod tests {
         assert!(p2.is_some());
         assert!(p2.unwrap() < p1.unwrap(), "more neglect → faster HP loss");
         assert!(p3.is_none());
+    }
+
+    // ── 成長段階遷移の祝福演出 ──
+
+    #[test]
+    fn ステージ遷移で祝福演出タイマーがセットされる() {
+        let mut s = alive_state();
+        tick(&mut s, BABY_DURATION as u32);
+        assert_eq!(s.stage, Stage::Child);
+        assert_eq!(s.stage_celebration, STAGE_CELEBRATION_TICKS);
+    }
+
+    #[test]
+    fn 祝福演出は所定tick経過で終了する() {
+        let mut s = alive_state();
+        tick(&mut s, BABY_DURATION as u32);
+        assert!(s.stage_celebration > 0);
+        tick(&mut s, STAGE_CELEBRATION_TICKS);
+        assert_eq!(s.stage_celebration, 0);
+    }
+
+    #[test]
+    fn 孵化では祝福演出が出ない() {
+        let s = alive_state();
+        assert_eq!(s.stage_celebration, 0);
+    }
+
+    #[test]
+    fn 死亡で祝福演出が止まる() {
+        let mut s = alive_state();
+        s.stage_celebration = 1000;
+        s.stats.hunger = 0;
+        s.stats.health = 1;
+        // hunger=0 (severity 4 → 周期 50) なので 60 tick 以内に必ず死ぬ
+        tick(&mut s, 60);
+        assert!(s.is_dead());
+        assert_eq!(s.stage_celebration, 0);
+    }
+
+    #[test]
+    fn celebration_messageは成長後ステージのみ返す() {
+        assert!(celebration_message(Stage::Child).is_some());
+        assert!(celebration_message(Stage::Teen).is_some());
+        assert!(celebration_message(Stage::Adult).is_some());
+        assert!(celebration_message(Stage::Elder).is_some());
+        assert!(celebration_message(Stage::Egg).is_none());
+        assert!(celebration_message(Stage::Baby).is_none());
+        assert!(celebration_message(Stage::Dead).is_none());
+    }
+
+    // ── 称号 (マイルストーン) ──
+
+    #[test]
+    fn milestone_for_stageは到達称号を返す() {
+        assert_eq!(milestone_for_stage(Stage::Child), Some(Milestone::Sprout));
+        assert_eq!(milestone_for_stage(Stage::Teen), Some(Milestone::Rebel));
+        assert_eq!(
+            milestone_for_stage(Stage::Adult),
+            Some(Milestone::FineAdult)
+        );
+        assert_eq!(
+            milestone_for_stage(Stage::Elder),
+            Some(Milestone::LongLifeStar)
+        );
+        assert_eq!(milestone_for_stage(Stage::Egg), None);
+        assert_eq!(milestone_for_stage(Stage::Baby), None);
+        assert_eq!(milestone_for_stage(Stage::Dead), None);
+    }
+
+    #[test]
+    fn ステージ到達で称号を獲得する() {
+        let mut s = alive_state();
+        tick(&mut s, (BABY_DURATION + CHILD_DURATION) as u32);
+        assert_eq!(s.stage, Stage::Teen);
+        assert!(s.milestones.contains(&Milestone::Sprout));
+        assert!(s.milestones.contains(&Milestone::Rebel));
+        assert!(!s.milestones.contains(&Milestone::FineAdult));
+    }
+
+    #[test]
+    fn 称号は世代をまたいで重複しない() {
+        let mut s = alive_state();
+        tick(&mut s, BABY_DURATION as u32); // Child 到達 →「すくすく」
+        s.stats.hunger = 0;
+        s.stats.health = 1;
+        tick(&mut s, 1000);
+        assert!(s.is_dead());
+        start_new_generation(&mut s);
+        hatch(&mut s);
+        tick(&mut s, BABY_DURATION as u32); // 2 代目も Child 到達
+        let count = s
+            .milestones
+            .iter()
+            .filter(|&&m| m == Milestone::Sprout)
+            .count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn 新世代でも称号を引き継ぐ() {
+        let mut s = alive_state();
+        tick(&mut s, BABY_DURATION as u32);
+        assert!(!s.milestones.is_empty());
+        let earned = s.milestones.clone();
+        s.stats.hunger = 0;
+        s.stats.health = 1;
+        tick(&mut s, 1000);
+        assert!(s.is_dead());
+        start_new_generation(&mut s);
+        assert_eq!(s.milestones, earned);
+    }
+
+    #[test]
+    fn 初代の死ではベスト更新でも伝説称号なし() {
+        let mut s = alive_state();
+        s.stats.hunger = 0;
+        s.stats.health = 1;
+        tick(&mut s, 1000);
+        assert!(s.is_dead());
+        assert!(s.best_age_ticks > 0);
+        // 過去ベストのない初代は「でんせつ」対象外
+        assert!(!s.milestones.contains(&Milestone::Legend));
+    }
+
+    #[test]
+    fn 過去ベスト更新の死で伝説称号を獲得する() {
+        let mut s = alive_state();
+        s.best_age_ticks = 100; // 過去世代のベスト
+        s.age_ticks = 200; // 既にベスト超え
+        s.stats.hunger = 0;
+        s.stats.health = 1;
+        tick(&mut s, 1000);
+        assert!(s.is_dead());
+        assert!(s.milestones.contains(&Milestone::Legend));
+        assert_eq!(s.best_age_ticks, s.age_ticks);
+    }
+
+    #[test]
+    fn next_milestoneは進行順で最初の未獲得を返す() {
+        assert_eq!(next_milestone(&[]), Some(Milestone::Sprout));
+        assert_eq!(next_milestone(&[Milestone::Sprout]), Some(Milestone::Rebel));
+        assert_eq!(next_milestone(&Milestone::ALL), None);
+    }
+
+    #[test]
+    fn backfillで現ステージまでの称号が埋まる() {
+        let mut s = alive_state();
+        s.stage = Stage::Adult;
+        backfill_stage_milestones(&mut s);
+        assert!(s.milestones.contains(&Milestone::Sprout));
+        assert!(s.milestones.contains(&Milestone::Rebel));
+        assert!(s.milestones.contains(&Milestone::FineAdult));
+        assert!(!s.milestones.contains(&Milestone::LongLifeStar));
+        assert!(!s.milestones.contains(&Milestone::Legend));
+    }
+
+    // ── Elder 期の晩年セリフ ──
+
+    fn elder_state(age: u64, health: u8) -> TamaState {
+        let mut s = alive_state();
+        s.stage = Stage::Elder;
+        s.age_ticks = age;
+        s.stats.health = health;
+        s
+    }
+
+    #[test]
+    fn elder以外は晩年セリフなし() {
+        let mut s = alive_state();
+        s.stats.health = 40;
+        assert!(elder_memory_line(&s).is_none());
+    }
+
+    #[test]
+    fn elder前半で健康なら晩年セリフなし() {
+        let s = elder_state(ADULT_END + 10, 100);
+        assert!(elder_memory_line(&s).is_none());
+    }
+
+    #[test]
+    fn elderでhpが下がると晩年セリフが出る() {
+        let s = elder_state(ADULT_END + 10, ELDER_MEMORY_HP);
+        assert!(elder_memory_line(&s).is_some());
+    }
+
+    #[test]
+    fn elder後半は健康でも晩年セリフが出る() {
+        let s = elder_state(ELDER_MEMORY_AGE, 100);
+        assert!(elder_memory_line(&s).is_some());
+    }
+
+    #[test]
+    fn 晩年セリフはローテーションする() {
+        let a = elder_memory_line(&elder_state(ELDER_MEMORY_AGE, 100)).unwrap();
+        let b = elder_memory_line(&elder_state(
+            ELDER_MEMORY_AGE + ELDER_MEMORY_ROTATE_TICKS,
+            100,
+        ))
+        .unwrap();
+        assert_ne!(a, b);
     }
 }
