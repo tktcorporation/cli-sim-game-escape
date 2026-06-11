@@ -8,10 +8,11 @@ use super::events::{generate_event, resolve_event, EventOutcome};
 use super::lore::{atmosphere_text, floor_entry_text, floor_theme};
 use super::overworld_map::generate_overworld;
 use super::state::{
-    affix_info, enemy_affix_info, enemy_info, item_info, level_stats, shop_items, skill_choice_pair,
-    skill_element, skill_info, CellType, DungeonEvent, EnemyAffix, EnemyKind, EventAction,
-    EventChoice, Facing, InventoryItem, ItemCategory, ItemKind, Monster, Overlay, Pet, PlayerBuffs,
-    Quest, QuestKind, RpgState, Scene, SkillKind, Tile, ALL_AFFIXES, MAX_FLOOR, MAX_LEVEL,
+    affix_info, element_name, enemy_affix_info, enemy_info, item_info, level_stats, shop_items,
+    skill_choice_pair, skill_element, skill_info, CellType, DungeonEvent, EnemyAffix, EnemyKind,
+    EventAction, EventChoice, Facing, InventoryItem, ItemCategory, ItemKind, Monster, Overlay, Pet,
+    PlayerBuffs, Quest, QuestKind, RpgState, Scene, SkillKind, Tile, ALL_AFFIXES, MAX_FLOOR,
+    MAX_LEVEL,
 };
 
 // ── Tick (no-op: command-based game) ─────────────────────────
@@ -806,6 +807,24 @@ fn auto_walk_direction(state: &RpgState) -> Option<Facing> {
 
 // ── Inline Combat ────────────────────────────────────────────
 
+/// Record this enemy kind's weakness in the bestiary. On the first
+/// discovery a log line celebrates the find — the "discover → exploit
+/// next time" meta-loop needs that moment to register.
+fn note_weakness_discovery(state: &mut RpgState, kind: EnemyKind) {
+    if !state.discover_weakness(kind) {
+        return;
+    }
+    let info = enemy_info(kind);
+    match info.weakness {
+        Some(w) => state.add_log(&format!(
+            "{}の弱点を見抜いた！(弱:{})",
+            info.name,
+            element_name(w)
+        )),
+        None => state.add_log(&format!("{}に弱点はないようだ。", info.name)),
+    }
+}
+
 /// Player attacks the monster at `monsters[idx]`.
 pub fn attack_monster(state: &mut RpgState, idx: usize) {
     let player_atk = state.total_atk();
@@ -852,6 +871,9 @@ pub fn attack_monster(state: &mut RpgState, idx: usize) {
     } else {
         state.add_log(&format!("{}に{}ダメージ{}", m_name, damage, weak_str));
     }
+    if !weak_str.is_empty() {
+        note_weakness_discovery(state, kind);
+    }
 
     if vamp_pct > 0 {
         let drain = (damage * vamp_pct / 100).max(1);
@@ -888,6 +910,7 @@ fn on_monster_killed(state: &mut RpgState, idx: usize, kind: EnemyKind, _hp_befo
     state.run_exp_earned += exp;
     state.run_enemies_killed += 1;
     state.add_log(&format!("{}を倒した！ EXP+{} +{}G", display_name, exp, gold));
+    note_weakness_discovery(state, kind);
 
     // Drop
     if let Some((drop_item, pct)) = info.drop {
@@ -1119,10 +1142,13 @@ fn monster_act(state: &mut RpgState, idx: usize) {
     }
 
     if adjacent_to_player {
-        // Maybe charge
+        // Maybe charge — telegraph only on this turn (no attack), the
+        // 2x burst releases on the monster's NEXT action. This guaranteed
+        // one-turn window is the whole point of the telegraph: the player
+        // can shield, heal, or step out of range.
         if can_charge && rng_range(state, 100) < 25 {
             state.dungeon.as_mut().unwrap().monsters[idx].charging = true;
-            state.add_log(&format!("{}は力を溜めている！", m_name));
+            state.add_log(&format!("⚡{}が力を溜めている！防御か回避を！", m_name));
             return;
         }
         // Normal attack (+ Burning elites add fire splash damage)
@@ -1726,6 +1752,9 @@ fn cast_damage_skill(state: &mut RpgState, skill: SkillKind, idx: usize) {
     let weak_str = if is_weak { " [弱点!]" } else { "" };
     let name = einfo.name;
     state.add_log(&format!("{}！ {}に{}ダメージ{}", info.name, name, damage, weak_str));
+    if is_weak {
+        note_weakness_discovery(state, kind);
+    }
 
     if matches!(skill, SkillKind::Drain) {
         let drain = damage / 2;
@@ -1963,7 +1992,7 @@ pub fn available_skills(state: &RpgState) -> Vec<SkillKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::state::{Affix, Monster};
+    use super::super::state::{Affix, Element, Monster};
 
     #[test]
     fn npc_first_meet_grants_starter_kit() {
@@ -2430,6 +2459,232 @@ mod tests {
             saw_charge_set,
             "200 trials never rolled into the charge branch — \
              test setup is broken"
+        );
+    }
+
+    /// Spawn a monster of `kind` on a walkable tile adjacent to the player.
+    /// Clears any pre-existing monsters so it ends up at index 0.
+    fn spawn_adjacent(s: &mut RpgState, kind: EnemyKind, affix: Option<EnemyAffix>) {
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        let px = map.player_x;
+        let py = map.player_y;
+        let mut spot = None;
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            let nx = px as i32 + dir.dx();
+            let ny = py as i32 + dir.dy();
+            if !map.in_bounds(nx, ny) { continue; }
+            let (ux, uy) = (nx as usize, ny as usize);
+            if !map.cell(ux, uy).is_walkable() { continue; }
+            spot = Some((ux, uy));
+            break;
+        }
+        let (mx, my) = spot.expect("player should have a walkable neighbor");
+        let info = enemy_info(kind);
+        map.monsters.push(Monster {
+            kind,
+            x: mx,
+            y: my,
+            hp: info.max_hp,
+            max_hp: info.max_hp,
+            awake: true,
+            charging: false,
+            affix,
+        });
+    }
+
+    #[test]
+    fn チャージ宣言ターンには敵の通常攻撃が発生しない() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        spawn_adjacent(&mut s, EnemyKind::Golem, None);
+
+        // Sweep seeds until the 25% charge branch fires; on that turn the
+        // monster must only telegraph — no damage of any kind.
+        let hp_before = s.hp;
+        let mut saw_charge = false;
+        for trial_seed in 0u64..200 {
+            s.rng_seed = trial_seed;
+            s.hp = hp_before;
+            s.dungeon.as_mut().unwrap().monsters[0].charging = false;
+
+            monster_turn(&mut s);
+
+            if s.dungeon.as_ref().unwrap().monsters[0].charging {
+                saw_charge = true;
+                assert_eq!(
+                    s.hp, hp_before,
+                    "チャージ宣言ターンに攻撃が発生した (seed {})",
+                    trial_seed
+                );
+                break;
+            }
+        }
+        assert!(saw_charge, "200 シードでチャージ分岐に入らなかった — テスト設定が壊れている");
+    }
+
+    #[test]
+    fn チャージ放出は宣言の次ターンに行われる() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        spawn_adjacent(&mut s, EnemyKind::Golem, None);
+        s.dungeon.as_mut().unwrap().monsters[0].charging = true;
+
+        let hp_before = s.hp;
+        monster_turn(&mut s);
+
+        let m = &s.dungeon.as_ref().unwrap().monsters[0];
+        assert!(!m.charging, "放出後はチャージ状態が解除される");
+        let expected = (enemy_info(EnemyKind::Golem).atk * 2)
+            .saturating_sub(s.total_def() / 2)
+            .max(1);
+        assert_eq!(
+            s.hp,
+            hp_before.saturating_sub(expected),
+            "次ターンに2倍ダメージが放出される"
+        );
+    }
+
+    #[test]
+    fn チャージ宣言時に警告ログが出る() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        spawn_adjacent(&mut s, EnemyKind::Golem, None);
+
+        let mut saw_charge = false;
+        for trial_seed in 0u64..200 {
+            s.rng_seed = trial_seed;
+            s.dungeon.as_mut().unwrap().monsters[0].charging = false;
+            s.log.clear();
+
+            monster_turn(&mut s);
+
+            if s.dungeon.as_ref().unwrap().monsters[0].charging {
+                saw_charge = true;
+                assert!(
+                    s.log.iter().any(|l| l.contains("力を溜めている") && l.contains("⚡")),
+                    "チャージ宣言の警告ログが見つからない: {:?}",
+                    s.log
+                );
+                break;
+            }
+        }
+        assert!(saw_charge, "200 シードでチャージ分岐に入らなかった");
+    }
+
+    #[test]
+    fn 撃破した敵の弱点が記録される() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: 0, y: 0, hp: 1, max_hp: 10,
+            awake: true, charging: false, affix: None,
+        });
+        assert_eq!(s.known_weakness(EnemyKind::Slime), None);
+
+        attack_monster(&mut s, 0);
+
+        assert!(s.weakness_known(EnemyKind::Slime));
+        assert_eq!(s.known_weakness(EnemyKind::Slime), Some(Element::Fire));
+    }
+
+    #[test]
+    fn 弱点属性でダメージを与えると撃破前でも弱点が記録される() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: 0, y: 0, hp: 1000, max_hp: 1000,
+            awake: true, charging: false, affix: None,
+        });
+
+        // Fire skill vs Slime (weak to Fire) — discovery without a kill.
+        cast_damage_skill(&mut s, SkillKind::Fire, 0);
+
+        assert!(s.dungeon.as_ref().unwrap().monsters[0].hp > 0, "敵は生存している前提");
+        assert_eq!(s.known_weakness(EnemyKind::Slime), Some(Element::Fire));
+    }
+
+    #[test]
+    fn 未発見の敵の弱点は取得できない() {
+        let s = RpgState::new();
+        assert!(!s.weakness_known(EnemyKind::Goblin));
+        assert_eq!(s.known_weakness(EnemyKind::Goblin), None);
+    }
+
+    #[test]
+    fn 弱点なしの敵は撃破で発見済みになるが弱点はない() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Rat, x: 0, y: 0, hp: 1, max_hp: 9,
+            awake: true, charging: false, affix: None,
+        });
+
+        attack_monster(&mut s, 0);
+
+        assert!(s.weakness_known(EnemyKind::Rat));
+        assert_eq!(s.known_weakness(EnemyKind::Rat), None);
+    }
+
+    #[test]
+    fn 発見済み弱点は新しい探索でも保持される() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: 0, y: 0, hp: 1, max_hp: 10,
+            awake: true, charging: false, affix: None,
+        });
+        attack_monster(&mut s, 0);
+        assert_eq!(s.known_weakness(EnemyKind::Slime), Some(Element::Fire));
+
+        // Die and return to the village, then start a fresh run — the
+        // bestiary knowledge must survive both transitions.
+        s.hp = 0;
+        process_dungeon_death(&mut s);
+        assert_eq!(s.known_weakness(EnemyKind::Slime), Some(Element::Fire));
+        enter_dungeon(&mut s, 1);
+        assert_eq!(s.known_weakness(EnemyKind::Slime), Some(Element::Fire));
+    }
+
+    #[test]
+    fn 弱点の初回発見時のみ発見ログが出る() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: 0, y: 0, hp: 1, max_hp: 10,
+            awake: true, charging: false, affix: None,
+        });
+        s.log.clear();
+        attack_monster(&mut s, 0);
+        assert!(
+            s.log.iter().any(|l| l.contains("弱点を見抜いた")),
+            "初回撃破で発見ログが出る: {:?}",
+            s.log
+        );
+
+        // Second kill of the same kind: no duplicate discovery log.
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: 0, y: 0, hp: 1, max_hp: 10,
+            awake: true, charging: false, affix: None,
+        });
+        let idx = s.dungeon.as_ref().unwrap().monsters.len() - 1;
+        s.log.clear();
+        attack_monster(&mut s, idx);
+        assert!(
+            !s.log.iter().any(|l| l.contains("弱点を見抜いた")),
+            "2回目の撃破では発見ログは出ない: {:?}",
+            s.log
         );
     }
 }

@@ -12,6 +12,15 @@ pub enum Element {
     Thunder,
 }
 
+/// 属性の表示名（弱点表示・発見ログで使用）。
+pub fn element_name(e: Element) -> &'static str {
+    match e {
+        Element::Fire => "火",
+        Element::Ice => "氷",
+        Element::Thunder => "雷",
+    }
+}
+
 // ── Enemies ───────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1047,6 +1056,11 @@ pub struct RpgState {
     pub max_floor_reached: u32,
     pub total_clears: u32,
 
+    /// 弱点図鑑: 弱点が判明済みの敵種別。撃破するか弱点属性で
+    /// ダメージを与えると登録され、村に戻っても・新しい run でも
+    /// 保持される（`max_floor_reached` と同じ寿命）。
+    pub known_weaknesses: Vec<EnemyKind>,
+
     // Scene system
     pub scene: Scene,
     pub overlay: Option<Overlay>,
@@ -1150,6 +1164,7 @@ impl RpgState {
             dungeon: None,
             max_floor_reached: 0,
             total_clears: 0,
+            known_weaknesses: Vec::new(),
             scene: Scene::Overworld,
             overlay: None,
             scene_text: Vec::new(),
@@ -1186,6 +1201,33 @@ impl RpgState {
         self.log.push(text.to_string());
         if self.log.len() > 30 {
             self.log.remove(0);
+        }
+    }
+
+    // ── 弱点図鑑 ──────────────────────────────────────────────
+
+    /// この敵種の弱点情報が判明済みか。弱点を持たない敵も撃破すれば
+    /// 「弱点なし」と判明した扱いになる。
+    pub fn weakness_known(&self, kind: EnemyKind) -> bool {
+        self.known_weaknesses.contains(&kind)
+    }
+
+    /// 敵種の弱点情報を図鑑に登録する。新規発見なら true。
+    pub fn discover_weakness(&mut self, kind: EnemyKind) -> bool {
+        if self.weakness_known(kind) {
+            return false;
+        }
+        self.known_weaknesses.push(kind);
+        true
+    }
+
+    /// 発見済みの弱点属性。未発見、または発見済みでも弱点を持たない
+    /// 敵の場合は None。
+    pub fn known_weakness(&self, kind: EnemyKind) -> Option<Element> {
+        if self.weakness_known(kind) {
+            enemy_info(kind).weakness
+        } else {
+            None
         }
     }
 
@@ -1378,6 +1420,35 @@ mod tests {
         });
         // Only stackable count
         assert_eq!(s.item_count(ItemKind::Herb), 5);
+    }
+
+    #[test]
+    fn 弱点図鑑は記録と参照ができる() {
+        let mut s = RpgState::new();
+        // 未発見: 何も返さない
+        assert!(!s.weakness_known(EnemyKind::Slime));
+        assert_eq!(s.known_weakness(EnemyKind::Slime), None);
+
+        // 初回記録は true、二重記録は false（重複登録なし）
+        assert!(s.discover_weakness(EnemyKind::Slime));
+        assert!(!s.discover_weakness(EnemyKind::Slime));
+        assert_eq!(s.known_weaknesses.len(), 1);
+
+        // 発見済み: enemy_info の弱点が引ける
+        assert!(s.weakness_known(EnemyKind::Slime));
+        assert_eq!(s.known_weakness(EnemyKind::Slime), Some(Element::Fire));
+
+        // 弱点なしの敵は発見済みでも None
+        assert!(s.discover_weakness(EnemyKind::Rat));
+        assert!(s.weakness_known(EnemyKind::Rat));
+        assert_eq!(s.known_weakness(EnemyKind::Rat), None);
+    }
+
+    #[test]
+    fn 属性の日本語名() {
+        assert_eq!(element_name(Element::Fire), "火");
+        assert_eq!(element_name(Element::Ice), "氷");
+        assert_eq!(element_name(Element::Thunder), "雷");
     }
 
     #[test]
