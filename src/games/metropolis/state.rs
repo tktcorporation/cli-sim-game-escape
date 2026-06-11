@@ -556,8 +556,11 @@ pub struct PendingOfflineWelcome {
 
 pub const MAX_EVENTS: usize = 8;
 
-/// 完成タイルが光り続けるtick数 (1.5秒)。
-pub const COMPLETION_FLASH_TICKS: u64 = 15;
+/// 完成タイルが光り続けるtick数 (4.5秒)。
+/// 期間は 3 等分され、白 (BOLD) → 明るい黄 → 通常色寄りの淡い光、と段階的に
+/// 減衰する (`logic::completion_flash_phase` がフェーズ判定)。放置プレイヤー
+/// が画面に目を戻した時にも「街が育った瞬間」が目に入る長さにしている。
+pub const COMPLETION_FLASH_TICKS: u64 = 45;
 
 /// 店舗が給料発生時に光るtick数 (0.6秒)。
 pub const PAYOUT_FLASH_TICKS: u64 = 6;
