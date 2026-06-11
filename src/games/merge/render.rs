@@ -16,7 +16,7 @@ use super::actions::{
     ACT_CLEAR_SELECTION, ACT_QUEST_DELIVER_BASE, ACT_QUEST_REROLL_BASE, ACT_UPGRADE_GENERATORS,
     GRID_CLICK_BASE,
 };
-use super::state::{Cell, ItemType, MergeState, Quest, GRID_H, GRID_W, QUEST_SLOTS};
+use super::state::{Cell, FlashKind, ItemType, MergeState, Quest, GRID_H, GRID_W, QUEST_SLOTS};
 
 /// セル 1 つの表示幅 (terminal columns)。
 const CELL_W: u16 = 5;
@@ -168,7 +168,10 @@ fn render_grid(
 fn cell_display(state: &MergeState, x: usize, y: usize) -> (String, Style) {
     let cell = state.get(x, y);
     let is_selected = state.selected == Some((x, y));
-    let is_flash = matches!(state.flash_cell, Some((fx, fy, _)) if fx == x && fy == y);
+    let flash_kind = state
+        .flash_cell
+        .filter(|fc| (fc.x, fc.y) == (x, y))
+        .map(|fc| fc.kind);
 
     let (text, mut style) = match cell {
         Cell::Empty => (
@@ -205,11 +208,29 @@ fn cell_display(state: &MergeState, x: usize, y: usize) -> (String, Style) {
 
     if is_selected {
         style = style.bg(Color::Indexed(238)).add_modifier(Modifier::REVERSED);
-    } else if is_flash {
-        style = style.add_modifier(Modifier::BOLD).bg(Color::Indexed(236));
+    } else if let Some(kind) = flash_kind {
+        style = apply_flash(style, kind);
     }
 
     (text, style)
+}
+
+/// flash 種別ごとの強調スタイル。格 (Action < Merge < Record) が
+/// 視覚的な強さに一致するようにする。
+fn apply_flash(base: Style, kind: FlashKind) -> Style {
+    match kind {
+        // 軽い操作フィードバック: 元の色のまま控えめに光る。
+        FlashKind::Action => base.add_modifier(Modifier::BOLD).bg(Color::Indexed(236)),
+        // マージ成立: 明るい色 + 太字で「進化」の瞬間を見せる。
+        FlashKind::Merge => base
+            .fg(Color::LightYellow)
+            .add_modifier(Modifier::BOLD)
+            .bg(Color::Indexed(238)),
+        // 自己ベスト更新: 反転 + LightYellow で最も派手に。
+        FlashKind::Record => base
+            .fg(Color::LightYellow)
+            .add_modifier(Modifier::REVERSED | Modifier::BOLD),
+    }
 }
 
 /// cooldown 進行度を 1 文字で表す。残り少ない (≒完成間近) ほど glyph が高くなる。
@@ -411,6 +432,35 @@ mod tests {
         assert!(rendered.contains("Flower"));
         assert!(rendered.contains("LV2"));
         assert!(rendered.contains("100"));
+    }
+
+    #[test]
+    fn フラッシュ演出は種別ごとに強さが違う() {
+        let base = Style::default().fg(Color::Green);
+        let action = apply_flash(base, FlashKind::Action);
+        let merge = apply_flash(base, FlashKind::Merge);
+        let record = apply_flash(base, FlashKind::Record);
+        // マージ成立: BOLD + 明るい色で「進化」を見せる
+        assert!(merge.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(merge.fg, Some(Color::LightYellow));
+        // ベスト更新: REVERSED + LightYellow で最も派手
+        assert!(record.add_modifier.contains(Modifier::REVERSED));
+        assert_eq!(record.fg, Some(Color::LightYellow));
+        // 通常アクションは元の色を保ったまま控えめに光る
+        assert_eq!(action.fg, Some(Color::Green));
+        assert!(!action.add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn フラッシュは該当セルだけに乗る() {
+        let mut s = MergeState::new();
+        s.set(1, 1, Cell::Item(ItemType::Flower, 1));
+        s.set(2, 2, Cell::Item(ItemType::Flower, 1));
+        s.flash_with(1, 1, FlashKind::Record);
+        let (_, flashed) = cell_display(&s, 1, 1);
+        let (_, plain) = cell_display(&s, 2, 2);
+        assert!(flashed.add_modifier.contains(Modifier::REVERSED));
+        assert!(!plain.add_modifier.contains(Modifier::REVERSED));
     }
 
     #[test]

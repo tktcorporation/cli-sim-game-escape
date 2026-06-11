@@ -1,6 +1,8 @@
 //! マージゲームのロジック (純粋関数)。tick / タップ / クエスト納品。
 
-use super::state::{Cell, ItemType, MergeState, Quest, MAX_LEVEL, MAX_UPGRADE, QUEST_SLOTS};
+use super::state::{
+    Cell, FlashCell, FlashKind, ItemType, MergeState, Quest, MAX_LEVEL, MAX_UPGRADE, QUEST_SLOTS,
+};
 
 /// 起動時に最大このクエスト数まで自動補充。
 const TARGET_QUEST_SLOTS: usize = QUEST_SLOTS;
@@ -22,12 +24,11 @@ fn tick_once(state: &mut MergeState) {
         }
     }
 
-    if let Some((x, y, ttl)) = state.flash_cell {
-        if ttl > 1 {
-            state.flash_cell = Some((x, y, ttl - 1));
-        } else {
-            state.flash_cell = None;
-        }
+    if let Some(fc) = state.flash_cell {
+        state.flash_cell = (fc.ttl > 1).then(|| FlashCell {
+            ttl: fc.ttl - 1,
+            ..fc
+        });
     }
 
     // クエストスロットが空いていれば自動補充。
@@ -72,10 +73,12 @@ pub fn tap_cell(state: &mut MergeState, x: usize, y: usize) {
                     state.set(x, y, Cell::Item(t1, new_lv));
                     state.set(sx, sy, Cell::Empty);
                     state.selected = None;
-                    state.flash(x, y);
                     if new_lv > state.best_level {
                         state.best_level = new_lv;
-                        state.add_log(format!("✨ {} LV{} に到達!", t1.full_name(), new_lv));
+                        state.flash_with(x, y, FlashKind::Record);
+                        state.add_log(format!("★ {} LV{} 初到達!", t1.full_name(), new_lv));
+                    } else {
+                        state.flash_with(x, y, FlashKind::Merge);
                     }
                 }
                 (Cell::Item(_, _), Cell::Item(_, _)) => {
@@ -306,6 +309,71 @@ mod tests {
         assert_eq!(s.get(2, 2), Cell::Item(ItemType::Gem, 3));
         assert!(s.get(1, 1).is_empty());
         assert_eq!(s.best_level, 3);
+    }
+
+    #[test]
+    fn マージ成立でマージ用フラッシュが光る() {
+        let mut s = MergeState::new();
+        s.best_level = 3; // 既到達レベルなので Record にはならない
+        s.set(1, 1, Cell::Item(ItemType::Gem, 1));
+        s.set(2, 2, Cell::Item(ItemType::Gem, 1));
+        tap_cell(&mut s, 1, 1);
+        tap_cell(&mut s, 2, 2);
+        let fc = s.flash_cell.expect("マージ後はフラッシュが残る");
+        assert_eq!((fc.x, fc.y), (2, 2));
+        assert_eq!(fc.kind, FlashKind::Merge);
+        assert_eq!(fc.ttl, FlashKind::Merge.duration());
+    }
+
+    #[test]
+    fn 新レベル初到達でベスト更新フラッシュとログが出る() {
+        let mut s = MergeState::new();
+        s.set(1, 1, Cell::Item(ItemType::Gem, 2));
+        s.set(2, 2, Cell::Item(ItemType::Gem, 2));
+        tap_cell(&mut s, 1, 1);
+        tap_cell(&mut s, 2, 2);
+        assert_eq!(s.best_level, 3);
+        let fc = s.flash_cell.expect("ベスト更新後はフラッシュが残る");
+        assert_eq!(fc.kind, FlashKind::Record);
+        assert!(
+            s.log.iter().any(|m| m.contains("初到達")),
+            "log={:?}",
+            s.log
+        );
+    }
+
+    #[test]
+    fn 既到達レベルへの再マージはベスト演出にならない() {
+        let mut s = MergeState::new();
+        s.best_level = 3;
+        s.set(1, 1, Cell::Item(ItemType::Flower, 2));
+        s.set(2, 2, Cell::Item(ItemType::Flower, 2));
+        tap_cell(&mut s, 1, 1);
+        tap_cell(&mut s, 2, 2);
+        assert_eq!(s.best_level, 3);
+        assert_eq!(s.flash_cell.map(|fc| fc.kind), Some(FlashKind::Merge));
+    }
+
+    #[test]
+    fn アイテム移動は軽いアクションフラッシュ() {
+        let mut s = MergeState::new();
+        s.set(1, 1, Cell::Item(ItemType::Flower, 1));
+        tap_cell(&mut s, 1, 1);
+        tap_cell(&mut s, 2, 2);
+        assert_eq!(s.flash_cell.map(|fc| fc.kind), Some(FlashKind::Action));
+    }
+
+    #[test]
+    fn フラッシュはtickで減衰して消える() {
+        let mut s = MergeState::new();
+        s.flash_with(1, 1, FlashKind::Record);
+        tick(&mut s, 1);
+        assert_eq!(
+            s.flash_cell.map(|fc| fc.ttl),
+            Some(FlashKind::Record.duration() - 1)
+        );
+        tick(&mut s, FlashKind::Record.duration());
+        assert!(s.flash_cell.is_none());
     }
 
     #[test]
