@@ -267,8 +267,14 @@ pub fn next_milestone(milestones: &[Milestone]) -> Option<Milestone> {
 /// ロードした時に、既に通過したステージの称号が失われないようにするための関数。
 #[cfg(any(target_arch = "wasm32", test))]
 pub fn backfill_stage_milestones(state: &mut TamaState) {
-    let reached: &[Stage] = match state.stage {
-        // Dead はどのステージで死んだか save に残らないので補完しない
+    // Dead は死亡時のステージ自体は save に残らないが、age_ticks が死亡時の
+    // 寿命のまま保存されるので、年齢から到達ステージを逆引きできる。
+    let effective_stage = if state.stage == Stage::Dead {
+        stage_for_age(state.age_ticks)
+    } else {
+        state.stage
+    };
+    let reached: &[Stage] = match effective_stage {
         Stage::Egg | Stage::Baby | Stage::Dead => &[],
         Stage::Child => &[Stage::Child],
         Stage::Teen => &[Stage::Child, Stage::Teen],
@@ -886,6 +892,29 @@ mod tests {
         assert!(s.milestones.contains(&Milestone::FineAdult));
         assert!(!s.milestones.contains(&Milestone::LongLifeStar));
         assert!(!s.milestones.contains(&Milestone::Legend));
+    }
+
+    #[test]
+    fn backfillは死亡済みセーブでも死亡時年齢から称号を補完する() {
+        // 称号導入前の save は milestones が空のまま Dead で復元されるが、
+        // age_ticks は死亡時の寿命のまま残っているので補完できる。
+        let mut s = alive_state();
+        s.stage = Stage::Dead;
+        s.age_ticks = ADULT_END - 1; // Adult 期の途中で死亡した個体
+        backfill_stage_milestones(&mut s);
+        assert!(s.milestones.contains(&Milestone::Sprout));
+        assert!(s.milestones.contains(&Milestone::Rebel));
+        assert!(s.milestones.contains(&Milestone::FineAdult));
+        assert!(!s.milestones.contains(&Milestone::LongLifeStar));
+    }
+
+    #[test]
+    fn backfillはbaby期で死亡したセーブには称号を付けない() {
+        let mut s = alive_state();
+        s.stage = Stage::Dead;
+        s.age_ticks = BABY_DURATION - 1;
+        backfill_stage_milestones(&mut s);
+        assert!(s.milestones.is_empty());
     }
 
     // ── Elder 期の晩年セリフ ──
