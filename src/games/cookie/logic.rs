@@ -1218,6 +1218,91 @@ fn tick_market(state: &mut CookieState, delta_ticks: u32) {
 }
 
 // ═══════════════════════════════════════════════════════
+// Market display helpers — pure functions for render
+// ═══════════════════════════════════════════════════════
+
+/// Remaining market phase time in whole seconds (10 ticks = 1 second).
+pub fn market_seconds_left(ticks_left: u32) -> u32 {
+    ticks_left / 10
+}
+
+/// Buy-time phases: producer costs are below normal, so buying is favored.
+pub fn is_market_buy_time(phase: &MarketPhase) -> bool {
+    phase.cost_multiplier() < 1.0
+}
+
+/// Format a multiplier without a trailing ".0" (3.0 → "3", 1.5 → "1.5").
+fn format_market_multiplier(v: f64) -> String {
+    if (v - v.round()).abs() < 1e-9 {
+        format!("{:.0}", v)
+    } else {
+        format!("{:.1}", v)
+    }
+}
+
+/// Effect summary derived from the phase multipliers.
+/// Buy-time phases show the discount (the actionable info);
+/// expensive phases show both multipliers so the trade-off is visible.
+fn market_effect_text(phase: &MarketPhase) -> String {
+    let cost = phase.cost_multiplier();
+    if is_market_buy_time(phase) {
+        format!("生産者{:.0}%OFF", (1.0 - cost) * 100.0)
+    } else if cost > 1.0 {
+        format!(
+            "CPS×{} コスト×{}",
+            format_market_multiplier(phase.cps_multiplier()),
+            format_market_multiplier(cost),
+        )
+    } else {
+        String::new()
+    }
+}
+
+/// Market banner line for wide layouts (>= 60 cols).
+/// e.g. 「💥 市場: 暴落！ 生産者75%OFF (残り23秒)」
+pub fn market_banner_wide(phase: &MarketPhase, ticks_left: u32) -> String {
+    let secs = market_seconds_left(ticks_left);
+    let effect = market_effect_text(phase);
+    if effect.is_empty() {
+        format!("{} 市場: {} (残り{}秒)", phase.symbol(), phase.name(), secs)
+    } else {
+        format!(
+            "{} 市場: {} {} (残り{}秒)",
+            phase.symbol(),
+            phase.name(),
+            effect,
+            secs
+        )
+    }
+}
+
+/// Compact market banner for narrow layouts (< 60 cols).
+/// e.g. 「💥暴落！75%OFF(23s)」
+pub fn market_banner_narrow(phase: &MarketPhase, ticks_left: u32) -> String {
+    let secs = market_seconds_left(ticks_left);
+    let cost = phase.cost_multiplier();
+    if is_market_buy_time(phase) {
+        format!(
+            "{}{}{:.0}%OFF({}s)",
+            phase.symbol(),
+            phase.name(),
+            (1.0 - cost) * 100.0,
+            secs
+        )
+    } else if cost > 1.0 {
+        format!(
+            "{}{} コスト×{}({}s)",
+            phase.symbol(),
+            phase.name(),
+            format_market_multiplier(cost),
+            secs
+        )
+    } else {
+        format!("{}{}({}s)", phase.symbol(), phase.name(), secs)
+    }
+}
+
+// ═══════════════════════════════════════════════════════
 // Research Tree
 // ═══════════════════════════════════════════════════════
 
@@ -1985,6 +2070,114 @@ mod tests {
         tick(&mut state, 50);
         tick(&mut state, 30);
         assert_eq!(state.total_ticks, 80);
+    }
+
+    // ── 相場表示ヘルパー ──────────────────────────────────
+
+    #[test]
+    fn 市場の残り秒数はticksを10で割った値() {
+        assert_eq!(market_seconds_left(0), 0);
+        assert_eq!(market_seconds_left(9), 0);
+        assert_eq!(market_seconds_left(10), 1);
+        assert_eq!(market_seconds_left(230), 23);
+    }
+
+    #[test]
+    fn 買い時判定はコスト倍率が1未満のフェーズのみ() {
+        assert!(is_market_buy_time(&MarketPhase::Crash));
+        assert!(is_market_buy_time(&MarketPhase::Bear));
+        assert!(!is_market_buy_time(&MarketPhase::Normal));
+        assert!(!is_market_buy_time(&MarketPhase::Bull));
+        assert!(!is_market_buy_time(&MarketPhase::Bubble));
+    }
+
+    #[test]
+    fn 暴落のワイド表示は割引率と残り時間を含む() {
+        let text = market_banner_wide(&MarketPhase::Crash, 230);
+        assert_eq!(text, "💥 市場: 暴落！ 生産者75%OFF (残り23秒)");
+    }
+
+    #[test]
+    fn 不景気のワイド表示は50パーセントオフ() {
+        let text = market_banner_wide(&MarketPhase::Bear, 450);
+        assert_eq!(text, "📉 市場: 不景気 生産者50%OFF (残り45秒)");
+    }
+
+    #[test]
+    fn 好景気のワイド表示はcpsとコストの倍率を含む() {
+        let text = market_banner_wide(&MarketPhase::Bull, 600);
+        assert_eq!(text, "📈 市場: 好景気 CPS×1.5 コスト×1.6 (残り60秒)");
+    }
+
+    #[test]
+    fn バブルのワイド表示は整数倍率を小数なしで表示() {
+        let text = market_banner_wide(&MarketPhase::Bubble, 150);
+        assert_eq!(text, "🚀 市場: バブル！ CPS×3 コスト×3 (残り15秒)");
+    }
+
+    #[test]
+    fn 通常のワイド表示は効果テキストなし() {
+        let text = market_banner_wide(&MarketPhase::Normal, 500);
+        assert_eq!(text, "📊 市場: 通常 (残り50秒)");
+    }
+
+    #[test]
+    fn ナロー表示は短縮形で割引や倍率を含む() {
+        assert_eq!(
+            market_banner_narrow(&MarketPhase::Crash, 230),
+            "💥暴落！75%OFF(23s)"
+        );
+        assert_eq!(
+            market_banner_narrow(&MarketPhase::Bear, 450),
+            "📉不景気50%OFF(45s)"
+        );
+        assert_eq!(
+            market_banner_narrow(&MarketPhase::Bull, 600),
+            "📈好景気 コスト×1.6(60s)"
+        );
+        assert_eq!(
+            market_banner_narrow(&MarketPhase::Bubble, 150),
+            "🚀バブル！ コスト×3(15s)"
+        );
+        assert_eq!(
+            market_banner_narrow(&MarketPhase::Normal, 500),
+            "📊通常(50s)"
+        );
+    }
+
+    // ── 市場フェーズ変化の検出 ────────────────────────────
+
+    #[test]
+    fn 市場フェーズはタイマー満了まで変わらない() {
+        let mut state = CookieState::new();
+        state.market_ticks_left = 100;
+        tick(&mut state, 10);
+        assert_eq!(state.market_phase, MarketPhase::Normal);
+        assert_eq!(state.market_ticks_left, 90);
+    }
+
+    #[test]
+    fn 市場フェーズ切替時にログへ告知が出る() {
+        let mut state = CookieState::new();
+        let phase_before = state.market_phase.clone();
+        state.market_ticks_left = 1;
+        let log_len = state.log.len();
+        tick(&mut state, 1);
+        // Normal からの遷移は必ず別フェーズになる
+        assert_ne!(state.market_phase, phase_before);
+        // 次のフェーズの持続時間がセットされる
+        assert!(state.market_ticks_left > 0);
+        // フェーズ告知が重要ログとして追加される
+        assert!(state.log.len() > log_len);
+        let last = state.log.last().unwrap();
+        assert!(last.is_important);
+        assert!(
+            last.text.contains("市場")
+                || last.text.contains("景気")
+                || last.text.contains("バブル"),
+            "市場告知らしくないログ: {}",
+            last.text
+        );
     }
 }
 

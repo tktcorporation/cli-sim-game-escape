@@ -13,8 +13,8 @@ use crate::input::ClickState;
 use crate::widgets::{Clickable, ClickableList, TabBar};
 
 use super::actions::*;
-use super::logic::format_number;
-use super::state::{CookieState, ParticleStyle};
+use super::logic::{format_number, is_market_buy_time, market_banner_narrow, market_banner_wide};
+use super::state::{CookieState, MarketPhase, ParticleStyle};
 
 /// Compact cookie art — 3 lines, 8 chars wide. Shared across all screen sizes.
 const COOKIE_ART: &[&[&str]] = &[
@@ -80,8 +80,9 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
         if n > 0 { n.min(4) } else { 0 }
     };
 
-    // Cookie display height — adaptive: compact on narrow screens
-    let cookie_height: u16 = if is_narrow { 8 } else { 12 };
+    // Cookie display height — adaptive: compact on narrow screens.
+    // Includes one row for the dedicated market banner.
+    let cookie_height: u16 = if is_narrow { 9 } else { 13 };
 
     // Tab bar: horizontal (1 row) on all screen sizes
     let tab_rows = 1;
@@ -324,6 +325,33 @@ fn render_cookie_display(
         crit_span,
     ]));
 
+    // --- Market row: dedicated banner so buy-time phases stand out ---
+    {
+        let market_text = if w >= 60 {
+            format!(" {}", market_banner_wide(&state.market_phase, state.market_ticks_left))
+        } else {
+            format!(" {}", market_banner_narrow(&state.market_phase, state.market_ticks_left))
+        };
+        // Color follows the cost direction: green = cheap (buy now),
+        // yellow = expensive (earn now), gray = neutral.
+        let market_color = match &state.market_phase {
+            MarketPhase::Crash => Color::LightGreen,
+            MarketPhase::Bear => Color::Green,
+            MarketPhase::Bubble => Color::Yellow,
+            MarketPhase::Bull => Color::White,
+            MarketPhase::Normal => Color::DarkGray,
+        };
+        // Buy-time phases pulse BOLD to push the "buy NOW" decision.
+        let market_style = if is_market_buy_time(&state.market_phase)
+            && (state.anim_frame / 4).is_multiple_of(2)
+        {
+            Style::default().fg(market_color).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(market_color)
+        };
+        lines.push(Line::from(Span::styled(market_text, market_style)));
+    }
+
     // --- Row 3: Stats (clicks / milk / kitten / prestige / milestones) ---
     lines.push(Line::from({
         let mut spans = vec![
@@ -527,34 +555,6 @@ fn render_cookie_display(
             format!(" 💰{:.0}%OFF", state.active_discount * 100.0),
             Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
         ));
-    }
-    {
-        use super::state::MarketPhase;
-        let (market_color, market_blink) = match &state.market_phase {
-            MarketPhase::Bull => (Color::Red, true),
-            MarketPhase::Bear => (Color::Blue, true),
-            MarketPhase::Normal => (Color::DarkGray, false),
-            MarketPhase::Bubble => (Color::Magenta, true),
-            MarketPhase::Crash => (Color::Yellow, true),
-        };
-        let secs_left = state.market_ticks_left / 10;
-        let style = if market_blink && (state.anim_frame / 4).is_multiple_of(2) {
-            Style::default().fg(market_color).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(market_color)
-        };
-        if w >= 60 {
-            status_spans.push(Span::styled(
-                format!(" {}{}({}s)", state.market_phase.symbol(), state.market_phase.name(), secs_left),
-                style,
-            ));
-        } else {
-            // Compact: just symbol + seconds
-            status_spans.push(Span::styled(
-                format!(" {}{}s", state.market_phase.symbol(), secs_left),
-                style,
-            ));
-        }
     }
     if state.dragon_level > 0 {
         status_spans.push(Span::styled(
