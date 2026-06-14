@@ -21,8 +21,8 @@ use super::dungeon_view;
 use super::logic::{available_quests, available_skills, return_bonus};
 use super::lore::{floor_theme, theme_name};
 use super::state::{
-    affix_info, item_info, skill_element, skill_info, Element, Overlay, RpgState,
-    Scene,
+    affix_info, element_name, item_info, skill_element, skill_info, Element, Overlay,
+    RpgState, Scene,
 };
 
 pub fn render(
@@ -65,6 +65,15 @@ fn hp_bar(current: u32, max: u32, width: usize) -> (String, Color) {
         Color::Red
     };
     (bar, color)
+}
+
+/// 属性ごとの表示色（弱点表示で使用）。
+fn element_color(e: Element) -> Color {
+    match e {
+        Element::Fire => Color::LightRed,
+        Element::Ice => Color::Cyan,
+        Element::Thunder => Color::Yellow,
+    }
 }
 
 fn satiety_color(s: u32, max: u32) -> Color {
@@ -417,10 +426,31 @@ fn render_explore_panel(
                     Style::default().fg(Color::White),
                 ),
             ]));
+            // 弱点図鑑: 発見済みなら属性を、未発見なら「?」を見せて
+            // 「まだ知らない情報がある」ことを示す。
+            let weak_span = if state.weakness_known(m.kind) {
+                match state.known_weakness(m.kind) {
+                    Some(w) => Span::styled(
+                        element_name(w).to_string(),
+                        Style::default().fg(element_color(w)).add_modifier(Modifier::BOLD),
+                    ),
+                    None => Span::styled("なし".to_string(), Style::default().fg(Color::Gray)),
+                }
+            } else {
+                Span::styled("?".to_string(), Style::default().fg(Color::DarkGray))
+            };
+            cl.push(Line::from(vec![
+                Span::styled(" 弱点: ", Style::default().fg(Color::Gray)),
+                weak_span,
+            ]));
             if m.charging {
                 cl.push(Line::from(Span::styled(
-                    " ⚠ 力を溜めている！",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+                    " ⚡力を溜めている！",
+                    Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+                )));
+                cl.push(Line::from(Span::styled(
+                    " 防御か回避を！",
+                    Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
                 )));
             }
         }

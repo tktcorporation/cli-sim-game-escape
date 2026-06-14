@@ -18,7 +18,7 @@
 //!
 //! 「みてるだけで楽しい」ための動的演出:
 //!   - 建設タイルの進捗フェーズ (`··→░░→▒▒→▓▓`) + シマー
-//!   - 完成時のフラッシュ (1.5秒間 REVERSED)
+//!   - 完成時の 3 段階フラッシュ (白 → 明黄 → 淡光、4.5 秒で減衰)
 //!   - アクティブ店舗のキラキラ + 給料発生時のハイライト
 //!   - 建設タイルに作業員の点滅 (`+`)
 //!   - 二重ボーダー (`═` / `║`) で luxury 感
@@ -164,8 +164,9 @@ fn banner_title(state: &City, narrow: bool) -> String {
     let tier_progress = tier_progress_label(tier, pop);
     if narrow {
         format!(
-            " ▙▟ {}  {}  {}  WK {}/{} ",
+            " ▙▟ {} {}  {}  {}  WK {}/{} ",
             tier.jp(),
+            tier_progress_label_short(tier, pop),
             cpu,
             strat,
             busy,
@@ -191,6 +192,20 @@ fn tier_progress_label(t: CityTier, pop: u32) -> String {
     match next_tier_threshold(t) {
         Some(target) => format!("pop {}/{}", pop, target),
         None => format!("pop {} ★MAX", pop),
+    }
+}
+
+/// ナローバナー用の短縮 Tier 進捗。幅が無いので "(N%)" に圧縮する
+/// (wide の `tier_progress_label` "pop x/y" と対)。Tier と pop が
+/// 食い違う呼び出しでも "(100%)" と出て「達成済みなのに進化しない」
+/// ように見えないよう 99% で頭打ちにする。最終 Tier は "★MAX"。
+fn tier_progress_label_short(t: CityTier, pop: u32) -> String {
+    match next_tier_threshold(t) {
+        Some(target) => format!(
+            "({}%)",
+            (pop.saturating_mul(100) / target.max(1)).min(99)
+        ),
+        None => "★MAX".to_string(),
     }
 }
 
@@ -393,12 +408,34 @@ fn tile_spans(
     connected: &[Vec<bool>],
 ) -> Vec<Span<'static>> {
     let tile = state.tile(x, y);
-    let completion = state.tick < state.completion_flash_until[y][x];
+    let flash = logic::completion_flash_phase(state.tick, state.completion_flash_until[y][x]);
     let payout = state.tick < state.payout_flash_until[y][x];
     if cell_width == 1 {
-        vec![tile_span_1(tile, x, y, state.tick, completion, payout, state, connected)]
+        vec![tile_span_1(tile, x, y, state.tick, flash, payout, state, connected)]
     } else {
-        tile_spans_2(tile, x, y, state.tick, completion, payout, state, connected)
+        tile_spans_2(tile, x, y, state.tick, flash, payout, state, connected)
+    }
+}
+
+/// 完成フラッシュの段階別スタイル。
+///
+/// Peak は建物色を背景にした反転表示 (最大強度)。Bright / Fade は建物に
+/// 依らない暖色グローへ切り替えて減衰を見せる — built_color が明色
+/// (LightYellow / White) の建物でも前景が読めるよう、後半 2 段階は固定の
+/// 暗い暖色 bg を使う。
+fn completion_flash_style(phase: logic::CompletionFlashPhase, b: Building) -> Style {
+    match phase {
+        logic::CompletionFlashPhase::Peak => Style::default()
+            .fg(Color::White)
+            .bg(built_color(b))
+            .add_modifier(Modifier::BOLD),
+        logic::CompletionFlashPhase::Bright => Style::default()
+            .fg(Color::LightYellow)
+            .bg(Color::Rgb(95, 80, 20))
+            .add_modifier(Modifier::BOLD),
+        logic::CompletionFlashPhase::Fade => Style::default()
+            .fg(Color::Yellow)
+            .bg(Color::Rgb(50, 42, 15)),
     }
 }
 
@@ -410,19 +447,16 @@ fn tile_span_1(
     x: usize,
     y: usize,
     tick: u64,
-    completion: bool,
+    flash: Option<logic::CompletionFlashPhase>,
     payout: bool,
     state: &City,
     connected: &[Vec<bool>],
 ) -> Span<'static> {
-    if completion {
+    if let Some(phase) = flash {
         if let Tile::Built(b) = tile {
             return Span::styled(
                 tile_char_1(*b).to_string(),
-                Style::default()
-                    .fg(Color::White)
-                    .bg(built_color(*b))
-                    .add_modifier(Modifier::BOLD),
+                completion_flash_style(phase, *b),
             );
         }
     }
@@ -739,19 +773,16 @@ fn tile_spans_2(
     x: usize,
     y: usize,
     tick: u64,
-    completion: bool,
+    flash: Option<logic::CompletionFlashPhase>,
     payout: bool,
     state: &City,
     connected: &[Vec<bool>],
 ) -> Vec<Span<'static>> {
-    if completion {
+    if let Some(phase) = flash {
         if let Tile::Built(b) = tile {
             return vec![Span::styled(
                 built_2wide_glyph(*b).to_string(),
-                Style::default()
-                    .fg(Color::White)
-                    .bg(built_color(*b))
-                    .add_modifier(Modifier::BOLD),
+                completion_flash_style(phase, *b),
             )];
         }
     }
@@ -1196,14 +1227,19 @@ fn park_glyph_2wide(tick: u64, x: usize, y: usize) -> (char, char, Color) {
     }
 }
 
-/// House の元 RGB (昼間)。Tier ごとに「街区が育つ」色相。
-/// Cottage は土の上 (暗茶)、Apartment は舗装地 (灰)、Highrise はガラス張り (青)。
+/// House の元 RGB (昼間)。Tier ごとの「地区の塊」が一目で分かる背景色。
+///
+/// 低層 → 高層を同系統 (緑 → 青緑) の段階で表現する: Cottage は暗い緑
+/// (庭付きの郊外)、Apartment は明るめのオリーブ緑 (市街地)、Highrise は
+/// 青緑 (ガラス張りの都心)。Road (灰 40,40,40) / Park (草地 25,70,35) /
+/// Forest (15,50,25) のどれとも被らない控えめな彩度に抑え、前景グリフの
+/// 可読性を保つ (テストで衝突を検知)。
+/// Tower / Arcology は紫がかった背景で「終盤の象徴」感を出す。
 fn house_bg_rgb(tier: logic::HouseTier) -> (u8, u8, u8) {
     match tier {
-        logic::HouseTier::Cottage => (40, 25, 15),
-        logic::HouseTier::Apartment => (40, 40, 40),
-        logic::HouseTier::Highrise => (20, 30, 60),
-        // Tower / Arcology は紫がかった背景で「終盤の象徴」感を出す。
+        logic::HouseTier::Cottage => (30, 44, 16),
+        logic::HouseTier::Apartment => (46, 66, 24),
+        logic::HouseTier::Highrise => (18, 58, 64),
         logic::HouseTier::Tower => (40, 20, 60),
         logic::HouseTier::Arcology => (60, 20, 80),
     }
@@ -3311,6 +3347,92 @@ mod tests {
         assert!(
             !registered.contains(&ACT_PANEL_SCROLL_DOWN),
             "▼ should disappear at bottom"
+        );
+    }
+
+    /// 完成フラッシュは Peak → Bright → Fade で見た目の強度が落ちる。
+    /// BOLD は Fade で外れ、各フェーズの fg/bg ペアは全て異なる
+    /// (= 3 段階の色減衰がちゃんと描き分けられる保証)。
+    #[test]
+    fn 完成フラッシュのスタイルは段階的に弱まる() {
+        use logic::CompletionFlashPhase as P;
+        let b = Building::House;
+        let peak = completion_flash_style(P::Peak, b);
+        let bright = completion_flash_style(P::Bright, b);
+        let fade = completion_flash_style(P::Fade, b);
+        assert!(peak.add_modifier.contains(Modifier::BOLD));
+        assert!(bright.add_modifier.contains(Modifier::BOLD));
+        assert!(!fade.add_modifier.contains(Modifier::BOLD));
+        assert_eq!(peak.fg, Some(Color::White));
+        assert_ne!((peak.fg, peak.bg), (bright.fg, bright.bg));
+        assert_ne!((bright.fg, bright.bg), (fade.fg, fade.bg));
+        assert_ne!((peak.fg, peak.bg), (fade.fg, fade.bg));
+    }
+
+    /// 後半 2 フェーズ (Bright / Fade) は建物色に依存しない固定 bg を使うため、
+    /// built_color が明色 (LightYellow / White) の建物でも前景が読める。
+    #[test]
+    fn 完成フラッシュ後半は明色建物でも前景と背景が被らない() {
+        use logic::CompletionFlashPhase as P;
+        for b in Building::ALL {
+            for phase in [P::Bright, P::Fade] {
+                let style = completion_flash_style(phase, *b);
+                assert_ne!(style.fg, style.bg, "{:?} {:?}", b, phase);
+            }
+        }
+    }
+
+    /// House Tier の背景色は「地区の塊」が読めるよう互いに異なり、
+    /// Road (40,40,40) / Park の背景色とも被らない。
+    #[test]
+    fn 住宅tierの背景色は地区ごとに区別できる() {
+        let tiers = [
+            logic::HouseTier::Cottage,
+            logic::HouseTier::Apartment,
+            logic::HouseTier::Highrise,
+            logic::HouseTier::Tower,
+            logic::HouseTier::Arcology,
+        ];
+        for (i, a) in tiers.iter().enumerate() {
+            for b in tiers.iter().skip(i + 1) {
+                assert_ne!(
+                    house_bg_rgb(*a),
+                    house_bg_rgb(*b),
+                    "{:?} と {:?} の地区色が同じ",
+                    a,
+                    b
+                );
+            }
+        }
+        for t in tiers {
+            assert_ne!(house_bg_rgb(t), (40, 40, 40), "{:?} が道路背景と同じ", t);
+            // park_bg_rgb(0) = Day (dim 0) の基本色。
+            assert_ne!(house_bg_rgb(t), park_bg_rgb(0), "{:?} が公園背景と同じ", t);
+        }
+    }
+
+    /// ナロー用 Tier 進捗ラベルは "(N%)" の短縮形、最終 Tier は "★MAX"。
+    #[test]
+    fn ナロー用tier進捗ラベルは百分率表示() {
+        assert_eq!(tier_progress_label_short(CityTier::Village, 0), "(0%)");
+        assert_eq!(tier_progress_label_short(CityTier::Village, 25), "(50%)");
+        assert_eq!(tier_progress_label_short(CityTier::Town, 125), "(50%)");
+        assert_eq!(tier_progress_label_short(CityTier::City, 300), "(50%)");
+        assert_eq!(
+            tier_progress_label_short(CityTier::Metropolis, 9_999),
+            "★MAX"
+        );
+    }
+
+    /// ナローバナーのタイトルにも次 Tier への進捗が出る (「次の目標」可視化)。
+    #[test]
+    fn ナローバナーにtier進捗が含まれる() {
+        let city = City::new(); // pop 0 → Village → (0%)
+        let title = banner_title(&city, true);
+        assert!(
+            title.contains("(0%)"),
+            "narrow banner should show tier progress: {}",
+            title
         );
     }
 

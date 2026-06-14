@@ -2,8 +2,10 @@
 
 use super::state::{
     event_description, event_name, invest_info, job_info, lifestyle_info, CareerState,
-    InvestKind, JobKind, MonthEvent, MonthlyReport, Screen, ALL_JOBS, ALL_LIFESTYLES,
-    INFLATION_RATE, MAX_MONTHS, REP_DECAY_PER_MONTH, SKILL_CAP, TICKS_PER_MONTH, TRAININGS,
+    InvestKind, JobInfo, JobKind, MonthEvent, MonthlyReport, Screen, ALL_JOBS, ALL_LIFESTYLES,
+    INFLATION_RATE, MAX_MONTHS, NETWORKING_REP_GAIN, NETWORKING_SOCIAL_GAIN,
+    REP_DECAY_PER_MONTH, SIDE_JOB_MIN_SKILL, SIDE_JOB_RATE, SKILL_CAP, TICKS_PER_MONTH,
+    TRAININGS,
 };
 
 // ── Tick (no-op: command-based game) ──────────────────────────────────
@@ -368,8 +370,8 @@ pub fn do_networking(state: &mut CareerState) -> bool {
     state.networked = true;
 
     let s_mult = skill_multiplier(state.current_event);
-    let social_gain = 2.0 * s_mult;
-    let rep_gain = 3.0;
+    let social_gain = NETWORKING_SOCIAL_GAIN * s_mult;
+    let rep_gain = NETWORKING_REP_GAIN;
     add_skill(&mut state.social, social_gain);
     add_skill(&mut state.reputation, rep_gain);
 
@@ -382,24 +384,29 @@ pub fn do_networking(state: &mut CareerState) -> bool {
 
 // ── Side Job ──────────────────────────────────────────────────────────
 
+fn best_skill(state: &CareerState) -> f64 {
+    state
+        .technical
+        .max(state.social)
+        .max(state.management)
+        .max(state.knowledge)
+}
+
 pub fn do_side_job(state: &mut CareerState) -> bool {
     if state.side_job_done {
         state.add_log("今月は既に副業済みです");
         return false;
     }
 
-    let best_skill = state.technical
-        .max(state.social)
-        .max(state.management)
-        .max(state.knowledge);
+    let best = best_skill(state);
 
-    if best_skill < 5.0 {
+    if best < SIDE_JOB_MIN_SKILL {
         state.add_log("副業にはスキル5以上が必要です");
         return false;
     }
 
     state.side_job_done = true;
-    let earnings = best_skill * 100.0;
+    let earnings = best * SIDE_JOB_RATE;
     state.money += earnings;
     state.total_earned += earnings;
 
@@ -484,20 +491,15 @@ pub fn monthly_actions_exhausted(state: &CareerState) -> bool {
 
     let networking_available = !state.networked;
 
-    let best_skill = state
-        .technical
-        .max(state.social)
-        .max(state.management)
-        .max(state.knowledge);
-    let side_job_available = !state.side_job_done && best_skill >= 5.0;
+    let side_job_available = !state.side_job_done && best_skill(state) >= SIDE_JOB_MIN_SKILL;
 
     !any_training && !networking_available && !side_job_available
 }
 
-// ── Next Goal ─────────────────────────────────────────────────────────
+// ── Action Hint ───────────────────────────────────────────────────────
 
-/// Returns a short description of what the player should aim for next.
-pub fn next_goal(state: &CareerState) -> &'static str {
+/// Returns a short description of what the player should do next.
+pub fn action_hint(state: &CareerState) -> &'static str {
     if state.won {
         return "経済的自由を達成済み！";
     }
@@ -646,17 +648,204 @@ pub fn freedom_progress(state: &CareerState) -> f64 {
     (passive / expenses).min(1.0)
 }
 
-pub fn next_available_job(state: &CareerState) -> Option<(JobKind, &'static str)> {
+// ── Next Goal ─────────────────────────────────────────────────────────
+
+/// Job requirement categories, used to describe what is still missing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ReqKind {
+    Technical,
+    Social,
+    Management,
+    Knowledge,
+    Reputation,
+    Money,
+}
+
+/// 表示用ラベル。`narrow` は求人画面の1文字表記に揃える。
+pub fn req_label(kind: ReqKind, narrow: bool) -> &'static str {
+    match (kind, narrow) {
+        (ReqKind::Technical, false) => "技術",
+        (ReqKind::Technical, true) => "技",
+        (ReqKind::Social, false) => "営業",
+        (ReqKind::Social, true) => "営",
+        (ReqKind::Management, false) => "管理",
+        (ReqKind::Management, true) => "管",
+        (ReqKind::Knowledge, false) => "知識",
+        (ReqKind::Knowledge, true) => "知",
+        (ReqKind::Reputation, false) => "評判",
+        (ReqKind::Reputation, true) => "評",
+        (ReqKind::Money, _) => "資金",
+    }
+}
+
+/// 就職条件1件分の不足量。
+#[derive(Clone, Debug, PartialEq)]
+pub struct GoalGap {
+    pub kind: ReqKind,
+    pub deficit: f64,
+}
+
+/// 「次の目標」: 今より給料の高い職業のうち、最も到達が近い候補。
+#[derive(Clone, Debug, PartialEq)]
+pub enum NextGoal {
+    /// 全条件を満たしており、今すぐ転職できる。
+    Ready { job: JobKind },
+    /// 条件不足。`gaps` は不足分、`est_months` は現在の成長ペースでの
+    /// 到達推定（伸ばす手段のない資源があれば None）。
+    Locked {
+        job: JobKind,
+        gaps: Vec<GoalGap>,
+        est_months: Option<u32>,
+    },
+}
+
+/// 次に目指すべき職業を返す。転職可能な職があればその中で最高給のもの、
+/// なければ推定到達月数（次いで不足量合計）が最小の職を選ぶ。
+/// 現職より給料の高い職が存在しない（最上位職）場合は None。
+pub fn next_goal(state: &CareerState) -> Option<NextGoal> {
+    let current_salary = job_info(state.job).salary;
+    let gains = estimated_monthly_gains(state);
+
+    let mut ready: Option<(JobKind, f64)> = None;
+    let mut locked: Option<(JobKind, Vec<GoalGap>, Option<u32>)> = None;
+    let mut locked_key = (u64::MAX, f64::INFINITY);
+
     for &kind in &ALL_JOBS {
-        if kind == state.job {
+        let info = job_info(kind);
+        if info.salary <= current_salary {
             continue;
         }
-        let info = job_info(kind);
-        if info.salary > job_info(state.job).salary && !can_apply(state, kind) {
-            return Some((kind, info.name));
+        if can_apply(state, kind) {
+            if ready.is_none_or(|(_, salary)| info.salary > salary) {
+                ready = Some((kind, info.salary));
+            }
+            continue;
+        }
+        let gaps = job_gaps(state, &info);
+        let est = estimate_months(&gains, &gaps);
+        // 推定月数 → 不足量合計の順で「近さ」を比較。推定不能(None)は
+        // どの Some よりも遠い扱いにするが、候補としては残す。
+        let key = (
+            est.map_or(u64::MAX - 1, u64::from),
+            weighted_deficit(&gaps),
+        );
+        if key.0 < locked_key.0 || (key.0 == locked_key.0 && key.1 < locked_key.1) {
+            locked_key = key;
+            locked = Some((kind, gaps, est));
         }
     }
-    None
+
+    if let Some((job, _)) = ready {
+        return Some(NextGoal::Ready { job });
+    }
+    locked.map(|(job, gaps, est_months)| NextGoal::Locked {
+        job,
+        gaps,
+        est_months,
+    })
+}
+
+fn job_gaps(state: &CareerState, info: &JobInfo) -> Vec<GoalGap> {
+    let pairs = [
+        (ReqKind::Technical, info.req_technical, state.technical),
+        (ReqKind::Social, info.req_social, state.social),
+        (ReqKind::Management, info.req_management, state.management),
+        (ReqKind::Knowledge, info.req_knowledge, state.knowledge),
+        (ReqKind::Reputation, info.req_reputation, state.reputation),
+        (ReqKind::Money, info.req_money, state.money),
+    ];
+    pairs
+        .into_iter()
+        .filter(|&(_, req, cur)| req > cur)
+        .map(|(kind, req, cur)| GoalGap {
+            kind,
+            deficit: req - cur,
+        })
+        .collect()
+}
+
+/// 候補同士の近さ比較用。スキル1ポイント=1、資金は¥1,000=1として合算する。
+fn weighted_deficit(gaps: &[GoalGap]) -> f64 {
+    gaps.iter()
+        .map(|g| match g.kind {
+            ReqKind::Money => g.deficit / 1_000.0,
+            _ => g.deficit,
+        })
+        .sum()
+}
+
+/// 月1回の研修・人脈作り・副業をすべて続けた場合の、1ヶ月あたりの
+/// おおよその成長量。到達見込みの概算用なので、イベント補正・研修費・
+/// スキル上限は考慮しない。
+struct MonthlyGains {
+    technical: f64,
+    social: f64,
+    management: f64,
+    knowledge: f64,
+    reputation: f64,
+    money: f64,
+}
+
+fn estimated_monthly_gains(state: &CareerState) -> MonthlyGains {
+    let info = job_info(state.job);
+    let ls = lifestyle_info(state.lifestyle);
+    let eff = 1.0 + ls.skill_efficiency;
+    let mt = TICKS_PER_MONTH as f64;
+
+    // 全研修を月1回ずつ受けた場合のスキル増分
+    let mut t_tech = 0.0;
+    let mut t_social = 0.0;
+    let mut t_mgmt = 0.0;
+    let mut t_know = 0.0;
+    let mut t_rep = 0.0;
+    for t in &TRAININGS {
+        t_tech += t.technical;
+        t_social += t.social;
+        t_mgmt += t.management;
+        t_know += t.knowledge;
+        t_rep += t.reputation;
+    }
+
+    let gross = info.salary * mt;
+    let (tax_rate, insurance_rate) = tax_rates(gross);
+    let net_salary = gross * (1.0 - tax_rate - insurance_rate);
+    let best = best_skill(state);
+    let side_job = if best >= SIDE_JOB_MIN_SKILL {
+        best * SIDE_JOB_RATE
+    } else {
+        0.0
+    };
+
+    MonthlyGains {
+        technical: info.gain_technical * eff * mt + t_tech * eff,
+        social: info.gain_social * eff * mt + t_social * eff + NETWORKING_SOCIAL_GAIN,
+        management: info.gain_management * eff * mt + t_mgmt * eff,
+        knowledge: info.gain_knowledge * eff * mt + t_know * eff,
+        reputation: (CareerState::base_rep_gain() + ls.rep_bonus) * mt - REP_DECAY_PER_MONTH
+            + NETWORKING_REP_GAIN
+            + t_rep,
+        money: net_salary + monthly_passive(state) - monthly_expenses(state) + side_job,
+    }
+}
+
+/// 現在ペースで全不足を解消するまでの推定月数（最も遅い資源に合わせる）。
+fn estimate_months(gains: &MonthlyGains, gaps: &[GoalGap]) -> Option<u32> {
+    let mut worst = 0u32;
+    for gap in gaps {
+        let per_month = match gap.kind {
+            ReqKind::Technical => gains.technical,
+            ReqKind::Social => gains.social,
+            ReqKind::Management => gains.management,
+            ReqKind::Knowledge => gains.knowledge,
+            ReqKind::Reputation => gains.reputation,
+            ReqKind::Money => gains.money,
+        };
+        if per_month <= 0.0 {
+            return None;
+        }
+        worst = worst.max((gap.deficit / per_month).ceil() as u32);
+    }
+    Some(worst)
 }
 
 #[cfg(test)]
@@ -899,13 +1088,6 @@ mod tests {
 
         s.money = 79_999.0;
         assert!(!can_apply(&s, JobKind::Entrepreneur));
-    }
-
-    #[test]
-    fn next_available_job_finds_target() {
-        let s = CareerState::new(); // freeter, all skills 0
-        let next = next_available_job(&s);
-        assert!(next.is_some());
     }
 
     // ── Monthly cycle tests ──────────────────────────────────────
@@ -1227,37 +1409,37 @@ mod tests {
         assert_ne!(a, seed);
     }
 
-    // ── Next Goal tests ──────────────────────────────────────
+    // ── Action Hint tests ──────────────────────────────────────
 
     #[test]
-    fn next_goal_for_new_player() {
+    fn action_hint_for_new_player() {
         let s = CareerState::new();
-        let goal = next_goal(&s);
-        assert!(goal.contains("独学"), "goal was: {}", goal);
+        let hint = action_hint(&s);
+        assert!(hint.contains("独学"), "hint was: {}", hint);
     }
 
     #[test]
-    fn next_goal_after_training_done() {
+    fn action_hint_after_training_done() {
         let mut s = CareerState::new();
         s.training_done[0] = true; // did self-study
-        let goal = next_goal(&s);
+        let hint = action_hint(&s);
         // Should suggest networking or advancing, NOT re-suggest self-study
-        assert!(!goal.contains("独学"), "should not suggest done training, got: {}", goal);
+        assert!(!hint.contains("独学"), "should not suggest done training, got: {}", hint);
     }
 
     #[test]
-    fn next_goal_all_actions_done_suggests_advance() {
+    fn action_hint_all_actions_done_suggests_advance() {
         let mut s = CareerState::new();
         s.training_done = [true; 5]; // all trainings done
         s.networked = true;
         s.side_job_done = true;
         s.money = 500.0; // can't invest
-        let goal = next_goal(&s);
-        assert!(goal.contains("次の月"), "should suggest advance, got: {}", goal);
+        let hint = action_hint(&s);
+        assert!(hint.contains("次の月"), "should suggest advance, got: {}", hint);
     }
 
     #[test]
-    fn next_goal_actions_done_with_money_suggests_invest() {
+    fn action_hint_actions_done_with_money_suggests_invest() {
         let mut s = CareerState::new();
         s.job = JobKind::Programmer;
         s.technical = 20.0;
@@ -1265,15 +1447,15 @@ mod tests {
         s.networked = true;
         s.side_job_done = true;
         s.money = 10_000.0; // can invest
-        let goal = next_goal(&s);
-        assert!(goal.contains("投資"), "should suggest investing, got: {}", goal);
+        let hint = action_hint(&s);
+        assert!(hint.contains("投資"), "should suggest investing, got: {}", hint);
     }
 
     #[test]
-    fn next_goal_after_win() {
+    fn action_hint_after_win() {
         let mut s = CareerState::new();
         s.won = true;
-        assert!(next_goal(&s).contains("達成"));
+        assert!(action_hint(&s).contains("達成"));
     }
 
     #[test]
@@ -1302,6 +1484,138 @@ mod tests {
         assert!(!monthly_actions_exhausted(&s)); // side job available
         s.side_job_done = true;
         assert!(monthly_actions_exhausted(&s)); // now exhausted
+    }
+
+    // ── 次の目標 (next_goal) ──────────────────────────────────
+
+    #[test]
+    fn 次の目標_新規プレイヤーには事務員と知識の不足を提示する() {
+        let s = CareerState::new();
+        match next_goal(&s) {
+            Some(NextGoal::Locked { job, gaps, est_months }) => {
+                assert_eq!(job, JobKind::OfficeClerk);
+                assert_eq!(gaps.len(), 1);
+                assert_eq!(gaps[0].kind, ReqKind::Knowledge);
+                assert!((gaps[0].deficit - 5.0).abs() < 0.001);
+                assert!(est_months.is_some());
+            }
+            other => panic!("Locked を期待したが {:?} だった", other),
+        }
+    }
+
+    #[test]
+    fn 次の目標_満たした条件は不足リストに含まれず最も近い職業を選ぶ() {
+        let mut s = CareerState::new();
+        s.job = JobKind::OfficeClerk;
+        s.technical = 8.0; // デザイナーの技術条件 (8) は達成済み
+        s.social = 3.0; // デザイナー: 営業あと2 / プログラマー: 技術あと4
+        match next_goal(&s) {
+            Some(NextGoal::Locked { job, gaps, .. }) => {
+                assert_eq!(job, JobKind::Designer);
+                assert_eq!(gaps.len(), 1);
+                assert_eq!(gaps[0].kind, ReqKind::Social);
+                assert!((gaps[0].deficit - 2.0).abs() < 0.001);
+            }
+            other => panic!("Locked を期待したが {:?} だった", other),
+        }
+    }
+
+    #[test]
+    fn 次の目標_全条件を満たしたら転職可能を返す() {
+        let mut s = CareerState::new();
+        s.knowledge = 5.0;
+        assert_eq!(
+            next_goal(&s),
+            Some(NextGoal::Ready { job: JobKind::OfficeClerk })
+        );
+    }
+
+    #[test]
+    fn 次の目標_転職可能な職があれば不足提示より優先する() {
+        let mut s = CareerState::new();
+        s.knowledge = 5.0; // 事務員に転職可能
+        s.technical = 11.9; // プログラマーはあと 0.1 だが未達
+        assert_eq!(
+            next_goal(&s),
+            Some(NextGoal::Ready { job: JobKind::OfficeClerk })
+        );
+    }
+
+    #[test]
+    fn 次の目標_複数転職可能なら最も給料が高い職を提示する() {
+        let mut s = CareerState::new();
+        s.technical = 20.0;
+        s.social = 12.0;
+        s.knowledge = 20.0;
+        s.management = 5.0;
+        // プログラマー(60)・デザイナー(50)・営業(65)・経理(55)・事務員(25) が応募可
+        assert_eq!(next_goal(&s), Some(NextGoal::Ready { job: JobKind::Sales }));
+    }
+
+    #[test]
+    fn 次の目標_推定月数は不足量と成長ペースから計算される() {
+        let mut s = CareerState::new();
+        s.job = JobKind::Programmer;
+        s.technical = 12.0;
+        s.social = 2.0;
+        // 営業(給料65)が最も近い: 営業力あと10。
+        // 月間成長 = ビジネスセミナー4 + 人脈作り2 = 6 → ceil(10/6) = 2ヶ月
+        match next_goal(&s) {
+            Some(NextGoal::Locked { job, gaps, est_months }) => {
+                assert_eq!(job, JobKind::Sales);
+                assert_eq!(gaps.len(), 1);
+                assert_eq!(gaps[0].kind, ReqKind::Social);
+                assert!((gaps[0].deficit - 10.0).abs() < 0.001);
+                assert_eq!(est_months, Some(2));
+            }
+            other => panic!("Locked を期待したが {:?} だった", other),
+        }
+    }
+
+    #[test]
+    fn 次の目標_資金条件の不足も差分に含まれる() {
+        let mut s = CareerState::new();
+        s.job = JobKind::Director;
+        s.technical = 25.0;
+        s.social = 25.0;
+        s.management = 25.0;
+        s.knowledge = 25.0;
+        s.reputation = 40.0;
+        s.money = 30_000.0;
+        // 候補は起業家のみ。資金 80,000 のうち 30,000 所持 → あと 50,000
+        match next_goal(&s) {
+            Some(NextGoal::Locked { job, gaps, est_months }) => {
+                assert_eq!(job, JobKind::Entrepreneur);
+                assert_eq!(gaps.len(), 1);
+                assert_eq!(gaps[0].kind, ReqKind::Money);
+                assert!((gaps[0].deficit - 50_000.0).abs() < 0.001);
+                assert!(est_months.is_some());
+            }
+            other => panic!("Locked を期待したが {:?} だった", other),
+        }
+    }
+
+    #[test]
+    fn 次の目標_最上位の職業に就いていたら目標なし() {
+        let mut s = CareerState::new();
+        s.job = JobKind::Entrepreneur;
+        assert_eq!(next_goal(&s), None);
+    }
+
+    #[test]
+    fn 次の目標_条件ラベルは全種類定義されている() {
+        let kinds = [
+            ReqKind::Technical,
+            ReqKind::Social,
+            ReqKind::Management,
+            ReqKind::Knowledge,
+            ReqKind::Reputation,
+            ReqKind::Money,
+        ];
+        for kind in kinds {
+            assert!(!req_label(kind, false).is_empty());
+            assert!(!req_label(kind, true).is_empty());
+        }
     }
 
     // ── Balance Simulation ──────────────────────────────────────

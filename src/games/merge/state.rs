@@ -104,15 +104,51 @@ pub struct Quest {
 }
 
 impl Quest {
-    /// 報酬は (level^2 + 1) * needed * 10 のシンプル設計。高 lv を要求する
-    /// クエストほど大きく跳ねるので「上を狙う動機」が出る。
+    /// 報酬は 20 * needed * 3^(level-1)。Lv N のアイテム 1 個は L1 アイテム
+    /// 2^(N-1) 個分の素材投資なので、係数を 3 倍 (> 2 倍) で伸ばすことで
+    /// 素材 1 個あたりの報酬がレベル単調増加になる。「低 Lv を量産して数で
+    /// 稼ぐ」か「時間をかけて高 Lv を育てて大きく稼ぐ」かの戦略選択を生む。
     pub fn compute_reward(level: u8, needed: u8) -> u32 {
-        let lv = level as u32;
-        (lv * lv + 1) * needed as u32 * 10
+        let lv = level.clamp(1, MAX_LEVEL) as u32;
+        20 * needed as u32 * 3u32.pow(lv - 1)
     }
 }
 
 pub const QUEST_SLOTS: usize = 3;
+
+/// フラッシュ演出の種別。格は Action < Merge < Record で、描画の強さと
+/// 表示時間の両方が連動する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FlashKind {
+    /// 生成・移動など軽い操作フィードバック。
+    Action,
+    /// マージ成立。「2 個が 1 個に減る」損失感を「進化した」喜びに変換
+    /// するため、通常アクションより明確に強く・長く光らせる。
+    Merge,
+    /// 自己ベストレベル更新 (新レベル初到達)。最も強い演出。
+    Record,
+}
+
+impl FlashKind {
+    /// 表示時間 (tick)。10 ticks/sec → Action 0.6 秒 / Merge 0.9 秒 /
+    /// Record 1.5 秒。
+    pub fn duration(self) -> u32 {
+        match self {
+            FlashKind::Action => 6,
+            FlashKind::Merge => 9,
+            FlashKind::Record => 15,
+        }
+    }
+}
+
+/// ハイライト中のセル。`ttl` が tick ごとに減り、0 で演出終了。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FlashCell {
+    pub x: usize,
+    pub y: usize,
+    pub kind: FlashKind,
+    pub ttl: u32,
+}
 
 pub struct MergeState {
     pub grid: Vec<Cell>,
@@ -129,9 +165,9 @@ pub struct MergeState {
     pub rng_state: u64,
     pub log: Vec<String>,
     pub anim_frame: u32,
-    /// アクションフィードバック (生成成功/失敗、マージ成功、納品成功) を
-    /// 短時間ハイライトするためのカウンタ。
-    pub flash_cell: Option<(usize, usize, u32)>,
+    /// アクションフィードバック (生成、移動、マージ成功、ベスト更新) を
+    /// 短時間ハイライトするための演出 state。
+    pub flash_cell: Option<FlashCell>,
     /// マージ達成済みの最高レベル (実績表示)。
     pub best_level: u8,
 }
@@ -255,9 +291,18 @@ impl MergeState {
     }
 
     pub fn flash(&mut self, x: usize, y: usize) {
-        // 約 0.6 秒 (6 tick) ハイライト。連続マージで複数セルが同時に
-        // 光る必要は今は無いので最後の 1 つだけ保持する。
-        self.flash_cell = Some((x, y, 6));
+        self.flash_with(x, y, FlashKind::Action);
+    }
+
+    /// 種別付きフラッシュ。連続マージで複数セルが同時に光る必要は今は
+    /// 無いので最後の 1 つだけ保持する。
+    pub fn flash_with(&mut self, x: usize, y: usize, kind: FlashKind) {
+        self.flash_cell = Some(FlashCell {
+            x,
+            y,
+            kind,
+            ttl: kind.duration(),
+        });
     }
 }
 
@@ -340,12 +385,63 @@ mod tests {
 
     #[test]
     fn quest_reward_scales_with_level_and_count() {
-        // L1×1 = (1+1)*1*10 = 20
+        // L1×1 = 20*1*3^0 = 20 (序盤の経済感は据え置き)
         assert_eq!(Quest::compute_reward(1, 1), 20);
-        // L3×2 = (9+1)*2*10 = 200
-        assert_eq!(Quest::compute_reward(3, 2), 200);
-        // L5 のクエストは滅多に出ないが、報酬は大きい
-        assert_eq!(Quest::compute_reward(5, 1), 260);
+        // L3×2 = 20*2*3^2 = 360
+        assert_eq!(Quest::compute_reward(3, 2), 360);
+        // L5 のクエストは滅多に出ないが、報酬は大きく跳ねる
+        assert_eq!(Quest::compute_reward(5, 1), 1620);
+    }
+
+    #[test]
+    fn 素材1個あたり報酬は高レベルほど高い() {
+        // Lv N のアイテム 1 個は L1 アイテム 2^(N-1) 個分の素材投資。
+        // 「数で稼ぐ低 Lv 納品」が常に最適にならないよう、素材 1 個あたりの
+        // 報酬がレベル単調増加であることを保証する。
+        let per_material = |lv: u8| -> f64 {
+            let materials = 2u32.pow(lv as u32 - 1) as f64;
+            Quest::compute_reward(lv, 1) as f64 / materials
+        };
+        for lv in 1..MAX_LEVEL {
+            assert!(
+                per_material(lv + 1) > per_material(lv),
+                "LV{} の素材あたり報酬 {} が LV{} の {} を上回っていない",
+                lv + 1,
+                per_material(lv + 1),
+                lv,
+                per_material(lv),
+            );
+        }
+    }
+
+    #[test]
+    fn 高レベル1個クエストは低レベル複数クエストより報酬が大きい() {
+        // L3×1 (素材 4 個分) は L1×3 (素材 3 個分) より素材が 1 個多いだけだが、
+        // 報酬は合計を明確に (2 倍以上) 上回る — 育てるリスクへの見返り。
+        assert!(Quest::compute_reward(3, 1) >= Quest::compute_reward(1, 3) * 2);
+        // 同素材数 (L1×4 相当) と比べても上回る
+        assert!(Quest::compute_reward(3, 1) > Quest::compute_reward(1, 4));
+    }
+
+    #[test]
+    fn フラッシュ種別ごとに表示時間が違う() {
+        // マージ成立は通常アクションより長く (8〜10 tick)、自己ベスト更新は
+        // さらに長い (15 tick) — 演出の格 (描画の強さは render 側で検証) が
+        // 表示時間にも一致していること。
+        assert!(FlashKind::Merge.duration() > FlashKind::Action.duration());
+        assert!((8..=10).contains(&FlashKind::Merge.duration()));
+        assert_eq!(FlashKind::Record.duration(), 15);
+        assert!(FlashKind::Record.duration() > FlashKind::Merge.duration());
+    }
+
+    #[test]
+    fn flash_withは種別と座標を保持する() {
+        let mut s = MergeState::new();
+        s.flash_with(2, 3, FlashKind::Record);
+        let fc = s.flash_cell.expect("flash がセットされる");
+        assert_eq!((fc.x, fc.y), (2, 3));
+        assert_eq!(fc.kind, FlashKind::Record);
+        assert_eq!(fc.ttl, FlashKind::Record.duration());
     }
 
     #[test]

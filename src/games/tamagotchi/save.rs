@@ -4,7 +4,9 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
-use super::state::{Stage, Stats, TamaState};
+use super::logic;
+#[cfg(any(target_arch = "wasm32", test))]
+use super::state::{Milestone, Stage, Stats, TamaState};
 
 #[cfg(any(target_arch = "wasm32", test))]
 const SAVE_VERSION: u32 = 1;
@@ -44,6 +46,9 @@ struct GameSave {
     best_age_ticks: u64,
     total_ticks: u64,
     poop_count: u8,
+    /// 獲得済み称号の save id 列。旧 save には存在しない → `serde(default)`
+    /// で空 vec になり、ロード時にステージから補完される。
+    milestones: Vec<u8>,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -62,6 +67,7 @@ fn extract_save(state: &TamaState) -> SaveData {
             best_age_ticks: state.best_age_ticks,
             total_ticks: state.total_ticks,
             poop_count: state.poop_count,
+            milestones: state.milestones.iter().map(|m| m.to_save_id()).collect(),
         },
     }
 }
@@ -81,10 +87,20 @@ fn apply_save(state: &mut TamaState, save: &GameSave) {
     state.best_age_ticks = save.best_age_ticks;
     state.total_ticks = save.total_ticks;
     state.poop_count = save.poop_count.min(5);
+    // 未知の id (別バージョンが書いた称号) は破棄、重複は unlock 側で弾く。
+    state.milestones.clear();
+    for &id in &save.milestones {
+        if let Some(m) = Milestone::from_save_id(id) {
+            state.unlock_milestone(m);
+        }
+    }
+    // 称号導入前の save でも到達済みステージ分の称号は補完する。
+    logic::backfill_stage_milestones(state);
     // 演出 state は永続化しない: ロード直後はクリーン状態から再開する。
     state.last_action = None;
     state.action_flash = 0;
     state.anim_frame = 0;
+    state.stage_celebration = 0;
     state.log.clear();
 }
 
@@ -217,6 +233,7 @@ mod tests {
             best_age_ticks: 0,
             total_ticks: 0,
             poop_count: 99,
+            milestones: vec![],
         };
         let mut s = TamaState::new();
         apply_save(&mut s, &save);
@@ -227,5 +244,66 @@ mod tests {
         assert_eq!(s.poop_count, 5);
         // 0 generation は 1 に修正
         assert_eq!(s.generation, 1);
+    }
+
+    #[test]
+    fn 称号がroundtripする() {
+        let mut original = TamaState::new();
+        logic::hatch(&mut original);
+        original.unlock_milestone(Milestone::Sprout);
+        original.unlock_milestone(Milestone::Legend);
+
+        let saved = extract_save(&original);
+        let mut restored = TamaState::new();
+        apply_save(&mut restored, &saved.game);
+
+        assert!(restored.milestones.contains(&Milestone::Sprout));
+        assert!(restored.milestones.contains(&Milestone::Legend));
+        assert_eq!(restored.milestones.len(), 2);
+    }
+
+    #[test]
+    fn 不明な称号idは破棄される() {
+        let save = GameSave {
+            stage: Stage::Baby.to_save_id(),
+            health: 100,
+            milestones: vec![Milestone::Sprout.to_save_id(), 99],
+            ..Default::default()
+        };
+        let mut s = TamaState::new();
+        apply_save(&mut s, &save);
+        assert_eq!(s.milestones, vec![Milestone::Sprout]);
+    }
+
+    #[test]
+    fn 称号のない旧セーブはステージから補完される() {
+        // 称号フィールド導入前のセーブ (serde default で空 vec) でも、
+        // 既に到達済みのステージ分の称号は失われない。
+        let save = GameSave {
+            stage: Stage::Adult.to_save_id(),
+            health: 100,
+            ..Default::default()
+        };
+        let mut s = TamaState::new();
+        apply_save(&mut s, &save);
+        assert!(s.milestones.contains(&Milestone::Sprout));
+        assert!(s.milestones.contains(&Milestone::Rebel));
+        assert!(s.milestones.contains(&Milestone::FineAdult));
+        assert!(!s.milestones.contains(&Milestone::LongLifeStar));
+        assert!(!s.milestones.contains(&Milestone::Legend));
+    }
+
+    #[test]
+    fn 祝福演出はロードで持ち越さない() {
+        let mut original = TamaState::new();
+        logic::hatch(&mut original);
+        original.stage_celebration = 20;
+
+        let saved = extract_save(&original);
+        let mut restored = TamaState::new();
+        restored.stage_celebration = 5;
+        apply_save(&mut restored, &saved.game);
+
+        assert_eq!(restored.stage_celebration, 0);
     }
 }

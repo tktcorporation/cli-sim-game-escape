@@ -53,6 +53,78 @@ impl Stage {
     }
 }
 
+/// 到達した節目に応じて獲得する称号。世代をまたいで保持される。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Milestone {
+    /// Child 到達
+    Sprout,
+    /// Teen 到達
+    Rebel,
+    /// Adult 到達
+    FineAdult,
+    /// Elder 到達
+    LongLifeStar,
+    /// 2 世代目以降でベスト寿命を更新
+    Legend,
+}
+
+impl Milestone {
+    /// 進行順 (易→難)。「つぎの目標」と最高位称号の判定はこの順序に依存する。
+    pub const ALL: [Milestone; 5] = [
+        Milestone::Sprout,
+        Milestone::Rebel,
+        Milestone::FineAdult,
+        Milestone::LongLifeStar,
+        Milestone::Legend,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Milestone::Sprout => "すくすく",
+            Milestone::Rebel => "はんこうき",
+            Milestone::FineAdult => "りっぱなおとな",
+            Milestone::LongLifeStar => "ながいきのほし",
+            Milestone::Legend => "でんせつ",
+        }
+    }
+
+    /// 「つぎの目標」表示用の達成条件ヒント。
+    pub fn goal_hint(self) -> &'static str {
+        match self {
+            Milestone::Sprout => "チャイルドまで そだてる",
+            Milestone::Rebel => "ティーンまで そだてる",
+            Milestone::FineAdult => "アダルトまで そだてる",
+            Milestone::LongLifeStar => "シニアまで そだてる",
+            Milestone::Legend => "ベスト寿命を こうしん",
+        }
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub fn to_save_id(self) -> u8 {
+        match self {
+            Milestone::Sprout => 0,
+            Milestone::Rebel => 1,
+            Milestone::FineAdult => 2,
+            Milestone::LongLifeStar => 3,
+            Milestone::Legend => 4,
+        }
+    }
+
+    /// 未知の id は `None`。新しい称号を知る別バージョンの save を読んでも
+    /// 既知の称号だけ残して安全にロードできる。
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub fn from_save_id(id: u8) -> Option<Self> {
+        match id {
+            0 => Some(Milestone::Sprout),
+            1 => Some(Milestone::Rebel),
+            2 => Some(Milestone::FineAdult),
+            3 => Some(Milestone::LongLifeStar),
+            4 => Some(Milestone::Legend),
+            _ => None,
+        }
+    }
+}
+
 /// 直近のアクション。表情や演出に反映する短期 state。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LastAction {
@@ -113,6 +185,10 @@ pub struct TamaState {
     pub anim_frame: u32,
     /// うんちが画面にいくつあるか (清潔度 0 のときに増殖、お風呂で 0)。
     pub poop_count: u8,
+    /// ステージ遷移直後の祝福演出の残り tick。0 なら演出なし。
+    pub stage_celebration: u32,
+    /// 獲得済み称号 (獲得順)。世代をまたいで保持される。
+    pub milestones: Vec<Milestone>,
 }
 
 impl TamaState {
@@ -130,6 +206,8 @@ impl TamaState {
             action_flash: 0,
             anim_frame: 0,
             poop_count: 0,
+            stage_celebration: 0,
+            milestones: Vec::new(),
         }
     }
 
@@ -150,6 +228,24 @@ impl TamaState {
 
     pub fn is_dead(&self) -> bool {
         self.stage == Stage::Dead
+    }
+
+    /// 称号を新規獲得したら true。獲得済みなら何もせず false。
+    pub fn unlock_milestone(&mut self, m: Milestone) -> bool {
+        if self.milestones.contains(&m) {
+            return false;
+        }
+        self.milestones.push(m);
+        true
+    }
+
+    /// 獲得済み称号のうち進行順 (`Milestone::ALL`) で最高位のもの。
+    pub fn highest_milestone(&self) -> Option<Milestone> {
+        Milestone::ALL
+            .iter()
+            .rev()
+            .copied()
+            .find(|m| self.milestones.contains(m))
     }
 }
 
@@ -195,5 +291,34 @@ mod tests {
             s.add_log(format!("msg{}", i));
         }
         assert!(s.log.len() <= 30);
+    }
+
+    #[test]
+    fn milestone_save_idのroundtrip() {
+        for m in Milestone::ALL {
+            assert_eq!(Milestone::from_save_id(m.to_save_id()), Some(m));
+        }
+    }
+
+    #[test]
+    fn 不明なmilestone_idはnoneになる() {
+        assert_eq!(Milestone::from_save_id(99), None);
+    }
+
+    #[test]
+    fn unlock_milestoneは重複獲得を防ぐ() {
+        let mut s = TamaState::new();
+        assert!(s.unlock_milestone(Milestone::Sprout));
+        assert!(!s.unlock_milestone(Milestone::Sprout));
+        assert_eq!(s.milestones.len(), 1);
+    }
+
+    #[test]
+    fn highest_milestoneは進行順で最高位を返す() {
+        let mut s = TamaState::new();
+        assert!(s.highest_milestone().is_none());
+        s.unlock_milestone(Milestone::Legend);
+        s.unlock_milestone(Milestone::Sprout);
+        assert_eq!(s.highest_milestone(), Some(Milestone::Legend));
     }
 }

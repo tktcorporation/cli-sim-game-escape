@@ -577,27 +577,29 @@ fn render_menu(
     // adding a new game is one entry edit. Each card occupies 3 visual
     // rows: blank / title / description; sharing the action ID across
     // title + desc lets the player tap either row.
-    type Entry = (&'static str, &'static str, u16, char);
+    // accent はゲームの「顔」となる固有色。タイトル文字に常時乗せることで、
+    // 一覧をスクロールした時にどのゲームか色で識別できる。
+    type Entry = (&'static str, &'static str, u16, char, Color);
     const MENU_ENTRIES: &[Entry] = &[
-        ("Cookie Factory", "クッキーをクリックして増やす放置ゲーム", MENU_SELECT_COOKIE, '▶'),
-        ("Tiny Factory", "工場を作って生産ラインを最適化する放置ゲーム", MENU_SELECT_FACTORY, '▶'),
-        ("Career Simulator", "スキルを磨いて転職・投資でキャリアを築くシミュレーション", MENU_SELECT_CAREER, '▶'),
-        ("Dungeon Dive", "ダンジョンを探索して帰還するローグライト風RPG", MENU_SELECT_RPG, '▶'),
-        ("廃墟カフェ復興記", "廃墟カフェを復興するシナリオ経営SLG", MENU_SELECT_CAFE, '▶'),
-        ("深淵潜行 (Abyss Idle)", "自動戦闘で深層を目指す放置型ローグダンジョン", MENU_SELECT_ABYSS, '▶'),
-        ("神の戦場 (God Field)", "4人で戦うターン制カードバトルロイヤル", MENU_SELECT_GODFIELD, '▶'),
-        ("Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶'),
-        ("たまごっち", "卵から育てて寿命を伸ばす育成ゲーム", MENU_SELECT_TAMAGOTCHI, '▶'),
-        ("マージマンション", "同種同レベルを重ねて上位アイテムを作るマージゲーム", MENU_SELECT_MERGE, '▶'),
-        ("設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙'),
+        ("Cookie Factory", "クッキーをクリックして増やす放置ゲーム", MENU_SELECT_COOKIE, '▶', Color::LightYellow),
+        ("Tiny Factory", "工場を作って生産ラインを最適化する放置ゲーム", MENU_SELECT_FACTORY, '▶', Color::Cyan),
+        ("Career Simulator", "スキルを磨いて転職・投資でキャリアを築くシミュレーション", MENU_SELECT_CAREER, '▶', Color::LightGreen),
+        ("Dungeon Dive", "ダンジョンを探索して帰還するローグライト風RPG", MENU_SELECT_RPG, '▶', Color::LightRed),
+        ("廃墟カフェ復興記", "廃墟カフェを復興するシナリオ経営SLG", MENU_SELECT_CAFE, '▶', Color::LightMagenta),
+        ("深淵潜行 (Abyss Idle)", "自動戦闘で深層を目指す放置型ローグダンジョン", MENU_SELECT_ABYSS, '▶', Color::LightBlue),
+        ("神の戦場 (God Field)", "4人で戦うターン制カードバトルロイヤル", MENU_SELECT_GODFIELD, '▶', Color::Red),
+        ("Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶', Color::LightCyan),
+        ("たまごっち", "卵から育てて寿命を伸ばす育成ゲーム", MENU_SELECT_TAMAGOTCHI, '▶', Color::Magenta),
+        ("マージマンション", "同種同レベルを重ねて上位アイテムを作るマージゲーム", MENU_SELECT_MERGE, '▶', Color::Green),
+        ("設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 
     let mut cl = ClickableList::new();
-    for (i, (name, desc, action_id, default_marker)) in MENU_ENTRIES.iter().enumerate() {
+    for (i, (name, desc, action_id, default_marker, accent)) in MENU_ENTRIES.iter().enumerate() {
         let is_selected = i as u8 == selected;
         // Highlighted card: solid yellow ▶ marker + bold yellow title.
-        // Unselected: same shape but muted, so the layout doesn't shift
-        // when the cursor moves.
+        // Unselected: same shape but muted accent color, so the layout
+        // doesn't shift when the cursor moves and each game keeps its hue.
         let marker = if is_selected { '▶' } else { *default_marker };
         let marker_style = if is_selected {
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
@@ -611,7 +613,7 @@ fn render_menu(
         } else if *default_marker == '⚙' {
             Style::default().fg(Color::Gray)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(*accent)
         };
         cl.push(Line::from(""));
         cl.push_clickable(

@@ -176,6 +176,41 @@ pub fn dim_rgb(r: u8, g: u8, b: u8, dim: u8) -> (u8, u8, u8) {
     )
 }
 
+// ── Completion flash (建物完成の多段階フラッシュ) ───────────
+//
+// 完成の瞬間を 1 段階の点灯で終わらせず、期間を 3 等分して色が減衰する
+// アニメーションにする。「パッと光って消えた」ではなく「光って、灯って、
+// 冷めていく」流れを見せることで、放置中でも街が育つ瞬間が目に入る。
+
+/// 完成フラッシュの減衰フェーズ。`COMPLETION_FLASH_TICKS` を 3 等分し、
+/// render 側 (`completion_flash_style`) が fg/bg/Modifier に変換する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionFlashPhase {
+    /// 第 1 段階: 白 + BOLD の最大強度 (完成の瞬間)。
+    Peak,
+    /// 第 2 段階: 明るい黄のグロー。
+    Bright,
+    /// 第 3 段階: 通常色へ戻る手前の淡い光。
+    Fade,
+}
+
+/// `flash_until` (= 完成 tick + `COMPLETION_FLASH_TICKS`) と現在 tick から
+/// フェーズを判定する純関数。期限切れ・未設定 (0) は `None`。
+pub fn completion_flash_phase(tick: u64, flash_until: u64) -> Option<CompletionFlashPhase> {
+    if tick >= flash_until {
+        return None;
+    }
+    let remaining = flash_until - tick;
+    let third = COMPLETION_FLASH_TICKS / 3;
+    if remaining > third * 2 {
+        Some(CompletionFlashPhase::Peak)
+    } else if remaining > third {
+        Some(CompletionFlashPhase::Bright)
+    } else {
+        Some(CompletionFlashPhase::Fade)
+    }
+}
+
 /// Advance the simulation by `delta_ticks` ticks.
 ///
 /// Each tick we:
@@ -3581,6 +3616,57 @@ mod tests {
     fn dim_rgb_endpoints() {
         assert_eq!(dim_rgb(100, 200, 50, 0), (100, 200, 50));
         assert_eq!(dim_rgb(255, 255, 255, 255), (0, 0, 0));
+    }
+
+    // ── 完成フラッシュの多段階減衰 ──────────────────────────
+
+    /// 期間を 3 等分して Peak → Bright → Fade と減衰し、期限で消える。
+    #[test]
+    fn 完成フラッシュは三段階で減衰して期限で消える() {
+        let start = 100u64;
+        let until = start + COMPLETION_FLASH_TICKS;
+        let third = COMPLETION_FLASH_TICKS / 3;
+        assert_eq!(
+            completion_flash_phase(start, until),
+            Some(CompletionFlashPhase::Peak)
+        );
+        assert_eq!(
+            completion_flash_phase(start + third - 1, until),
+            Some(CompletionFlashPhase::Peak)
+        );
+        assert_eq!(
+            completion_flash_phase(start + third, until),
+            Some(CompletionFlashPhase::Bright)
+        );
+        assert_eq!(
+            completion_flash_phase(start + third * 2 - 1, until),
+            Some(CompletionFlashPhase::Bright)
+        );
+        assert_eq!(
+            completion_flash_phase(start + third * 2, until),
+            Some(CompletionFlashPhase::Fade)
+        );
+        assert_eq!(
+            completion_flash_phase(start + COMPLETION_FLASH_TICKS - 1, until),
+            Some(CompletionFlashPhase::Fade)
+        );
+        assert_eq!(
+            completion_flash_phase(start + COMPLETION_FLASH_TICKS, until),
+            None
+        );
+    }
+
+    /// フラッシュ未設定 (until = 0、初期値) のセルは光らない。
+    #[test]
+    fn フラッシュ未設定のセルは常にnone() {
+        assert_eq!(completion_flash_phase(0, 0), None);
+        assert_eq!(completion_flash_phase(50, 0), None);
+    }
+
+    /// 放置プレイヤーの目に「街が育つ瞬間」が入るよう 3 秒以上光り続ける。
+    #[test]
+    fn 完成フラッシュは3秒以上続く() {
+        assert!(COMPLETION_FLASH_TICKS >= 3 * TICKS_PER_SEC as u64);
     }
 
     #[test]

@@ -3,8 +3,22 @@
 use super::grid::{anchor_of, Belt, Cell, Direction, ItemKind, Machine, MachineKind, MinerMode, GRID_H, GRID_W};
 use super::state::{FactoryState, PlacementTool};
 
+/// 残像（アイテム通過跡）の表示 tick 数。
+/// 流れの方向が目で追える長さで、かつ残像だらけにならないバランス。
+pub const TRAIL_TICKS: u8 = 3;
+
+/// 出荷フラッシュの持続 tick 数（10 ticks/sec なので約 1.2 秒）。
+pub const EXPORT_FLASH_TICKS: u32 = 12;
+
+/// スループット集計のウィンドウ幅（100 ticks = 直近 10 秒）。
+pub const THROUGHPUT_WINDOW_TICKS: u64 = 100;
+
 /// Advance the factory by one tick.
 pub fn tick(state: &mut FactoryState) {
+    state.total_ticks += 1;
+    // Phase 0: Decay visual trails and prune stale export history
+    decay_trails(state);
+    prune_export_history(state);
     // Phase 1: Tick all machines
     tick_machines(state);
     // Phase 2: Auto-route items on belts (belt→machine and belt→belt)
@@ -19,10 +33,47 @@ pub fn tick_n(state: &mut FactoryState, n: u32) {
         tick(state);
     }
     state.anim_frame = state.anim_frame.wrapping_add(n);
-    state.total_ticks += n as u64;
     if state.export_flash > 0 {
         state.export_flash = state.export_flash.saturating_sub(n);
     }
+}
+
+/// 残像を 1 tick 分減衰させる。
+fn decay_trails(state: &mut FactoryState) {
+    for row in &mut state.grid {
+        for cell in row {
+            if let Cell::Belt(b) = cell {
+                if b.trail_ticks > 0 {
+                    b.trail_ticks -= 1;
+                    if b.trail_ticks == 0 {
+                        b.trail_item = None;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// スループット集計ウィンドウから外れた出荷履歴を捨てる。
+fn prune_export_history(state: &mut FactoryState) {
+    let now = state.total_ticks;
+    state.recent_export_ticks.retain(|&t| t + THROUGHPUT_WINDOW_TICKS > now);
+}
+
+/// 直近の出荷履歴から出荷ペース（個/秒）を計算する純粋関数。
+/// ゲーム開始から 10 秒未満の間は実経過時間で割る（窓幅で薄めない）。
+pub fn throughput_per_sec(export_ticks: &[u64], current_tick: u64) -> f64 {
+    if current_tick == 0 {
+        return 0.0;
+    }
+    let window = THROUGHPUT_WINDOW_TICKS.min(current_tick);
+    let window_start = current_tick - window;
+    let count = export_ticks
+        .iter()
+        .filter(|&&t| t > window_start && t <= current_tick)
+        .count();
+    // 10 ticks/sec 固定タイムステップ
+    count as f64 / (window as f64 / 10.0)
 }
 
 /// Process all machines for one tick.
@@ -166,8 +217,9 @@ fn tick_machines(state: &mut FactoryState) {
                                 state.money += value;
                                 state.total_exported += 1;
                                 state.total_money_earned += value;
-                                state.export_flash = 5;
+                                state.export_flash = EXPORT_FLASH_TICKS;
                                 state.last_export_value = value;
+                                state.recent_export_ticks.push(state.total_ticks);
                                 m.stat_produced += 1;
                                 m.stat_revenue += value;
                             }
@@ -343,7 +395,13 @@ fn tick_belts(state: &mut FactoryState) {
         };
         if should_feed {
             let item = if let Cell::Belt(belt) = &mut state.grid[by][bx] {
-                belt.item.take()
+                let taken = belt.item.take();
+                if let Some(it) = taken {
+                    // 残像: 通過元に流れの跡を残す
+                    belt.trail_item = Some(it);
+                    belt.trail_ticks = TRAIL_TICKS;
+                }
+                taken
             } else {
                 None
             };
@@ -378,7 +436,13 @@ fn tick_belts(state: &mut FactoryState) {
         }
         let item = if let Cell::Belt(belt) = &mut state.grid[fy][fx] {
             // Keep item_from to remember flow direction (helps try_push_to_belt)
-            belt.item.take()
+            let taken = belt.item.take();
+            if let Some(it) = taken {
+                // 残像: 通過元に流れの跡を残す
+                belt.trail_item = Some(it);
+                belt.trail_ticks = TRAIL_TICKS;
+            }
+            taken
         } else {
             None
         };
@@ -1209,6 +1273,191 @@ mod tests {
             "should have earned money from copper plate exports"
         );
         assert!(state.total_exported > 0);
+    }
+
+    // ── 演出・スループット系 ──
+
+    #[test]
+    fn 残像_ベルト間移動で通過元ベルトに記録される() {
+        let mut state = FactoryState::new();
+        state.grid[0][0] = Cell::Belt(Belt::new());
+        state.grid[0][1] = Cell::Belt(Belt::new());
+        if let Cell::Belt(b) = &mut state.grid[0][0] {
+            b.item = Some(ItemKind::IronOre);
+        }
+
+        tick(&mut state);
+        if let Cell::Belt(b) = &state.grid[0][0] {
+            assert!(b.item.is_none());
+            assert_eq!(b.trail_item, Some(ItemKind::IronOre));
+            assert_eq!(b.trail_ticks, TRAIL_TICKS);
+        } else {
+            panic!("belt expected at (0,0)");
+        }
+    }
+
+    #[test]
+    fn 残像_時間経過で減衰して消える() {
+        let mut state = FactoryState::new();
+        state.grid[0][0] = Cell::Belt(Belt::new());
+        state.grid[0][1] = Cell::Belt(Belt::new());
+        if let Cell::Belt(b) = &mut state.grid[0][0] {
+            b.item = Some(ItemKind::IronOre);
+        }
+
+        tick(&mut state); // item moves (0,0)→(1,0), trail = TRAIL_TICKS
+        for expected in (0..TRAIL_TICKS).rev() {
+            tick(&mut state);
+            if let Cell::Belt(b) = &state.grid[0][0] {
+                assert_eq!(b.trail_ticks, expected);
+            } else {
+                panic!("belt expected at (0,0)");
+            }
+        }
+        if let Cell::Belt(b) = &state.grid[0][0] {
+            assert_eq!(b.trail_ticks, 0);
+            assert!(b.trail_item.is_none(), "減衰しきったら残像は消える");
+        }
+    }
+
+    #[test]
+    fn 残像_機械への投入でも通過元ベルトに記録される() {
+        let mut state = FactoryState::new();
+        place_machine_at(&mut state, 2, 0, MachineKind::Smelter);
+        state.grid[0][1] = Cell::Belt(Belt::new());
+        if let Cell::Belt(b) = &mut state.grid[0][1] {
+            b.item = Some(ItemKind::IronOre);
+        }
+
+        tick(&mut state);
+        if let Cell::Belt(b) = &state.grid[0][1] {
+            assert!(b.item.is_none());
+            assert_eq!(b.trail_item, Some(ItemKind::IronOre));
+            assert_eq!(b.trail_ticks, TRAIL_TICKS);
+        } else {
+            panic!("belt expected at (1,0)");
+        }
+    }
+
+    #[test]
+    fn 残像_アイテムの移動速度は変わらない() {
+        // 演出追加後も 1 tick につき 1 セルずつ移動する
+        let mut state = FactoryState::new();
+        state.grid[0][0] = Cell::Belt(Belt::new());
+        state.grid[0][1] = Cell::Belt(Belt::new());
+        state.grid[0][2] = Cell::Belt(Belt::new());
+        if let Cell::Belt(b) = &mut state.grid[0][0] {
+            b.item = Some(ItemKind::IronOre);
+            b.item_from = Some(Direction::Left);
+        }
+
+        tick(&mut state);
+        if let Cell::Belt(b) = &state.grid[0][1] {
+            assert_eq!(b.item, Some(ItemKind::IronOre));
+        }
+        tick(&mut state);
+        if let Cell::Belt(b) = &state.grid[0][2] {
+            assert_eq!(b.item, Some(ItemKind::IronOre));
+        }
+    }
+
+    #[test]
+    fn 出荷フラッシュ_出荷直後に12tick分設定される() {
+        let mut state = FactoryState::new();
+        place_machine_at(&mut state, 0, 0, MachineKind::Exporter);
+        if let Cell::Machine(m) = &mut state.grid[0][0] {
+            m.input_buffer.push(ItemKind::Gear);
+        }
+
+        // Exporter recipe_time = 5。1 tick ずつ進める（実ゲームのフレーム単位）
+        for _ in 0..5 {
+            tick_n(&mut state, 1);
+        }
+        // 出荷した tick の終わりに 1 減るので EXPORT_FLASH_TICKS - 1
+        assert_eq!(state.export_flash, EXPORT_FLASH_TICKS - 1);
+    }
+
+    #[test]
+    fn 出荷フラッシュ_10tick以上持続する() {
+        let mut state = FactoryState::new();
+        place_machine_at(&mut state, 0, 0, MachineKind::Exporter);
+        if let Cell::Machine(m) = &mut state.grid[0][0] {
+            m.input_buffer.push(ItemKind::Gear);
+        }
+
+        for _ in 0..5 {
+            tick_n(&mut state, 1); // 5 tick 目で出荷
+        }
+        for _ in 0..10 {
+            tick_n(&mut state, 1);
+        }
+        assert!(state.export_flash > 0, "出荷後 10 tick 経ってもまだ光っている");
+        tick_n(&mut state, 1);
+        assert_eq!(state.export_flash, 0, "11 tick 後には消える");
+    }
+
+    #[test]
+    fn スループット_履歴が空なら0() {
+        assert_eq!(throughput_per_sec(&[], 100), 0.0);
+    }
+
+    #[test]
+    fn スループット_開始直後はゼロ除算せず0() {
+        assert_eq!(throughput_per_sec(&[], 0), 0.0);
+    }
+
+    #[test]
+    fn スループット_10秒で5個なら毎秒0_5個() {
+        let ticks = [10, 30, 50, 70, 90];
+        let tput = throughput_per_sec(&ticks, 100);
+        assert!((tput - 0.5).abs() < 1e-9, "got {}", tput);
+    }
+
+    #[test]
+    fn スループット_ウィンドウ外の古い出荷は数えない() {
+        // 現在 tick 200、ウィンドウは 100..200 → 150 と 160 のみ集計
+        let ticks = [5, 150, 160];
+        let tput = throughput_per_sec(&ticks, 200);
+        assert!((tput - 0.2).abs() < 1e-9, "got {}", tput);
+    }
+
+    #[test]
+    fn スループット_開始10秒未満は経過時間で割る() {
+        // 2 秒間に 4 個 → 2.0 個/秒（10 秒窓で薄めない）
+        let ticks = [5, 10, 15, 20];
+        let tput = throughput_per_sec(&ticks, 20);
+        assert!((tput - 2.0).abs() < 1e-9, "got {}", tput);
+    }
+
+    #[test]
+    fn スループット_出荷時に履歴へ記録される() {
+        let mut state = FactoryState::new();
+        place_machine_at(&mut state, 0, 0, MachineKind::Exporter);
+        if let Cell::Machine(m) = &mut state.grid[0][0] {
+            m.input_buffer.push(ItemKind::Gear);
+        }
+
+        tick_n(&mut state, 5); // 5 tick 目に出荷
+        assert_eq!(state.recent_export_ticks, vec![5]);
+    }
+
+    #[test]
+    fn スループット_古い履歴は剪定される() {
+        let mut state = FactoryState::new();
+        state.recent_export_ticks.push(1);
+        state.recent_export_ticks.push(150);
+
+        tick_n(&mut state, 101); // total_ticks = 101 → tick 1 はウィンドウ外
+        assert_eq!(state.recent_export_ticks, vec![150]);
+    }
+
+    #[test]
+    fn tick_nでtotal_ticksが正しく加算される() {
+        let mut state = FactoryState::new();
+        tick_n(&mut state, 7);
+        assert_eq!(state.total_ticks, 7);
+        tick_n(&mut state, 3);
+        assert_eq!(state.total_ticks, 10);
     }
 
     #[test]

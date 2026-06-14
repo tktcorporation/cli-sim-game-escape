@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 
-use ratzilla::ratatui::style::{Color, Style};
+use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::text::{Line, Span};
 
 use super::state::{CellType, DungeonMap, FloorTheme, Tile};
@@ -105,15 +105,16 @@ pub fn render_map_2d(
     // Compute visibility
     let visible = compute_visibility(map);
 
-    // Buffer: (2-char string, Color)
-    let mut buf: Vec<Vec<(String, Color)>> = Vec::with_capacity(gh);
+    // Buffer: (2-char string, Style)
+    let mut buf: Vec<Vec<(String, Style)>> = Vec::with_capacity(gh);
     for _row in 0..gh {
         let mut row_data = Vec::with_capacity(n);
         for _col in 0..n {
-            row_data.push(("  ".to_string(), Color::Reset));
+            row_data.push(("  ".to_string(), Style::default()));
         }
         buf.push(row_data);
     }
+    let fg = |c: Color| Style::default().fg(c);
 
     for vy in 0..n {
         let my = py - radius + vy as i32;
@@ -121,7 +122,7 @@ pub fn render_map_2d(
             let mx = px - radius + vx as i32;
 
             if !map.in_bounds(mx, my) {
-                buf[vy][vx] = ("  ".to_string(), Color::Reset);
+                buf[vy][vx] = ("  ".to_string(), Style::default());
                 continue;
             }
 
@@ -136,48 +137,52 @@ pub fn render_map_2d(
             let is_pet = pet.is_some_and(|p| p.x == ux && p.y == uy);
 
             if is_player {
-                buf[vy][vx] = ("\u{ff20}".to_string(), Color::White); // ＠
+                buf[vy][vx] = ("\u{ff20}".to_string(), fg(Color::White)); // ＠
             } else if is_pet {
-                buf[vy][vx] = ("\u{ff05}".to_string(), Color::Cyan); // ％ (pet)
+                buf[vy][vx] = ("\u{ff05}".to_string(), fg(Color::Cyan)); // ％ (pet)
             } else if let (true, Some(m)) = (is_visible, monster) {
                 let glyph = format!("{} ", m.glyph());
-                // Elite mobs render in magenta so they stand out from regular reds.
-                let color = if m.affix.is_some() {
-                    if m.awake { Color::Magenta } else { Color::Rgb(180, 80, 180) }
+                // Charging enemies flash bright red + bold — the telegraph
+                // must be readable on the map itself, not only in the log.
+                let style = if m.charging {
+                    fg(Color::LightRed).add_modifier(Modifier::BOLD)
+                } else if m.affix.is_some() {
+                    // Elite mobs render in magenta so they stand out from regular reds.
+                    if m.awake { fg(Color::Magenta) } else { fg(Color::Rgb(180, 80, 180)) }
                 } else if m.awake {
-                    Color::Red
+                    fg(Color::Red)
                 } else {
-                    Color::Rgb(180, 80, 80)
+                    fg(Color::Rgb(180, 80, 80))
                 };
-                buf[vy][vx] = (glyph, color);
+                buf[vy][vx] = (glyph, style);
             } else if is_visible {
                 match cell.tile {
                     Tile::Wall => {
-                        buf[vy][vx] = ("\u{2588}\u{2588}".to_string(), wall_color);
+                        buf[vy][vx] = ("\u{2588}\u{2588}".to_string(), fg(wall_color));
                     }
                     Tile::RoomFloor | Tile::Corridor => {
                         let (ch, color) = cell_marker(cell);
-                        buf[vy][vx] = (ch, color);
+                        buf[vy][vx] = (ch, fg(color));
                     }
                 }
             } else if cell.revealed {
                 // Revealed but not currently visible — very dark
                 match cell.tile {
                     Tile::Wall => {
-                        buf[vy][vx] = ("\u{2588}\u{2588}".to_string(), dark_wall_color);
+                        buf[vy][vx] = ("\u{2588}\u{2588}".to_string(), fg(dark_wall_color));
                     }
                     Tile::RoomFloor | Tile::Corridor => {
                         if ch_is_floor(cell) {
-                            buf[vy][vx] = ("\u{00b7} ".to_string(), dark_floor_color);
+                            buf[vy][vx] = ("\u{00b7} ".to_string(), fg(dark_floor_color));
                         } else {
                             let (ch, _) = cell_marker(cell);
-                            buf[vy][vx] = (ch, dark_floor_color);
+                            buf[vy][vx] = (ch, fg(dark_floor_color));
                         }
                     }
                 }
             } else {
                 // Unexplored
-                buf[vy][vx] = ("\u{2591}\u{2591}".to_string(), fog_color);
+                buf[vy][vx] = ("\u{2591}\u{2591}".to_string(), fg(fog_color));
             }
         }
     }
@@ -187,7 +192,7 @@ pub fn render_map_2d(
         .map(|row| {
             Line::from(
                 row.iter()
-                    .map(|(ch, color)| Span::styled(ch.clone(), Style::default().fg(*color)))
+                    .map(|(ch, style)| Span::styled(ch.clone(), *style))
                     .collect::<Vec<_>>(),
             )
         })
@@ -287,6 +292,65 @@ mod tests {
         let center_col = lines[0].spans.len() / 2;
         let center_span = &lines[center_row].spans[center_col];
         assert_eq!(center_span.content.as_ref(), "\u{ff20}"); // ＠
+    }
+
+    #[test]
+    fn チャージ中の敵はマップ上で強調表示される() {
+        use ratzilla::ratatui::style::Modifier;
+        use crate::games::rpg::state::{EnemyKind, Monster};
+
+        let mut seed = 42u64;
+        let mut map = generate_map(1, &mut seed);
+        map.monsters.clear();
+
+        // Place one charging + one idle monster adjacent to the player so
+        // both are inside the visible room area.
+        let px = map.player_x;
+        let py = map.player_y;
+        let mut spots = Vec::new();
+        for (dx, dy) in [(0i32, -1i32), (1, 0), (0, 1), (-1, 0)] {
+            let nx = px as i32 + dx;
+            let ny = py as i32 + dy;
+            if !map.in_bounds(nx, ny) { continue; }
+            let (ux, uy) = (nx as usize, ny as usize);
+            if !map.cell(ux, uy).is_walkable() { continue; }
+            spots.push((ux, uy));
+        }
+        assert!(spots.len() >= 2, "プレイヤー隣接に歩行可能マスが2つ必要");
+        let charging_pos = spots[0];
+        let idle_pos = spots[1];
+        for (i, &(x, y)) in [charging_pos, idle_pos].iter().enumerate() {
+            map.monsters.push(Monster {
+                kind: EnemyKind::Golem,
+                x, y, hp: 60, max_hp: 60,
+                awake: true,
+                charging: i == 0,
+                affix: None,
+            });
+        }
+
+        let lines = render_map_2d(&map, FloorTheme::Underground, 22, 11, None);
+        let center = lines.len() / 2;
+        let span_at = |pos: (usize, usize)| {
+            let vy = (center as i32 + (pos.1 as i32 - py as i32)) as usize;
+            let vx = (center as i32 + (pos.0 as i32 - px as i32)) as usize;
+            lines[vy].spans[vx].clone()
+        };
+
+        let charging_span = span_at(charging_pos);
+        assert!(
+            charging_span.style.add_modifier.contains(Modifier::BOLD),
+            "チャージ中の敵は BOLD で強調される"
+        );
+        let idle_span = span_at(idle_pos);
+        assert!(
+            !idle_span.style.add_modifier.contains(Modifier::BOLD),
+            "非チャージの敵は通常表示のまま"
+        );
+        assert_ne!(
+            charging_span.style.fg, idle_span.style.fg,
+            "チャージ中の敵は色でも区別できる"
+        );
     }
 
     #[test]

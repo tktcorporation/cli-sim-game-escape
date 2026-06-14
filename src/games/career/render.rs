@@ -15,9 +15,9 @@ use crate::widgets::ClickableList;
 use super::actions::*;
 
 use super::logic::{
-    can_apply, format_money, format_money_exact, freedom_progress, is_game_over,
-    monthly_actions_exhausted, monthly_expenses, monthly_passive, monthly_salary, months_remaining,
-    next_available_job, next_goal, training_cost_multiplier,
+    action_hint, can_apply, format_money, format_money_exact, freedom_progress, is_game_over,
+    monthly_actions_exhausted, monthly_expenses, monthly_passive, monthly_salary,
+    months_remaining, next_goal, req_label, training_cost_multiplier, GoalGap, NextGoal, ReqKind,
 };
 use super::state::{
     event_description, event_name, invest_info, job_info, lifestyle_info, CareerState, InvestKind,
@@ -59,7 +59,7 @@ fn render_main(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6),  // Header (expanded for freedom progress)
+            Constraint::Length(7),  // Header (freedom progress + next goal)
             Constraint::Length(6),  // Skills
             Constraint::Length(3),  // Event (always reserved)
             Constraint::Length(if is_narrow { 11 } else { 12 }), // Actions
@@ -178,6 +178,11 @@ fn render_header(
         ]));
     }
 
+    // ゲーム終了後は転職を促しても操作できないため、目標行は表示しない
+    if !is_game_over(state) {
+        lines.push(next_goal_line(state, is_narrow));
+    }
+
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Cyan))
@@ -189,6 +194,91 @@ fn render_header(
         ));
     let widget = Paragraph::new(lines).block(block);
     f.render_widget(widget, area);
+}
+
+/// 「次の目標」1行を組み立てる。転職可能なら強調、条件不足なら不足差分と
+/// 現在ペースでの推定到達月数を表示する。
+fn next_goal_line(state: &CareerState, is_narrow: bool) -> Line<'static> {
+    let label = Span::styled(
+        if is_narrow { " 目標: " } else { " 次の目標: " },
+        Style::default().fg(Color::Gray),
+    );
+    match next_goal(state) {
+        None => Line::from(vec![
+            label,
+            Span::styled(
+                "キャリアの頂点に到達！",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Some(NextGoal::Ready { job }) => Line::from(vec![
+            label,
+            Span::styled(
+                format!("{}に転職できます！", job_info(job).name),
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Some(NextGoal::Locked {
+            job,
+            gaps,
+            est_months,
+        }) => {
+            let info = job_info(job);
+            // 不足が多い時は給料表記を省き、差分と推定月数の表示幅を優先する
+            let name = if is_narrow || gaps.len() > 2 {
+                info.name.to_string()
+            } else {
+                format!("{} (月給¥{})", info.name, format_money(info.salary * 300.0))
+            };
+            let mut spans = vec![
+                label,
+                Span::styled(name, Style::default().fg(Color::Cyan)),
+                Span::styled(
+                    format!(" {}", gaps_summary(&gaps, is_narrow)),
+                    Style::default().fg(Color::White),
+                ),
+            ];
+            if let Some(months) = est_months {
+                let est = if is_narrow {
+                    format!(" 約{}ヶ月", months)
+                } else {
+                    format!(" (推定あと{}ヶ月)", months)
+                };
+                spans.push(Span::styled(est, Style::default().fg(Color::DarkGray)));
+            }
+            Line::from(spans)
+        }
+    }
+}
+
+/// 不足条件を「技術あと3 評判あと1」形式で並べる。行幅に収めるため
+/// 表示数を制限し、超過分は件数だけ示す。
+fn gaps_summary(gaps: &[GoalGap], is_narrow: bool) -> String {
+    let max_shown = if is_narrow { 2 } else { 3 };
+    let mut parts: Vec<String> = gaps
+        .iter()
+        .take(max_shown)
+        .map(|g| match g.kind {
+            ReqKind::Money => format!(
+                "{}あと¥{}",
+                req_label(g.kind, is_narrow),
+                format_money(g.deficit)
+            ),
+            _ => format!(
+                "{}あと{}",
+                req_label(g.kind, is_narrow),
+                g.deficit.ceil() as u32
+            ),
+        })
+        .collect();
+    if gaps.len() > max_shown {
+        parts.push(format!("他{}", gaps.len() - max_shown));
+    }
+    parts.join(" ")
 }
 
 fn render_skills(
@@ -407,9 +497,9 @@ fn render_actions(
         ),
     ]), GO_LIFESTYLE);
 
-    // Next goal hint
-    let goal = next_goal(state);
-    let title = format!(" アクション — 目標: {} ", goal);
+    // Action hint
+    let hint = action_hint(state);
+    let title = format!(" アクション — 目標: {} ", hint);
 
     let block = Block::default()
         .borders(borders)
@@ -420,14 +510,18 @@ fn render_actions(
     cl.render(f, area, block, &mut cs, false, 0);
 }
 
+/// 転職ボタン横のヒント。「次の目標」と同じ職業を指して一貫させる。
 fn next_job_hint(state: &CareerState) -> Span<'static> {
-    if let Some((_kind, name)) = next_available_job(state) {
-        Span::styled(
-            format!(" (次: {})", name),
+    match next_goal(state) {
+        Some(NextGoal::Ready { job }) => Span::styled(
+            format!(" (▶ {}に転職可)", job_info(job).name),
+            Style::default().fg(Color::Green),
+        ),
+        Some(NextGoal::Locked { job, .. }) => Span::styled(
+            format!(" (次: {})", job_info(job).name),
             Style::default().fg(Color::DarkGray),
-        )
-    } else {
-        Span::raw("")
+        ),
+        None => Span::raw(""),
     }
 }
 
@@ -1468,4 +1562,97 @@ fn format_reputation(rep: f64) -> String {
     let empty = 5 - filled;
     let bar: String = "★".repeat(filled) + &"☆".repeat(empty);
     format!("{} ({})", bar, rep as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::state::JobKind;
+    use ratzilla::ratatui::backend::TestBackend;
+    use ratzilla::ratatui::Terminal;
+
+    fn draw_main(state: &CareerState, width: u16, height: u16) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        terminal
+            .draw(|f| render(state, f, Rect::new(0, 0, width, height), &cs))
+            .unwrap();
+        terminal
+    }
+
+    /// TestBackend のバッファを空白抜きの文字列にする。double-width 文字は
+    /// 2セル目が空白で埋まるため、空白を除去してから検索する。
+    fn screen_compact(terminal: &Terminal<TestBackend>) -> String {
+        let buffer = terminal.backend().buffer();
+        let mut s = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                let sym = buffer.cell((x, y)).unwrap().symbol();
+                if sym != " " {
+                    s.push_str(sym);
+                }
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn ワイド画面に次の目標と不足差分が表示される() {
+        let state = CareerState::new();
+        let terminal = draw_main(&state, 100, 35);
+        let screen = screen_compact(&terminal);
+        assert!(screen.contains("次の目標:"), "screen:\n{}", screen);
+        assert!(screen.contains("事務員"), "screen:\n{}", screen);
+        assert!(screen.contains("知識あと5"), "screen:\n{}", screen);
+    }
+
+    #[test]
+    fn ナロー画面でも目標が表示される() {
+        let state = CareerState::new();
+        let terminal = draw_main(&state, 40, 35);
+        let screen = screen_compact(&terminal);
+        assert!(screen.contains("目標:事務員"), "screen:\n{}", screen);
+        assert!(screen.contains("知あと5"), "screen:\n{}", screen);
+    }
+
+    #[test]
+    fn 転職可能なら強調メッセージが表示される() {
+        let mut state = CareerState::new();
+        state.knowledge = 5.0;
+        let terminal = draw_main(&state, 100, 35);
+        let screen = screen_compact(&terminal);
+        assert!(
+            screen.contains("事務員に転職できます！"),
+            "screen:\n{}",
+            screen
+        );
+    }
+
+    #[test]
+    fn 最上位職では頂点到達と表示される() {
+        let mut state = CareerState::new();
+        state.job = JobKind::Entrepreneur;
+        let terminal = draw_main(&state, 100, 35);
+        let screen = screen_compact(&terminal);
+        assert!(
+            screen.contains("キャリアの頂点に到達！"),
+            "screen:\n{}",
+            screen
+        );
+    }
+
+    #[test]
+    fn ゲーム終了後は目標行を表示しない() {
+        let mut state = CareerState::new();
+        state.won = true;
+        let terminal = draw_main(&state, 100, 35);
+        let screen = screen_compact(&terminal);
+        assert!(!screen.contains("次の目標:"), "screen:\n{}", screen);
+    }
+
+    #[test]
+    fn 極小サイズでもパニックしない() {
+        let state = CareerState::new();
+        draw_main(&state, 20, 10);
+    }
 }

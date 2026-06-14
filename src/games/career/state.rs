@@ -411,6 +411,16 @@ pub const REP_DECAY_PER_MONTH: f64 = 0.3;
 /// Reputation gain per tick from working.
 const BASE_REP_GAIN: f64 = 0.002;
 
+/// Networking action gains (per month). Shared by the action itself and
+/// the next-goal pace estimation so the two never drift apart.
+pub const NETWORKING_SOCIAL_GAIN: f64 = 2.0;
+pub const NETWORKING_REP_GAIN: f64 = 3.0;
+
+/// Minimum best-skill value required to take a side job.
+pub const SIDE_JOB_MIN_SKILL: f64 = 5.0;
+/// Side job earnings per month = best skill × this rate.
+pub const SIDE_JOB_RATE: f64 = 100.0;
+
 // ── Monthly Events ─────────────────────────────────────────────
 
 /// Monthly event types that affect gameplay.
