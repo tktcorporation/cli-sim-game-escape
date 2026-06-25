@@ -2986,18 +2986,19 @@ fn neighborhood_match_factor(city: &City, x: usize, y: usize, kind: Building) ->
             let road_near = has_neighbor_kind(city, x, y, Building::Road);
             if houses < 5 || !road_near { 10 } else { 100 }
         }
-        // 雇用: 近隣 House が労働力供給 + edge_connected な Road 隣接が active 条件。
-        // Road 不足の場所に建てると inactive のまま居座り demolish_cleanup_hint で
-        // 即撤去される振動を生むため、商業と同じく Road 隣接を pre-rank で要求する。
+        // 雇用: active 条件は `workshop_is_active` =「**隣接** House + edge_connected
+        // Road 隣接」。pre-rank の互換係数も同じ条件で測らないと、半径内に House は
+        // あるが隣接していないセルを 100 と過大評価し、AI が「建てる→隣接 House が
+        // 無く inactive→別種に置換」の往復 (同セル振動) を起こす。隣接 House と
+        // Road 隣接の両方を満たすセルだけ 100、それ以外は 10 に割り引く。
         Building::Workshop
         | Building::Factory
         | Building::Refinery
         | Building::Office
         | Building::Headquarters => {
             let road_near = has_neighbor_kind(city, x, y, Building::Road);
-            if !road_near { return 10; }
-            let houses = count_built_within(city, x, y, 4, |b| matches!(b, Building::House));
-            if houses == 0 { 10 } else { 100 }
+            let house_adj = has_neighbor_kind(city, x, y, Building::House);
+            if road_near && house_adj { 100 } else { 10 }
         }
         // House: 近隣 Road があると edge_connected 化しやすく、商業/雇用建物が
         // あれば Apartment 化候補。何もない孤島は Cottage 据え置き。
@@ -3180,6 +3181,18 @@ fn demolish_cleanup_hint(city: &City, x: usize, y: usize, kind: Building) -> i64
     if is_waste { 1100 } else { 0 }
 }
 
+/// 撤去・置換の switching cost。`demolish_cost` 分の cash を実際に捨てるため、
+/// その実費を pre-rank hint から差し引く。`cheap_action_score` の Demolish /
+/// Replace に乗せることで、income がほぼ変わらない限界セルでの「壊して建て直し」
+/// 往復 (同セル振動) が選ばれなくなる。
+///
+/// `action_value` (Δevaluate) は cents/sec、demolish_cost は one-time cash で
+/// 厳密には次元が違うが、hint 自体が既に同じ混合スケールの経験値 (cleanup=1100
+/// 等) で運用されているため、ここでも cash 額をそのまま hint 減算に使う。
+fn teardown_penalty(x: usize, y: usize) -> i64 {
+    demolish_cost(x, y)
+}
+
 /// O(R²) で計算できる action の近隣考慮スコア。`rank_actions` の事前 rank に使う。
 ///
 /// 目的: saturated map で候補数千 → full evaluate を全候補に回せない。
@@ -3279,13 +3292,24 @@ pub(super) fn cheap_action_score(
         // 拮抗させる。それ以外 (active な建物、House、Park など) は 0 中立 ——
         // Δevaluate で実値変化が示す方向に従う。
         super::ai::AiAction::Demolish { x, y } => match city.tile(*x, *y) {
-            Tile::Built(b) => demolish_cleanup_hint(city, *x, *y, *b),
+            // `teardown_penalty` で「壊すと捨てる cash (= demolish_cost)」を hint から
+            // 差し引く。限界的な income 差で active な建物を壊して建て直す往復
+            // (同セル Build↔Demolish 振動) を net-negative にして止める。明確な死に
+            // 建物の掃除 (hint +1100) は近接セルの demolish_cost を上回るので通る。
+            Tile::Built(b) => {
+                demolish_cleanup_hint(city, *x, *y, *b) - teardown_penalty(*x, *y)
+            }
             _ => 0,
         },
         super::ai::AiAction::Replace { x, y, kind } => {
             let m = neighborhood_match_factor(city, *x, *y, *kind);
             let s = stage_weight(stage, *kind);
-            build_base(city, *x, *y, *kind) * m * s / 10_000 - current_at(city, *x, *y)
+            // Replace も既存建物を取り壊すので teardown_penalty を負担する。
+            // 同系列の正当な上位化 (Shop→Mall 等) は income 増が penalty を上回れば
+            // 通り、限界的な置換は通らなくなる。
+            build_base(city, *x, *y, *kind) * m * s / 10_000
+                - current_at(city, *x, *y)
+                - teardown_penalty(*x, *y)
         }
         super::ai::AiAction::Idle => 0,
     }
@@ -4047,6 +4071,61 @@ mod tests {
             v < 0,
             "connected House demolish should be net-negative, got {}",
             v
+        );
+    }
+
+    /// 雇用建物 (Office 等) の pre-rank 互換係数は active 条件
+    /// (`workshop_is_active` =「隣接 House + 道路接続」) と一致していなければ
+    /// ならない。半径内に House はあるが**隣接していない**セルを高評価すると、
+    /// AI が活性化できない雇用建物を建て続け、別種への置換で往復する
+    /// (同セル振動)。隣接 House の有無で 100/10 が切り替わることを固定する。
+    #[test]
+    fn employment_match_factor_requires_adjacent_house() {
+        let mut city = City::new();
+        let cx = GRID_W / 2;
+        let cy = GRID_H / 2;
+        // 道路は隣接させる。House は距離 2 (非隣接) に置く。
+        city.set_tile(cx - 1, cy, Tile::Built(Building::Road));
+        city.set_tile(cx + 2, cy, Tile::Built(Building::House));
+        let m_far = neighborhood_match_factor(&city, cx, cy, Building::Office);
+        assert_eq!(
+            m_far, 10,
+            "house within radius but not adjacent must NOT count as viable (got {})",
+            m_far
+        );
+        // House を隣接させると active 条件を満たすので 100。
+        city.set_tile(cx + 1, cy, Tile::Built(Building::House));
+        let m_adj = neighborhood_match_factor(&city, cx, cy, Building::Office);
+        assert_eq!(
+            m_adj, 100,
+            "adjacent house + road should make employment viable (got {})",
+            m_adj
+        );
+    }
+
+    /// active な建物の Demolish / Replace の pre-rank hint は
+    /// `teardown_penalty` (= demolish_cost) ぶん負になり、Idle (=0) に負ける。
+    /// 限界的な income 差で「壊して建て直し」を繰り返す往復を止める安全装置。
+    #[test]
+    fn teardown_penalty_makes_active_building_demolish_lose_to_idle() {
+        let mut city = City::new();
+        city.cash = 10_000;
+        let cx = GRID_W / 2;
+        let cy = GRID_H / 2;
+        // 道路接続 + 隣接 House で active な Shop を作る。
+        for y in 0..cy {
+            city.set_tile(cx, y, Tile::Built(Building::Road));
+        }
+        city.set_tile(cx, cy, Tile::Built(Building::Road));
+        city.set_tile(cx + 1, cy, Tile::Built(Building::House));
+        city.set_tile(cx + 1, cy - 1, Tile::Built(Building::Shop));
+        let stage = city_stage(&city);
+        let demo = AiAction::Demolish { x: cx + 1, y: cy - 1 };
+        let demo_score = cheap_action_score(&city, &demo, stage);
+        assert!(
+            demo_score < 0,
+            "active Shop demolish hint must be negative (teardown cost), got {}",
+            demo_score
         );
     }
 

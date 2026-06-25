@@ -1381,4 +1381,63 @@ mod tests {
             );
         }
     }
+
+    /// 同セル振動 (Build/Demolish/Replace が 60s 窓で 3 回以上) を複数 seed ×
+    /// 振動が出やすい Tier (ノイズ持ちの T3 / 評価ベースの T4) で横断検出する。
+    ///
+    /// `no_oscillation_at_same_cell_tier4_30min` (30min 単一 seed) より短い 900s に
+    /// する代わりに seed と Tier の幅を広げ、限界立地での Mall↔Office 等の往復を
+    /// 早期に捕まえる。`#[ignore]` 運用は他の長尺ベンチと揃える (release で
+    /// `--ignored` 実行)。
+    ///
+    /// **workers=1 で回す**: 限界立地での Mall↔Office 往復は worker 1 人
+    /// (= 1 tick 1 判断で街がゆっくり育つ過程) の方で顕在化する。多 worker だと
+    /// 街が速く埋まって限界セルが早期に解消されるため検出力が落ちる。
+    ///
+    /// **span=900s**: 振動 (Demolish+Build+Replace が 60s 窓に 3 件) は seed 次第で
+    /// 中盤 (600〜900s) に出るため、それ以下の horizon では取りこぼす。
+    #[test]
+    #[ignore = "multi-tier oscillation regression; release + --ignored で実行"]
+    fn no_oscillation_multi_seed_tier3_tier4() {
+        use std::collections::BTreeMap;
+        let span = 900u32;
+        let seeds: [u64; 3] = [0xC1A5_5EED, 0xDEAD_BEEF, 42];
+        let tiers = [(AiTier::Aware, "T3"), (AiTier::Planner, "T4")];
+        let mut violations: Vec<(u64, &str, (usize, usize))> = Vec::new();
+        for seed in seeds {
+            for (tier, label) in tiers {
+                let (_samples, actions) =
+                    run_diagnostic(seed, tier, Strategy::Income, 1, span, span);
+                let mut by_cell: BTreeMap<(usize, usize), Vec<u32>> = BTreeMap::new();
+                for r in &actions {
+                    if !matches!(r.outcome, ActionOutcome::Applied) {
+                        continue;
+                    }
+                    if let AiAction::Build { x, y, .. }
+                    | AiAction::Demolish { x, y }
+                    | AiAction::Replace { x, y, .. } = &r.action
+                    {
+                        by_cell.entry((*x, *y)).or_default().push(r.sec);
+                    }
+                }
+                for (cell, secs) in &by_cell {
+                    let mut left = 0usize;
+                    for right in 0..secs.len() {
+                        while secs[right] - secs[left] >= 60 {
+                            left += 1;
+                        }
+                        if right - left + 1 >= 3 {
+                            violations.push((seed, label, *cell));
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "same-cell oscillation detected (>=3 events in 60s): {:?}",
+            violations,
+        );
+    }
 }
