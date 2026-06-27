@@ -2435,23 +2435,6 @@ fn stagnation_penalty(city: &City, connected: &[Vec<bool>]) -> i64 {
     penalty
 }
 
-/// 評価関数 — 簡易版 (アマ低級相当: 「駒得しか見えない」)。
-/// 1-ply で見ても「将来の収入」を推測できないように **直接収入だけ** を見る。
-/// = Cottage の +25/+50 cents しか見えず、Road や Park の長期効果が見えない。
-pub fn evaluate_simple(city: &City) -> i64 {
-    // 全 House の Cottage 想定収入だけを足す。Tier 評価も連結性も見ない。
-    // = 「目先の家賃しか見えてない」初級プレイヤー思考。
-    let mut cents = 0i64;
-    for y in 0..GRID_H {
-        for x in 0..GRID_W {
-            if matches!(city.tile(x, y), Tile::Built(Building::House)) {
-                cents += 50;
-            }
-        }
-    }
-    cents
-}
-
 /// 仮想着手 + 評価 + 巻き戻し: city を mutate して `f` を呼び、終わったら元に戻す。
 ///
 /// **クローン回避**: 64×32 grid の clone は ~18k bytes / 1 アクション分。Tier 5 の
@@ -2603,16 +2586,12 @@ pub fn with_action_applied<R, F: FnOnce(&mut City) -> R>(
 /// `start_construction` で前提条件を再検証する。買えない物を AI が選び続ける
 /// 事故は構造上起きない。
 ///
-/// `eval_fn` を引数に取ることで、Tier ごとに精緻 (`evaluate`) / 単純
-/// (`evaluate_simple`) を切り替えられる。
+/// `eval_fn` を引数に取る汎用版。production の探索 (`rank_actions_full`) は
+/// `evaluate` 専用の `action_value_with_baseline_full` を使うので、この汎用版は
+/// テストや `render` の選択セル詳細など単発評価向けの公開 API として残す。
 ///
 /// **`&mut City` を取る理由**: in-place mutate + revert で評価する。clone は
-/// 64×32 grid のメモリ確保が探索の度に走り、Tier 5 の depth=3 で tick が
-/// 秒単位に詰まる。mutate-then-revert で同じ depth が ~10x 速くなる。
-///
-/// production の hot path (`rank_actions`) は baseline 共有版
-/// `action_value_with_baseline` を直接呼ぶ。本関数は単発評価向けの公開 API
-/// (テストや `render` の選択セル詳細などで使う)。
+/// 64×32 grid のメモリ確保が評価の度に走るため、mutate-then-revert で避ける。
 #[allow(dead_code)]
 pub fn action_value<F: Fn(&City) -> i64>(
     city: &mut City,
@@ -2625,7 +2604,7 @@ pub fn action_value<F: Fn(&City) -> i64>(
 
 /// `action_value` の baseline 共有版。同じ city 状態に対して N 個の候補を比較する
 /// 場合、呼び側で `before = eval_fn(city)` を 1 度だけ計算して渡せば、`eval_fn`
-/// 呼び出しが 2N → N+1 回に減る。`rank_actions` のホットパスで効く。
+/// 呼び出しが 2N → N+1 回に減る。
 pub(super) fn action_value_with_baseline<F: Fn(&City) -> i64>(
     city: &mut City,
     action: &super::ai::AiAction,
@@ -3193,7 +3172,7 @@ fn teardown_penalty(x: usize, y: usize) -> i64 {
     demolish_cost(x, y)
 }
 
-/// O(R²) で計算できる action の近隣考慮スコア。`rank_actions` の事前 rank に使う。
+/// O(R²) で計算できる action の近隣考慮スコア。`rank_actions_full` の事前 rank に使う。
 ///
 /// 目的: saturated map で候補数千 → full evaluate を全候補に回せない。
 /// 近隣互換性 (`neighborhood_match_factor`) を base income に乗じて「表面高評価で
@@ -3315,92 +3294,16 @@ pub(super) fn cheap_action_score(
     }
 }
 
-/// 探索: 全候補アクションを評価し、上位 K を返す (depth=1)。
-/// 戻り値は `(action, value)` の降順ソート済み Vec。
+/// 探索: 全候補アクションを `evaluate` で評価し、上位 K を `(action, value)` の
+/// 降順ソート済み Vec で返す (depth=1)。`ai::decide` が top-1 を取る唯一の探索
+/// インフラ。
 ///
-/// **2 段 ranking**: cheap_action_score で大量候補を上位 ~`PRE_RANK_LIMIT` 個に
+/// **2 段 ranking**: `cheap_action_score` で大量候補を上位 ~`PRE_RANK_LIMIT` 個に
 /// 絞り、その上だけで full `action_value` を計算する。saturated map で候補数が
 /// 数千に達するため、O(N) full evaluate を全候補に流すと秒単位の遅延が出る。
 /// cheap score は近似だが正の相関があれば、true best が pre-rank top に残る確率が
-/// 高い。Idle は常に最終候補に含めて「何もしない」を選択肢として残す。
-pub(super) fn rank_actions<F: Fn(&City) -> i64>(
-    city: &mut City,
-    eval_fn: &F,
-    top_k: usize,
-) -> Vec<(super::ai::AiAction, i64)> {
-    /// full evaluate を回す候補の上限。実測でこの数で 30min sim が release で
-    /// 数分内に収まり、かつ AI Tier 4/5 の質はほぼ落ちないと観測。
-    const PRE_RANK_LIMIT: usize = 200;
-
-    let mut actions = enumerate_actions(city);
-    // stage は pre-rank ループに渡す前に 1 度だけ計算する。
-    // count_built が GRID 全走査のため、pre-rank ループ内で再計算すると O(N×GRID²)
-    // に膨らむ。pre-rank 中 city 状態は不変なので 1 度の評価で全候補に共有できる。
-    let stage = city_stage(city);
-    if actions.len() > PRE_RANK_LIMIT {
-        // cheap rank の上位 + 「Demolish と Idle は常時パススルー」で構成する。
-        //
-        // Demolish を常時含める理由: cheap_action_score は dead 建物 (= isolated
-        // road の -100 ペナルティ等) の **撤去メリット** を base income だけでは
-        // 表現できない。死に建物の Demolish は full evaluate でないと正の
-        // action_value が見えないので、cheap rank の top から漏れても必ず
-        // 最終比較に乗せる (chess engine の killer moves と同じ救済枠)。
-        //
-        // Idle を常時含める理由: 全候補が負評価の時に「何もしない」が最終比較で
-        // 勝てるように。
-        let mut indexed: Vec<(usize, i64)> = actions
-            .iter()
-            .enumerate()
-            .map(|(i, a)| (i, cheap_action_score(city, a, stage)))
-            .collect();
-        indexed.sort_by(|a, b| b.1.cmp(&a.1));
-        let mut keep_set: std::collections::HashSet<usize> = indexed
-            .into_iter()
-            .take(PRE_RANK_LIMIT)
-            .map(|(i, _)| i)
-            .collect();
-        for (i, a) in actions.iter().enumerate() {
-            if matches!(
-                a,
-                super::ai::AiAction::Demolish { .. } | super::ai::AiAction::Idle
-            ) {
-                keep_set.insert(i);
-            }
-        }
-        let mut keep_idx: Vec<usize> = keep_set.into_iter().collect();
-        keep_idx.sort_unstable();
-        let mut filtered = Vec::with_capacity(keep_idx.len());
-        for i in keep_idx.into_iter().rev() {
-            filtered.push(actions.swap_remove(i));
-        }
-        actions = filtered;
-    }
-
-    // baseline `before` は同じ city 状態で全候補に共通。1 度計算して N 個の候補で
-    // 共有することで evaluate 呼び出しが 2N → N+1 回 (実質 ~2x speedup)。
-    let before = eval_fn(city);
-    let mut scored: Vec<(super::ai::AiAction, i64)> = actions
-        .into_iter()
-        .map(|a| {
-            // `rank_actions_full` と同じく Δeval + stage hint で sort する。
-            // Tier 2 (evaluate_simple = House 数) でも stage bias で「Seed では
-            // House」「Town では商業」が優先され、純粋な House 量産にならず
-            // 段階的な街作りに沿う。
-            let v = action_value_with_baseline(city, &a, eval_fn, before);
-            let hint = cheap_action_score(city, &a, stage);
-            (a, v + hint)
-        })
-        .collect();
-    scored.sort_by(|a, b| b.1.cmp(&a.1));
-    scored.truncate(top_k.max(1));
-    scored
-}
-
-
-/// `rank_actions` の `evaluate` 専用版。`action_value_with_baseline_full` 経由で
-/// non-Road action は local diff で評価する。Tier 3/4/5 全てが共通で使う唯一の
-/// 探索インフラ。Tier 差は `top_k` の広さ (8 / 20 / 30) で表現する — 探索深さは
-/// 一律 1 に統一し、評価コストを抑えつつ「より広く候補を見る」方向で巧拙を作る。
+/// 高い。Demolish と Idle は pre-rank top から漏れても常に最終比較に含める
+/// (chess engine の killer moves と同じ救済枠 / 「何もしない」を常に選択肢に残す)。
 pub(super) fn rank_actions_full(
     city: &mut City,
     top_k: usize,
@@ -3408,7 +3311,8 @@ pub(super) fn rank_actions_full(
     const PRE_RANK_LIMIT: usize = 200;
 
     let mut actions = enumerate_actions(city);
-    // stage は `rank_actions` 同様に 1 度だけ計算して pre-rank ループに渡す。
+    // stage は pre-rank ループに渡す前に 1 度だけ計算する (`count_built` が
+    // GRID 全走査のため、ループ内再計算を避ける)。
     let stage = city_stage(city);
     if actions.len() > PRE_RANK_LIMIT {
         let mut indexed: Vec<(usize, i64)> = actions
@@ -3460,31 +3364,6 @@ pub(super) fn rank_actions_full(
     scored.sort_by(|a, b| b.1.cmp(&a.1));
     scored.truncate(top_k.max(1));
     scored
-}
-
-/// Stockfish 流のノイズ付き選択: `noise_pct`% の確率で「上位 3 候補から random」を選ぶ。
-/// 残り (100 − noise_pct)% は素直に best を返す。
-///
-/// **デザイン意図**: 明示ブランダー (突然の大悪手) は入れない。次善手を確率で
-/// 選ぶことで、評価関数が見抜けない「微妙に良い手」を時々取りこぼす自然な弱体化。
-pub(super) fn pick_with_noise(
-    ranked: &[(super::ai::AiAction, i64)],
-    noise_pct: u32,
-    rng: u64,
-) -> Option<super::ai::AiAction> {
-    if ranked.is_empty() {
-        return None;
-    }
-    if noise_pct == 0 {
-        return Some(ranked[0].0.clone());
-    }
-    let roll = (rng % 100) as u32;
-    if roll < noise_pct {
-        let pick = (rng >> 32) as usize % ranked.len().min(3);
-        Some(ranked[pick].0.clone())
-    } else {
-        Some(ranked[0].0.clone())
-    }
 }
 
 #[cfg(test)]
