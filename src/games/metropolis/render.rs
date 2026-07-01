@@ -22,7 +22,7 @@
 //!   - アクティブ店舗のキラキラ + 給料発生時のハイライト
 //!   - 建設タイルに作業員の点滅 (`+`)
 //!   - 二重ボーダー (`═` / `║`) で luxury 感
-//!   - AI ティア記号 ([I]/[II]/[III]/[IV]) + 思考スピナー
+//!   - AI 思考スピナー
 //!   - 太陽 ◉ / 月 ◯ が空を往復し、時間経過を表す
 
 use std::cell::RefCell;
@@ -40,15 +40,13 @@ use crate::widgets::{Clickable, ClickableGrid, ClickableList, ScrollableTab, Tab
 use super::logic;
 use super::save::{format_offline_duration, MAX_OFFLINE_SECS, OFFLINE_EFFICIENCY_PCT};
 use super::state::{
-    city_tier_for, next_tier_threshold, AiTier, Building, City, CityTier, PanelTab,
-    PendingOfflineWelcome, Strategy, Tile, GRID_H, GRID_W, PAYOUT_FLASH_TICKS, VIEW_H, VIEW_W,
+    city_tier_for, next_tier_threshold, Building, City, CityTier, PanelTab, PendingOfflineWelcome,
+    Tile, GRID_H, GRID_W, PAYOUT_FLASH_TICKS, VIEW_H, VIEW_W,
 };
 use super::terrain::Terrain;
 use super::{
     ACT_DISMISS_OFFLINE_WELCOME, ACT_HIRE_WORKER, ACT_PANEL_SCROLL_DOWN, ACT_PANEL_SCROLL_UP,
-    ACT_STRATEGY_ECO, ACT_STRATEGY_GROWTH, ACT_STRATEGY_INCOME, ACT_STRATEGY_TECH,
     ACT_TAB_CATALOG, ACT_TAB_EVENTS, ACT_TAB_MANAGER, ACT_TAB_STATUS, ACT_TAB_WORLD,
-    ACT_UPGRADE_AI,
 };
 
 /// Wide layout が必要とする最小幅。
@@ -156,32 +154,24 @@ fn banner_border_color(state: &City) -> Color {
 }
 
 fn banner_title(state: &City, narrow: bool) -> String {
-    let cpu = ai_tier_icon(state.ai_tier);
-    let strat = strategy_tag(state.strategy);
     let busy = state.active_constructions();
     let pop = state.population();
     let tier = city_tier_for(pop);
     let tier_progress = tier_progress_label(tier, pop);
     if narrow {
         format!(
-            " ▙▟ {} {}  {}  {}  WK {}/{} ",
+            " ▙▟ {} {}  WK {}/{} ",
             tier.jp(),
             tier_progress_label_short(tier, pop),
-            cpu,
-            strat,
             busy,
             state.workers
         )
     } else {
         format!(
-            " ▙▟ {} ({}) {}  ── CPU {} {} ── STRAT {} {} ── WK {}/{} ── ",
+            " ▙▟ {} ({}) {}  ── WK {}/{} ── ",
             tier.name(),
             tier.jp(),
             tier_progress,
-            cpu,
-            state.ai_tier.name(),
-            strat,
-            strategy_label(state.strategy),
             busy,
             state.workers,
         )
@@ -206,27 +196,6 @@ fn tier_progress_label_short(t: CityTier, pop: u32) -> String {
             (pop.saturating_mul(100) / target.max(1)).min(99)
         ),
         None => "★MAX".to_string(),
-    }
-}
-
-/// AI ティアを Roman 風 ASCII タグで表現 ([I] が dumbest、[IV] が smartest)。
-fn ai_tier_icon(t: AiTier) -> &'static str {
-    match t {
-        AiTier::Random => "[I]",
-        AiTier::Greedy => "[II]",
-        AiTier::Aware => "[III]",
-        AiTier::Planner => "[IV]",
-        AiTier::Master => "[V]",
-    }
-}
-
-/// 戦略を 3 文字タグで表現。
-fn strategy_tag(s: Strategy) -> &'static str {
-    match s {
-        Strategy::Growth => "[GRW]",
-        Strategy::Income => "[CSH]",
-        Strategy::Tech => "[TEC]",
-        Strategy::Eco => "[ECO]",
     }
 }
 
@@ -874,7 +843,7 @@ fn tile_spans_2(
 
             // 航空標識: Highrise が密集 (周囲 3 軒以上 Highrise) で、夜間に
             // 1.5 秒周期で右側 1 文字を `*` (赤太字) に差し替える。
-            // 都市感の最後のスパイス — Tier 4 経済まで育てたプレイヤーへのご褒美。
+            // 都市感の最後のスパイス — 街を育てきったプレイヤーへのご褒美。
             if matches!(tier, logic::HouseTier::Highrise)
                 && logic::should_show_aviation_light_with(state, x, y, tick, connected)
             {
@@ -2127,12 +2096,6 @@ fn status_list(state: &City) -> ClickableList<'static> {
         ),
     ]));
 
-    // 区切り + Strategy 内訳パネル。
-    // 「マネージャーが今 CPU に何をやらせているか」を可視化することで、
-    // ボタンを切り替えた時の効果が即座に見える。
-    lines.push(Line::from(""));
-    lines.extend(strategy_status_lines(state));
-
     // 選択中セルの詳細パネル (タップ / クリックで表示)。
     if let Some((sx, sy)) = state.selected_cell {
         lines.push(Line::from(""));
@@ -2676,94 +2639,6 @@ fn building_icon(b: Building) -> &'static str {
     }
 }
 
-/// 現在の Strategy の内訳を表示する 4 行ブロック。
-///   行1: ラベル + 速度/収入修正
-///   行2: 建物別の roll 確率
-///   行3: 建物別の確率を 1 行のバーで描画 (H██ R▓▓ W░ S██)
-///   行4: タグライン (1 行説明)
-fn strategy_status_lines(state: &City) -> Vec<Line<'static>> {
-    let info = logic::strategy_info(state.strategy);
-    let mut out: Vec<Line> = Vec::new();
-
-    // 行1: 戦略ラベル + 副作用。
-    let mut head = vec![
-        Span::styled("STRAT ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            info.label.to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ),
-    ];
-    if info.speed_bonus_pct != 0 {
-        head.push(Span::styled(
-            format!("  建設{:+}%", info.speed_bonus_pct),
-            Style::default().fg(Color::LightGreen),
-        ));
-    }
-    if info.income_penalty_pct != 0 {
-        head.push(Span::styled(
-            format!("  収入{:+}%", info.income_penalty_pct),
-            Style::default().fg(Color::LightRed),
-        ));
-    }
-    out.push(Line::from(head));
-
-    // 行2: 建物別重みの数値。
-    out.push(Line::from(vec![
-        Span::styled(
-            format!(" 家{:>2}% ", info.house_pct),
-            Style::default().fg(Color::Green),
-        ),
-        Span::styled(
-            format!("道{:>2}% ", info.road_pct),
-            Style::default().fg(Color::Gray),
-        ),
-        Span::styled(
-            format!("工{:>2}% ", info.workshop_pct),
-            Style::default().fg(Color::LightRed),
-        ),
-        Span::styled(
-            format!("店{:>2}%", info.shop_pct),
-            Style::default().fg(Color::Yellow),
-        ),
-    ]));
-
-    // 行3: 重みを横バーで可視化。色付きの ▰ で 100% を 20 セルに展開。
-    out.push(Line::from(strategy_weight_bar(&info)));
-
-    // 行4: 1 行の意図説明 (タグライン)。
-    out.push(Line::from(vec![Span::styled(
-        format!(" {}", info.tagline),
-        Style::default().fg(Color::DarkGray),
-    )]));
-
-    out
-}
-
-/// 建物別重みをカラフルな 1 行バーに変換。合計 20 セル幅。
-/// 各 Strategy の特性が塊として見えるので、切り替え時に即印象が変わる。
-fn strategy_weight_bar(info: &logic::StrategyInfo) -> Vec<Span<'static>> {
-    const BAR_WIDTH: u32 = 20;
-    let segs: [(u32, Color); 4] = [
-        (info.house_pct, Color::Green),
-        (info.road_pct, Color::Gray),
-        (info.workshop_pct, Color::LightRed),
-        (info.shop_pct, Color::Yellow),
-    ];
-    let mut spans: Vec<Span> = vec![Span::raw(" ")];
-    for (pct, color) in segs {
-        // 整数除算: 0% は 0 セル、99% は 19 セル。表示の都合で 1% 以上なら最低 1 セル
-        // 出したいが、合計が 20 を超えないよう四捨五入は避ける。
-        let cells = pct * BAR_WIDTH / 100;
-        if cells > 0 {
-            spans.push(Span::styled(
-                "▰".repeat(cells as usize),
-                Style::default().fg(color),
-            ));
-        }
-    }
-    spans
-}
-
 fn worker_bar_spans(state: &City) -> Vec<Span<'static>> {
     let busy = state.active_constructions();
     let total = state.workers;
@@ -2801,55 +2676,12 @@ fn worker_bar_spans(state: &City) -> Vec<Span<'static>> {
 
 // ── Manager panel (buttons) ─────────────────────────────────
 
-/// Manager タブを `ClickableList` 1 本に詰め込む。各 Strategy ボタン /
-/// 雇用 / CPU 進化はクリック可能行 (`push_clickable`)、タグラインや自動
-/// 運用ステータスは表示専用の行 (`push`)。共通スクロールレイヤがこの list
-/// を `wrap=false` で描画し、行単位でクリック領域を登録するので
+/// Manager タブを `ClickableList` 1 本に詰め込む。雇用ボタンはクリック可能行
+/// (`push_clickable`)、自動運用ステータスは表示専用の行 (`push`)。共通スクロール
+/// レイヤがこの list を `wrap=false` で描画し、行単位でクリック領域を登録するので
 /// 「下まで見えない & 押せない」問題が一気に解決する。
 fn manager_list(state: &City) -> ClickableList<'static> {
     let mut cl = ClickableList::new();
-
-    cl.push_clickable(
-        strategy_button_line("[G] [GRW] 成長重視", state.strategy == Strategy::Growth, Color::Green),
-        ACT_STRATEGY_GROWTH,
-    );
-    cl.push_clickable(
-        strategy_button_line("[I] [CSH] 収入重視", state.strategy == Strategy::Income, Color::Yellow),
-        ACT_STRATEGY_INCOME,
-    );
-    cl.push_clickable(
-        strategy_button_line("[T] [TEC] 技術投資", state.strategy == Strategy::Tech, Color::Cyan),
-        ACT_STRATEGY_TECH,
-    );
-    cl.push_clickable(
-        strategy_button_line("[E] [ECO] 環境配慮", state.strategy == Strategy::Eco, Color::LightGreen),
-        ACT_STRATEGY_ECO,
-    );
-
-    // 選択中 Strategy のタグライン (1 行)。
-    let info = logic::strategy_info(state.strategy);
-    let mut tag_spans = vec![
-        Span::styled(" → ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            info.tagline.to_string(),
-            Style::default().fg(Color::White),
-        ),
-    ];
-    if info.speed_bonus_pct != 0 || info.income_penalty_pct != 0 {
-        let mut suffix = String::from(" (");
-        if info.speed_bonus_pct != 0 {
-            suffix.push_str(&format!("建設{:+}%", info.speed_bonus_pct));
-        }
-        if info.speed_bonus_pct != 0 && info.income_penalty_pct != 0 {
-            suffix.push('/');
-        }
-        if info.income_penalty_pct != 0 {
-            suffix.push_str(&format!("収入{:+}%", info.income_penalty_pct));
-        }
-        suffix.push(')');
-        tag_spans.push(Span::styled(suffix, Style::default().fg(Color::DarkGray)));
-    }
-    cl.push(Line::from(tag_spans));
 
     // 雇用ボタン。
     let hire_cost = logic::hire_worker_cost(state.workers);
@@ -2867,35 +2699,10 @@ fn manager_list(state: &City) -> ClickableList<'static> {
         cl.push(hire_line);
     }
 
-    // CPU 進化ボタン (or 最大到達表示)。
-    if let Some(next) = state.ai_tier.next() {
-        let color = if state.cash >= next.upgrade_cost() {
-            Color::Magenta
-        } else {
-            Color::DarkGray
-        };
-        let label = format!(
-            "[U] {} CPU進化 → {} (${})",
-            ai_tier_icon(next),
-            next.name(),
-            next.upgrade_cost()
-        );
-        cl.push_clickable(
-            Line::from(Span::styled(label, Style::default().fg(color))),
-            ACT_UPGRADE_AI,
-        );
-    } else {
-        cl.push(Line::from(Span::styled(
-            "[U] [IV] CPU最大Tier到達",
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-
     // 自動運用ステータス — 撤去判断は AI が `evaluate` と
     // `action_value` を比較して即時実行。表示は予備金ガードのみ
     // (= AI が撤去後に手元に残す cash 下限。デフレ螺旋ガード)。
-    let policy = logic::automation_policy(state.strategy);
-    let auto_label = format!(" 🤖 撤去判断: AI / 予備${}", policy.min_cash_reserve);
+    let auto_label = format!(" 🤖 撤去判断: AI / 予備${}", logic::DEMOLISH_CASH_RESERVE);
     cl.push(Line::from(Span::styled(
         auto_label,
         Style::default().fg(Color::DarkGray),
@@ -2904,23 +2711,12 @@ fn manager_list(state: &City) -> ClickableList<'static> {
     cl
 }
 
-fn strategy_button_line(label: &str, selected: bool, accent: Color) -> Line<'static> {
-    let style = if selected {
-        Style::default()
-            .fg(accent)
-            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
-    } else {
-        Style::default().fg(accent)
-    };
-    Line::from(Span::styled(label.to_string(), style))
-}
-
 // ── AI activity log ─────────────────────────────────────────
 
 fn log_list(state: &City) -> ClickableList<'static> {
     let spinner_chars = ['◐', '◓', '◑', '◒'];
     let spinner = spinner_chars[((state.tick / 2) % spinner_chars.len() as u64) as usize];
-    let header = format!("{} AI {} 履歴", spinner, ai_tier_icon(state.ai_tier));
+    let header = format!("{} AI 履歴", spinner);
 
     let mut cl = ClickableList::new();
     cl.push(Line::from(Span::styled(
@@ -2940,15 +2736,6 @@ fn log_list(state: &City) -> ClickableList<'static> {
         cl.push(Line::from(Span::styled(e.clone(), style)));
     }
     cl
-}
-
-fn strategy_label(s: Strategy) -> &'static str {
-    match s {
-        Strategy::Growth => "成長",
-        Strategy::Income => "収入",
-        Strategy::Tech => "技術",
-        Strategy::Eco => "環境",
-    }
 }
 
 // ── Offline welcome overlay ────────────────────────────────
@@ -3092,7 +2879,7 @@ mod tests {
 
     #[test]
     fn manager_buttons_register_click_targets() {
-        // 既定で Manager タブが選ばれているので、戦略ボタンは出るはず。
+        // 既定で Manager タブが選ばれているので、雇用ボタンは出るはず。
         let city = City::new();
         // 32×16 = 2-wide で 66 col 必要。ターミナルもそれに合わせる。
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
@@ -3104,11 +2891,7 @@ mod tests {
             .unwrap();
         let registered: Vec<u16> = cs.borrow().targets.iter().map(|t| t.action_id).collect();
         for id in [
-            ACT_STRATEGY_GROWTH,
-            ACT_STRATEGY_INCOME,
-            ACT_STRATEGY_TECH,
             ACT_HIRE_WORKER,
-            ACT_UPGRADE_AI,
             // タブバーも常に登録される。
             ACT_TAB_STATUS,
             ACT_TAB_MANAGER,
@@ -3122,74 +2905,6 @@ mod tests {
                 registered
             );
         }
-    }
-
-    /// Status タブに切り替えると Strategy のタグラインが画面に出る。
-    /// 「マネージャーが今 CPU に何をやらせているか」が UI で読める保証。
-    #[test]
-    fn status_tab_shows_strategy_tagline() {
-        let mut city = City::new();
-        city.panel_tab = PanelTab::Status;
-        city.strategy = Strategy::Tech;
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        let cs = Rc::new(RefCell::new(ClickState::new()));
-        terminal
-            .draw(|f| {
-                render(&city, f, Rect::new(0, 0, 100, 30), &cs);
-            })
-            .unwrap();
-        // TestBackend は double-width 文字を 2 セルに分割して 2 セル目を
-        // 空白で埋めるため、`concat` 上は "技 術 投 資" のように現れる。
-        // 比較前に空白を全て落として「文字の出現」だけをチェックする。
-        let concat = screen_compact(&terminal);
-        assert!(
-            concat.contains("技術投資"),
-            "Status tab should display the strategy label; compacted screen:\n{}",
-            concat
-        );
-    }
-
-    /// Manager タブには現在選択中 Strategy のタグラインが矢印付きで出る。
-    #[test]
-    fn manager_tab_shows_selected_strategy_tagline() {
-        let mut city = City::new();
-        city.panel_tab = PanelTab::Manager;
-        city.strategy = Strategy::Income;
-        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-        let cs = Rc::new(RefCell::new(ClickState::new()));
-        terminal
-            .draw(|f| {
-                render(&city, f, Rect::new(0, 0, 100, 30), &cs);
-            })
-            .unwrap();
-        // タグラインの先頭 (「工房と店舗」) が出ていれば OK。
-        // 末尾は wide layout の右パネル (~32 cells) で折れるため。
-        let concat = screen_compact(&terminal);
-        assert!(
-            concat.contains("工房と店舗"),
-            "Manager tab should display the Income tagline beginning; compacted screen:\n{}",
-            concat
-        );
-    }
-
-    /// テスト用: TestBackend のバッファを「空白を抜いた」文字列にして返す。
-    /// ratzilla の TestBackend は double-width 文字を 2 セルに分割し、
-    /// 2 セル目を空白で埋めるため、そのまま concat すると "技 術" になる。
-    /// 検索系 assert では空白を抜いてから比較する。
-    fn screen_compact(
-        terminal: &Terminal<TestBackend>,
-    ) -> String {
-        let buffer = terminal.backend().buffer().clone();
-        let mut s = String::new();
-        for y in 0..buffer.area.height {
-            for x in 0..buffer.area.width {
-                let sym = buffer.cell((x, y)).unwrap().symbol();
-                if sym != " " {
-                    s.push_str(sym);
-                }
-            }
-        }
-        s
     }
 
     /// 80 col ターミナル (典型的な PC) では narrow layout が選ばれる。
@@ -3286,15 +3001,15 @@ mod tests {
             .unwrap();
     }
 
-    /// スマホ想定の浅い縦幅 (Manager の content area が 3 行しか取れない)
+    /// スマホ想定の浅い縦幅 (Status の content area が 3 行しか取れない)
     /// で、最初は ▼ ボタンだけが表示される (= 続きがあることを伝える)。
     /// content が見切れてもパニックしない。
     #[test]
     fn narrow_panel_shows_down_arrow_when_overflow() {
         let mut city = City::new();
-        city.panel_tab = PanelTab::Manager;
+        city.panel_tab = PanelTab::Status;
         // 28 col × 28 row の極狭ターミナル。banner 4 + grid 18 = 22 を引くと
-        // パネルは最大 6 行 (枠 2 + tab 1 + content 3)。Manager は 8 行あるので
+        // パネルは最大 6 行 (枠 2 + tab 1 + content 3)。Status は 8 行あるので
         // content overflow が起きる。
         let mut terminal = Terminal::new(TestBackend::new(28, 28)).unwrap();
         let cs = Rc::new(RefCell::new(ClickState::new()));
@@ -3323,7 +3038,7 @@ mod tests {
     #[test]
     fn scroll_clamp_and_arrow_visibility() {
         let mut city = City::new();
-        city.panel_tab = PanelTab::Manager;
+        city.panel_tab = PanelTab::Status;
         // 大きめにスクロールを入れて clamp を強制。
         city.panel_scroll.set(99);
 

@@ -1,14 +1,14 @@
 //! Idle Metropolis — AI-driven city builder.
 //!
-//! The player buys upgrades and sets strategy; an automated CPU does the
-//! actual placement.  Because the lowest AI tier is intentionally dumb,
-//! `simulator.rs` is provided up-front to verify that even a bad CPU keeps
-//! the game progressing (cash & population trending up over time).
+//! The player hires workers to speed up parallel construction; an automated
+//! CPU does the actual placement.  `simulator.rs` verifies that the CPU
+//! always keeps the game progressing (cash & population trending up over
+//! time).
 //!
 //! Architecture follows the project's "pure logic" pattern:
 //!   • `state.rs`  — all data, no behavior.
 //!   • `logic.rs`  — pure functions (tick, income, construction).
-//!   • `ai.rs`     — strategy brains, one function per tier.
+//!   • `ai.rs`     — the build/demolish decision brain.
 //!   • `simulator.rs` — balance tests (cargo test, no rendering).
 
 pub mod ai;
@@ -34,28 +34,19 @@ use crate::sound;
 
 use crate::widgets::ClickableGrid;
 
-use state::{City, PanelTab, Strategy};
+use state::{City, PanelTab};
 
 // ── Action IDs scoped to MetropolisGame ─────────────────────────
 //
 // These are click/key actions on the manager panel.  Keep them stable —
 // they're persisted through Click events keyed by `ClickScope::Game(...)`.
 //
-// 7-9 と 1000 番台 (旧 DEMOLISH_CELL_BASE) は再利用可能な ID 範囲。
-// プレイヤー操作は戦略 / 雇用 / CPU 進化 / タブだけで、撤去・開拓判断は
-// すべて AI (`ai::decide`) が `evaluate` / `action_value` 経由で行う。
-pub const ACT_STRATEGY_GROWTH: u16 = 1;
-pub const ACT_STRATEGY_INCOME: u16 = 2;
-/// Tech 戦略 (建設速度 +20% / 収入 -20%)。
-/// 数値 ID は永続クリックスコープのため変更しない。
-pub const ACT_STRATEGY_TECH: u16 = 3;
+// 1-3, 5-6 と 1000 番台 (旧 DEMOLISH_CELL_BASE) は再利用可能な ID 範囲。
+// プレイヤー操作は雇用 / タブだけで、撤去・開拓判断はすべて AI
+// (`ai::decide`) が `evaluate` / `action_value` 経由で行う。
 pub const ACT_HIRE_WORKER: u16 = 4;
-pub const ACT_UPGRADE_AI: u16 = 5;
-/// Eco 戦略 (建設 -10% / 収入 +5% / Forest を切らない)。
-/// 既存 ID 1-5 と重複しないよう新しい番号を取得。
-pub const ACT_STRATEGY_ECO: u16 = 6;
 
-// タブ切替アクション (10-14 を予約; 戦略の隣だが衝突しない)。
+// タブ切替アクション (10-14 を予約)。
 pub const ACT_TAB_STATUS: u16 = 10;
 pub const ACT_TAB_MANAGER: u16 = 11;
 pub const ACT_TAB_EVENTS: u16 = 12;
@@ -310,12 +301,7 @@ impl Game for MetropolisGame {
         let action_id = match event {
             InputEvent::Click(_, id) => *id,
             InputEvent::Key(c) => match c {
-                'g' | 'G' => ACT_STRATEGY_GROWTH,
-                'i' | 'I' => ACT_STRATEGY_INCOME,
-                't' | 'T' => ACT_STRATEGY_TECH,
-                'e' | 'E' => ACT_STRATEGY_ECO,
                 'w' | 'W' => ACT_HIRE_WORKER,
-                'u' | 'U' => ACT_UPGRADE_AI,
                 '1' => ACT_TAB_STATUS,
                 '2' => ACT_TAB_MANAGER,
                 '3' => ACT_TAB_EVENTS,
@@ -334,34 +320,9 @@ impl Game for MetropolisGame {
         };
 
         match action_id {
-            ACT_STRATEGY_GROWTH => {
-                set_strategy(&mut self.state, Strategy::Growth, "📈");
-                sound::play(sound::CLICK);
-                true
-            }
-            ACT_STRATEGY_INCOME => {
-                set_strategy(&mut self.state, Strategy::Income, "💰");
-                sound::play(sound::CLICK);
-                true
-            }
-            ACT_STRATEGY_TECH => {
-                set_strategy(&mut self.state, Strategy::Tech, "⚙");
-                sound::play(sound::CLICK);
-                true
-            }
-            ACT_STRATEGY_ECO => {
-                set_strategy(&mut self.state, Strategy::Eco, "🌳");
-                sound::play(sound::CLICK);
-                true
-            }
             ACT_HIRE_WORKER => {
                 let ok = logic::hire_worker(&mut self.state);
                 sound::play(if ok { sound::PURCHASE } else { sound::ERROR });
-                ok
-            }
-            ACT_UPGRADE_AI => {
-                let ok = logic::upgrade_ai(&mut self.state);
-                sound::play(if ok { sound::LEVEL_UP } else { sound::ERROR });
                 ok
             }
             ACT_TAB_STATUS => {
@@ -531,25 +492,6 @@ fn switch_tab(city: &mut City, tab: PanelTab) {
     city.panel_tab = tab;
 }
 
-/// Strategy 切替時の共通処理。`logic::strategy_info` を引いて
-/// 「ラベル + 副作用 (建設速度・収入修正)」を 1 行のイベントログにまとめる。
-/// 切替時に「何が変わったか」が即座にログに見えるようにするのが目的。
-fn set_strategy(city: &mut City, s: Strategy, icon: &str) {
-    city.strategy = s;
-    let info = logic::strategy_info(s);
-    let mut suffix = String::new();
-    if info.speed_bonus_pct != 0 {
-        suffix.push_str(&format!(" / 建設{:+}%", info.speed_bonus_pct));
-    }
-    if info.income_penalty_pct != 0 {
-        suffix.push_str(&format!(" / 収入{:+}%", info.income_penalty_pct));
-    }
-    city.push_event(format!(
-        "{} 戦略: {} — {}{}",
-        icon, info.label, info.tagline, suffix
-    ));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,17 +499,6 @@ mod tests {
 
     fn click(id: u16) -> InputEvent {
         InputEvent::Click(ClickScope::Game(GameChoice::Metropolis), id)
-    }
-
-    #[test]
-    fn strategy_keys_change_state() {
-        let mut g = MetropolisGame::new();
-        g.handle_input(&InputEvent::Key('g'));
-        assert_eq!(g.state.strategy, Strategy::Growth);
-        g.handle_input(&InputEvent::Key('i'));
-        assert_eq!(g.state.strategy, Strategy::Income);
-        g.handle_input(&click(ACT_STRATEGY_TECH));
-        assert_eq!(g.state.strategy, Strategy::Tech);
     }
 
     #[test]
@@ -644,20 +575,18 @@ mod tests {
     }
 
     /// AI が中央の inactive Shop を **退かして他の建物に置き換える** ことを確認。
-    /// Tier 4 (`Planner`) は `evaluate` + `action_value` で機能不全 Shop を改修対象に
-    /// 選び、Demolish 単独 or Replace×他 kind のいずれかで処理する。
+    /// AI は `evaluate` + `action_value` で機能不全 Shop を改修対象に選び、
+    /// Demolish 単独 or Replace×他 kind のいずれかで処理する。
     ///
     /// **テスト前提**: 街全体に edge-connected Road が存在しない (= seed road を消去)
     /// 状態 + 中央の Shop の 4-近傍を Water 地形で囲んで Road/House の隣接配置を
     /// 不可能にする。
     #[test]
     fn drive_ai_demolishes_inactive_shop() {
-        use state::{AiTier, Building, Tile, GRID_H, GRID_W};
+        use state::{Building, Tile, GRID_H, GRID_W};
         let mut g = MetropolisGame::new();
         g.state.cash = 50_000;
         g.state.workers = 4;
-        g.state.strategy = Strategy::Income;
-        g.state.ai_tier = AiTier::Planner;
         for y in 0..GRID_H {
             for x in 0..GRID_W {
                 g.state.terrain[y][x] = crate::games::metropolis::terrain::Terrain::Plain;
@@ -682,7 +611,7 @@ mod tests {
         // 証跡として OK。
         assert!(
             !matches!(g.state.tile(sx, sy), Tile::Built(Building::Shop)),
-            "AI (Tier 4) should not leave the inactive Shop in place"
+            "AI should not leave the inactive Shop in place"
         );
     }
 }

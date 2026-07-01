@@ -21,9 +21,7 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
-use super::state::{
-    AiTier, Building, City, CityTier, GRID_H, GRID_W, MAX_EVENTS, PanelTab, Strategy, Tile,
-};
+use super::state::{Building, City, CityTier, GRID_H, GRID_W, MAX_EVENTS, PanelTab, Tile};
 
 #[cfg(any(target_arch = "wasm32", test))]
 use super::terrain::Terrain;
@@ -47,8 +45,11 @@ use super::terrain::Terrain;
 ///       旧データは default 0 → 「初回計測」扱いでボーナス未発動になる。
 ///   v7: `Building::Factory` / `Building::Mall` / `Building::Office` 追加。
 ///       新数値 (6/7/8) を割り当て。旧データには出現しないので互換性維持。
+///   v8: `ai_tier` / `strategy` フィールドを削除 (CPU 進化 / 投資戦略切替の
+///       廃止)。旧データにこれらのキーが残っていても `deny_unknown_fields`
+///       は付けていないため無視され、ロードは失敗しない。
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 7;
+const SAVE_VERSION: u32 = 8;
 
 /// 互換性を維持できる最小バージョン。破壊的変更で +1。
 /// v1-v3 はフィールド追加だけだったが、v4 でマップ寸法が変わったので
@@ -262,17 +263,6 @@ mod codes {
     pub const TERRAIN_WASTELAND: u8 = 3;
     pub const TERRAIN_ROCK: u8 = 4;
 
-    pub const STRATEGY_GROWTH: u8 = 0;
-    pub const STRATEGY_INCOME: u8 = 1;
-    pub const STRATEGY_TECH: u8 = 2;
-    pub const STRATEGY_ECO: u8 = 3;
-
-    pub const AI_TIER_RANDOM: u8 = 1;
-    pub const AI_TIER_GREEDY: u8 = 2;
-    pub const AI_TIER_ROAD_PLANNER: u8 = 3;
-    pub const AI_TIER_DEMAND_AWARE: u8 = 4;
-    pub const AI_TIER_DEEP_PLANNER: u8 = 5;
-
     pub const PANEL_STATUS: u8 = 0;
     pub const PANEL_MANAGER: u8 = 1;
     pub const PANEL_EVENTS: u8 = 2;
@@ -417,48 +407,6 @@ fn tile_from_save(s: TileSave) -> Tile {
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
-fn strategy_to_u8(s: Strategy) -> u8 {
-    match s {
-        Strategy::Growth => STRATEGY_GROWTH,
-        Strategy::Income => STRATEGY_INCOME,
-        Strategy::Tech => STRATEGY_TECH,
-        Strategy::Eco => STRATEGY_ECO,
-    }
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn strategy_from_u8(v: u8) -> Strategy {
-    match v {
-        STRATEGY_INCOME => Strategy::Income,
-        STRATEGY_TECH => Strategy::Tech,
-        STRATEGY_ECO => Strategy::Eco,
-        _ => Strategy::Growth,
-    }
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn ai_tier_to_u8(t: AiTier) -> u8 {
-    match t {
-        AiTier::Random => AI_TIER_RANDOM,
-        AiTier::Greedy => AI_TIER_GREEDY,
-        AiTier::Aware => AI_TIER_ROAD_PLANNER,
-        AiTier::Planner => AI_TIER_DEMAND_AWARE,
-        AiTier::Master => AI_TIER_DEEP_PLANNER,
-    }
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn ai_tier_from_u8(v: u8) -> AiTier {
-    match v {
-        AI_TIER_GREEDY => AiTier::Greedy,
-        AI_TIER_ROAD_PLANNER => AiTier::Aware,
-        AI_TIER_DEMAND_AWARE => AiTier::Planner,
-        AI_TIER_DEEP_PLANNER => AiTier::Master,
-        _ => AiTier::Random,
-    }
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
 fn panel_to_u8(p: PanelTab) -> u8 {
     match p {
         PanelTab::Status => PANEL_STATUS,
@@ -524,8 +472,6 @@ pub(super) struct GameSave {
     /// 地形レイヤ。長さ = GRID_W * GRID_H。整地で書き換わるためフル保存。
     terrain: Vec<u8>,
 
-    ai_tier: u8,
-    strategy: u8,
     panel_tab: u8,
     last_observed_tier: u8,
     workers: u32,
@@ -584,8 +530,6 @@ pub(super) fn extract_save(state: &City) -> SaveData {
         world_seed,
         cash,
         tick,
-        ai_tier,
-        strategy,
         panel_tab,
         last_observed_tier,
         workers,
@@ -647,8 +591,6 @@ pub(super) fn extract_save(state: &City) -> SaveData {
             tick: *tick,
             tiles,
             terrain: terrain_buf,
-            ai_tier: ai_tier_to_u8(*ai_tier),
-            strategy: strategy_to_u8(*strategy),
             panel_tab: panel_to_u8(*panel_tab),
             last_observed_tier: city_tier_to_u8(*last_observed_tier),
             workers: *workers,
@@ -686,8 +628,6 @@ pub(super) fn apply_save(state: &mut City, save: &GameSave) {
         tick,
         tiles,
         terrain,
-        ai_tier,
-        strategy,
         panel_tab,
         last_observed_tier,
         workers,
@@ -727,8 +667,6 @@ pub(super) fn apply_save(state: &mut City, save: &GameSave) {
         }
     }
 
-    state.ai_tier = ai_tier_from_u8(*ai_tier);
-    state.strategy = strategy_from_u8(*strategy);
     state.panel_tab = panel_from_u8(*panel_tab);
     state.last_observed_tier = city_tier_from_u8(*last_observed_tier);
     // workers は 1..=MAX_WORKERS にクランプ (0 や巨大値はゲームを壊す)。
@@ -975,8 +913,6 @@ mod tests {
         let mut original = City::with_seed(0xDEADBEEF);
         original.cash = 12345;
         original.tick = 1000;
-        original.ai_tier = AiTier::Planner;
-        original.strategy = Strategy::Eco;
         original.panel_tab = PanelTab::Events;
         original.last_observed_tier = CityTier::City;
         original.workers = 4;
@@ -1019,8 +955,6 @@ mod tests {
 
         assert_eq!(restored.cash, 12345);
         assert_eq!(restored.tick, 1000);
-        assert_eq!(restored.ai_tier, AiTier::Planner);
-        assert_eq!(restored.strategy, Strategy::Eco);
         assert_eq!(restored.panel_tab, PanelTab::Events);
         assert_eq!(restored.last_observed_tier, CityTier::City);
         assert_eq!(restored.workers, 4);
@@ -1114,8 +1048,6 @@ mod tests {
     fn unknown_enum_values_fallback_safely() {
         let mut city = City::new();
         let mut save = extract_save(&city);
-        save.game.strategy = 99;
-        save.game.ai_tier = 99;
         save.game.panel_tab = 99;
         save.game.last_observed_tier = 99;
         // タイル内の building 数値も汚染。
@@ -1127,9 +1059,7 @@ mod tests {
             *tr = 99;
         }
         apply_save(&mut city, &save.game);
-        // フォールバックは Growth / Random / Manager / Village / Empty / Plain。
-        assert_eq!(city.strategy, Strategy::Growth);
-        assert_eq!(city.ai_tier, AiTier::Random);
+        // フォールバックは Manager / Village / Empty / Plain。
         assert_eq!(city.panel_tab, PanelTab::Manager);
         assert_eq!(city.last_observed_tier, CityTier::Village);
         assert!(matches!(city.tile(0, 0), Tile::Empty));
@@ -1149,6 +1079,18 @@ mod tests {
         assert_eq!(city.cash, 0); // GameSave::default
         assert_eq!(city.tick, 0);
         assert_eq!(city.workers, 1); // クランプ後
+    }
+
+    /// v7 以前のセーブに残る `ai_tier` / `strategy` キーは `deny_unknown_fields`
+    /// を付けていないため無視され、ロードは失敗しない (CPU 進化 / 投資戦略切替の
+    /// 廃止に伴う後方互換性の回帰テスト)。
+    #[test]
+    fn old_save_with_removed_fields_still_loads() {
+        let json = r#"{"version":7,"game":{"ai_tier":4,"strategy":2,"cash":500}}"#;
+        let save: SaveData = serde_json::from_str(json).unwrap();
+        let mut city = City::new();
+        apply_save(&mut city, &save.game);
+        assert_eq!(city.cash, 500);
     }
 
     // ── オフライン進行ボーナス ───────────────────────────────

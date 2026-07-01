@@ -237,9 +237,7 @@ pub fn tick_without_ai(city: &mut City, delta_ticks: u32) {
 
 fn step_one_tick(city: &mut City) {
     advance_construction(city);
-    // `auto_strategy_actions` は no-op (互換 stub)。撤去判断は AI が
-    // `decide()` 経由で `evaluate` と `action_value` を比較して行う。
-    auto_strategy_actions(city);
+    // 撤去判断は AI が `decide()` 経由で `evaluate` と `action_value` を比較して行う。
     drive_ai(city);
     accrue_income(city);
     detect_tier_advance(city);
@@ -252,7 +250,6 @@ fn step_one_tick(city: &mut City) {
 
 fn step_one_physics_tick(city: &mut City) {
     advance_construction(city);
-    auto_strategy_actions(city);
     accrue_income(city);
     detect_tier_advance(city);
     city.invalidate_population_cache();
@@ -480,7 +477,6 @@ where
 {
     for _ in 0..delta_ticks {
         advance_construction(city);
-        auto_strategy_actions(city);
         drive_ai_with_observer(city, &mut observer);
         accrue_income(city);
         detect_tier_advance(city);
@@ -561,202 +557,38 @@ where
     }
 }
 
-/// Tech 戦略時の建設速度ブースト。`strategy_info` 経由で取得することで
-/// 「Strategy 副作用の唯一の集約点」を maintain。state/render は読取専用。
-fn build_ticks_for(city: &City, kind: Building) -> u32 {
-    let base = kind.build_ticks();
-    let bonus = strategy_info(city.strategy).speed_bonus_pct;
-    if bonus == 0 {
-        return base;
-    }
-    // bonus = +20 (建設時間 -20%) → factor 80/100。
-    // bonus = -10 (建設時間 +10%) → factor 110/100。
-    let factor_num = (100 - bonus).max(10) as u64; // 下限 10 で安全側
-    (base as u64 * factor_num).div_ceil(100) as u32
-}
-
-// ── Strategy metadata (Single Source of Truth) ─────────────
-//
-// Strategy の意味 (重み・速度ボーナス・収入ペナルティ・説明文・思考動詞) を
-// 1 か所に集約。AI (ai.rs)・状態タブ・マネージャータブ・イベントログ・
-// 建設速度補正 (build_ticks_for) はすべてここを参照する。
-
-/// Strategy の全方位プロファイル。AI の重みも player への説明文も同居。
-#[derive(Clone, Copy, Debug)]
-pub struct StrategyInfo {
-    /// 短いラベル ("成長重視" など)。
-    pub label: &'static str,
-    /// 1 行の意図説明。Manager タブのボタン下にこのまま出す。
-    pub tagline: &'static str,
-    /// AI が建物種別を引く時の重み (合計 100 を厳守)。
-    /// AI が建物種別を引く時の重み (合計 100 を厳守)。
-    ///
-    /// **注意**: Tier 4 以上は `evaluate` 評価ベースなのでこの重みは
-    /// 直接参照しない。Tier 3 (Aware) と Status パネルの「戦略内訳」
-    /// 表示でのみ使われる。Park の重みは「strategy_bias」側に統合済み
-    /// (= 評価ベース AI が Eco の時に Park を選びやすくなる)。
-    pub house_pct: u32,
-    pub road_pct: u32,
-    pub workshop_pct: u32,
-    pub shop_pct: u32,
-    /// 建設速度ボーナス (%)。+20 = 建設 20% 短縮、-10 = 10% 延長。
-    pub speed_bonus_pct: i32,
-    /// 収入ペナルティ (%)。-20 = 収入 20% 減、0 = 通常。
-    pub income_penalty_pct: i32,
-}
-
-/// 各戦略のプロファイル。重みは tier4_demand_aware と一致させる
-/// (ai.rs はこの構造体を直接読む)。
-pub fn strategy_info(s: Strategy) -> StrategyInfo {
-    match s {
-        Strategy::Growth => StrategyInfo {
-            label: "成長重視",
-            tagline: "人口を伸ばし街のティア進化を急ぐ",
-            house_pct: 70,
-            road_pct: 20,
-            workshop_pct: 0,
-            shop_pct: 10,
-            speed_bonus_pct: 0,
-            income_penalty_pct: 0,
-        },
-        Strategy::Income => StrategyInfo {
-            label: "収入重視",
-            tagline: "工房と店舗で経済を回し現金を稼ぐ",
-            house_pct: 30,
-            road_pct: 22,
-            workshop_pct: 13,
-            shop_pct: 35,
-            speed_bonus_pct: 0,
-            income_penalty_pct: 0,
-        },
-        Strategy::Tech => StrategyInfo {
-            label: "技術投資",
-            tagline: "道路網を急拡大 (建設+20% / 収入-20%)",
-            house_pct: 35,
-            road_pct: 50,
-            workshop_pct: 0,
-            shop_pct: 15,
-            speed_bonus_pct: 20,
-            income_penalty_pct: -20,
-        },
-        Strategy::Eco => StrategyInfo {
-            label: "環境配慮",
-            tagline: "森を残し公園で街を彩る (建設-10% / 収入+5%)",
-            house_pct: 40,
-            road_pct: 25,
-            workshop_pct: 0,
-            shop_pct: 25,
-            // 副作用は「ゆっくり育てる」を表現する負の建設速度と僅かな収入ボーナス。
-            // ボーナスは正の `income_penalty_pct = +5` として扱う (関数側で 100+5)。
-            // Park を建てる傾向は `strategy_bias(Eco, Park) = +60` で
-            // 評価ベース AI に統合済み。
-            speed_bonus_pct: -10,
-            income_penalty_pct: 5,
-        },
+/// AI のイベントログに出す「思考動詞」。マネージャー視点で「CPU が今この
+/// 建物を建てた → だからこういう意図」を体感できるようにする。
+pub fn build_thought_verb(kind: Building) -> &'static str {
+    match kind {
+        Building::Road => "生活道路を整備",
+        Building::House => "住宅地を拡張",
+        Building::Workshop => "近隣の工房を整備",
+        Building::Factory => "工業団地を整備",
+        Building::Shop => "商業地を育てる",
+        Building::Mall => "大型商業施設を開業",
+        Building::Office => "オフィスを整備",
+        Building::Park => "公園を整備",
+        Building::Plaza => "中央広場を整備",
+        Building::Stadium => "競技場を建設",
+        Building::MegaMall => "メガモールを開業",
+        Building::Headquarters => "本社ビルを誘致",
+        Building::Refinery => "製油所を稼働",
+        Building::Outpost => "開拓機材を設置",
     }
 }
 
-/// AI のイベントログに出す「思考動詞」を Strategy × Building で返す。
-/// マネージャー視点で「CPU が今この戦略でこの建物を建てた → だからこういう
-/// 意図」を体感できるようにする。
-pub fn strategy_thought_verb(s: Strategy, kind: Building) -> &'static str {
-    match (s, kind) {
-        (Strategy::Growth, Building::House) => "住宅地を拡張",
-        (Strategy::Growth, Building::Road) => "生活道路を整備",
-        (Strategy::Growth, Building::Shop) => "近所の店舗を出店",
-        (Strategy::Growth, Building::Workshop) => "近隣の工房を整備",
-
-        (Strategy::Income, Building::House) => "労働者用住宅を建設",
-        (Strategy::Income, Building::Road) => "商業道路を整備",
-        (Strategy::Income, Building::Shop) => "商業地を育てる",
-        (Strategy::Income, Building::Workshop) => "工房で雇用を創出",
-
-        (Strategy::Tech, Building::House) => "ベッドタウンを増設",
-        (Strategy::Tech, Building::Road) => "道路網を伸ばす",
-        (Strategy::Tech, Building::Shop) => "幹線沿いに出店",
-        (Strategy::Tech, Building::Workshop) => "工業地区を試験設置",
-
-        (Strategy::Eco, Building::House) => "緑に囲まれた住宅を整備",
-        (Strategy::Eco, Building::Road) => "並木道を敷設",
-        (Strategy::Eco, Building::Shop) => "地域密着の店舗を出店",
-        (Strategy::Eco, Building::Workshop) => "森に配慮した工房を整備",
-
-        // Park: 戦略によって公園の意味付けが変わる。
-        (Strategy::Growth, Building::Park) => "中央公園を整備",
-        (Strategy::Income, Building::Park) => "高級住宅街向け緑地を確保",
-        (Strategy::Tech, Building::Park) => "幹線沿いに緑地帯を配置",
-        (Strategy::Eco, Building::Park) => "森を残し公園として開放",
-
-        // 上位建物 (Factory / Mall / Office) は中後盤の主役。戦略ごとの意図を
-        // 明示する文言を入れる。
-        (Strategy::Growth, Building::Factory) => "工業団地を整備",
-        (Strategy::Income, Building::Factory) => "重工業区を稼働",
-        (Strategy::Tech, Building::Factory) => "先端工場を立ち上げ",
-        (Strategy::Eco, Building::Factory) => "環境配慮型の工場を試験設置",
-
-        (Strategy::Growth, Building::Mall) => "近隣商業施設を建設",
-        (Strategy::Income, Building::Mall) => "大型商業ビルを開業",
-        (Strategy::Tech, Building::Mall) => "幹線沿いに商業ビルを開業",
-        (Strategy::Eco, Building::Mall) => "地域密着型商業ビルを建設",
-
-        (Strategy::Growth, Building::Office) => "高層オフィスを整備",
-        (Strategy::Income, Building::Office) => "オフィス区を稼働",
-        (Strategy::Tech, Building::Office) => "テック企業の拠点を設置",
-        (Strategy::Eco, Building::Office) => "緑化オフィスを建設",
-
-        // 超上位 (Plaza / Stadium / MegaMall / Headquarters / Refinery) は
-        // 街が成熟した終盤の象徴施設。戦略の差より「都市の象徴」感を優先する。
-        (_, Building::Plaza) => "中央広場を整備",
-        (_, Building::Stadium) => "競技場を建設",
-        (_, Building::MegaMall) => "メガモールを開業",
-        (_, Building::Headquarters) => "本社ビルを誘致",
-        (_, Building::Refinery) => "製油所を稼働",
-
-        (_, Building::Outpost) => "開拓機材を設置",
-    }
-}
-
-// ── 自動運用ポリシー (Strategy ごとの撤去 cash 余力) ───────────────
+// ── 自動運用ポリシー (撤去 cash 余力) ───────────────
 //
 // 撤去判断は AI (`ai::decide`) が `evaluate` と `action_value` を
 // 同じ天秤で行う。本セクションが提供するのは「撤去後 cash がこの予備金を
 // 下回るなら撤去を見送る」というガードのみ。これがないと cash $50 →
 // 中央のミス建物を撤去 → cash $0 → 次 tick の build を全て idle、の
 // デフレ螺旋に陥り得る。
-//
-// Strategy ごとの reserve は「キャラ付け」を数字で表現する:
-//   - 守備的な戦略 (Growth/Eco) は予備金を厚めに → cash 枯渇しにくい
-//   - 攻撃的な戦略 (Income) はやや薄めに → 撤去再建をテンポ良く回す
 
 /// 撤去判断時の cash 予備金ガード。AI が demolish action を出す前に
-/// `cash >= demolish_cost(x, y) + min_cash_reserve` を満たすか確認する。
-#[derive(Clone, Copy, Debug)]
-pub struct AutomationPolicy {
-    /// 撤去後に手元に残しておく cash 下限。これを割る撤去は見送られる。
-    pub min_cash_reserve: i64,
-}
-
-/// 戦略ごとの撤去予備金ガード。AI と Manager タブの両方が参照する。
-pub fn automation_policy(s: Strategy) -> AutomationPolicy {
-    match s {
-        // Growth: 人口拡張に資金を残したいので予備金厚め。
-        Strategy::Growth => AutomationPolicy { min_cash_reserve: 250 },
-        // Income: 撤去再建を積極的に回す = 予備金は薄め。
-        Strategy::Income => AutomationPolicy { min_cash_reserve: 400 },
-        // Tech: 建設+20% を活かしたいので House cost 程度を残す。
-        Strategy::Tech => AutomationPolicy { min_cash_reserve: 350 },
-        // Eco: 既存街区の更新がメインなので慎重に。
-        Strategy::Eco => AutomationPolicy { min_cash_reserve: 200 },
-    }
-}
-
-/// `step_one_tick` から毎 tick 呼ばれる no-op (互換性のため残置)。
-///
-/// 旧仕様では戦略ごとの周期で撤去を発火していたが、AI 自身が
-/// `evaluate` と `action_value` を同じ天秤で比較するように
-/// なったため不要。`step_one_tick` の呼び出し点を変えずに済むよう
-/// 関数だけ残してある。次回大幅リファクタ時に呼び出し側ごと削除可。
-pub fn auto_strategy_actions(_city: &mut City) {}
+/// `cash >= demolish_cost(x, y) + DEMOLISH_CASH_RESERVE` を満たすか確認する。
+pub const DEMOLISH_CASH_RESERVE: i64 = 300;
 
 /// 4-近傍 (上下左右) に Outpost が建っているか。Rock 整地のゲート判定。
 /// 建設中 Outpost は対象外 (まだ機材として稼働していない)。
@@ -827,7 +659,7 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
     }
     city.cash -= cost;
     city.cash_spent_total += cost;
-    let ticks = build_ticks_for(city, kind);
+    let ticks = kind.build_ticks();
     city.grid[y][x] = Tile::Construction {
         target: kind,
         ticks_remaining: ticks,
@@ -840,27 +672,14 @@ pub fn start_construction(city: &mut City, x: usize, y: usize, kind: Building) -
     if matches!(kind, Building::Outpost) {
         city.outposts_dispatched_total = city.outposts_dispatched_total.saturating_add(1);
     }
-    // Tier 4 (Planner) のみ Strategy に基づく動詞を表示。
-    // 低 Tier は戦略を読まない設計なので、汎用の「着工」を出す方が誠実。
-    // この差自体が「上位 AI ほど目的を持って動いている」演出にもなる。
-    if matches!(city.ai_tier, AiTier::Planner) {
-        city.push_event(format!(
-            "▷ {} ({},{}) — {} -${}",
-            building_name(kind),
-            x,
-            y,
-            strategy_thought_verb(city.strategy, kind),
-            cost
-        ));
-    } else {
-        city.push_event(format!(
-            "▷ {} ({},{}) 着工 -${}",
-            building_name(kind),
-            x,
-            y,
-            cost
-        ));
-    }
+    city.push_event(format!(
+        "▷ {} ({},{}) — {} -${}",
+        building_name(kind),
+        x,
+        y,
+        build_thought_verb(kind),
+        cost
+    ));
     true
 }
 
@@ -1382,8 +1201,8 @@ fn employment_income_cents(
 /// 「Highrise は 6 倍」が本機能の主役。dwell time (5 min) と寿命 (4×) を考えると
 /// 「育てた街区は長く高収入を出す」が成り立つ。
 pub fn compute_income_per_sec(city: &City) -> i64 {
-    if let Some((cached_tick, cached_strategy, cached)) = city.income_dollars_cache.get() {
-        if cached_tick == city.tick && cached_strategy == city.strategy {
+    if let Some((cached_tick, cached)) = city.income_dollars_cache.get() {
+        if cached_tick == city.tick {
             return cached;
         }
     }
@@ -1394,8 +1213,7 @@ pub fn compute_income_per_sec(city: &City) -> i64 {
     if any_house && income == 0 {
         income = 1;
     }
-    city.income_dollars_cache
-        .set(Some((city.tick, city.strategy, income)));
+    city.income_dollars_cache.set(Some((city.tick, income)));
     income
 }
 
@@ -1446,11 +1264,6 @@ pub fn compute_income_per_sec_cents_with(city: &City, connected: &[Vec<bool>]) -
                 scratch.tier_map[y][x],
             );
         }
-    }
-    let modifier = strategy_info(city.strategy).income_penalty_pct;
-    if modifier != 0 && income_cents > 0 {
-        let factor = (100 + modifier).max(10) as i64;
-        income_cents = (income_cents * factor) / 100;
     }
     income_cents
 }
@@ -1733,8 +1546,6 @@ pub fn gather_house_neighborhood_with(
 ///
 /// **シムシティ的な性質**: 「家を固めて道路を引いただけ」では Apartment にならず、
 /// **商業 (Shop / Workshop) が近くで動いて初めて街区がリッチ化する**。
-/// この条件があるため、Tech 戦略 (道路重視) が単独で住宅を高層化することはなく、
-/// 戦略の特化が崩れない (simulator::tier4_strategies_specialize の不変条件)。
 pub fn house_tier_for(stats: HouseNeighborhood) -> HouseTier {
     // Park は商業ほど刺激は強くない (1 Park = 0.5 経済密度)。
     // Office は Highrise 化を促進する触媒として 1.5x 重み (整数演算で 3/2 計算)。
@@ -2000,11 +1811,10 @@ pub fn aging_factor_per_mille(age_ticks: u64, lifespan_x100: u32) -> u32 {
     (1000 - (t * 500) / span) as u32
 }
 
-
 /// 航空標識: 高層ビル屋上の赤い点滅灯を出すか。純関数。
 ///
 /// **意図**: rebels-in-the-sky 風の「都市感」最終スパイス。摩天楼が密集
-/// した時だけ航空法上の障害灯を点滅させる演出で、Tier 4 まで育てきった
+/// した時だけ航空法上の障害灯を点滅させる演出で、街を育てきった
 /// プレイヤーへの視覚報酬。
 ///
 /// **条件**:
@@ -2307,22 +2117,6 @@ pub(super) fn has_built_within_distance(city: &City, x: usize, y: usize, dist: i
     false
 }
 
-/// Try to upgrade the AI brain.  Returns true on success.
-pub fn upgrade_ai(city: &mut City) -> bool {
-    let Some(next) = city.ai_tier.next() else {
-        return false;
-    };
-    let cost = next.upgrade_cost();
-    if city.cash < cost {
-        return false;
-    }
-    city.cash -= cost;
-    city.cash_spent_total += cost;
-    city.ai_tier = next;
-    city.push_event(format!("⚡ CPU進化 → {}", next.name()));
-    true
-}
-
 /// Cost of hiring the next worker (i.e. promoting `workers` from N to N+1).
 ///
 /// Returns `None` when the worker cap (`MAX_WORKERS`) is already reached or
@@ -2361,16 +2155,15 @@ pub fn hire_worker(city: &mut City) -> bool {
 //
 // **思想**: 「この街局面の良さを 1 つの数値で表す」評価関数と、「全合法手を
 // 仮想着手して評価値を最大化する手を選ぶ」1 手読み探索で AI を構成する。
-// 探索は全 Tier で depth = 1 に統一し、Tier 差は **評価する候補数の広さ +
-// 評価ノイズ** で作る (Beam Search の知見: heuristic が悪ければ深く探しても
-// 無駄。広く正確に評価する方が深さより効く)。評価関数自体は全 Tier 共通。
+// 探索は depth = 1 に固定する (Beam Search の知見: heuristic が悪ければ深く
+// 探しても無駄。広く正確に評価する方が深さより効く)。
 //
 // 評価値は 2 軸の単純加算: `compute_income_per_sec_cents`(現在の収益) +
-// `stagnation_penalty`(街が止まっているかの減点)。それ以外の戦略的選好
-// (Eco の Park 偏重、Tech の道路偏重 など) は `cheap_action_score` の pre-rank
-// 段階で乗せる方針に統一し、評価関数自体は軽量に保つ。
-// affordability は `enumerate_actions` の事前フィルタで担保されているので、cost を
-// 評価値から控除しなくても「買えない物を選び続ける」事故は起きない。
+// `stagnation_penalty`(街が止まっているかの減点)。追加の選好バイアスは
+// `cheap_action_score` の pre-rank 段階で乗せる方針に統一し、評価関数自体は
+// 軽量に保つ。affordability は `enumerate_actions` の事前フィルタで担保
+// されているので、cost を評価値から控除しなくても「買えない物を選び続ける」
+// 事故は起きない。
 
 /// 評価関数。「街全体の cents/sec」+「停滞ペナルティ」の 2 成分加算。
 ///
@@ -2822,7 +2615,7 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
     // Replace 候補は `allowed_replace_targets` で「inactive 経済建物の再生」と
     // 「同系列の直接上位」だけに絞る (REDESIGN.md §3 P4)。これで saturated map
     // でも Replace 候補数が線形 → 1〜数件 / cell に抑えられる。
-    let reserve = automation_policy(city.strategy).min_cash_reserve;
+    let reserve = DEMOLISH_CASH_RESERVE;
     for y in 0..GRID_H {
         for x in 0..GRID_W {
             let current = match city.tile(x, y) {
@@ -2859,7 +2652,7 @@ pub(super) fn enumerate_actions(city: &City) -> Vec<super::ai::AiAction> {
 
 /// affordability ガード — Build 候補の唯一の事前フィルタ。判断は `action_value` に
 /// 委ねる方針 (docs/adr/0001) のため、per-Building の house-count や savings
-/// protection は置かない。Demolish 側の `min_cash_reserve` ガードは Build には
+/// protection は置かない。Demolish 側の `DEMOLISH_CASH_RESERVE` ガードは Build には
 /// 適用しない: Build は income 源を生む投資なので、reserve をかけると初期
 /// cash で何も建てられず永久停滞する (chicken-and-egg)。
 ///
@@ -3432,7 +3225,7 @@ mod tests {
         );
     }
 
-    /// Park 単体でも Apartment まで育つ (Eco 戦略の核)。
+    /// Park 単体でも Apartment まで育つ。
     #[test]
     fn park_alone_can_lift_to_apartment() {
         // road=1, workshop=0, shop=0, house=1, park=1
@@ -3654,23 +3447,11 @@ mod tests {
         );
     }
 
-    /// Eco 戦略は collection-time builder of Forest avoidance。
-    /// strategy_info の `speed_bonus_pct` が負、`income_penalty_pct` が正。
+    /// House が 1 軒でもあれば income/sec は 0 に丸め込まれない (床保護)。
     #[test]
-    fn eco_strategy_has_negative_speed_and_positive_income() {
-        let info = strategy_info(Strategy::Eco);
-        assert!(info.speed_bonus_pct < 0, "Eco builds slower");
-        assert!(info.income_penalty_pct > 0, "Eco earns slightly more");
-    }
-
-    /// Eco 戦略時、Tech と同じく定数倍が income に効く。+5% で 1 軒 → 1$/s が
-    /// 維持される (床保護)。
-    #[test]
-    fn eco_income_bonus_does_not_break_floor() {
+    fn single_house_income_has_floor_of_one_dollar() {
         let mut city = City::new();
-        city.strategy = Strategy::Eco;
         city.set_tile(0, 0, Tile::Built(Building::House));
-        // (1+1)/2 = 1, +5% = 1.05 → floor で 1。床保護で 1 を下回らない。
         assert!(compute_income_per_sec(&city) >= 1);
     }
 
