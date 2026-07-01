@@ -1,9 +1,9 @@
 //! City state for Idle Metropolis.
 //!
-//! AI-driven idle city builder.  The player only sets a strategy and buys
-//! upgrades; the CPU does all placement.  At low Tiers the CPU is dumb on
-//! purpose, so we need a balance simulator (see `simulator.rs`) to confirm
-//! the game is still progressing.
+//! AI-driven idle city builder.  The CPU does all placement automatically;
+//! the player hires workers to speed up parallel construction.  We keep a
+//! balance simulator (see `simulator.rs`) to confirm the game is always
+//! progressing.
 
 use std::cell::Cell;
 use std::collections::VecDeque;
@@ -100,7 +100,7 @@ pub enum Building {
     /// 重工業の頂点。煙害は Factory より広い 2 タイル半径に及ぶ。
     Refinery,
     /// **開拓機材** — 隣接する Rock セルの整地を可能にする特殊建物。
-    /// AI (Tier 4/5) が `evaluate` で判定して自分で建てる。
+    /// AI が `evaluate` で判定して自分で建てる。
     Outpost,
 }
 
@@ -209,11 +209,11 @@ impl CityTier {
 ///
 /// **TODO (バランス調整ポイント)**: 各閾値を確定する。これは
 /// ゲーム体験を直接決める重要な数値で、シミュレーター結果から逆算する
-/// と良い。30 分で T4 が pop ~600 に達するため、目安として:
+/// と良い。30 分で AI が pop ~600 に達するため、目安として:
 ///
 ///   - Village → Town:  ~50 pop  (序盤、最初の店舗が回り始める頃)
 ///   - Town → City:     ~250 pop (中盤、複数の住宅クラスター)
-///   - City → Metropolis: ~600 pop (終盤、Tier 4 AI で十分到達可能)
+///   - City → Metropolis: ~600 pop (終盤、AI で十分到達可能)
 ///
 /// 数字を変える時は、シミュレーターの 30min ベンチを実行して
 /// 「ちょうど終盤直前で Metropolis に到達するか」を確認すること。
@@ -260,93 +260,6 @@ impl PanelTab {
             PanelTab::Events => "履歴",
             PanelTab::World => "世界",
             PanelTab::Catalog => "図鑑",
-        }
-    }
-}
-
-/// Player's strategic preference.  Drives how Tier-2+ AI weights its choices;
-/// Tier-1 ignores this field.
-///
-/// `Tech` は短期収入を犠牲にして建設速度と (将来の) 研究ポイントを稼ぐ路線。
-/// `Eco` は森を残し荒地だけ整地する「環境配慮」型 — 整地メカニクスと組み合わせ。
-/// `Balanced` は「中間値で意思決定が薄まる」ため削除し、各択に明確な
-/// トレードオフを持たせる方針 (Plan #1)。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Strategy {
-    Growth, // prefer Houses
-    Income, // prefer Shops
-    /// Tech: 建設速度 +20% / 収入 -20%。AI は道路を優先し展開を重視。
-    Tech,
-    /// Eco: 森を切らない (Forest 整地を AI が回避)。建設速度 -10% / 収入 +5%。
-    /// 「ゆっくり丁寧に育てる」自然と共存する街づくり。
-    Eco,
-}
-
-/// CPU intelligence tier — 将棋AI 風のレベル設計。
-///
-/// **強さの源泉**: 将棋エンジンと同じく **評価関数 × 探索深さ** の2軸。
-/// 評価関数 (`logic::evaluate`) は Tier 3 以上で共通、Tier 差は探索深さ +
-/// ノイズ量で作る (= Stockfish Skill Level / ぴよ将棋 と同じ思想)。
-///
-///   - Tier 1 (Random):  ランダム指し。15級相当。評価関数なし。
-///   - Tier 2 (Greedy):  1手読み + 簡易評価 (駒得のみ) + 30%ノイズ。5級相当。
-///   - Tier 3 (Aware):   1手読み + フル評価 + 5%ノイズ。初段相当。
-///   - Tier 4 (Planner): 2手読み + フル評価。三段相当。
-///   - Tier 5 (Master):  3手読み + フル評価。アマ高段相当。
-///
-/// 「自然な弱さ」設計: 弱い Tier は **視野を狭めることで自然に悪手が出る**。
-/// 明示ブランダー (突然の大悪手) は入れない (=「バカにされた感」を避ける)。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum AiTier {
-    /// 15級: 合法手から完全ランダム選択。評価関数なし。
-    Random = 1,
-    /// 5級: 1手読み + 簡易評価 (House 数だけ見る駒得) + 30% ノイズ。
-    /// 「目先の家賃しか見えない」短視眼な弱さ。
-    Greedy = 2,
-    /// 初段: 1手読み + フル評価関数 (income/sec + Strategy bias) + 5% ノイズ。
-    /// 「考えてるが先は読まない」レベル。
-    Aware = 3,
-    /// 三段: 2手読み + フル評価。「道路を引いて家を建てる」のような
-    /// 1手目+2手目の連携を発見できる。
-    Planner = 4,
-    /// アマ高段: 3手読み + フル評価 + ワイド beam search。長期投資が見える。
-    Master = 5,
-}
-
-impl AiTier {
-    /// Cash price to upgrade *into* this tier.
-    ///
-    /// **2026-05 調整**: 旧価格は $500 / $5,000 / $50,000 と 10x ジャンプで
-    /// 「$5,000 に詰まる」問題があった。段階を ~3x にすることで、
-    /// 30 分プレイでも順次進化を実感できるカーブに調整。
-    /// 累計 ~$50K は変えず、途中の $3K / $12K で頻繁に進化ボタンが効く。
-    pub fn upgrade_cost(self) -> i64 {
-        match self {
-            AiTier::Random => 0, // starting tier
-            AiTier::Greedy => 500,
-            AiTier::Aware => 3_000,
-            AiTier::Planner => 12_000,
-            AiTier::Master => 35_000,
-        }
-    }
-
-    pub fn next(self) -> Option<AiTier> {
-        match self {
-            AiTier::Random => Some(AiTier::Greedy),
-            AiTier::Greedy => Some(AiTier::Aware),
-            AiTier::Aware => Some(AiTier::Planner),
-            AiTier::Planner => Some(AiTier::Master),
-            AiTier::Master => None,
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            AiTier::Random => "Random",
-            AiTier::Greedy => "Greedy",
-            AiTier::Aware => "Aware",
-            AiTier::Planner => "Planner",
-            AiTier::Master => "Master",
         }
     }
 }
@@ -404,10 +317,6 @@ pub struct City {
     pub world_seed: u64,
     pub cash: i64,
     pub tick: u64,
-
-    /// AI brain in use.
-    pub ai_tier: AiTier,
-    pub strategy: Strategy,
 
     /// 現在表示中の右パネルタブ。
     pub panel_tab: PanelTab,
@@ -512,10 +421,9 @@ pub struct City {
     pub connected_cache: std::cell::RefCell<Option<(u64, std::rc::Rc<Vec<Vec<bool>>>)>>,
 
     /// `compute_income_per_sec` (dollars) の per-frame メモ化キャッシュ。
-    /// 描画は header / status / Manager タブ等から複数回呼ぶ。`(tick, strategy, dollars)`
-    /// のトリプルで保持: strategy は `income_penalty_pct` を通じて income に直接効くため
-    /// cache key に含める (= プレイヤーが strategy を切り替えた瞬間も自動 stale)。
-    pub income_dollars_cache: Cell<Option<(u64, Strategy, i64)>>,
+    /// 描画は header / status / Manager タブ等から複数回呼ぶため `(tick, dollars)`
+    /// のペアで保持する。
+    pub income_dollars_cache: Cell<Option<(u64, i64)>>,
 
     /// AI 評価ホットパス用の使い回しスクラッチバッファ。
     ///
@@ -606,8 +514,6 @@ impl City {
             world_seed: seed,
             cash: 200, // enough seed money for 5 houses or a shop
             tick: 0,
-            ai_tier: AiTier::Random,
-            strategy: Strategy::Growth,
             panel_tab: PanelTab::Manager,
             last_observed_tier: CityTier::Village,
             tier_flash_until: 0,
