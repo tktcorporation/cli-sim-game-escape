@@ -28,12 +28,13 @@ pub const MENU_SELECT_GODFIELD: u16 = 7;
 pub const MENU_SELECT_METROPOLIS: u16 = 8;
 pub const MENU_SELECT_TAMAGOTCHI: u16 = 9;
 pub const MENU_SELECT_MERGE: u16 = 13;
+pub const MENU_SELECT_DIG: u16 = 14;
 pub const MENU_SELECT_SETTINGS: u16 = 10;
 pub const MENU_SCROLL_UP: u16 = 11;
 pub const MENU_SCROLL_DOWN: u16 = 12;
 
-/// Last valid index of the main menu cards (10 games + settings → 0..=10).
-const MENU_LAST_INDEX: u8 = 10;
+/// Last valid index of the main menu cards (11 games + settings → 0..=11).
+const MENU_LAST_INDEX: u8 = 11;
 
 /// Cursor → menu action, used for the A button on the main menu.
 enum MenuPick {
@@ -53,6 +54,7 @@ fn menu_pick_for(idx: u8) -> MenuPick {
         7 => MenuPick::Game(GameChoice::Metropolis),
         8 => MenuPick::Game(GameChoice::Tamagotchi),
         9 => MenuPick::Game(GameChoice::Merge),
+        10 => MenuPick::Game(GameChoice::Dig),
         _ => MenuPick::Settings,
     }
 }
@@ -66,6 +68,7 @@ const SETTINGS_RESET_ABYSS: u16 = 14;
 const SETTINGS_RESET_METROPOLIS: u16 = 15;
 const SETTINGS_RESET_TAMAGOTCHI: u16 = 16;
 const SETTINGS_RESET_MERGE: u16 = 17;
+const SETTINGS_RESET_DIG: u16 = 18;
 
 /// Use `elementFromPoint` to find which grid cell was clicked.
 ///
@@ -289,6 +292,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 InputEvent::Click(_, MENU_SELECT_MERGE) => {
                     Some(MenuPick::Game(GameChoice::Merge))
                 }
+                InputEvent::Click(_, MENU_SELECT_DIG) => {
+                    Some(MenuPick::Game(GameChoice::Dig))
+                }
                 InputEvent::Key('0') | InputEvent::Click(_, MENU_SELECT_SETTINGS) => {
                     Some(MenuPick::Settings)
                 }
@@ -378,6 +384,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     InputEvent::Key('6') | InputEvent::Click(_, SETTINGS_RESET_MERGE) => {
                         *confirm_reset = Some(GameChoice::Merge);
                     }
+                    InputEvent::Key('7') | InputEvent::Click(_, SETTINGS_RESET_DIG) => {
+                        *confirm_reset = Some(GameChoice::Dig);
+                    }
                     InputEvent::Key('q') | InputEvent::Click(_, BACK_TO_MENU) => {
                         *state = AppState::Menu { scroll: 0, selected: 0 };
                     }
@@ -409,6 +418,7 @@ fn perform_reset(game: &GameChoice) {
         GameChoice::Metropolis => games::metropolis::save::delete_save(),
         GameChoice::Tamagotchi => games::tamagotchi::save::delete_save(),
         GameChoice::Merge => games::merge::save::delete_save(),
+        GameChoice::Dig => games::dig::save::delete_save(),
         _ => {}
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -591,6 +601,7 @@ fn render_menu(
         ("Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶', Color::LightCyan),
         ("たまごっち", "卵から育てて寿命を伸ばす育成ゲーム", MENU_SELECT_TAMAGOTCHI, '▶', Color::Magenta),
         ("マージマンション", "同種同レベルを重ねて上位アイテムを作るマージゲーム", MENU_SELECT_MERGE, '▶', Color::Green),
+        ("穴掘り長屋", "1日5回の行動力で自分の庭とご近所の庭を掘る穴掘りソーシャルゲーム", MENU_SELECT_DIG, '▶', Color::Yellow),
         ("設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 
@@ -863,6 +874,18 @@ fn render_settings_main(
     );
 
     cl.push(Line::from(""));
+
+    // 穴掘り長屋
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
+            Span::styled("穴掘り長屋", Style::default().fg(Color::White)),
+            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
+        ]),
+        SETTINGS_RESET_DIG,
+    );
+
+    cl.push(Line::from(""));
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
         " ※ Tiny Factory / Dungeon Dive は",
@@ -898,6 +921,7 @@ fn render_confirm_dialog(
         GameChoice::Metropolis => "Idle Metropolis",
         GameChoice::Tamagotchi => "たまごっち",
         GameChoice::Merge => "マージマンション",
+        GameChoice::Dig => "穴掘り長屋",
         _ => "Unknown",
     };
 
