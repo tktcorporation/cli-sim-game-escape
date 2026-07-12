@@ -160,7 +160,11 @@ fn render_yard(
         grid.register_targets(area, &block, &mut cs, 0);
     }
 
-    let para = Paragraph::new(lines).block(block).alignment(Alignment::Center);
+    // ClickableGrid::register_targets は inner の左端からのオフセットでクリック
+    // 領域を計算するため (widgets.rs)、Paragraph 側も Left で描画して両者の
+    // 座標系を一致させる。Center にすると inner が広い時に描画だけ右へずれ、
+    // タップ判定と表示位置がずれる。
+    let para = Paragraph::new(lines).block(block).alignment(Alignment::Left);
     f.render_widget(para, area);
 }
 
@@ -351,21 +355,38 @@ mod tests {
         use ratzilla::ratatui::backend::TestBackend;
         use ratzilla::ratatui::Terminal;
 
-        let state = DigState::new();
+        let mut state = DigState::new();
+        state.yard[0] = Some(ItemKind::GoldNugget); // glyph "gd"
         let cs = Rc::new(RefCell::new(ClickState::new()));
-        let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+        // inner 幅 (58) がグリッド内容の幅 (YARD_W*CELL_W=25) よりずっと広い
+        // エリアで検証する。もし Paragraph が Alignment::Center で描画されると
+        // 実際の文字は右へずれるが、register_targets は常に左端基準で座標を
+        // 登録するため、幅に余裕がある時だけこのズレが露見する。
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
         terminal
             .draw(|f| {
-                render_yard(&state, f, Rect::new(0, 0, 40, 5), &cs, Borders::ALL);
+                render_yard(&state, f, Rect::new(0, 0, 60, 5), &cs, Borders::ALL);
             })
             .unwrap();
 
-        // inner = (1,1,38,3) with Borders::ALL, cell (0,0): col=1+0*5=1, row=1
+        // inner = (1,1,58,3) with Borders::ALL, cell (0,0): col=1+0*5=1, row=1
         let hit = cs.borrow().hit_test(1, 1);
         assert_eq!(hit, Some(GRID_CLICK_BASE));
         // cell (1,0): col = 1 + 1*5 = 6
         let hit1 = cs.borrow().hit_test(6, 1);
         assert_eq!(hit1, Some(GRID_CLICK_BASE + 1));
+
+        // register_targets が指すクリック座標に、実際に "gd" が描画されている
+        // ことをバッファから直接確認する (クリック領域と表示位置の一致を
+        // register_targets の計算式の再現ではなく実描画結果で検証する)。
+        let buffer = terminal.backend().buffer();
+        let cell0_text: String = (1..6)
+            .map(|x| buffer.cell((x, 1)).unwrap().symbol().to_string())
+            .collect();
+        assert!(
+            cell0_text.contains("gd"),
+            "セル(0,0)のクリック座標に実際に描画された内容: {cell0_text:?}"
+        );
     }
 
     #[test]
