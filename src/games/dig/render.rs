@@ -96,7 +96,10 @@ fn render_header(
         .alignment(Alignment::Left);
     f.render_widget(para, area);
 
-    let label_len = upgrade_label.chars().count() as u16;
+    // chars().count() は絵文字・全角文字を1幅として数えてしまい、実際の
+    // terminal 表示幅より小さく出る (yard グリッドのグリフを ASCII に
+    // 限定した理由と同じ落とし穴)。Line::width() で実表示幅を使う。
+    let label_len = Line::from(upgrade_label.as_str()).width() as u16;
     if area.width > label_len + 2 && area.height >= 2 {
         let btn_y = area.y + 1;
         let btn_x = area.x + area.width.saturating_sub(label_len + 1);
@@ -327,6 +330,37 @@ fn render_log(state: &DigState, f: &mut Frame, area: Rect, borders: Borders) {
 mod tests {
     use super::*;
     use crate::input::ClickState;
+
+    #[test]
+    fn 強化ボタンは絵文字と全角文字があっても金額まで欠けずに描画される() {
+        use ratzilla::ratatui::backend::TestBackend;
+        use ratzilla::ratatui::Terminal;
+
+        // コイン残高をコスト(100)と異なる値にしておく — 同じ値だとヘッダー
+        // 本文側の "💰{coins}" 表示にも同じ数字が出るため、強化ボタン側が
+        // 切り詰められていても row 内に "100" 自体は見つかってしまい検出できない。
+        let mut state = DigState::new();
+        state.coins = 9999; // shovel_level=0 → コストは100 (別値なので混同しない)
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|f| {
+                render_header(&state, f, Rect::new(0, 0, 80, 3), &cs, Borders::ALL);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let row1: String = (0..80)
+            .map(|x| buffer.cell((x, 1)).unwrap().symbol().to_string())
+            .collect();
+        // chars().count() で幅を過小評価すると "100]" の末尾 ("00]") が
+        // 切れて描画される。閉じ括弧まで含めて検証することで、末尾側の
+        // 欠落を確実に検出する。
+        assert!(
+            row1.contains("100]"),
+            "強化コストの金額(閉じ括弧まで)が描画結果から欠落している: {row1:?}"
+        );
+    }
 
     #[test]
     fn 庭セルは未掘も全種類も表示幅が揃う() {
