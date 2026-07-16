@@ -601,7 +601,7 @@ fn render_menu(
         ("Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶', Color::LightCyan),
         ("たまごっち", "卵から育てて寿命を伸ばす育成ゲーム", MENU_SELECT_TAMAGOTCHI, '▶', Color::Magenta),
         ("マージマンション", "同種同レベルを重ねて上位アイテムを作るマージゲーム", MENU_SELECT_MERGE, '▶', Color::Green),
-        ("穴掘り長屋", "1日5回の行動力で自分の庭とご近所の庭を掘る穴掘りソーシャルゲーム", MENU_SELECT_DIG, '▶', Color::Yellow),
+        ("穴掘り長屋", "ヒントの数字で宝の位置を推理する1日5掘りの発掘パズル", MENU_SELECT_DIG, '▶', Color::Yellow),
         ("設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 

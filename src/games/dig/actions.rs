@@ -1,41 +1,28 @@
 //! 穴掘り長屋のクリック ID。
 
-use super::state::{YARD_H, YARD_W};
+use super::state::SITE_LEN;
 
 /// タブ切り替え。
-pub const ACT_TAB_YARD: u16 = 1;
-pub const ACT_TAB_NEIGHBORS: u16 = 2;
-pub const ACT_TAB_COLLECTION: u16 = 3;
+pub const ACT_TAB_SITE: u16 = 1;
+pub const ACT_TAB_MUSEUM: u16 = 2;
 
-/// 庭グリッドセルの base id。`(col, row)` のセルは `GRID_CLICK_BASE + row*YARD_W + col`。
+/// 羅盤モードの切り替え (次のグリッドタップが「調べる」になる)。
+pub const ACT_RADAR: u16 = 3;
+
+/// 図鑑タブのスクロール。
+pub const ACT_MUSEUM_SCROLL_UP: u16 = 4;
+pub const ACT_MUSEUM_SCROLL_DOWN: u16 = 5;
+
+/// 現場グリッドセルの base id。`(col, row)` のセルは `GRID_CLICK_BASE + row*SITE_W + col`。
 pub const GRID_CLICK_BASE: u16 = 100;
 
-/// ご近所さんのお福分け穴。`ACT_NEIGHBOR_DIG_BASE + neighbor_index`。
-pub const ACT_NEIGHBOR_DIG_BASE: u16 = 200;
-
-/// シャベル強化購入。
-pub const ACT_UPGRADE_SHOVEL: u16 = 210;
-
-/// `action_id` が庭グリッド範囲 (`GRID_CLICK_BASE` から `YARD_W * YARD_H` 個)
-/// に収まっていればセル index (`row * YARD_W + col`) を返す。
+/// `action_id` が現場グリッド範囲に収まっていればセル index を返す。
 pub fn decode_grid(action_id: u16) -> Option<usize> {
     if action_id < GRID_CLICK_BASE {
         return None;
     }
     let offset = (action_id - GRID_CLICK_BASE) as usize;
-    if offset >= YARD_W * YARD_H {
-        return None;
-    }
-    Some(offset)
-}
-
-/// `action_id` がご近所さんのお福分け穴クリックであれば neighbor index を返す。
-pub fn decode_neighbor(action_id: u16, neighbor_count: usize) -> Option<usize> {
-    if action_id < ACT_NEIGHBOR_DIG_BASE {
-        return None;
-    }
-    let offset = (action_id - ACT_NEIGHBOR_DIG_BASE) as usize;
-    if offset >= neighbor_count {
+    if offset >= SITE_LEN {
         return None;
     }
     Some(offset)
@@ -44,27 +31,15 @@ pub fn decode_neighbor(action_id: u16, neighbor_count: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::state::NEIGHBOR_COUNT;
 
     #[test]
     fn decode_gridは範囲内のみsomeを返す() {
         assert_eq!(decode_grid(GRID_CLICK_BASE), Some(0));
-        assert_eq!(decode_grid(GRID_CLICK_BASE + (YARD_W * YARD_H) as u16 - 1), Some(YARD_W * YARD_H - 1));
-        assert_eq!(decode_grid(GRID_CLICK_BASE + (YARD_W * YARD_H) as u16), None);
+        assert_eq!(
+            decode_grid(GRID_CLICK_BASE + SITE_LEN as u16 - 1),
+            Some(SITE_LEN - 1)
+        );
+        assert_eq!(decode_grid(GRID_CLICK_BASE + SITE_LEN as u16), None);
         assert_eq!(decode_grid(GRID_CLICK_BASE - 1), None);
-    }
-
-    #[test]
-    fn decode_neighborは範囲内のみsomeを返す() {
-        assert_eq!(decode_neighbor(ACT_NEIGHBOR_DIG_BASE, NEIGHBOR_COUNT), Some(0));
-        assert_eq!(
-            decode_neighbor(ACT_NEIGHBOR_DIG_BASE + NEIGHBOR_COUNT as u16 - 1, NEIGHBOR_COUNT),
-            Some(NEIGHBOR_COUNT - 1)
-        );
-        assert_eq!(
-            decode_neighbor(ACT_NEIGHBOR_DIG_BASE + NEIGHBOR_COUNT as u16, NEIGHBOR_COUNT),
-            None
-        );
-        assert_eq!(decode_neighbor(ACT_NEIGHBOR_DIG_BASE - 1, NEIGHBOR_COUNT), None);
     }
 }

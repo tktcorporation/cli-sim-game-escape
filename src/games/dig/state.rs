@@ -1,128 +1,102 @@
-//! 穴掘り長屋の state — 庭グリッド / 隣人 / 図鑑コレクション / コイン。
+//! 穴掘り長屋の state — 発掘現場 / 宝 / 図鑑 / コイン。
+//!
+//! v2: 「ランダム抽選」から「ヒント数字で宝の位置を推理する発掘パズル」へ。
+//! 現場は日付から決定的に生成されるため全プレイヤー共通 (Wordle 方式)。
 
-pub const YARD_W: usize = 5;
-pub const YARD_H: usize = 3;
-pub const YARD_LEN: usize = YARD_W * YARD_H;
+use std::cell::Cell;
 
-/// 1日あたりの最大行動回数。実際の日付 (localStorage 保存) が変わると全回復する。
-pub const MAX_ACTIONS_PER_DAY: u8 = 5;
+pub const SITE_W: usize = 7;
+pub const SITE_H: usize = 5;
+pub const SITE_LEN: usize = SITE_W * SITE_H;
 
-pub const NEIGHBOR_COUNT: usize = 3;
+/// 1日あたりのシャベル本数。宝を完掘すると1本返却されるので、
+/// 推理が上手いほど実質の行動回数が増える。
+pub const SHOVELS_PER_DAY: u8 = 5;
 
-/// シャベル強化の最大段階。
-pub const MAX_SHOVEL_LEVEL: u8 = 3;
+/// 羅盤 (掘らずにヒントだけ見るツール) の1日の使用上限。
+pub const RADAR_MAX_PER_DAY: u8 = 3;
 
-/// 掘って出るものの種類。前半5種はその場でコインに変わる「地面の恵み」、
-/// 後半7種は図鑑コレクションの「かけら」(所持数を保持し、セット全部揃うと
-/// ボーナスコインを獲得する)。
+/// 地中に埋まる宝の種類。それぞれ固有の形 (占有マス) を持ち、
+/// 全マス掘り当てると回収される。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ItemKind {
-    Dirt,
-    Pebble,
-    CopperCoin,
-    SilverChunk,
-    GoldNugget,
-    PotteryTop,
-    PotteryBottom,
+    JomonPot,
+    Magatama,
+    ObsidianArrow,
     DragonSkull,
     DragonSpine,
-    DragonTail,
-    ManekiRight,
-    ManekiLeft,
+    ManekiNeko,
+    CoinJar,
+    Senryobako,
 }
+
+pub const KIND_COUNT: usize = 8;
 
 impl ItemKind {
     /// この並び順がそのまま `to_save_id`/`from_save_id` のエンコードになる。
     /// 既存セーブとの互換性のため、途中への挿入や並び替えはせず末尾に追記すること。
-    pub fn all() -> [ItemKind; 12] {
+    pub fn all() -> [ItemKind; KIND_COUNT] {
         [
-            ItemKind::Dirt,
-            ItemKind::Pebble,
-            ItemKind::CopperCoin,
-            ItemKind::SilverChunk,
-            ItemKind::GoldNugget,
-            ItemKind::PotteryTop,
-            ItemKind::PotteryBottom,
+            ItemKind::JomonPot,
+            ItemKind::Magatama,
+            ItemKind::ObsidianArrow,
             ItemKind::DragonSkull,
             ItemKind::DragonSpine,
-            ItemKind::DragonTail,
-            ItemKind::ManekiRight,
-            ItemKind::ManekiLeft,
+            ItemKind::ManekiNeko,
+            ItemKind::CoinJar,
+            ItemKind::Senryobako,
         ]
     }
 
-    /// その場でコインに変わる「地面の恵み」ならコイン額を返す。
-    /// 図鑑かけらは `None` (別途 `piece_slot` で所持数管理する)。
-    pub fn coin_value(self) -> Option<u32> {
+    /// 基本形 (回転前) の占有オフセット。原点 (0,0) を必ず含む。
+    /// 多マスの宝は「一部が見えたら残りの位置を形から推理できる」ための設計。
+    pub fn shape(self) -> &'static [(i8, i8)] {
         match self {
-            ItemKind::Dirt => Some(1),
-            ItemKind::Pebble => Some(2),
-            ItemKind::CopperCoin => Some(5),
-            ItemKind::SilverChunk => Some(15),
-            ItemKind::GoldNugget => Some(40),
-            _ => None,
+            ItemKind::JomonPot => &[(0, 0), (1, 0), (0, 1)],
+            ItemKind::Magatama => &[(0, 0), (1, 0)],
+            ItemKind::ObsidianArrow => &[(0, 0)],
+            ItemKind::DragonSkull => &[(0, 0), (1, 0)],
+            ItemKind::DragonSpine => &[(0, 0), (1, 0), (2, 0)],
+            ItemKind::ManekiNeko => &[(0, 0), (0, 1)],
+            ItemKind::CoinJar => &[(0, 0)],
+            ItemKind::Senryobako => &[(0, 0), (1, 0), (1, 1)],
         }
     }
 
-    /// 図鑑かけらなら所属する `CollectionSet` を返す。
-    pub fn collection(self) -> Option<CollectionSet> {
+    pub fn size(self) -> usize {
+        self.shape().len()
+    }
+
+    /// 初回発見時のコイン。大きい宝ほど掘り当てる手数がかかるため高額。
+    pub fn first_find_coins(self) -> u64 {
+        self.size() as u64 * 40
+    }
+
+    /// 2回目以降 (図鑑登録済み) の発見時のコイン。
+    pub fn duplicate_coins(self) -> u64 {
+        self.size() as u64 * 20
+    }
+
+    pub fn collection(self) -> CollectionSet {
         match self {
-            ItemKind::PotteryTop | ItemKind::PotteryBottom => Some(CollectionSet::Pottery),
-            ItemKind::DragonSkull | ItemKind::DragonSpine | ItemKind::DragonTail => {
-                Some(CollectionSet::Dragon)
+            ItemKind::JomonPot | ItemKind::Magatama | ItemKind::ObsidianArrow => {
+                CollectionSet::Jomon
             }
-            ItemKind::ManekiRight | ItemKind::ManekiLeft => Some(CollectionSet::Maneki),
-            _ => None,
+            ItemKind::DragonSkull | ItemKind::DragonSpine => CollectionSet::Dragon,
+            ItemKind::ManekiNeko | ItemKind::CoinJar | ItemKind::Senryobako => CollectionSet::Fuku,
         }
     }
 
-    /// `DigState::piece_counts` のインデックス。図鑑かけらのみ `Some`。
-    pub fn piece_slot(self) -> Option<usize> {
-        match self {
-            ItemKind::PotteryTop => Some(0),
-            ItemKind::PotteryBottom => Some(1),
-            ItemKind::DragonSkull => Some(2),
-            ItemKind::DragonSpine => Some(3),
-            ItemKind::DragonTail => Some(4),
-            ItemKind::ManekiRight => Some(5),
-            ItemKind::ManekiLeft => Some(6),
-            _ => None,
-        }
-    }
-
-    /// 庭グリッドのセル表示用 2 文字コード (ASCII 固定幅、CJK幅ズレを避ける)。
-    pub fn glyph(self) -> &'static str {
-        match self {
-            ItemKind::Dirt => "dt",
-            ItemKind::Pebble => "pb",
-            ItemKind::CopperCoin => "cu",
-            ItemKind::SilverChunk => "si",
-            ItemKind::GoldNugget => "gd",
-            ItemKind::PotteryTop => "p1",
-            ItemKind::PotteryBottom => "p2",
-            ItemKind::DragonSkull => "d1",
-            ItemKind::DragonSpine => "d2",
-            ItemKind::DragonTail => "d3",
-            ItemKind::ManekiRight => "m1",
-            ItemKind::ManekiLeft => "m2",
-        }
-    }
-
-    /// ログ・図鑑表示用の日本語名。
     pub fn name(self) -> &'static str {
         match self {
-            ItemKind::Dirt => "土くれ",
-            ItemKind::Pebble => "小石",
-            ItemKind::CopperCoin => "古びた銅貨",
-            ItemKind::SilverChunk => "銀の欠片",
-            ItemKind::GoldNugget => "砂金",
-            ItemKind::PotteryTop => "土器のかけら(上)",
-            ItemKind::PotteryBottom => "土器のかけら(下)",
+            ItemKind::JomonPot => "縄文土器",
+            ItemKind::Magatama => "翡翠の勾玉",
+            ItemKind::ObsidianArrow => "黒曜石の鏃",
             ItemKind::DragonSkull => "竜の頭骨",
             ItemKind::DragonSpine => "竜の背骨",
-            ItemKind::DragonTail => "竜の尾骨",
-            ItemKind::ManekiRight => "招き猫の右手",
-            ItemKind::ManekiLeft => "招き猫の左手",
+            ItemKind::ManekiNeko => "招き猫",
+            ItemKind::CoinJar => "古銭の壺",
+            ItemKind::Senryobako => "千両箱",
         }
     }
 
@@ -136,132 +110,151 @@ impl ItemKind {
     }
 }
 
-pub const PIECE_COUNT: usize = 7;
-
-/// 図鑑コレクション (かけらを全部揃えるとボーナスコインを獲得)。
+/// 図鑑コレクション。全種類を掘り当てるとボーナスコイン。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CollectionSet {
-    Pottery,
+    Jomon,
     Dragon,
-    Maneki,
+    Fuku,
 }
 
 pub const COLLECTION_COUNT: usize = 3;
 
 impl CollectionSet {
     pub fn all() -> [CollectionSet; COLLECTION_COUNT] {
-        [CollectionSet::Pottery, CollectionSet::Dragon, CollectionSet::Maneki]
+        [CollectionSet::Jomon, CollectionSet::Dragon, CollectionSet::Fuku]
     }
 
     pub fn index(self) -> usize {
         match self {
-            CollectionSet::Pottery => 0,
+            CollectionSet::Jomon => 0,
             CollectionSet::Dragon => 1,
-            CollectionSet::Maneki => 2,
+            CollectionSet::Fuku => 2,
         }
     }
 
-    pub fn pieces(self) -> &'static [ItemKind] {
-        match self {
-            CollectionSet::Pottery => &[ItemKind::PotteryTop, ItemKind::PotteryBottom],
-            CollectionSet::Dragon => {
-                &[ItemKind::DragonSkull, ItemKind::DragonSpine, ItemKind::DragonTail]
-            }
-            CollectionSet::Maneki => &[ItemKind::ManekiRight, ItemKind::ManekiLeft],
-        }
+    pub fn kinds(self) -> Vec<ItemKind> {
+        ItemKind::all()
+            .into_iter()
+            .filter(|k| k.collection() == self)
+            .collect()
     }
 
     pub fn display_name(self) -> &'static str {
         match self {
-            CollectionSet::Pottery => "唐草文様の土器",
-            CollectionSet::Dragon => "小さな竜の骨格",
-            CollectionSet::Maneki => "福を呼ぶ招き猫",
+            CollectionSet::Jomon => "縄文の宴",
+            CollectionSet::Dragon => "竜の伝説",
+            CollectionSet::Fuku => "商店街の福",
         }
     }
 
-    /// コンプリート時の一括ボーナスコイン。
-    pub fn bonus_coins(self) -> u32 {
+    pub fn bonus_coins(self) -> u64 {
         match self {
-            CollectionSet::Pottery => 150,
+            CollectionSet::Jomon => 300,
             CollectionSet::Dragon => 400,
-            CollectionSet::Maneki => 250,
+            CollectionSet::Fuku => 350,
         }
     }
 }
 
-/// ご近所さん 1 人分。専門の `CollectionSet` を持ち、そのお福分け穴を
-/// 掘らせてもらうとそのセットのかけらが出やすくなる。
-pub struct Neighbor {
-    pub name: &'static str,
-    pub specialty: CollectionSet,
-    /// 今日すでにこの人の穴を掘らせてもらったか。日付が変わるとリセット。
-    pub dug_today: bool,
-    /// 累計で掘らせてもらった回数。`friendship_level` の算出に使う。
-    pub total_digs: u32,
+/// 現場に埋まっている宝1つ。`cells` は現場グリッドの flat index。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Treasure {
+    pub kind: ItemKind,
+    pub cells: Vec<u16>,
 }
 
-/// 固定 3 人のご近所さん定義。各人がそれぞれ別のコレクションを専門にすることで、
-/// 「今日は誰の庭に行くか」の判断に意味を持たせる。
-const NEIGHBOR_DEFS: [(&str, CollectionSet); NEIGHBOR_COUNT] = [
-    ("大家さん", CollectionSet::Pottery),
-    ("隣のご隠居", CollectionSet::Dragon),
-    ("向かいの八百屋さん", CollectionSet::Maneki),
-];
+/// 発掘演出。`cells` が REVERSED で光り、`ttl` が tick ごとに減る。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Flash {
+    pub cells: Vec<u16>,
+    pub ttl: u32,
+}
 
-/// 図鑑コンプリート演出の表示時間 (tick)。10 ticks/sec → 2 秒。
-pub const COLLECTION_FLASH_TTL: u32 = 20;
+/// 宝の一部ヒット時 / 完掘時の演出時間 (tick)。10 ticks/sec。
+pub const FLASH_HIT_TTL: u32 = 8;
+pub const FLASH_COMPLETE_TTL: u32 = 15;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DigTab {
-    Yard,
-    Neighbors,
-    Collection,
+    Site,
+    Museum,
 }
 
 pub struct DigState {
-    /// 庭グリッド。`None` = 未掘 (今日はまだ新しい土)、`Some(item)` = 今日掘り当てたもの。
-    pub yard: [Option<ItemKind>; YARD_LEN],
-    pub actions_remaining: u8,
-    /// 直近リセット時点の日付インデックス (`logic::day_index` 参照)。
-    /// 実際のカレンダー日付が変わるまで行動回数は回復しない。
-    pub last_reset_day: u64,
+    /// 現在の現場の日付インデックス (`logic::day_index`)。現場はこの値から
+    /// 決定的に生成されるため、セーブには日付だけ保存すれば復元できる。
+    pub day: u64,
+    pub treasures: Vec<Treasure>,
+    pub dug: [bool; SITE_LEN],
+    /// 羅盤で調査済み (掘らずにヒントだけ見えている) のマス。
+    pub scanned: [bool; SITE_LEN],
+    pub shovels: u8,
+    pub radar_uses: u8,
+    /// 羅盤モード中 (次のグリッドタップが「掘る」ではなく「調べる」になる)。
+    pub radar_armed: bool,
+    /// 本日の完全制覇ボーナスを付与済みか。
+    pub perfect_bonus_given: bool,
     pub coins: u64,
     pub total_coins_earned: u64,
-    pub piece_counts: [u32; PIECE_COUNT],
+    /// 種類ごとの累計発見数。0 = 未発見 (図鑑では？？？表示)。
+    pub museum_counts: [u32; KIND_COUNT],
     pub completed_sets: [bool; COLLECTION_COUNT],
-    pub neighbors: [Neighbor; NEIGHBOR_COUNT],
-    pub shovel_level: u8,
-    /// 決定的乱数の seed。`localStorage` ロード後も同じ列を続けられる。
-    pub rng_state: u64,
-    pub log: Vec<String>,
     pub selected_tab: DigTab,
-    /// 図鑑コンプリート演出。`(セット, 残り tick)`。
-    pub collection_flash: Option<(CollectionSet, u32)>,
+    /// 図鑑タブのスクロール位置。描画時に `ScrollableTab` が実コンテンツ高で
+    /// clamp して書き戻すため `Cell` (render は `&self`)。
+    pub museum_scroll: Cell<u16>,
+    pub log: Vec<String>,
+    pub flash: Option<Flash>,
 }
 
 impl DigState {
     pub fn new() -> Self {
         Self {
-            yard: [None; YARD_LEN],
-            actions_remaining: MAX_ACTIONS_PER_DAY,
-            last_reset_day: 0,
+            day: 0,
+            treasures: Vec::new(),
+            dug: [false; SITE_LEN],
+            scanned: [false; SITE_LEN],
+            shovels: SHOVELS_PER_DAY,
+            radar_uses: 0,
+            radar_armed: false,
+            perfect_bonus_given: false,
             coins: 0,
             total_coins_earned: 0,
-            piece_counts: [0; PIECE_COUNT],
+            museum_counts: [0; KIND_COUNT],
             completed_sets: [false; COLLECTION_COUNT],
-            neighbors: NEIGHBOR_DEFS.map(|(name, specialty)| Neighbor {
-                name,
-                specialty,
-                dug_today: false,
-                total_digs: 0,
-            }),
-            shovel_level: 0,
-            // 固定 seed: 初プレイの体験を全プレイヤー共通にする (merge と同じ方針)。
-            rng_state: 0x9E37_79B9_7F4A_7C15,
-            log: vec!["今日の行動力は5。庭を掘るか、ご近所のお福分け穴を掘らせてもらおう。".into()],
-            selected_tab: DigTab::Yard,
-            collection_flash: None,
+            selected_tab: DigTab::Site,
+            museum_scroll: Cell::new(0),
+            log: vec!["数字は「一番近いお宝までの歩数」。よく狙って掘ろう。".into()],
+            flash: None,
         }
+    }
+
+    pub fn idx(x: usize, y: usize) -> usize {
+        y * SITE_W + x
+    }
+
+    /// `idx` を含む宝の (treasures 内 index, 種類) を返す。
+    pub fn treasure_at(&self, idx: usize) -> Option<(usize, ItemKind)> {
+        self.treasures
+            .iter()
+            .position(|t| t.cells.contains(&(idx as u16)))
+            .map(|i| (i, self.treasures[i].kind))
+    }
+
+    /// 宝が完掘 (全マス dug) されているか。
+    pub fn treasure_complete(&self, t_idx: usize) -> bool {
+        self.treasures[t_idx]
+            .cells
+            .iter()
+            .all(|&c| self.dug[c as usize])
+    }
+
+    /// 未回収の宝の数。
+    pub fn remaining_treasures(&self) -> usize {
+        (0..self.treasures.len())
+            .filter(|&i| !self.treasure_complete(i))
+            .count()
     }
 
     pub fn add_log(&mut self, msg: impl Into<String>) {
@@ -283,23 +276,85 @@ mod tests {
     use super::*;
 
     #[test]
-    fn 新規stateは行動力満タンで庭は未掘() {
+    fn 新規stateはシャベル満タンで現場は未掘() {
         let s = DigState::new();
-        assert_eq!(s.actions_remaining, MAX_ACTIONS_PER_DAY);
-        assert!(s.yard.iter().all(|c| c.is_none()));
+        assert_eq!(s.shovels, SHOVELS_PER_DAY);
+        assert!(s.dug.iter().all(|d| !d));
+        assert!(s.scanned.iter().all(|d| !d));
         assert_eq!(s.coins, 0);
-        assert_eq!(s.shovel_level, 0);
+        assert_eq!(s.radar_uses, 0);
+        assert!(!s.radar_armed);
     }
 
     #[test]
-    fn 新規stateは3人のご近所さんを持つ() {
-        let s = DigState::new();
-        assert_eq!(s.neighbors.len(), NEIGHBOR_COUNT);
-        for n in &s.neighbors {
-            assert!(!n.name.is_empty());
-            assert!(!n.dug_today);
-            assert_eq!(n.total_digs, 0);
+    fn 全種類のshapeは原点を含み空でない() {
+        for kind in ItemKind::all() {
+            let shape = kind.shape();
+            assert!(!shape.is_empty(), "{kind:?} の shape が空");
+            assert!(shape.contains(&(0, 0)), "{kind:?} の shape に原点がない");
+            assert_eq!(kind.size(), shape.len());
         }
+    }
+
+    #[test]
+    fn shape内にオフセットの重複がない() {
+        for kind in ItemKind::all() {
+            let shape = kind.shape();
+            for (i, a) in shape.iter().enumerate() {
+                for b in &shape[i + 1..] {
+                    assert_ne!(a, b, "{kind:?} の shape にマス重複");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn 全種類がいずれかのコレクションにちょうど1回属する() {
+        let mut counts = [0usize; COLLECTION_COUNT];
+        for kind in ItemKind::all() {
+            counts[kind.collection().index()] += 1;
+        }
+        let total: usize = counts.iter().sum();
+        assert_eq!(total, KIND_COUNT);
+        for set in CollectionSet::all() {
+            assert!(
+                !set.kinds().is_empty(),
+                "{set:?} に属する種類がない"
+            );
+        }
+    }
+
+    #[test]
+    fn 初回発見コインは重複発見コインより高い() {
+        for kind in ItemKind::all() {
+            assert!(kind.first_find_coins() > kind.duplicate_coins());
+        }
+    }
+
+    #[test]
+    fn save_idは往復可能() {
+        for kind in ItemKind::all() {
+            assert_eq!(ItemKind::from_save_id(kind.to_save_id()), Some(kind));
+        }
+        assert_eq!(ItemKind::from_save_id(255), None);
+    }
+
+    #[test]
+    fn treasure_atとtreasure_completeが整合する() {
+        let mut s = DigState::new();
+        s.treasures = vec![Treasure {
+            kind: ItemKind::Magatama,
+            cells: vec![3, 4],
+        }];
+        assert_eq!(s.treasure_at(3), Some((0, ItemKind::Magatama)));
+        assert_eq!(s.treasure_at(4), Some((0, ItemKind::Magatama)));
+        assert_eq!(s.treasure_at(5), None);
+        assert!(!s.treasure_complete(0));
+        s.dug[3] = true;
+        assert!(!s.treasure_complete(0));
+        s.dug[4] = true;
+        assert!(s.treasure_complete(0));
+        assert_eq!(s.remaining_treasures(), 0);
     }
 
     #[test]
@@ -310,66 +365,5 @@ mod tests {
         }
         assert_eq!(s.log.len(), 20);
         assert_eq!(s.log.last().unwrap(), "log 29");
-    }
-
-    #[test]
-    fn piece_slotは図鑑かけらのみsomeを返す() {
-        for item in ItemKind::all() {
-            if item.collection().is_some() {
-                assert!(item.piece_slot().is_some(), "{item:?} は piece_slot を持つべき");
-            } else {
-                assert!(item.piece_slot().is_none(), "{item:?} は piece_slot を持たないべき");
-            }
-        }
-    }
-
-    #[test]
-    fn coin_valueは通貨アイテムのみsomeを返す() {
-        let currency = [
-            ItemKind::Dirt,
-            ItemKind::Pebble,
-            ItemKind::CopperCoin,
-            ItemKind::SilverChunk,
-            ItemKind::GoldNugget,
-        ];
-        for item in ItemKind::all() {
-            if currency.contains(&item) {
-                assert!(item.coin_value().is_some());
-            } else {
-                assert!(item.coin_value().is_none());
-            }
-        }
-    }
-
-    #[test]
-    fn コレクション定義は全ての図鑑かけらをちょうど1回ずつ含む() {
-        let mut covered: Vec<ItemKind> = Vec::new();
-        for set in CollectionSet::all() {
-            for piece in set.pieces() {
-                assert!(
-                    !covered.contains(piece),
-                    "{piece:?} が複数のセットに重複している"
-                );
-                covered.push(*piece);
-            }
-        }
-        for item in ItemKind::all() {
-            if item.collection().is_some() {
-                assert!(covered.contains(&item), "{item:?} がどのセットにも属していない");
-            }
-        }
-        assert_eq!(covered.len(), PIECE_COUNT);
-    }
-
-    #[test]
-    fn item_kindのsave_idは往復可能() {
-        for item in ItemKind::all() {
-            assert_eq!(ItemKind::from_save_id(item.to_save_id()), Some(item));
-        }
-    }
-
-    #[test]
-    fn 不正なsave_idはnoneを返す() {
-        assert_eq!(ItemKind::from_save_id(255), None);
     }
 }

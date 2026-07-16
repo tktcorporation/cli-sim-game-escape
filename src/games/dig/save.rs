@@ -1,42 +1,30 @@
 //! 穴掘り長屋の localStorage 保存。
+//!
+//! 現場の宝配置は日付から決定的に再生成できるため保存しない — `day` と
+//! 掘削状況だけ保存すれば現場を完全に復元できる。
 
 #[cfg(any(target_arch = "wasm32", test))]
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
+use super::logic;
+#[cfg(any(target_arch = "wasm32", test))]
 use super::state::{
-    DigState, ItemKind, COLLECTION_COUNT, MAX_SHOVEL_LEVEL, NEIGHBOR_COUNT, PIECE_COUNT, YARD_LEN,
+    DigState, COLLECTION_COUNT, KIND_COUNT, RADAR_MAX_PER_DAY, SHOVELS_PER_DAY, SITE_LEN,
 };
 
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 1;
+const SAVE_VERSION: u32 = 2;
 
+/// v2 でゲーム構造ごと作り直したため v1 セーブは互換なし (破棄)。
 #[cfg(target_arch = "wasm32")]
-const MIN_COMPATIBLE_VERSION: u32 = 1;
+const MIN_COMPATIBLE_VERSION: u32 = 2;
 
 #[cfg(target_arch = "wasm32")]
 const STORAGE_KEY: &str = "dig_save";
 
 /// オートセーブ間隔 (tick)。10 ticks/sec → 30 秒。
 pub const AUTOSAVE_INTERVAL: u32 = 300;
-
-/// 庭セルのシリアライズ表現。`0` = 未掘、`1..=12` = `ItemKind::to_save_id() + 1`。
-#[cfg(any(target_arch = "wasm32", test))]
-fn encode_yard_cell(c: Option<ItemKind>) -> u8 {
-    match c {
-        None => 0,
-        Some(item) => item.to_save_id() + 1,
-    }
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn decode_yard_cell(v: u8) -> Option<ItemKind> {
-    if v == 0 {
-        None
-    } else {
-        ItemKind::from_save_id(v - 1)
-    }
-}
 
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Serialize, Deserialize)]
@@ -48,88 +36,85 @@ struct SaveData {
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Serialize, Deserialize, Default)]
 #[serde(default)]
-struct NeighborSave {
-    dug_today: bool,
-    total_digs: u32,
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Serialize, Deserialize, Default)]
-#[serde(default)]
 struct GameSave {
-    yard: Vec<u8>,
-    actions_remaining: u8,
-    last_reset_day: u64,
+    day: u64,
+    /// 保存時点の現場配置のフィンガープリント。ロード時に day から
+    /// 再生成した現場と一致しなければ、`dug` 等の当日進行は別配置への
+    /// 誤適用になるため破棄する (生成ロジック変更時の安全弁)。
+    site_fingerprint: u64,
+    dug: Vec<bool>,
+    scanned: Vec<bool>,
+    shovels: u8,
+    radar_uses: u8,
+    perfect_bonus_given: bool,
     coins: u64,
     total_coins_earned: u64,
-    piece_counts: Vec<u32>,
+    museum_counts: Vec<u32>,
     completed_sets: Vec<bool>,
-    neighbors: Vec<NeighborSave>,
-    shovel_level: u8,
-    rng_state: u64,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
 fn extract_save(state: &DigState) -> SaveData {
-    let yard = state.yard.iter().map(|c| encode_yard_cell(*c)).collect();
-    let neighbors = state
-        .neighbors
-        .iter()
-        .map(|n| NeighborSave {
-            dug_today: n.dug_today,
-            total_digs: n.total_digs,
-        })
-        .collect();
     SaveData {
         version: SAVE_VERSION,
         game: GameSave {
-            yard,
-            actions_remaining: state.actions_remaining,
-            last_reset_day: state.last_reset_day,
+            day: state.day,
+            site_fingerprint: logic::site_fingerprint(&state.treasures),
+            dug: state.dug.to_vec(),
+            scanned: state.scanned.to_vec(),
+            shovels: state.shovels,
+            radar_uses: state.radar_uses,
+            perfect_bonus_given: state.perfect_bonus_given,
             coins: state.coins,
             total_coins_earned: state.total_coins_earned,
-            piece_counts: state.piece_counts.to_vec(),
+            museum_counts: state.museum_counts.to_vec(),
             completed_sets: state.completed_sets.to_vec(),
-            neighbors,
-            shovel_level: state.shovel_level,
-            rng_state: state.rng_state,
         },
     }
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
 fn apply_save(state: &mut DigState, save: &GameSave) {
-    if save.yard.len() == YARD_LEN {
-        for (i, v) in save.yard.iter().enumerate() {
-            state.yard[i] = decode_yard_cell(*v);
+    // 現場は day から再生成する。dug/scanned はその現場に対する掘削状況。
+    logic::setup_site(state, save.day);
+
+    // 再生成した現場が保存時と一致する時だけ当日進行を復元する。
+    // 一致しない (= 生成ロジックか宝の形が変わった) 場合、古い dug を
+    // 新配置に重ねると「掘っていない★」や「◆のハズレ化」が起きるため、
+    // その日はまっさらな現場からやり直しにする。図鑑・コインは影響なし。
+    let same_site = save.site_fingerprint == logic::site_fingerprint(&state.treasures);
+    if same_site {
+        if save.dug.len() == SITE_LEN {
+            for (i, v) in save.dug.iter().enumerate() {
+                state.dug[i] = *v;
+            }
         }
+        if save.scanned.len() == SITE_LEN {
+            for (i, v) in save.scanned.iter().enumerate() {
+                state.scanned[i] = *v;
+            }
+        }
+        // 正規プレイでは返却が消費の直後に起きるため5本を超えることはない。
+        // 改ざんセーブ対策として上限で clamp する。
+        state.shovels = save.shovels.min(SHOVELS_PER_DAY);
+        state.radar_uses = save.radar_uses.min(RADAR_MAX_PER_DAY);
+        state.perfect_bonus_given = save.perfect_bonus_given;
     }
-    state.actions_remaining = save.actions_remaining.min(super::state::MAX_ACTIONS_PER_DAY);
-    state.last_reset_day = save.last_reset_day;
+
     state.coins = save.coins;
     state.total_coins_earned = save.total_coins_earned.max(save.coins);
-    if save.piece_counts.len() == PIECE_COUNT {
-        state.piece_counts.copy_from_slice(&save.piece_counts);
+    // 図鑑は「新種は末尾追記」の前提でプレフィックスだけコピーする。
+    // 厳密長一致にすると、種類を追加した瞬間に旧セーブの図鑑が全消去される。
+    let n = save.museum_counts.len().min(KIND_COUNT);
+    state.museum_counts[..n].copy_from_slice(&save.museum_counts[..n]);
+    let n = save.completed_sets.len().min(COLLECTION_COUNT);
+    for (i, v) in save.completed_sets.iter().take(n).enumerate() {
+        state.completed_sets[i] = *v;
     }
-    if save.completed_sets.len() == COLLECTION_COUNT {
-        for (i, v) in save.completed_sets.iter().enumerate() {
-            state.completed_sets[i] = *v;
-        }
-    }
-    // ネイバー人数が一致する場合のみ反映する。名前・専門は固定定義由来なので
-    // 保存対象から外し、`DigState::new()` が組み立てた既定値を保つ。
-    if save.neighbors.len() == NEIGHBOR_COUNT {
-        for (i, n) in save.neighbors.iter().enumerate() {
-            state.neighbors[i].dug_today = n.dug_today;
-            state.neighbors[i].total_digs = n.total_digs;
-        }
-    }
-    state.shovel_level = save.shovel_level.min(MAX_SHOVEL_LEVEL);
-    if save.rng_state != 0 {
-        state.rng_state = save.rng_state;
-    }
-    // 演出 state はロード後にクリーンにする。
-    state.collection_flash = None;
+    // 演出・UI state はロード後にクリーンにする。
+    state.radar_armed = false;
+    state.flash = None;
+    state.museum_scroll.set(0);
     state.log.clear();
 }
 
@@ -203,85 +188,141 @@ pub fn delete_save() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::logic;
-    use super::super::state::CollectionSet;
+    use super::super::state::{CollectionSet, SHOVELS_PER_DAY};
 
     #[test]
-    fn yard_cellのエンコードは往復可能() {
-        assert_eq!(decode_yard_cell(encode_yard_cell(None)), None);
-        for item in ItemKind::all() {
-            assert_eq!(decode_yard_cell(encode_yard_cell(Some(item))), Some(item));
-        }
-    }
-
-    #[test]
-    fn save_roundtripは進行状況を保持する() {
+    fn save_roundtripは進行状況を保持し現場をdayから再生成する() {
         let mut original = DigState::new();
-        logic::dig_yard(&mut original, 0);
-        logic::dig_neighbor(&mut original, 1);
+        logic::setup_site(&mut original, 42);
+        logic::dig(&mut original, 0);
+        original.scanned[5] = true;
         original.coins = 999;
         original.total_coins_earned = 1500;
-        original.shovel_level = 2;
-        original.piece_counts[3] = 7;
-        original.completed_sets[CollectionSet::Maneki.index()] = true;
-        original.last_reset_day = 42;
-        original.actions_remaining = 2;
+        original.radar_uses = 2;
+        original.perfect_bonus_given = true;
+        original.museum_counts[3] = 7;
+        original.completed_sets[CollectionSet::Fuku.index()] = true;
 
         let saved = extract_save(&original);
         let mut restored = DigState::new();
         apply_save(&mut restored, &saved.game);
 
+        assert_eq!(restored.day, 42);
+        assert_eq!(restored.treasures, logic::generate_site(42), "現場は再生成");
+        assert_eq!(restored.dug, original.dug);
+        assert_eq!(restored.scanned, original.scanned);
+        assert_eq!(restored.shovels, original.shovels);
+        assert_eq!(restored.radar_uses, 2);
+        assert!(restored.perfect_bonus_given);
         assert_eq!(restored.coins, 999);
         assert_eq!(restored.total_coins_earned, 1500);
-        assert_eq!(restored.shovel_level, 2);
-        assert_eq!(restored.piece_counts[3], 7);
-        assert!(restored.completed_sets[CollectionSet::Maneki.index()]);
-        assert_eq!(restored.last_reset_day, 42);
-        assert_eq!(restored.actions_remaining, 2);
-        assert_eq!(restored.yard[0], original.yard[0]);
-        assert!(restored.neighbors[1].dug_today);
-        assert_eq!(restored.neighbors[1].total_digs, 1);
-        // 固定定義由来のフィールドは保存対象外でも保持される。
-        assert_eq!(restored.neighbors[1].name, original.neighbors[1].name);
+        assert_eq!(restored.museum_counts[3], 7);
+        assert!(restored.completed_sets[CollectionSet::Fuku.index()]);
     }
 
     #[test]
     fn apply_saveは不正な長さのvecを無視して既定値を保つ() {
+        let day = 3;
         let save = GameSave {
-            yard: vec![1, 2, 3], // YARD_LEN と不一致
-            piece_counts: vec![1, 2],
-            completed_sets: vec![true],
-            neighbors: vec![NeighborSave::default()],
+            day,
+            site_fingerprint: logic::site_fingerprint(&logic::generate_site(day)),
+            dug: vec![true; 3],
+            scanned: vec![true],
+            museum_counts: vec![],
+            completed_sets: vec![],
+            shovels: SHOVELS_PER_DAY,
             ..Default::default()
         };
         let mut s = DigState::new();
         apply_save(&mut s, &save);
-        assert!(s.yard.iter().all(|c| c.is_none()));
-        assert_eq!(s.piece_counts, [0; PIECE_COUNT]);
+        assert!(s.dug.iter().all(|d| !d));
+        assert!(s.scanned.iter().all(|d| !d));
+        assert_eq!(s.museum_counts, [0; KIND_COUNT]);
         assert_eq!(s.completed_sets, [false; COLLECTION_COUNT]);
-        assert!(!s.neighbors[0].dug_today);
     }
 
     #[test]
-    fn apply_saveはshovel_levelを上限でclampする() {
+    fn apply_saveはシャベルと羅盤回数を上限でclampする() {
         let save = GameSave {
-            shovel_level: 99,
+            day: 0,
+            site_fingerprint: logic::site_fingerprint(&logic::generate_site(0)),
+            shovels: 200,
+            radar_uses: 99,
             ..Default::default()
         };
         let mut s = DigState::new();
         apply_save(&mut s, &save);
-        assert_eq!(s.shovel_level, MAX_SHOVEL_LEVEL);
+        assert_eq!(s.shovels, SHOVELS_PER_DAY);
+        assert_eq!(s.radar_uses, RADAR_MAX_PER_DAY);
+    }
+
+    #[test]
+    fn フィンガープリント不一致なら当日進行を破棄し永続進行は保持する() {
+        // 生成ロジック変更後のロードを模す: fp が再生成結果と食い違う。
+        let save = GameSave {
+            day: 5,
+            site_fingerprint: 0xDEAD_BEEF,
+            dug: vec![true; SITE_LEN],
+            scanned: vec![true; SITE_LEN],
+            shovels: 1,
+            radar_uses: 3,
+            perfect_bonus_given: true,
+            coins: 777,
+            museum_counts: vec![9; KIND_COUNT],
+            ..Default::default()
+        };
+        let mut s = DigState::new();
+        apply_save(&mut s, &save);
+        // 当日進行は破棄 → まっさらな現場
+        assert!(s.dug.iter().all(|d| !d));
+        assert!(s.scanned.iter().all(|d| !d));
+        assert_eq!(s.shovels, SHOVELS_PER_DAY);
+        assert_eq!(s.radar_uses, 0);
+        assert!(!s.perfect_bonus_given);
+        // 永続進行は保持
+        assert_eq!(s.coins, 777);
+        assert_eq!(s.museum_counts, [9; KIND_COUNT]);
+    }
+
+    #[test]
+    fn 図鑑は種類が増えた将来セーブでもプレフィックスが保持される() {
+        // 旧バージョン (種類が少ない) のセーブを模す: 長さ不一致でも
+        // 先頭からのプレフィックスは復元されること。
+        let save = GameSave {
+            museum_counts: vec![5, 3],
+            completed_sets: vec![true],
+            ..Default::default()
+        };
+        let mut s = DigState::new();
+        apply_save(&mut s, &save);
+        assert_eq!(s.museum_counts[0], 5);
+        assert_eq!(s.museum_counts[1], 3);
+        assert_eq!(s.museum_counts[2], 0);
+        assert!(s.completed_sets[0]);
+        assert!(!s.completed_sets[1]);
     }
 
     #[test]
     fn apply_saveはtotal_coins_earnedがcoins未満なら引き上げる() {
         let save = GameSave {
             coins: 500,
-            total_coins_earned: 100, // 壊れたデータ (coins より少ない)
+            total_coins_earned: 100,
             ..Default::default()
         };
         let mut s = DigState::new();
         apply_save(&mut s, &save);
         assert_eq!(s.total_coins_earned, 500);
+    }
+
+    #[test]
+    fn apply_saveは演出とui_stateをクリーンにする() {
+        let save = GameSave::default();
+        let mut s = DigState::new();
+        s.radar_armed = true;
+        s.flash = Some(super::super::state::Flash { cells: vec![1], ttl: 5 });
+        apply_save(&mut s, &save);
+        assert!(!s.radar_armed);
+        assert!(s.flash.is_none());
+        assert!(s.log.is_empty());
     }
 }
