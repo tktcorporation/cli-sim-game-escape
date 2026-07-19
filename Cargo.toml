@@ -51,7 +51,7 @@ strip = "debuginfo"
 [profile.dev.package."*"]
 opt-level = 3
 
-# `cargo test` は simulator (metropolis / cafe / abyss) の tick ループに支配される。
+# `cargo test` は simulator (metropolis / abyss) の tick ループに支配される。
 # 自プロジェクト側も opt-level=3 にすると debug 比 10-20x 速くなる。
 # debug = 2 (test profile のデフォルト) は維持しているので file:line は出るが、
 # inline 展開で stack frame が消える / local variable が optimize out される DX コストはある。

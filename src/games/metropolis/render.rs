@@ -1702,7 +1702,7 @@ fn render_tab_panel(
         bar.render(f, v[0], &mut cs);
     }
 
-    // 5 タブを共通の `ScrollableTab` primitive に乗せる。Cafe / Abyss と
+    // 5 タブを共通の `ScrollableTab` primitive に乗せる。Abyss と
     // 同じスクロール挙動 (overflow 時のみ ▲▼ 列を予約 / clamp の自動書き戻し)
     // を共有することで、game ごとに scroll 実装を再発明しない。
     let list = match state.panel_tab {
@@ -1733,7 +1733,7 @@ fn render_tab_panel(
 ///
 /// `updatedAt` (= `performance.now()` ミリ秒) を載せることで、JS 側は
 /// 「最後の更新から N ms 以上経った rect」を stale とみなし無視できる。
-/// これがないと metropolis から他ゲーム (cafe / abyss など) に切り替えた
+/// これがないと metropolis から他ゲーム (abyss など) に切り替えた
 /// 後も古い rect が残り、その範囲のスワイプが J/K に化けて他ゲームの
 /// scrolling を奪う。metropolis 自身は毎フレーム render するので fresh
 /// な rect が継続更新される。
