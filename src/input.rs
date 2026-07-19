@@ -10,7 +10,7 @@ use crate::games::GameChoice;
 ///
 /// Action IDs are scoped to a `ClickScope`, so the global `u16` namespace no
 /// longer has to be partitioned by hand across screens.  Dispatchers can
-/// detect cross-screen mis-routing (e.g. a stale `Game(Career)` click hitting
+/// detect cross-screen mis-routing (e.g. a stale `Game(Cookie)` click hitting
 /// `Menu` after a screen transition) instead of silently triggering an
 /// unrelated action that happens to share the same numeric ID.
 #[derive(Debug, Clone, PartialEq)]

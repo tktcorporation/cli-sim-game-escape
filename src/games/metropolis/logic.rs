@@ -1542,7 +1542,7 @@ pub fn gather_house_neighborhood_with(
 ///
 /// `economic_density = n_workshop_within_5 + n_shop_within_5` を派生値として
 /// 一段噛ませる。Workshop 未実装の現在は Shop だけで Highrise に到達でき、
-/// Workshop 実装後は両方が寄与する設計 (career Tier 進化と同じ「複数経路」思想)。
+/// Workshop 実装後は両方が寄与する設計 (複数経路で Tier が上がる思想)。
 ///
 /// **シムシティ的な性質**: 「家を固めて道路を引いただけ」では Apartment にならず、
 /// **商業 (Shop / Workshop) が近くで動いて初めて街区がリッチ化する**。

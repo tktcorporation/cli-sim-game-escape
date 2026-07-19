@@ -543,7 +543,7 @@
     // 内に同居するため、スワイプの開始位置がパネル領域なら panel scroll
     // (大文字 J/K)、それ以外 (= マップ領域) なら viewport scroll (j/k) と
     // 動的に振り分ける。Rust 側が `window.metropolisPanelRect` (cell 座標)
-    // を毎フレーム書き出し、JS 側はそれと比較する。他ゲーム (cafe / abyss)
+    // を毎フレーム書き出し、JS 側はそれと比較する。他ゲーム (abyss など)
     // は rect を書き出さないので常に j/k フォールバック。
     //
     // 重要:
@@ -601,7 +601,7 @@
         try { iosHapticLabel.click(); } catch (_e) {}
       }
 
-      // metropolis 以外のゲーム (cafe / abyss など) に切り替えた時に古い
+      // metropolis 以外のゲーム (abyss など) に切り替えた時に古い
       // rect が残ると、その範囲のスワイプが J/K に化けて他ゲームのスクロール
       // を奪う。Rust 側が毎フレーム `updatedAt` (performance.now()) を更新する
       // ので、N ms 以上更新が無ければ stale とみなして無視する。

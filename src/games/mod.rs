@@ -1,16 +1,11 @@
 //! Game trait and game selection logic.
 
 pub mod abyss;
-pub mod cafe;
-pub mod career;
 pub mod cookie;
-pub mod dig;
 pub mod factory;
 pub mod godfield;
-pub mod merge;
 pub mod metropolis;
 pub mod rpg;
-pub mod tamagotchi;
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -41,15 +36,10 @@ pub trait Game {
 pub enum GameChoice {
     Cookie,
     Factory,
-    Career,
     Rpg,
-    Cafe,
     Abyss,
     Godfield,
     Metropolis,
-    Tamagotchi,
-    Merge,
-    Dig,
 }
 
 /// Top-level application state.
@@ -79,14 +69,9 @@ pub fn create_game(choice: &GameChoice) -> Box<dyn Game> {
     match choice {
         GameChoice::Cookie => Box::new(cookie::CookieGame::new()),
         GameChoice::Factory => Box::new(factory::FactoryGame::new()),
-        GameChoice::Career => Box::new(career::CareerGame::new()),
         GameChoice::Rpg => Box::new(rpg::RpgGame::new()),
-        GameChoice::Cafe => Box::new(cafe::CafeGame::new()),
         GameChoice::Abyss => Box::new(abyss::AbyssGame::new()),
         GameChoice::Godfield => Box::new(godfield::GodFieldGame::new()),
         GameChoice::Metropolis => Box::new(metropolis::MetropolisGame::new()),
-        GameChoice::Tamagotchi => Box::new(tamagotchi::TamagotchiGame::new()),
-        GameChoice::Merge => Box::new(merge::MergeGame::new()),
-        GameChoice::Dig => Box::new(dig::DigGame::new()),
     }
 }

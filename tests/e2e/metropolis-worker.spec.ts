@@ -37,9 +37,9 @@ test("AI worker dispatches actions and at least one construction starts", async 
   // 1 フレーム分余裕を持たせて keyboard handler が登録されるのを待つ。
   await page.waitForTimeout(200);
 
-  // '8' = MENU_SELECT_METROPOLIS。`main.rs` の InputEvent::Key('8') が
+  // '6' = MENU_SELECT_METROPOLIS。`main.rs` の InputEvent::Key('6') が
   // GameChoice::Metropolis に直接遷移するため、SPACE での確認操作は不要。
-  await page.keyboard.press("8");
+  await page.keyboard.press("6");
 
   // ratzilla は terminal 行ごとに `<pre>` を分割するので、ページ全体テキストで
   // 探す。Metropolis のグリッド title (`▟▙ City — POP ...`) が描画されたら遷移完了。

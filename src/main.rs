@@ -20,21 +20,16 @@ use ratzilla::{DomBackend, WebRenderer};
 // ── Menu action IDs ─────────────────────────────────────────────
 pub const MENU_SELECT_COOKIE: u16 = 1;
 pub const MENU_SELECT_FACTORY: u16 = 2;
-pub const MENU_SELECT_CAREER: u16 = 3;
-pub const MENU_SELECT_RPG: u16 = 4;
-pub const MENU_SELECT_CAFE: u16 = 5;
-pub const MENU_SELECT_ABYSS: u16 = 6;
-pub const MENU_SELECT_GODFIELD: u16 = 7;
-pub const MENU_SELECT_METROPOLIS: u16 = 8;
-pub const MENU_SELECT_TAMAGOTCHI: u16 = 9;
-pub const MENU_SELECT_MERGE: u16 = 13;
-pub const MENU_SELECT_DIG: u16 = 14;
-pub const MENU_SELECT_SETTINGS: u16 = 10;
-pub const MENU_SCROLL_UP: u16 = 11;
-pub const MENU_SCROLL_DOWN: u16 = 12;
+pub const MENU_SELECT_RPG: u16 = 3;
+pub const MENU_SELECT_ABYSS: u16 = 4;
+pub const MENU_SELECT_GODFIELD: u16 = 5;
+pub const MENU_SELECT_METROPOLIS: u16 = 6;
+pub const MENU_SELECT_SETTINGS: u16 = 7;
+pub const MENU_SCROLL_UP: u16 = 8;
+pub const MENU_SCROLL_DOWN: u16 = 9;
 
-/// Last valid index of the main menu cards (11 games + settings → 0..=11).
-const MENU_LAST_INDEX: u8 = 11;
+/// Last valid index of the main menu cards (6 games + settings → 0..=6).
+const MENU_LAST_INDEX: u8 = 6;
 
 /// Cursor → menu action, used for the A button on the main menu.
 enum MenuPick {
@@ -46,29 +41,20 @@ fn menu_pick_for(idx: u8) -> MenuPick {
     match idx {
         0 => MenuPick::Game(GameChoice::Cookie),
         1 => MenuPick::Game(GameChoice::Factory),
-        2 => MenuPick::Game(GameChoice::Career),
-        3 => MenuPick::Game(GameChoice::Rpg),
-        4 => MenuPick::Game(GameChoice::Cafe),
-        5 => MenuPick::Game(GameChoice::Abyss),
-        6 => MenuPick::Game(GameChoice::Godfield),
-        7 => MenuPick::Game(GameChoice::Metropolis),
-        8 => MenuPick::Game(GameChoice::Tamagotchi),
-        9 => MenuPick::Game(GameChoice::Merge),
-        10 => MenuPick::Game(GameChoice::Dig),
+        2 => MenuPick::Game(GameChoice::Rpg),
+        3 => MenuPick::Game(GameChoice::Abyss),
+        4 => MenuPick::Game(GameChoice::Godfield),
+        5 => MenuPick::Game(GameChoice::Metropolis),
         _ => MenuPick::Settings,
     }
 }
 
 // ── Settings action IDs ─────────────────────────────────────────
 const SETTINGS_RESET_COOKIE: u16 = 10;
-const SETTINGS_RESET_CAREER: u16 = 11;
-const SETTINGS_CONFIRM_YES: u16 = 12;
-const SETTINGS_CONFIRM_NO: u16 = 13;
-const SETTINGS_RESET_ABYSS: u16 = 14;
-const SETTINGS_RESET_METROPOLIS: u16 = 15;
-const SETTINGS_RESET_TAMAGOTCHI: u16 = 16;
-const SETTINGS_RESET_MERGE: u16 = 17;
-const SETTINGS_RESET_DIG: u16 = 18;
+const SETTINGS_RESET_ABYSS: u16 = 11;
+const SETTINGS_RESET_METROPOLIS: u16 = 12;
+const SETTINGS_CONFIRM_YES: u16 = 13;
+const SETTINGS_CONFIRM_NO: u16 = 14;
 
 /// Use `elementFromPoint` to find which grid cell was clicked.
 ///
@@ -268,32 +254,17 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 InputEvent::Key('2') | InputEvent::Click(_, MENU_SELECT_FACTORY) => {
                     Some(MenuPick::Game(GameChoice::Factory))
                 }
-                InputEvent::Key('3') | InputEvent::Click(_, MENU_SELECT_CAREER) => {
-                    Some(MenuPick::Game(GameChoice::Career))
-                }
-                InputEvent::Key('4') | InputEvent::Click(_, MENU_SELECT_RPG) => {
+                InputEvent::Key('3') | InputEvent::Click(_, MENU_SELECT_RPG) => {
                     Some(MenuPick::Game(GameChoice::Rpg))
                 }
-                InputEvent::Key('5') | InputEvent::Click(_, MENU_SELECT_CAFE) => {
-                    Some(MenuPick::Game(GameChoice::Cafe))
-                }
-                InputEvent::Key('6') | InputEvent::Click(_, MENU_SELECT_ABYSS) => {
+                InputEvent::Key('4') | InputEvent::Click(_, MENU_SELECT_ABYSS) => {
                     Some(MenuPick::Game(GameChoice::Abyss))
                 }
-                InputEvent::Key('7') | InputEvent::Click(_, MENU_SELECT_GODFIELD) => {
+                InputEvent::Key('5') | InputEvent::Click(_, MENU_SELECT_GODFIELD) => {
                     Some(MenuPick::Game(GameChoice::Godfield))
                 }
-                InputEvent::Key('8') | InputEvent::Click(_, MENU_SELECT_METROPOLIS) => {
+                InputEvent::Key('6') | InputEvent::Click(_, MENU_SELECT_METROPOLIS) => {
                     Some(MenuPick::Game(GameChoice::Metropolis))
-                }
-                InputEvent::Key('9') | InputEvent::Click(_, MENU_SELECT_TAMAGOTCHI) => {
-                    Some(MenuPick::Game(GameChoice::Tamagotchi))
-                }
-                InputEvent::Click(_, MENU_SELECT_MERGE) => {
-                    Some(MenuPick::Game(GameChoice::Merge))
-                }
-                InputEvent::Click(_, MENU_SELECT_DIG) => {
-                    Some(MenuPick::Game(GameChoice::Dig))
                 }
                 InputEvent::Key('0') | InputEvent::Click(_, MENU_SELECT_SETTINGS) => {
                     Some(MenuPick::Settings)
@@ -369,23 +340,11 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     InputEvent::Key('1') | InputEvent::Click(_, SETTINGS_RESET_COOKIE) => {
                         *confirm_reset = Some(GameChoice::Cookie);
                     }
-                    InputEvent::Key('2') | InputEvent::Click(_, SETTINGS_RESET_CAREER) => {
-                        *confirm_reset = Some(GameChoice::Career);
-                    }
-                    InputEvent::Key('3') | InputEvent::Click(_, SETTINGS_RESET_ABYSS) => {
+                    InputEvent::Key('2') | InputEvent::Click(_, SETTINGS_RESET_ABYSS) => {
                         *confirm_reset = Some(GameChoice::Abyss);
                     }
-                    InputEvent::Key('4') | InputEvent::Click(_, SETTINGS_RESET_METROPOLIS) => {
+                    InputEvent::Key('3') | InputEvent::Click(_, SETTINGS_RESET_METROPOLIS) => {
                         *confirm_reset = Some(GameChoice::Metropolis);
-                    }
-                    InputEvent::Key('5') | InputEvent::Click(_, SETTINGS_RESET_TAMAGOTCHI) => {
-                        *confirm_reset = Some(GameChoice::Tamagotchi);
-                    }
-                    InputEvent::Key('6') | InputEvent::Click(_, SETTINGS_RESET_MERGE) => {
-                        *confirm_reset = Some(GameChoice::Merge);
-                    }
-                    InputEvent::Key('7') | InputEvent::Click(_, SETTINGS_RESET_DIG) => {
-                        *confirm_reset = Some(GameChoice::Dig);
                     }
                     InputEvent::Key('q') | InputEvent::Click(_, BACK_TO_MENU) => {
                         *state = AppState::Menu { scroll: 0, selected: 0 };
@@ -413,12 +372,8 @@ fn perform_reset(game: &GameChoice) {
     #[cfg(target_arch = "wasm32")]
     match game {
         GameChoice::Cookie => games::cookie::save::delete_save(),
-        GameChoice::Career => games::career::save::delete_save(),
         GameChoice::Abyss => games::abyss::save::delete_save(),
         GameChoice::Metropolis => games::metropolis::save::delete_save(),
-        GameChoice::Tamagotchi => games::tamagotchi::save::delete_save(),
-        GameChoice::Merge => games::merge::save::delete_save(),
-        GameChoice::Dig => games::dig::save::delete_save(),
         _ => {}
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -593,15 +548,10 @@ fn render_menu(
     const MENU_ENTRIES: &[Entry] = &[
         ("Cookie Factory", "クッキーをクリックして増やす放置ゲーム", MENU_SELECT_COOKIE, '▶', Color::LightYellow),
         ("Tiny Factory", "工場を作って生産ラインを最適化する放置ゲーム", MENU_SELECT_FACTORY, '▶', Color::Cyan),
-        ("Career Simulator", "スキルを磨いて転職・投資でキャリアを築くシミュレーション", MENU_SELECT_CAREER, '▶', Color::LightGreen),
         ("Dungeon Dive", "ダンジョンを探索して帰還するローグライト風RPG", MENU_SELECT_RPG, '▶', Color::LightRed),
-        ("廃墟カフェ復興記", "廃墟カフェを復興するシナリオ経営SLG", MENU_SELECT_CAFE, '▶', Color::LightMagenta),
         ("深淵潜行 (Abyss Idle)", "自動戦闘で深層を目指す放置型ローグダンジョン", MENU_SELECT_ABYSS, '▶', Color::LightBlue),
         ("神の戦場 (God Field)", "4人で戦うターン制カードバトルロイヤル", MENU_SELECT_GODFIELD, '▶', Color::Red),
         ("Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶', Color::LightCyan),
-        ("たまごっち", "卵から育てて寿命を伸ばす育成ゲーム", MENU_SELECT_TAMAGOTCHI, '▶', Color::Magenta),
-        ("マージマンション", "同種同レベルを重ねて上位アイテムを作るマージゲーム", MENU_SELECT_MERGE, '▶', Color::Green),
-        ("穴掘り長屋", "ヒントの数字で宝の位置を推理する1日5掘りの発掘パズル", MENU_SELECT_DIG, '▶', Color::Yellow),
         ("設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 
@@ -815,18 +765,6 @@ fn render_settings_main(
 
     cl.push(Line::from(""));
 
-    // Career Simulator
-    cl.push_clickable(
-        Line::from(vec![
-            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
-            Span::styled("Career Simulator", Style::default().fg(Color::White)),
-            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
-        ]),
-        SETTINGS_RESET_CAREER,
-    );
-
-    cl.push(Line::from(""));
-
     // 深淵潜行 (Abyss Idle)
     cl.push_clickable(
         Line::from(vec![
@@ -850,45 +788,9 @@ fn render_settings_main(
     );
 
     cl.push(Line::from(""));
-
-    // たまごっち
-    cl.push_clickable(
-        Line::from(vec![
-            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
-            Span::styled("たまごっち", Style::default().fg(Color::White)),
-            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
-        ]),
-        SETTINGS_RESET_TAMAGOTCHI,
-    );
-
-    cl.push(Line::from(""));
-
-    // マージマンション
-    cl.push_clickable(
-        Line::from(vec![
-            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
-            Span::styled("マージマンション", Style::default().fg(Color::White)),
-            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
-        ]),
-        SETTINGS_RESET_MERGE,
-    );
-
-    cl.push(Line::from(""));
-
-    // 穴掘り長屋
-    cl.push_clickable(
-        Line::from(vec![
-            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
-            Span::styled("穴掘り長屋", Style::default().fg(Color::White)),
-            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
-        ]),
-        SETTINGS_RESET_DIG,
-    );
-
-    cl.push(Line::from(""));
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
-        " ※ Tiny Factory / Dungeon Dive は",
+        " ※ Tiny Factory / Dungeon Dive / God Field は",
         Style::default().fg(Color::DarkGray),
     )));
     cl.push(Line::from(Span::styled(
@@ -915,13 +817,8 @@ fn render_confirm_dialog(
 ) {
     let game_name = match game {
         GameChoice::Cookie => "Cookie Factory",
-        GameChoice::Career => "Career Simulator",
-        GameChoice::Cafe => "廃墟カフェ復興記",
         GameChoice::Abyss => "深淵潜行",
         GameChoice::Metropolis => "Idle Metropolis",
-        GameChoice::Tamagotchi => "たまごっち",
-        GameChoice::Merge => "マージマンション",
-        GameChoice::Dig => "穴掘り長屋",
         _ => "Unknown",
     };
 

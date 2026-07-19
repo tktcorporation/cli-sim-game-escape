@@ -1029,7 +1029,7 @@ mod tests {
 
     /// Codex review #82: when content fits, ScrollableTab must NOT reserve
     /// the right-edge scroll column. Otherwise full-width-authored lines
-    /// (e.g. cafe Cards 32-cell line designs) clip the last cell. The
+    /// (e.g. a 32-cell card line design) clip the last cell. The
     /// clickable list row span equals the full inner.width on no overflow.
     #[test]
     fn scrollable_tab_uses_full_width_when_no_overflow() {
