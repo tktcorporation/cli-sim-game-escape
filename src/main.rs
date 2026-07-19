@@ -790,7 +790,7 @@ fn render_settings_main(
     cl.push(Line::from(""));
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
-        " ※ Tiny Factory / Dungeon Dive は",
+        " ※ Tiny Factory / Dungeon Dive / God Field は",
         Style::default().fg(Color::DarkGray),
     )));
     cl.push(Line::from(Span::styled(
