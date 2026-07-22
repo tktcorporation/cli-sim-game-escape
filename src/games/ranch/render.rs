@@ -15,7 +15,7 @@ use crate::input::{is_narrow_layout, ClickState};
 use crate::widgets::{ClickableList, ScrollableTab, TabBar};
 
 use super::actions::{FEED_BASE, SCROLL_DOWN, SCROLL_UP, TAB_BATTLE, TAB_DEX, TAB_HABITAT, TOGGLE_TEAM_BASE, UPGRADE_CAPACITY};
-use super::state::{Affinity, RanchState, Species, Tab, CLASH_INTERVAL_TICKS, SPECIES_COUNT};
+use super::state::{Affinity, RanchState, Species, Tab, CLASH_INTERVAL_TICKS, MATURE_LEVEL, SPECIES_COUNT};
 
 pub fn render(state: &RanchState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
     let is_narrow = is_narrow_layout(area.width);
@@ -297,10 +297,11 @@ fn species_summary_line(state: &RanchState, species: Species) -> Line<'static> {
     Line::from(spans)
 }
 
-/// 全種の個体を種の区別なく1つの群れに混ぜたリスト ((種, 成熟か) のペア)。
+/// 全種の個体を種の区別なく1つの群れに混ぜたリスト ((種, レベル) のペア)。
 /// 種ごとに1体ずつ順番に取り出すラウンドロビンにすることで、同じ種で固まらず
-/// 色とりどりに混ざった山に見えるようにする。
-fn all_creatures_mixed(state: &RanchState) -> Vec<(Species, bool)> {
+/// 色とりどりに混ざった山に見えるようにする。レベルは `creature_style` で
+/// 育ち具合をグラデーションとして見せるために持たせている。
+fn all_creatures_mixed(state: &RanchState) -> Vec<(Species, u8)> {
     let mut cursors = [0usize; SPECIES_COUNT];
     let mut mixed = Vec::new();
     loop {
@@ -309,7 +310,7 @@ fn all_creatures_mixed(state: &RanchState) -> Vec<(Species, bool)> {
             let idx = species.index();
             let creatures = &state.population[idx];
             if cursors[idx] < creatures.len() {
-                mixed.push((species, creatures[cursors[idx]].is_mature()));
+                mixed.push((species, creatures[cursors[idx]].level));
                 cursors[idx] += 1;
                 added = true;
             }
@@ -321,6 +322,20 @@ fn all_creatures_mixed(state: &RanchState) -> Vec<(Species, bool)> {
     mixed
 }
 
+/// レベルに応じた個体の表示スタイル。未成熟なほど暗く、育つにつれて種の色が
+/// はっきり出るよう段階を分けることで、増える/育つ過程が「見ているだけで
+/// 分かる」ようにする (成熟の有無だけの二値ではなく3段階のグラデーションにする)。
+fn creature_style(species: Species, level: u8) -> Style {
+    let color = species_color(species);
+    if level < MATURE_LEVEL / 2 {
+        Style::default().fg(Color::DarkGray)
+    } else if level < MATURE_LEVEL {
+        Style::default().fg(color)
+    } else {
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    }
+}
+
 /// 末広がりのピラミッド型に積み上がる「山」の各行の幅 (下から上へ)。
 const MOUND_ROW_WIDTHS_BOTTOM_UP: [usize; 7] = [13, 11, 9, 7, 5, 3, 1];
 
@@ -328,6 +343,10 @@ const MOUND_ROW_WIDTHS_BOTTOM_UP: [usize; 7] = [13, 11, 9, 7, 5, 3, 1];
 /// 積み上げる。`all_creatures_mixed` でラウンドロビンに混ぜたリストを、
 /// 土台 (下の行) から埋めていき、末広がりのピラミッド型のシルエットにする。
 /// 表示上限を超えた分は最終行に "+N" でまとめる。
+///
+/// 進化直後は `state.evolution_flash` が指す個体 (=進化先の種の中で最後に
+/// 追加された個体、つまり最新の1体) を数tickだけ点滅させ、群れが増えるだけ
+/// でなく「今まさに進化した」瞬間も見ているだけで分かるようにする。
 fn mound_lines(state: &RanchState) -> Vec<Line<'static>> {
     let base_width = MOUND_ROW_WIDTHS_BOTTOM_UP[0];
     let capacity: usize = MOUND_ROW_WIDTHS_BOTTOM_UP.iter().sum();
@@ -336,26 +355,27 @@ fn mound_lines(state: &RanchState) -> Vec<Line<'static>> {
     let total = mixed.len();
     let shown = total.min(capacity);
 
-    let mut idx = 0;
+    let flash = state.evolution_flash.filter(|f| f.ticks_left > 0);
+    let flash_pos = flash.and_then(|f| mixed[..shown].iter().rposition(|&(sp, _)| sp == f.species));
+
+    let mut flat: Vec<Span<'static>> = mixed[..shown]
+        .iter()
+        .enumerate()
+        .map(|(i, &(species, level))| {
+            if Some(i) == flash_pos && flash.unwrap().ticks_left % 4 < 2 {
+                Span::styled("✨", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
+            } else {
+                Span::styled(species.glyph(), creature_style(species, level))
+            }
+        })
+        .collect();
+    flat.resize(capacity, Span::raw(" "));
+
     let mut rows_bottom_up: Vec<Vec<Span<'static>>> = Vec::with_capacity(MOUND_ROW_WIDTHS_BOTTOM_UP.len());
     for &width in MOUND_ROW_WIDTHS_BOTTOM_UP.iter() {
         let pad = (base_width - width) / 2;
         let mut spans: Vec<Span<'static>> = vec![Span::raw(" ".repeat(pad + 3))];
-        for _ in 0..width {
-            let span = if idx < shown {
-                let (species, mature) = mixed[idx];
-                idx += 1;
-                let style = if mature {
-                    Style::default().fg(species_color(species)).add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                Span::styled(species.glyph(), style)
-            } else {
-                Span::raw(" ")
-            };
-            spans.push(span);
-        }
+        spans.extend(flat.drain(0..width));
         rows_bottom_up.push(spans);
     }
 
@@ -551,7 +571,7 @@ fn render_battle(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickSt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::state::Creature;
+    use super::super::state::{Creature, EvolutionFlash};
     use ratzilla::ratatui::backend::TestBackend;
     use ratzilla::ratatui::Terminal;
 
@@ -706,6 +726,45 @@ mod tests {
             vec![Species::Tsubu, Species::FireKirin, Species::Tsubu, Species::FireKirin],
             "種ごとに固めず交互に混ざるはず"
         );
+    }
+
+    /// レベルに応じて3段階 (暗いグレー→種の色→太字の種の色) に分かれること。
+    /// 二値のON/OFFではなく、育つ過程がグラデーションで伝わるようにするための前提。
+    #[test]
+    fn creature_style_reflects_growth_stage() {
+        let young = creature_style(Species::Tsubu, 1);
+        assert_eq!(young.fg, Some(Color::DarkGray));
+        assert!(!young.add_modifier.contains(Modifier::BOLD));
+
+        let developing = creature_style(Species::Tsubu, MATURE_LEVEL - 1);
+        assert_eq!(developing.fg, Some(species_color(Species::Tsubu)));
+        assert!(!developing.add_modifier.contains(Modifier::BOLD));
+
+        let mature = creature_style(Species::Tsubu, MATURE_LEVEL);
+        assert_eq!(mature.fg, Some(species_color(Species::Tsubu)));
+        assert!(mature.add_modifier.contains(Modifier::BOLD));
+    }
+
+    /// 進化直後は、進化先の種の最新個体が数tickだけ点滅表示されること
+    /// (「見ているだけで進化の瞬間が分かる」ための演出)。
+    #[test]
+    fn mound_lines_flashes_the_newly_evolved_individual() {
+        let mut state = RanchState::new();
+        state.population[Species::Tsubu.index()] = vec![Creature::new(); 2];
+        state.evolution_flash = Some(EvolutionFlash { species: Species::Tsubu, ticks_left: 4 });
+        let lines = mound_lines(&state);
+        let joined: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref()).collect();
+        assert!(joined.contains('✨'), "進化直後は✨が点滅表示されるはず");
+    }
+
+    /// 残りtickが尽きた演出は表示に反映されないこと。
+    #[test]
+    fn mound_lines_ignores_expired_evolution_flash() {
+        let mut state = RanchState::new();
+        state.evolution_flash = Some(EvolutionFlash { species: Species::Tsubu, ticks_left: 0 });
+        let lines = mound_lines(&state);
+        let joined: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref()).collect();
+        assert!(!joined.contains('✨'), "残りtickが0の演出は表示されないはず");
     }
 
     /// `clash_cooldown` (既存の対戦タイマー) をそのままアニメーション進捗に

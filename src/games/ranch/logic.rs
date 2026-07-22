@@ -4,7 +4,8 @@
 
 use super::actions::PlayerAction;
 use super::state::{
-    Affinity, Creature, RanchState, Species, CLASH_INTERVAL_TICKS, MATURE_LEVEL, MAX_LEVEL,
+    Affinity, Creature, EvolutionFlash, RanchState, Species, CLASH_INTERVAL_TICKS, MATURE_LEVEL,
+    MAX_LEVEL,
 };
 
 // ── RNG ──────────────────────────────────────────────────────────
@@ -73,6 +74,10 @@ const EVOLUTION_COUNT_FACTOR_PER_EXTRA: f64 = 0.1;
 
 const WILD_CAPTURE_CHANCE: f64 = 0.15;
 
+/// 進化演出 (`RanchState::evolution_flash`) を保持しておくtick数。
+/// 10 ticks/sec なので2秒間、群れの中の進化直後の個体が光る。
+const EVOLUTION_FLASH_TICKS: u8 = 20;
+
 // ── Tick entry point ─────────────────────────────────────────────
 
 pub fn tick(state: &mut RanchState, delta_ticks: u32) {
@@ -88,7 +93,18 @@ fn tick_once(state: &mut RanchState) {
     tick_feed_focus_accumulation(state);
     tick_reproduction(state);
     tick_evolution(state);
+    tick_evolution_flash(state);
     tick_battle(state);
+}
+
+/// 進化演出の残りtickを減らし、0になったら消す。
+fn tick_evolution_flash(state: &mut RanchState) {
+    if let Some(flash) = &mut state.evolution_flash {
+        flash.ticks_left = flash.ticks_left.saturating_sub(1);
+        if flash.ticks_left == 0 {
+            state.evolution_flash = None;
+        }
+    }
 }
 
 // ── Growth ────────────────────────────────────────────────────────
@@ -226,6 +242,7 @@ fn evolve(state: &mut RanchState, species: Species, consume: u32) {
 
     consume_mature(state, species, consume);
     state.population[target.index()].push(Creature::new());
+    state.evolution_flash = Some(EvolutionFlash { species: target, ticks_left: EVOLUTION_FLASH_TICKS });
 
     let first_sighting = !state.discovered[target.index()];
     state.discovered[target.index()] = true;
@@ -587,6 +604,33 @@ mod tests {
             .filter(|&&sp| s.discovered[sp.index()])
             .count();
         assert_eq!(discovered_total, 1);
+    }
+
+    /// 進化すると、進化先の種を指す演出フラグが立つこと
+    /// (牧場タブの山で該当個体を数tick光らせるための情報)。
+    #[test]
+    fn evolve_sets_evolution_flash_for_the_target_species() {
+        let mut s = RanchState::new();
+        s.population[Species::Tsubu.index()] = vec![Creature { level: MAX_LEVEL, xp: 0 }; 5];
+        assert!(s.evolution_flash.is_none());
+        evolve(&mut s, Species::Tsubu, 5);
+        let flash = s.evolution_flash.expect("進化演出フラグが立つはず");
+        assert_eq!(flash.ticks_left, EVOLUTION_FLASH_TICKS);
+        assert!(
+            [Species::AquaTsubu, Species::FlareTsubu, Species::EarthTsubu].contains(&flash.species),
+            "フラグは実際に進化した先の種を指すはず"
+        );
+    }
+
+    /// 演出フラグは経過tick数だけ減り、0になったら自動的に消えること。
+    #[test]
+    fn evolution_flash_expires_after_its_duration() {
+        let mut s = RanchState::new();
+        s.evolution_flash = Some(EvolutionFlash { species: Species::AquaTsubu, ticks_left: 2 });
+        tick(&mut s, 1);
+        assert_eq!(s.evolution_flash.unwrap().ticks_left, 1, "1tickごとに1減るはず");
+        tick(&mut s, 1);
+        assert!(s.evolution_flash.is_none(), "残りtickが0になったら消えるはず");
     }
 
     #[test]

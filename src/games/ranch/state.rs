@@ -546,8 +546,20 @@ pub struct RanchState {
     pub tab_scroll: Cell<u16>,
     pub log: Vec<String>,
 
+    /// 進化が起きた直後の数tickだけ保持する演出用の情報。UI only、永続化しない
+    /// (ログ・スクロール位置と同様)。render.rs はこれを読んで、群れの中の
+    /// 該当個体を数tickだけ光らせる。
+    pub evolution_flash: Option<EvolutionFlash>,
+
     pub total_ticks: u64,
     pub rng_state: u32,
+}
+
+/// 進化演出のための短命な情報。`RanchState::evolution_flash` 参照。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EvolutionFlash {
+    pub species: Species,
+    pub ticks_left: u8,
 }
 
 impl RanchState {
@@ -580,6 +592,7 @@ impl RanchState {
             tab: Tab::Habitat,
             tab_scroll: Cell::new(0),
             log: Vec::new(),
+            evolution_flash: None,
             total_ticks: 0,
             rng_state: 0xC0FFEE,
         };
