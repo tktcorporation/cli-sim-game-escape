@@ -281,8 +281,7 @@ fn tick_battle(state: &mut RanchState) {
     // そちらは従来通り `atk == 0` の静かなスキップに任せる。
     let max_hp = state.team_max_hp();
     if max_hp > 0 && state.team_hp() == 0 {
-        state.add_log(format!("{}に敗れた… チームを立て直す", state.enemy_species.name()));
-        state.damage_taken = 0;
+        defeat_team(state);
         return;
     }
 
@@ -300,9 +299,17 @@ fn tick_battle(state: &mut RanchState) {
     let enemy_atk = state.enemy_species.stage_atk(state.stage);
     state.damage_taken = state.damage_taken.saturating_add(enemy_atk);
     if state.team_hp() == 0 {
-        state.add_log(format!("{}に敗れた… チームを立て直す", state.enemy_species.name()));
-        state.damage_taken = 0;
+        defeat_team(state);
     }
+}
+
+/// チームを壊滅させて立て直す。`damage_taken` だけでなく `enemy_hp` も全回復させる —
+/// でないと「壊滅を繰り返しながら同じ敵を少しずつ削る」ことで、育成が追いついて
+/// いなくても指数関数的な敵HPの壁を迂回できてしまう (Codex review: PR #134)。
+fn defeat_team(state: &mut RanchState) {
+    state.add_log(format!("{}に敗れた… チームを立て直す", state.enemy_species.name()));
+    state.damage_taken = 0;
+    state.enemy_hp = state.enemy_max_hp;
 }
 
 fn win_stage(state: &mut RanchState) {
@@ -662,9 +669,31 @@ mod tests {
         let stage_before = s.stage;
         tick(&mut s, CLASH_INTERVAL_TICKS);
 
-        assert_eq!(s.enemy_hp, 1, "壊滅状態のチームは攻撃できない");
+        // 攻撃が通っていれば enemy_hp=1 は saturating_sub で即0になり win_stage() で
+        // 早期returnするため defeat_team() は呼ばれない (=enemy_max_hpへの全回復もされない)。
+        // 全回復しているということは、攻撃を経由せず壊滅処理に直接入った証拠になる。
+        assert_eq!(s.enemy_hp, s.enemy_max_hp, "壊滅状態のチームは攻撃できない");
         assert_eq!(s.stage, stage_before, "壊滅状態から敵を倒してステージが進んではいけない");
         assert_eq!(s.damage_taken, 0, "壊滅チームは立て直される");
+    }
+
+    /// Codex review (PR #134): 攻撃で敵を倒しきれずチームが反撃で壊滅した場合、
+    /// damage_taken だけリセットして enemy_hp を削れたままにしておくと、壊滅を
+    /// 繰り返すだけで育成が追いついていなくても敵を少しずつ削り切れてしまい、
+    /// 指数関数的な敵HPスケーリングによる壁を迂回できてしまう回帰を防ぐ。
+    #[test]
+    fn team_wipe_after_attack_also_resets_enemy_hp() {
+        let mut s = RanchState::new();
+        s.population[Species::Tsubu.index()][0].level = MAX_LEVEL;
+        s.team[0] = Some(Species::Tsubu);
+        s.enemy_hp = 1000; // 1回の攻撃では倒しきれない体力に細工
+        s.damage_taken = s.team_max_hp() - 1; // 反撃を受ければ壊滅する体力に細工
+        tick(&mut s, CLASH_INTERVAL_TICKS);
+        assert_eq!(s.damage_taken, 0, "壊滅後はダメージがリセットされる");
+        assert_eq!(
+            s.enemy_hp, s.enemy_max_hp,
+            "壊滅時は敵HPも全回復し、壊滅を繰り返して敵を削り切る抜け道を防ぐ"
+        );
     }
 
     #[test]

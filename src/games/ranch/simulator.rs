@@ -38,13 +38,34 @@ impl Policy for NoActionPolicy {
 
 /// 「1つの属性に餌やり方針を固定し、収容数が買えたら買い、チームは常に最強3体で
 /// 埋める」貪欲 Policy。素朴な「とりあえず育てて放置する」プレイヤーの近似。
+///
+/// `rotate_every` を指定すると、一定間隔で3属性を巡回する「頭打ちに気付いたら
+/// 方針を変える」プレイヤーの近似になる。1属性に固定し続けると進化系統が偏り、
+/// 対戦チームに使える種の多様性が乏しくなる (`pick_team_action` はレベルしか
+/// 見ないため、選択肢が少ないと弱い構成に固定されがち) — その影響を切り分けて
+/// 測るための比較用バリエーション。
 pub struct AutoRanchPolicy {
     pub focus: Affinity,
+    rotate_every: Option<u64>,
 }
 
 impl AutoRanchPolicy {
     pub fn new(focus: Affinity) -> Self {
-        Self { focus }
+        Self { focus, rotate_every: None }
+    }
+
+    pub fn rotating(interval_ticks: u64) -> Self {
+        Self { focus: Affinity::Aqua, rotate_every: Some(interval_ticks) }
+    }
+
+    fn desired_focus(&self, state: &RanchState) -> Affinity {
+        match self.rotate_every {
+            Some(interval) if interval > 0 => {
+                const ORDER: [Affinity; 3] = [Affinity::Aqua, Affinity::Flare, Affinity::Earth];
+                ORDER[(state.total_ticks / interval) as usize % ORDER.len()]
+            }
+            _ => self.focus,
+        }
     }
 }
 
@@ -52,8 +73,9 @@ impl Policy for AutoRanchPolicy {
     fn choose_actions(&mut self, state: &RanchState) -> Vec<PlayerAction> {
         let mut actions = Vec::new();
 
-        if state.feed_focus != Some(self.focus) {
-            actions.push(PlayerAction::ToggleFeedFocus(self.focus));
+        let desired = self.desired_focus(state);
+        if state.feed_focus != Some(desired) {
+            actions.push(PlayerAction::ToggleFeedFocus(desired));
         }
 
         if state.food >= state.capacity_upgrade_cost() {
@@ -438,6 +460,7 @@ mod runners {
         run_and_print("Auto + Aqua固定", Box::new(AutoRanchPolicy::new(Affinity::Aqua)), ticks);
         run_and_print("Auto + Flare固定", Box::new(AutoRanchPolicy::new(Affinity::Flare)), ticks);
         run_and_print("Auto + Earth固定", Box::new(AutoRanchPolicy::new(Affinity::Earth)), ticks);
+        run_and_print("Auto + 10分毎に巡回", Box::new(AutoRanchPolicy::rotating(6_000)), ticks);
     }
 
     /// 24h ロングランで最終形態まで発見できるか、対戦がどこまで進むかを見る。

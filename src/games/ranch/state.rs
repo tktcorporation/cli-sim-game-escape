@@ -275,14 +275,14 @@ impl Species {
     pub fn stage_atk(self, stage: u32) -> u64 {
         let base = self.base_atk() as f64;
         let steps = stage.saturating_sub(1) as f64;
-        (base * 1.06_f64.powf(steps)).round() as u64
+        (base * 1.05_f64.powf(steps)).round() as u64
     }
 
     /// ステージ分スケールした野生個体のHP。`stage_atk` と同じ理由で指数関数的に伸ばす。
     pub fn stage_hp(self, stage: u32) -> u64 {
         let base = self.base_hp() as f64;
         let steps = stage.saturating_sub(1) as f64;
-        (base * 1.09_f64.powf(steps)).round() as u64
+        (base * 1.07_f64.powf(steps)).round() as u64
     }
 
     /// この種を表す1文字の記号。個体数の並び表示など、ポートレートを出すには
