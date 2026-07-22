@@ -90,12 +90,19 @@ impl Policy for AutoRanchPolicy {
     }
 }
 
+/// 種の現状の「強さ」の目安 (ATK×HPの積)。対戦の壁は team_atk*team_max_hp の
+/// 積が enemy_atk*enemy_hp の積を上回れるかで決まるため、レベルだけで比較すると
+/// 低レベルの最終形態が高レベルの無属性種より弱いと誤判定してしまう
+/// (種ごとの基礎ステータス差の方がレベル差より大きいことが普通にあるため)。
+fn combat_power(species: Species, level: u8) -> u64 {
+    species.atk_at_level(level) * species.hp_at_level(level)
+}
+
 /// チーム編成を1手だけ進める: 絶滅した種が編成中なら解除、空きスロットが
-/// あれば未編成の種の中で最もレベルが高い個体を持つ種を追加する。枠が
-/// 埋まっている場合でも、未編成に編成中の最弱種より強い種がいれば入れ替える
-/// (でないと「常に最強3体で埋める」というPolicyの想定と実装がずれ、より強い
-/// 種が後から手に入っても編成が更新されず、対戦の伸びしろを過小評価してしまう —
-/// Codex review: PR #134)。
+/// あれば未編成の種の中で最も強い種を追加する。枠が埋まっている場合でも、
+/// 未編成に編成中の最弱種より強い種がいれば入れ替える (でないと「常に最強3体で
+/// 埋める」というPolicyの想定と実装がずれ、より強い種が後から手に入っても
+/// 編成が更新されず、対戦の伸びしろを過小評価してしまう)。
 fn pick_team_action(state: &RanchState) -> Option<PlayerAction> {
     for &sp in state.team.iter().flatten() {
         if state.population[sp.index()].is_empty() {
@@ -114,13 +121,13 @@ fn pick_team_action(state: &RanchState) -> Option<PlayerAction> {
         .team
         .iter()
         .flatten()
-        .filter_map(|&sp| state.strongest(sp).map(|c| (sp, c.level)))
-        .min_by_key(|&(_, lv)| lv);
+        .filter_map(|&sp| state.strongest(sp).map(|c| (sp, combat_power(sp, c.level))))
+        .min_by_key(|&(_, power)| power);
     let strongest_unteamed = strongest_unteamed_species(state)
-        .and_then(|sp| state.strongest(sp).map(|c| (sp, c.level)));
+        .and_then(|sp| state.strongest(sp).map(|c| (sp, combat_power(sp, c.level))));
 
-    if let (Some((weak_sp, weak_lv)), Some((_, strong_lv))) = (weakest_teamed, strongest_unteamed) {
-        if strong_lv > weak_lv {
+    if let (Some((weak_sp, weak_power)), Some((_, strong_power))) = (weakest_teamed, strongest_unteamed) {
+        if strong_power > weak_power {
             return Some(PlayerAction::ToggleTeamMember(weak_sp));
         }
     }
@@ -128,14 +135,14 @@ fn pick_team_action(state: &RanchState) -> Option<PlayerAction> {
     None
 }
 
-/// 未編成の種のうち、最もレベルが高い個体を持つ種。
+/// 未編成の種のうち、最も強い (ATK×HPが高い) 種。
 fn strongest_unteamed_species(state: &RanchState) -> Option<Species> {
     Species::all()
         .iter()
         .copied()
         .filter(|&sp| !state.team.contains(&Some(sp)))
-        .filter_map(|sp| state.strongest(sp).map(|c| (sp, c.level)))
-        .max_by_key(|&(_, lv)| lv)
+        .filter_map(|sp| state.strongest(sp).map(|c| (sp, combat_power(sp, c.level))))
+        .max_by_key(|&(_, power)| power)
         .map(|(sp, _)| sp)
 }
 
@@ -294,11 +301,11 @@ impl Simulator {
 
 mod sanity_tests {
     use super::*;
-    use super::super::state::Creature;
+    use super::super::state::{Creature, MAX_LEVEL};
 
-    /// Codex review (PR #134): 編成枠が埋まっている場合でも、未編成の種に
-    /// 編成中の最弱種より強い種がいれば入れ替えるはず (でないと
-    /// 「常に最強3体で埋める」というdoc comment通りに動かない)。
+    /// 編成枠が埋まっている場合でも、未編成の種に編成中の最弱種より強い種が
+    /// いれば入れ替えるはず (でないと「常に最強3体で埋める」というdoc comment
+    /// 通りに動かない)。
     #[test]
     fn pick_team_action_swaps_out_the_weakest_member_for_a_stronger_species() {
         let mut state = RanchState::new();
@@ -312,6 +319,27 @@ mod sanity_tests {
             pick_team_action(&state),
             Some(PlayerAction::ToggleTeamMember(Species::Tsubu)),
             "最弱の編成メンバーを解除して、より強い未編成種と入れ替えられるようにするはず"
+        );
+    }
+
+    /// 低レベルの最終形態でも、種の基礎ステータス差によって高レベルの無属性種より
+    /// 強いことがある。レベルだけで比較すると、この入れ替えを誤って見送ってしまう。
+    #[test]
+    fn pick_team_action_ranks_by_combat_power_not_raw_level() {
+        let mut state = RanchState::new();
+        // レベルだけ見るとTsubu(Lv10)が最弱ではない (他の2体よりレベルが高い) が、
+        // 種の基礎ステータスが低いため実際のATK×HPは最も低い。
+        state.population[Species::Tsubu.index()] = vec![Creature { level: MAX_LEVEL, xp: 0 }];
+        state.population[Species::AquaTsubu.index()] = vec![Creature { level: 5, xp: 0 }];
+        state.population[Species::FlareTsubu.index()] = vec![Creature { level: 5, xp: 0 }];
+        state.team = [Some(Species::Tsubu), Some(Species::AquaTsubu), Some(Species::FlareTsubu)];
+        // 未編成のFireKirinはLv2と低レベルだが、基礎ステータスが高くTsubu(Lv10)より強い。
+        state.population[Species::FireKirin.index()] = vec![Creature { level: 2, xp: 0 }];
+
+        assert_eq!(
+            pick_team_action(&state),
+            Some(PlayerAction::ToggleTeamMember(Species::Tsubu)),
+            "レベルではなくATK×HPで比較し、最も弱いTsubu(Lv10)が入れ替え対象になるはず"
         );
     }
 

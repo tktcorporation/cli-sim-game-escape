@@ -119,11 +119,23 @@ fn apply_save(state: &mut RanchState, save: &GameSave) {
     for (i, slot) in save.team.iter().enumerate().take(TEAM_SIZE) {
         state.team[i] = slot.and_then(|idx| Species::from_index(idx as usize));
     }
-    state.stage = save.stage;
+    // stage=0 や enemy_max_hp=0 は tick_battle 中には現れない値 (0になった瞬間に
+    // win_stage/次ステージ計算で上書きされる) なので、欠損/破損セーブの目印として
+    // 安全に使える。欠損時は RanchState::new() 相当の値を現在のステージから
+    // 組み直し、0HPの敵に対して即座に win_stage が誤発火するのを防ぐ。
+    state.stage = save.stage.max(1);
     state.enemy_species = Species::from_index(save.enemy_species as usize).unwrap_or(Species::Tsubu);
-    state.enemy_max_hp = save.enemy_max_hp;
+    state.enemy_max_hp = if save.enemy_max_hp > 0 {
+        save.enemy_max_hp
+    } else {
+        state.enemy_species.stage_hp(state.stage)
+    };
     // 改変/破損セーブで enemy_hp > enemy_max_hp になっていても表示が壊れないようクランプする。
-    state.enemy_hp = save.enemy_hp.min(state.enemy_max_hp);
+    state.enemy_hp = if save.enemy_hp > 0 {
+        save.enemy_hp.min(state.enemy_max_hp)
+    } else {
+        state.enemy_max_hp
+    };
     state.damage_taken = save.damage_taken;
     state.clash_cooldown = save.clash_cooldown;
     state.stage_clears = save.stage_clears;
@@ -365,5 +377,30 @@ mod tests {
         apply_save(&mut restored, &loaded.game);
         assert_eq!(restored.enemy_max_hp, 100);
         assert_eq!(restored.enemy_hp, 100, "enemy_hp は enemy_max_hp でクランプされる");
+    }
+
+    /// stage・enemy_hp・enemy_max_hp が欠損したセーブ (`#[serde(default)]` で 0 になる)
+    /// を復元しても、0HPの敵に対して次のクラッシュで即座に win_stage が誤発火して
+    /// 無償のステージ進行が起きないこと。
+    #[test]
+    fn missing_battle_fields_do_not_grant_a_free_stage_win() {
+        let json_missing_battle = r#"{
+            "version": 1,
+            "game": {
+                "population": [[[10, 0]]],
+                "team": [0]
+            }
+        }"#;
+        let loaded: SaveData = serde_json::from_str(json_missing_battle).unwrap();
+        let mut restored = RanchState::new();
+        apply_save(&mut restored, &loaded.game);
+
+        assert_eq!(restored.stage, 1, "stage欠損時は1にフォールバックするはず");
+        assert!(restored.enemy_max_hp > 0, "enemy_max_hpは欠損時も0のままにしない");
+        assert_eq!(restored.enemy_hp, restored.enemy_max_hp, "enemy_hpも欠損時はenemy_max_hpまで補うはず");
+
+        let stage_before = restored.stage;
+        super::super::logic::tick(&mut restored, super::super::state::CLASH_INTERVAL_TICKS);
+        assert_eq!(restored.stage, stage_before, "破損セーブから復元しても無償でステージが進んではいけない");
     }
 }

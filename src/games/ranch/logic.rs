@@ -322,7 +322,7 @@ fn tick_battle(state: &mut RanchState) {
 
 /// チームを壊滅させて立て直す。`damage_taken` だけでなく `enemy_hp` も全回復させる —
 /// でないと「壊滅を繰り返しながら同じ敵を少しずつ削る」ことで、育成が追いついて
-/// いなくても指数関数的な敵HPの壁を迂回できてしまう (Codex review: PR #134)。
+/// いなくても指数関数的な敵HPの壁を迂回できてしまう。
 fn defeat_team(state: &mut RanchState) {
     state.add_log(format!("{}に敗れた… チームを立て直す", state.enemy_species.name()));
     state.damage_taken = 0;
@@ -513,9 +513,8 @@ mod tests {
 
     // ── evolution_chance ─────────────────────────────────────────
 
-    /// Codex review (PR #134): 閾値超過分の個体数が確率に反映されていなかった
-    /// (mature はゲート判定にしか使われず、5体でも50体でも同じ確率になっていた)
-    /// 回帰を防ぐテスト。
+    /// 閾値超過分の個体数が確率に反映されること。mature はゲート判定だけでなく
+    /// count_factor としても効くため、5体と50体では確率が変わるはず。
     #[test]
     fn evolution_chance_increases_with_mature_count_beyond_threshold() {
         let threshold = Species::Tsubu.evolution_threshold();
@@ -692,10 +691,9 @@ mod tests {
         assert!(s.enemy_hp < enemy_hp_before);
     }
 
-    /// Codex review (PR #134): 編成変更で `team_max_hp` が `damage_taken` を
-    /// 下回ると、まだ攻撃を受けていないのに既に「壊滅」状態になる。この状態の
-    /// まま攻撃させると、瀕死のはずのチームが敵を倒してステージを進めてしまう
-    /// (無料の勝利+全回復) 回帰を防ぐ。
+    /// 編成変更で `team_max_hp` が `damage_taken` を下回ると、まだ攻撃を受けて
+    /// いないのに既に「壊滅」状態になる。この状態のまま攻撃させると、瀕死のはずの
+    /// チームが敵を倒してステージを進めてしまう (無料の勝利+全回復) ことを防ぐ。
     #[test]
     fn shrinking_team_below_damage_taken_rebuilds_instead_of_attacking() {
         let mut s = RanchState::new();
@@ -721,10 +719,10 @@ mod tests {
         assert_eq!(s.damage_taken, 0, "壊滅チームは立て直される");
     }
 
-    /// Codex review (PR #134): 攻撃で敵を倒しきれずチームが反撃で壊滅した場合、
-    /// damage_taken だけリセットして enemy_hp を削れたままにしておくと、壊滅を
-    /// 繰り返すだけで育成が追いついていなくても敵を少しずつ削り切れてしまい、
-    /// 指数関数的な敵HPスケーリングによる壁を迂回できてしまう回帰を防ぐ。
+    /// 攻撃で敵を倒しきれずチームが反撃で壊滅した場合、damage_taken だけリセット
+    /// して enemy_hp を削れたままにしておくと、壊滅を繰り返すだけで育成が追いついて
+    /// いなくても敵を少しずつ削り切れてしまい、指数関数的な敵HPスケーリングによる
+    /// 壁を迂回できてしまう。
     #[test]
     fn team_wipe_after_attack_also_resets_enemy_hp() {
         let mut s = RanchState::new();
