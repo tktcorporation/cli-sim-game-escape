@@ -1,0 +1,625 @@
+//! つぶ牧場 (Tsubu Ranch) — tick processing and player actions.
+//!
+//! `state.rs` のデータに対する唯一の書き込み経路。純粋なデータ定義は持たない。
+
+use super::actions::PlayerAction;
+use super::state::{
+    Affinity, Creature, RanchState, Species, CLASH_INTERVAL_TICKS, MATURE_LEVEL, MAX_LEVEL,
+};
+
+// ── RNG ──────────────────────────────────────────────────────────
+// xorshift32。0 seed は退化するため abyss/cookie と同じガードを入れる。
+
+fn rng_next(seed: &mut u32) -> u32 {
+    let mut x = *seed;
+    if x == 0 {
+        x = 0xDEAD_BEEF;
+    }
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *seed = x;
+    x
+}
+
+fn roll_chance(seed: &mut u32, probability: f64) -> bool {
+    let r = rng_next(seed) % 10_000;
+    let threshold = (probability.clamp(0.0, 1.0) * 10_000.0) as u32;
+    r < threshold
+}
+
+/// 重み付き抽選。合計が0なら常に0番目を返す。
+fn roll_index(seed: &mut u32, weights: &[u32]) -> usize {
+    let total: u32 = weights.iter().sum();
+    if total == 0 {
+        return 0;
+    }
+    let r = rng_next(seed) % total;
+    let mut acc = 0u32;
+    for (i, &w) in weights.iter().enumerate() {
+        acc += w;
+        if r < acc {
+            return i;
+        }
+    }
+    weights.len() - 1
+}
+
+// ── Tick balance constants ──────────────────────────────────────
+
+const PASSIVE_XP_PER_TICK: u32 = 1;
+const FEED_XP_BONUS: u32 = 15;
+
+const FOOD_INCOME_INTERVAL_TICKS: u64 = 10;
+
+const REPRODUCE_CHANCE_PER_MATURE: f64 = 0.01;
+const REPRODUCE_CHANCE_CAP: f64 = 0.15;
+const REPRODUCE_COST: u64 = 3;
+
+const EVOLUTION_BASE_CHANCE: f64 = 0.02;
+const EVOLUTION_CHANCE_CAP: f64 = 0.5;
+/// 平均レベルが `MATURE_LEVEL` を1超えるごとに進化確率へ乗る係数。
+const EVOLUTION_LEVEL_FACTOR_PER_LEVEL: f64 = 0.2;
+
+const WILD_CAPTURE_CHANCE: f64 = 0.15;
+
+// ── Tick entry point ─────────────────────────────────────────────
+
+pub fn tick(state: &mut RanchState, delta_ticks: u32) {
+    for _ in 0..delta_ticks {
+        tick_once(state);
+    }
+}
+
+fn tick_once(state: &mut RanchState) {
+    state.total_ticks += 1;
+    tick_growth(state);
+    tick_food_income(state);
+    tick_reproduction(state);
+    tick_evolution(state);
+    tick_battle(state);
+}
+
+// ── Growth ────────────────────────────────────────────────────────
+
+fn tick_growth(state: &mut RanchState) {
+    for creatures in state.population.iter_mut() {
+        for c in creatures.iter_mut() {
+            grow_creature(c, PASSIVE_XP_PER_TICK);
+        }
+    }
+}
+
+/// `xp_gain` を加算し、必要なら複数回レベルアップさせる。上限到達後は XP を溜めない。
+fn grow_creature(c: &mut Creature, xp_gain: u32) {
+    if c.level >= MAX_LEVEL {
+        return;
+    }
+    c.xp += xp_gain;
+    while c.level < MAX_LEVEL {
+        let need = Creature::xp_to_next_level(c.level);
+        if c.xp >= need {
+            c.xp -= need;
+            c.level += 1;
+        } else {
+            break;
+        }
+    }
+    if c.level >= MAX_LEVEL {
+        c.xp = 0;
+    }
+}
+
+// ── Food income ───────────────────────────────────────────────────
+
+/// 成熟個体が多いほど収入が増える (1秒 = 10tick ごとに清算)。
+fn tick_food_income(state: &mut RanchState) {
+    if !state.total_ticks.is_multiple_of(FOOD_INCOME_INTERVAL_TICKS) {
+        return;
+    }
+    let mature_total: u64 = Species::all()
+        .iter()
+        .map(|&sp| state.mature_count(sp) as u64)
+        .sum();
+    state.food += 1 + mature_total;
+}
+
+// ── Reproduction ───────────────────────────────────────────────────
+
+fn tick_reproduction(state: &mut RanchState) {
+    for &species in Species::all() {
+        if state.total_population() >= state.capacity() {
+            break;
+        }
+        let mature = state.mature_count(species);
+        if mature == 0 || state.food < REPRODUCE_COST {
+            continue;
+        }
+        let chance = (mature as f64 * REPRODUCE_CHANCE_PER_MATURE).min(REPRODUCE_CHANCE_CAP);
+        if roll_chance(&mut state.rng_state, chance) {
+            state.food -= REPRODUCE_COST;
+            state.population[species.index()].push(Creature::new());
+        }
+    }
+}
+
+// ── Evolution ──────────────────────────────────────────────────────
+
+fn tick_evolution(state: &mut RanchState) {
+    for &species in Species::all() {
+        if species.is_final_tier() {
+            continue;
+        }
+        let threshold = species.evolution_threshold();
+        let mature = state.mature_count(species);
+        if mature < threshold {
+            continue;
+        }
+        let avg_level = state.average_mature_level(species);
+        let level_factor =
+            1.0 + (avg_level - MATURE_LEVEL as f64).max(0.0) * EVOLUTION_LEVEL_FACTOR_PER_LEVEL;
+        let chance = (EVOLUTION_BASE_CHANCE * level_factor).min(EVOLUTION_CHANCE_CAP);
+        if roll_chance(&mut state.rng_state, chance) {
+            evolve(state, species, threshold);
+        }
+    }
+}
+
+/// `species` の成熟個体 `consume` 体を消費して次階層の種を1体誕生させる。
+/// 進化先は `affinity_feed` の蓄積量で重み付き抽選する (プレイヤーには明示しない)。
+fn evolve(state: &mut RanchState, species: Species, consume: u32) {
+    let targets = species.evolution_targets();
+    if targets.is_empty() {
+        return;
+    }
+    let weights: Vec<u32> = targets
+        .iter()
+        .map(|&t| {
+            species
+                .evolution_bias(t)
+                .map(|a| state.affinity_feed[a.index()] + 1)
+                .unwrap_or(1)
+        })
+        .collect();
+    let idx = roll_index(&mut state.rng_state, &weights);
+    let target = targets[idx];
+
+    consume_mature(state, species, consume);
+    state.population[target.index()].push(Creature::new());
+
+    let first_sighting = !state.discovered[target.index()];
+    state.discovered[target.index()] = true;
+
+    if first_sighting {
+        state.add_log(format!(
+            "{}が{}体集まり、{}が誕生した! (新種発見)",
+            species.name(),
+            consume,
+            target.name()
+        ));
+    } else {
+        state.add_log(format!("{}が{}に進化した", species.name(), target.name()));
+    }
+}
+
+/// 成熟個体のうち、レベルが低い方から `count` 体を消費する。
+/// (プレイヤーが育てた高レベル個体は温存され、ギリギリ成熟した個体から消える)
+fn consume_mature(state: &mut RanchState, species: Species, count: u32) {
+    let creatures = &mut state.population[species.index()];
+    creatures.sort_by_key(|c| c.level);
+    let mut remaining = count;
+    creatures.retain(|c| {
+        if remaining > 0 && c.is_mature() {
+            remaining -= 1;
+            false
+        } else {
+            true
+        }
+    });
+}
+
+// ── Battle ───────────────────────────────────────────────────────
+
+fn tick_battle(state: &mut RanchState) {
+    if state.team.iter().all(|slot| slot.is_none()) {
+        return;
+    }
+    // 0 になった tick で即座にクラッシュを解決する (先に減算してから判定する)。
+    // 「> 0 なら減らして return」の順だと、ちょうど 0 に達した tick で
+    // クラッシュが1 tick 遅れてしまう。
+    state.clash_cooldown = state.clash_cooldown.saturating_sub(1);
+    if state.clash_cooldown > 0 {
+        return;
+    }
+    state.clash_cooldown = CLASH_INTERVAL_TICKS;
+
+    let atk = state.team_atk();
+    if atk == 0 {
+        return;
+    }
+    state.enemy_hp = state.enemy_hp.saturating_sub(atk);
+
+    if state.enemy_hp == 0 {
+        win_stage(state);
+        return;
+    }
+
+    let enemy_atk = state.enemy_species.stage_atk(state.stage);
+    state.team_hp = state.team_hp.saturating_sub(enemy_atk);
+    if state.team_hp == 0 {
+        state.add_log(format!("{}に敗れた… チームを立て直す", state.enemy_species.name()));
+        state.team_hp = state.team_max_hp();
+    }
+}
+
+fn win_stage(state: &mut RanchState) {
+    state.stage_clears += 1;
+    let reward = 10 + state.stage as u64 * 2;
+    state.food += reward;
+    state.add_log(format!(
+        "{}を倒した! 食料+{}獲得",
+        state.enemy_species.name(),
+        reward
+    ));
+
+    if state.total_population() < state.capacity()
+        && roll_chance(&mut state.rng_state, WILD_CAPTURE_CHANCE)
+    {
+        state.population[state.enemy_species.index()].push(Creature::new());
+        state.add_log(format!("野生の{}が仲間になった!", state.enemy_species.name()));
+    }
+
+    state.stage += 1;
+    state.enemy_species = Species::for_stage(state.stage);
+    state.discovered[state.enemy_species.index()] = true;
+    state.enemy_max_hp = state.enemy_species.stage_hp(state.stage);
+    state.enemy_hp = state.enemy_max_hp;
+    state.team_hp = state.team_max_hp();
+}
+
+// ── Player actions ─────────────────────────────────────────────────
+
+pub fn apply_action(state: &mut RanchState, action: PlayerAction) -> bool {
+    match action {
+        PlayerAction::SetTab(tab) => {
+            state.tab = tab;
+            state.tab_scroll.set(0);
+            true
+        }
+        PlayerAction::Feed(affinity) => feed(state, affinity),
+        PlayerAction::UpgradeCapacity => upgrade_capacity(state),
+        PlayerAction::ToggleTeamMember(species) => toggle_team_member(state, species),
+        PlayerAction::ScrollUp => {
+            let cur = state.tab_scroll.get();
+            state.tab_scroll.set(cur.saturating_sub(3));
+            true
+        }
+        PlayerAction::ScrollDown => {
+            let cur = state.tab_scroll.get();
+            state.tab_scroll.set(cur.saturating_add(3));
+            true
+        }
+    }
+}
+
+fn feed(state: &mut RanchState, affinity: Affinity) -> bool {
+    let cost = state.feed_cost();
+    if state.food < cost {
+        return false;
+    }
+    state.food -= cost;
+    state.affinity_feed[affinity.index()] += 1;
+
+    for creatures in state.population.iter_mut() {
+        for c in creatures.iter_mut() {
+            grow_creature(c, FEED_XP_BONUS);
+        }
+    }
+    state.add_log(format!("{}属性の餌を与えた", affinity.name()));
+    true
+}
+
+fn upgrade_capacity(state: &mut RanchState) -> bool {
+    let cost = state.capacity_upgrade_cost();
+    if state.food < cost {
+        return false;
+    }
+    state.food -= cost;
+    state.capacity_upgrades += 1;
+    state.add_log(format!("収容数が{}に拡張された", state.capacity()));
+    true
+}
+
+fn toggle_team_member(state: &mut RanchState, species: Species) -> bool {
+    if let Some(slot) = state.team.iter().position(|s| *s == Some(species)) {
+        state.team[slot] = None;
+        state.team_hp = state.team_max_hp();
+        return true;
+    }
+    if let Some(slot) = state.team.iter().position(|s| s.is_none()) {
+        state.team[slot] = Some(species);
+        state.team_hp = state.team_max_hp();
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::games::ranch::state::TEAM_SIZE;
+
+    // ── grow_creature ────────────────────────────────────────────
+
+    #[test]
+    fn grow_creature_levels_up_when_xp_threshold_crossed() {
+        let mut c = Creature::new();
+        grow_creature(&mut c, Creature::xp_to_next_level(1));
+        assert_eq!(c.level, 2);
+        assert_eq!(c.xp, 0);
+    }
+
+    #[test]
+    fn grow_creature_can_multi_level_in_one_call() {
+        let mut c = Creature::new();
+        let jump = Creature::xp_to_next_level(1) + Creature::xp_to_next_level(2) + 1;
+        grow_creature(&mut c, jump);
+        assert_eq!(c.level, 3);
+        assert_eq!(c.xp, 1);
+    }
+
+    #[test]
+    fn grow_creature_caps_at_max_level_and_drops_xp() {
+        let mut c = Creature { level: MAX_LEVEL, xp: 0 };
+        grow_creature(&mut c, 9999);
+        assert_eq!(c.level, MAX_LEVEL);
+        assert_eq!(c.xp, 0);
+    }
+
+    // ── tick_food_income ─────────────────────────────────────────
+
+    #[test]
+    fn food_income_only_fires_on_interval_boundary() {
+        let mut s = RanchState::new();
+        let start_food = s.food;
+        tick(&mut s, FOOD_INCOME_INTERVAL_TICKS as u32 - 1);
+        assert_eq!(s.food, start_food, "インターバル前は収入なし");
+        tick(&mut s, 1);
+        assert!(s.food > start_food, "インターバル到達で収入が入る");
+    }
+
+    #[test]
+    fn food_income_scales_with_mature_population() {
+        let mut s = RanchState::new();
+        for c in s.population[Species::Tsubu.index()].iter_mut() {
+            c.level = MATURE_LEVEL;
+        }
+        let food_before = s.food;
+        tick(&mut s, FOOD_INCOME_INTERVAL_TICKS as u32);
+        let gained_with_mature = s.food - food_before;
+        assert!(gained_with_mature >= 1 + 3, "成熟3体分の収入が上乗せされる");
+    }
+
+    // ── tick_reproduction ────────────────────────────────────────
+
+    #[test]
+    fn reproduction_never_exceeds_capacity() {
+        let mut s = RanchState::new();
+        s.food = 1_000_000;
+        for c in s.population[Species::Tsubu.index()].iter_mut() {
+            c.level = MATURE_LEVEL;
+        }
+        tick(&mut s, 2000);
+        assert!(s.total_population() <= s.capacity());
+    }
+
+    #[test]
+    fn reproduction_does_not_happen_without_mature_individuals() {
+        let mut s = RanchState::new();
+        s.food = 1_000_000;
+        // 初期個体は Lv1 で未成熟。
+        tick(&mut s, 200);
+        assert_eq!(s.total_population(), 3, "未成熟のみでは繁殖しない");
+    }
+
+    #[test]
+    fn reproduction_consumes_food() {
+        // tick_reproduction を直接呼び、食料収入 (tick_food_income) の影響を排除して
+        // 繁殖そのものが食料を消費することだけを検証する。
+        let mut s = RanchState::new();
+        s.food = 1_000_000;
+        for c in s.population[Species::Tsubu.index()].iter_mut() {
+            c.level = MATURE_LEVEL;
+        }
+        for _ in 0..500 {
+            tick_reproduction(&mut s);
+        }
+        assert!(s.food < 1_000_000, "繁殖のたびに食料が減る");
+    }
+
+    // ── tick_evolution / evolve ──────────────────────────────────
+
+    #[test]
+    fn evolution_does_not_trigger_below_threshold() {
+        // tick_evolution を直接呼び、繁殖による個体数増加を排除して
+        // 「閾値未満なら進化しない」ことだけを検証する。
+        let mut s = RanchState::new();
+        s.population[Species::Tsubu.index()] =
+            vec![Creature { level: MAX_LEVEL, xp: 0 }; Species::Tsubu.evolution_threshold() as usize - 1];
+        for _ in 0..1000 {
+            tick_evolution(&mut s);
+        }
+        assert_eq!(s.population[Species::AquaTsubu.index()].len(), 0);
+        assert_eq!(s.population[Species::FlareTsubu.index()].len(), 0);
+        assert_eq!(s.population[Species::EarthTsubu.index()].len(), 0);
+    }
+
+    #[test]
+    fn evolution_eventually_triggers_once_threshold_and_level_are_met() {
+        let mut s = RanchState::new();
+        let threshold = Species::Tsubu.evolution_threshold() as usize;
+        s.population[Species::Tsubu.index()] = vec![Creature { level: MAX_LEVEL, xp: 0 }; threshold];
+        tick(&mut s, 5000);
+        let tier1_total: usize = [Species::AquaTsubu, Species::FlareTsubu, Species::EarthTsubu]
+            .iter()
+            .map(|&sp| s.population[sp.index()].len())
+            .sum();
+        assert!(tier1_total > 0, "十分なtickがあれば進化するはず");
+    }
+
+    #[test]
+    fn evolve_consumes_lowest_level_mature_individuals_first() {
+        let mut s = RanchState::new();
+        s.population[Species::Tsubu.index()] = vec![
+            Creature { level: 5, xp: 0 },
+            Creature { level: 9, xp: 0 },
+            Creature { level: 6, xp: 0 },
+        ];
+        evolve(&mut s, Species::Tsubu, 2);
+        let remaining = &s.population[Species::Tsubu.index()];
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].level, 9, "最もレベルが高い個体だけが生き残る");
+    }
+
+    #[test]
+    fn evolve_spawns_target_and_marks_discovered() {
+        let mut s = RanchState::new();
+        s.population[Species::Tsubu.index()] = vec![Creature { level: MAX_LEVEL, xp: 0 }; 5];
+        assert!(!s.discovered[Species::AquaTsubu.index()]);
+        assert!(!s.discovered[Species::FlareTsubu.index()]);
+        assert!(!s.discovered[Species::EarthTsubu.index()]);
+        evolve(&mut s, Species::Tsubu, 5);
+        let tier1_total: usize = [Species::AquaTsubu, Species::FlareTsubu, Species::EarthTsubu]
+            .iter()
+            .map(|&sp| s.population[sp.index()].len())
+            .sum();
+        assert_eq!(tier1_total, 1);
+        let discovered_total = [Species::AquaTsubu, Species::FlareTsubu, Species::EarthTsubu]
+            .iter()
+            .filter(|&&sp| s.discovered[sp.index()])
+            .count();
+        assert_eq!(discovered_total, 1);
+    }
+
+    #[test]
+    fn evolution_bias_favors_the_most_fed_affinity() {
+        // Aqua だけを大量に蓄積すれば、統計的にAquaTsubuへの進化が優勢になるはず。
+        let mut aqua_wins = 0;
+        for seed in 1..30u32 {
+            let mut s = RanchState::new();
+            s.rng_state = seed;
+            s.affinity_feed[Affinity::Aqua.index()] = 1000;
+            s.population[Species::Tsubu.index()] = vec![Creature { level: MAX_LEVEL, xp: 0 }; 5];
+            evolve(&mut s, Species::Tsubu, 5);
+            if !s.population[Species::AquaTsubu.index()].is_empty() {
+                aqua_wins += 1;
+            }
+        }
+        assert!(aqua_wins > 20, "Aqua を極端に蓄積すればほぼ AquaTsubu に進化するはず (実績: {aqua_wins}/29)");
+    }
+
+    // ── tick_battle ──────────────────────────────────────────────
+
+    #[test]
+    fn battle_does_not_progress_without_a_team() {
+        let mut s = RanchState::new();
+        let enemy_hp_before = s.enemy_hp;
+        tick(&mut s, 100);
+        assert_eq!(s.enemy_hp, enemy_hp_before, "チーム未編成では戦闘が進まない");
+    }
+
+    #[test]
+    fn battle_damages_enemy_over_time() {
+        let mut s = RanchState::new();
+        s.population[Species::Tsubu.index()][0].level = MAX_LEVEL;
+        s.team[0] = Some(Species::Tsubu);
+        s.team_hp = s.team_max_hp();
+        let enemy_hp_before = s.enemy_hp;
+        tick(&mut s, CLASH_INTERVAL_TICKS);
+        assert!(s.enemy_hp < enemy_hp_before);
+    }
+
+    #[test]
+    fn winning_a_stage_advances_and_heals_team() {
+        let mut s = RanchState::new();
+        s.population[Species::Tsubu.index()][0].level = MAX_LEVEL;
+        s.team[0] = Some(Species::Tsubu);
+        s.team_hp = s.team_max_hp();
+        s.enemy_hp = 1; // 次のクラッシュで即死する体力に細工
+        let stage_before = s.stage;
+        tick(&mut s, CLASH_INTERVAL_TICKS);
+        assert_eq!(s.stage, stage_before + 1);
+        assert_eq!(s.team_hp, s.team_max_hp(), "勝利後はチームが全回復する");
+    }
+
+    #[test]
+    fn losing_team_hp_resets_without_losing_stage_progress() {
+        let mut s = RanchState::new();
+        s.population[Species::Tsubu.index()][0].level = MAX_LEVEL;
+        s.team[0] = Some(Species::Tsubu);
+        s.team_hp = 1; // 次のクラッシュで壊滅する体力に細工
+        s.enemy_hp = s.enemy_max_hp * 1000; // 勝てないようにHPを底上げ
+        let stage_before = s.stage;
+        tick(&mut s, CLASH_INTERVAL_TICKS);
+        assert_eq!(s.stage, stage_before, "敗北してもステージは後退しない");
+        assert_eq!(s.team_hp, s.team_max_hp(), "敗北後もチームは立て直される");
+    }
+
+    // ── apply_action ─────────────────────────────────────────────
+
+    #[test]
+    fn feed_fails_when_food_insufficient() {
+        let mut s = RanchState::new();
+        s.food = 0;
+        assert!(!apply_action(&mut s, PlayerAction::Feed(Affinity::Aqua)));
+    }
+
+    #[test]
+    fn feed_consumes_food_and_grants_xp_and_affinity() {
+        let mut s = RanchState::new();
+        s.food = 1000;
+        let xp_before = s.population[Species::Tsubu.index()][0].xp;
+        assert!(apply_action(&mut s, PlayerAction::Feed(Affinity::Flare)));
+        assert!(s.food < 1000);
+        assert_eq!(s.affinity_feed[Affinity::Flare.index()], 1);
+        assert!(s.population[Species::Tsubu.index()][0].xp > xp_before
+            || s.population[Species::Tsubu.index()][0].level > 1);
+    }
+
+    #[test]
+    fn upgrade_capacity_increases_capacity_and_costs_food() {
+        let mut s = RanchState::new();
+        s.food = 1_000_000;
+        let cap_before = s.capacity();
+        assert!(apply_action(&mut s, PlayerAction::UpgradeCapacity));
+        assert!(s.capacity() > cap_before);
+    }
+
+    #[test]
+    fn toggle_team_member_adds_then_removes() {
+        let mut s = RanchState::new();
+        assert!(apply_action(&mut s, PlayerAction::ToggleTeamMember(Species::Tsubu)));
+        assert_eq!(s.team[0], Some(Species::Tsubu));
+        assert!(apply_action(&mut s, PlayerAction::ToggleTeamMember(Species::Tsubu)));
+        assert!(s.team.iter().all(|slot| slot.is_none()));
+    }
+
+    #[test]
+    fn toggle_team_member_fails_when_team_full() {
+        let mut s = RanchState::new();
+        for &sp in &[Species::Tsubu, Species::AquaTsubu, Species::FlareTsubu] {
+            assert!(apply_action(&mut s, PlayerAction::ToggleTeamMember(sp)));
+        }
+        assert!(s.team.iter().all(|slot| slot.is_some()));
+        assert_eq!(TEAM_SIZE, 3, "このテストはTEAM_SIZE=3を前提にしている");
+        assert!(!apply_action(&mut s, PlayerAction::ToggleTeamMember(Species::EarthTsubu)));
+    }
+
+    #[test]
+    fn set_tab_resets_scroll() {
+        let mut s = RanchState::new();
+        s.tab_scroll.set(42);
+        assert!(apply_action(&mut s, PlayerAction::SetTab(crate::games::ranch::state::Tab::Dex)));
+        assert_eq!(s.tab_scroll.get(), 0);
+    }
+}
