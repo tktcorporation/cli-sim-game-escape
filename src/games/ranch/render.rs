@@ -115,7 +115,9 @@ fn render_habitat(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickS
         for line in species_card_lines(state, species) {
             cl.push(line);
         }
-        cl.push(creature_glyphs_line(state, species));
+        for line in pit_lines(state, species) {
+            cl.push(line);
+        }
         cl.push(Line::from(""));
     }
 
@@ -273,29 +275,55 @@ fn species_card_lines(state: &RanchState, species: Species) -> Vec<Line<'static>
         .collect()
 }
 
-/// 個体をグリフの並びとしてビジュアル表示する行。
+/// ピット (個体の積み上げ表示) の幅・高さ。テトリス/スイカゲームのように
+/// 下の行から埋まっていくのを見せるため、1体=1マスの矩形として扱う。
+const PIT_COLS: usize = 8;
+const PIT_ROWS: usize = 3;
+const PIT_CAPACITY: usize = PIT_COLS * PIT_ROWS;
+
+/// 個体を「下から積み上がるピット」として表示する (最大 `PIT_CAPACITY` 体)。
 /// 成熟個体は明るい色で、未成熟はグレーで表示し、群れの成熟度を一目で分かるようにする。
-fn creature_glyphs_line(state: &RanchState, species: Species) -> Line<'static> {
-    const MAX_SHOWN: usize = 24;
+/// 表示上限を超えた分は最終行に "+N" でまとめる。
+fn pit_lines(state: &RanchState, species: Species) -> Vec<Line<'static>> {
     let creatures = &state.population[species.index()];
     let glyph = species.glyph();
     let color = species_color(species);
-    let mut spans: Vec<Span<'static>> = vec![Span::raw("   ")];
-    for c in creatures.iter().take(MAX_SHOWN) {
-        let style = if c.is_mature() {
-            Style::default().fg(color).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::DarkGray)
+
+    let mut rows: Vec<Vec<Span<'static>>> = (0..PIT_ROWS).map(|_| Vec::with_capacity(PIT_COLS)).collect();
+    for i in 0..PIT_CAPACITY {
+        // 一番下の行 (画面上は最終行) から埋まっていくように、行番号を反転して積む。
+        let row_from_bottom = i / PIT_COLS;
+        let row = PIT_ROWS - 1 - row_from_bottom;
+        let span = match creatures.get(i) {
+            Some(c) => {
+                let style = if c.is_mature() {
+                    Style::default().fg(color).add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
+                Span::styled(glyph, style)
+            }
+            None => Span::raw(" "),
         };
-        spans.push(Span::styled(glyph, style));
+        rows[row].push(span);
     }
-    if creatures.len() > MAX_SHOWN {
-        spans.push(Span::styled(
-            format!(" …+{}", creatures.len() - MAX_SHOWN),
+
+    let mut lines: Vec<Line<'static>> = rows
+        .into_iter()
+        .map(|spans| {
+            let mut full = vec![Span::raw("   ")];
+            full.extend(spans);
+            Line::from(full)
+        })
+        .collect();
+
+    if creatures.len() > PIT_CAPACITY {
+        lines.push(Line::from(Span::styled(
+            format!("   …+{}", creatures.len() - PIT_CAPACITY),
             Style::default().fg(Color::DarkGray),
-        ));
+        )));
     }
-    Line::from(spans)
+    lines
 }
 
 fn tier_marker(tier: u8) -> &'static str {
@@ -432,6 +460,7 @@ fn render_battle(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickSt
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::state::Creature;
     use ratzilla::ratatui::backend::TestBackend;
     use ratzilla::ratatui::Terminal;
 
@@ -538,6 +567,34 @@ mod tests {
         let top_row = &lines[0];
         assert_eq!(top_row.spans[0].content.as_ref(), " ");
         assert_eq!(top_row.spans[0].style, Style::default());
+    }
+
+    /// テトリス/スイカゲームのように、個体は下の行から積み上がっていくこと。
+    /// 上の行はまだ空 (スペースのまま) で、最下行だけが埋まっているはず。
+    #[test]
+    fn pit_lines_fills_from_the_bottom_row_first() {
+        let mut state = RanchState::new();
+        state.population[Species::Tsubu.index()] = vec![Creature::new(); 3];
+        let lines = pit_lines(&state, Species::Tsubu);
+        assert_eq!(lines.len(), PIT_ROWS);
+
+        let glyph = Species::Tsubu.glyph();
+        let bottom_text: String = lines[PIT_ROWS - 1].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(bottom_text.matches(glyph).count(), 3, "最下行に3体分のグリフがあるはず");
+
+        let top_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(top_text.matches(glyph).count(), 0, "最上行はまだ空のはず");
+    }
+
+    /// ピット容量を超えた分は "+N" 表記で最終行にまとめられること。
+    #[test]
+    fn pit_lines_overflow_appends_a_plus_n_line() {
+        let mut state = RanchState::new();
+        state.population[Species::Tsubu.index()] = vec![Creature::new(); PIT_CAPACITY + 5];
+        let lines = pit_lines(&state, Species::Tsubu);
+        assert_eq!(lines.len(), PIT_ROWS + 1, "オーバーフロー行が1行追加されるはず");
+        let overflow_text: String = lines.last().unwrap().spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(overflow_text.contains("+5"));
     }
 
     /// 未発見の種は「？？？」で伏せられ、名前が漏れないこと。
