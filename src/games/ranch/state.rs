@@ -217,10 +217,20 @@ impl Species {
         (base * (1.0 + 0.2 * steps)).round() as u64
     }
 
-    /// このステージに出現する野生個体の種。5ステージごとに解放されるプールから、
-    /// ステージ番号で周期的に選ぶ (決定的、乱数不使用)。
+    /// `Species::for_stage` の tier 解放間隔 (ステージ数)。tier1はステージ
+    /// `STAGE_TIER_UNLOCK_INTERVAL + 1` から、tier2はその2倍から出現する。
+    ///
+    /// 図鑑の発見は繁殖(進化)だけでなく対戦での遭遇でも成立する設計だが、
+    /// この間隔が短いと「対戦で流し見しただけで全種発見済みになる」ため、
+    /// 繁殖より遅い"保険"の発見経路として機能する程度まで長くしてある
+    /// (シミュレータで実測: 間隔5だと1時間未満で全10種が対戦遭遇だけで発見済みになっていた)。
+    const STAGE_TIER_UNLOCK_INTERVAL: u32 = 40;
+
+    /// このステージに出現する野生個体の種。`STAGE_TIER_UNLOCK_INTERVAL` ごとに
+    /// 解放されるプールから、ステージ番号で周期的に選ぶ (決定的、乱数不使用)。
     pub fn for_stage(stage: u32) -> Species {
-        let tier_unlock = ((stage.saturating_sub(1)) / 5).min(2) as u8;
+        let tier_unlock =
+            ((stage.saturating_sub(1)) / Self::STAGE_TIER_UNLOCK_INTERVAL).min(2) as u8;
         let pool: Vec<Species> = Self::all()
             .iter()
             .copied()
@@ -231,17 +241,22 @@ impl Species {
     }
 
     /// ステージ分スケールした野生個体の攻撃力。
+    ///
+    /// チームのステータスはLv上限(`MAX_LEVEL`)と編成上限(`TEAM_SIZE`)で頭打ちになる一方、
+    /// 敵を線形にしか強くしないと、頭打ちに達したチームがいつまでも無双できてしまう
+    /// (シミュレータで実測: 線形係数だと1時間で200ステージ超クリアしてしまっていた)。
+    /// 指数関数的に伸ばすことで、育成を積み重ねないと突破できない壁を維持する。
     pub fn stage_atk(self, stage: u32) -> u64 {
         let base = self.base_atk() as f64;
         let steps = stage.saturating_sub(1) as f64;
-        (base * (1.0 + 0.25 * steps)).round() as u64
+        (base * 1.06_f64.powf(steps)).round() as u64
     }
 
-    /// ステージ分スケールした野生個体のHP。
+    /// ステージ分スケールした野生個体のHP。`stage_atk` と同じ理由で指数関数的に伸ばす。
     pub fn stage_hp(self, stage: u32) -> u64 {
         let base = self.base_hp() as f64;
         let steps = stage.saturating_sub(1) as f64;
-        (base * (1.0 + 0.35 * steps)).round() as u64
+        (base * 1.09_f64.powf(steps)).round() as u64
     }
 
     /// この種を表す絵文字/記号。牧場タブなどで個体をビジュアル表示する時に使う。
@@ -613,16 +628,18 @@ mod tests {
 
     #[test]
     fn species_for_stage_unlocks_higher_tiers_over_time() {
-        // 序盤 (stage 1-5) は tier0 のみ。
-        for stage in 1..=5 {
+        // 序盤 (stage 1..=STAGE_TIER_UNLOCK_INTERVAL) は tier0 のみ。
+        for stage in 1..=Species::STAGE_TIER_UNLOCK_INTERVAL {
             assert_eq!(Species::for_stage(stage).tier(), 0);
         }
-        // stage 6-10 は tier0/1 のプールから選ばれる (tier2は出ない)。
-        for stage in 6..=10 {
+        // 次のSTAGE_TIER_UNLOCK_INTERVAL分はtier0/1のプールから選ばれる (tier2は出ない)。
+        for stage in (Species::STAGE_TIER_UNLOCK_INTERVAL + 1)..=(Species::STAGE_TIER_UNLOCK_INTERVAL * 2) {
             assert!(Species::for_stage(stage).tier() <= 1);
         }
-        // stage 11+ は tier2 も出現しうる。
-        let has_tier2 = (11..=30).any(|stage| Species::for_stage(stage).tier() == 2);
+        // STAGE_TIER_UNLOCK_INTERVAL*2 を超えると tier2 も出現しうる。
+        let sweep_start = Species::STAGE_TIER_UNLOCK_INTERVAL * 2 + 1;
+        let has_tier2 =
+            (sweep_start..sweep_start + 20).any(|stage| Species::for_stage(stage).tier() == 2);
         assert!(has_tier2, "十分ステージが進めば最終形態も出現するはず");
     }
 

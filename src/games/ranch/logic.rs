@@ -60,8 +60,12 @@ const REPRODUCE_CHANCE_PER_MATURE: f64 = 0.02;
 const REPRODUCE_CHANCE_CAP: f64 = 0.2;
 const REPRODUCE_COST: u64 = 3;
 
-const EVOLUTION_BASE_CHANCE: f64 = 0.02;
-const EVOLUTION_CHANCE_CAP: f64 = 0.5;
+/// 進化判定を行う間隔。繁殖と同じ理由 (毎tickだと体感できないほど速い) に加え、
+/// シミュレータで計測したところ毎tick判定だと閾値到達から数秒で進化してしまい、
+/// 図鑑が数分で埋まっていた (`cargo test simulate_ranch_default -- --nocapture` で確認可能)。
+const EVOLUTION_INTERVAL_TICKS: u64 = 10;
+const EVOLUTION_BASE_CHANCE: f64 = 0.003;
+const EVOLUTION_CHANCE_CAP: f64 = 0.05;
 /// 平均レベルが `MATURE_LEVEL` を1超えるごとに進化確率へ乗る係数。
 const EVOLUTION_LEVEL_FACTOR_PER_LEVEL: f64 = 0.2;
 /// 成熟個体数が閾値を1体超えるごとに進化確率へ乗る係数。
@@ -171,6 +175,9 @@ fn tick_reproduction(state: &mut RanchState) {
 // ── Evolution ──────────────────────────────────────────────────────
 
 fn tick_evolution(state: &mut RanchState) {
+    if !state.total_ticks.is_multiple_of(EVOLUTION_INTERVAL_TICKS) {
+        return;
+    }
     for &species in Species::all() {
         if species.is_final_tier() {
             continue;
@@ -440,7 +447,7 @@ mod tests {
         let food_before = s.food;
         tick(&mut s, FOOD_INCOME_INTERVAL_TICKS as u32);
         let gained_with_mature = s.food - food_before;
-        assert!(gained_with_mature >= 1 + 3, "成熟3体分の収入が上乗せされる");
+        assert!(gained_with_mature > 3, "成熟3体分の収入が上乗せされる");
     }
 
     // ── tick_reproduction ────────────────────────────────────────

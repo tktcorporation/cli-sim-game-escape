@@ -12,6 +12,9 @@ pub mod render;
 pub mod save;
 pub mod state;
 
+#[cfg(test)]
+mod simulator;
+
 use std::cell::RefCell;
 use std::rc::Rc;
 
