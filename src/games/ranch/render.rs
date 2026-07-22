@@ -187,6 +187,9 @@ fn species_color(species: Species) -> Color {
         Species::ThunderHawk => Color::Yellow,
         Species::ThornBoar => Color::Green,
         Species::SwampTurtle => Color::LightGreen,
+        Species::SeaDragon => Color::Blue,
+        Species::FlameWolf => Color::Rgb(255, 140, 0),
+        Species::RockBear => Color::Rgb(139, 90, 43),
     }
 }
 

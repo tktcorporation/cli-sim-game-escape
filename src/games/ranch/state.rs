@@ -67,13 +67,17 @@ pub enum Species {
     ThunderHawk,
     ThornBoar,
     SwampTurtle,
+    SeaDragon,
+    FlameWolf,
+    RockBear,
 }
 
 /// 種の総数。`RanchState::population` / `discovered` 配列のサイズに使う。
-pub const SPECIES_COUNT: usize = 10;
+pub const SPECIES_COUNT: usize = 13;
 
 impl Species {
     /// 全種を宣言順で返す (save id / index の SSOT)。
+    /// 既存セーブとの互換のため、既存種の並び (index 0..9) は変更せず末尾に追加する。
     pub fn all() -> &'static [Species] {
         &[
             Species::Tsubu,
@@ -86,6 +90,9 @@ impl Species {
             Species::ThunderHawk,
             Species::ThornBoar,
             Species::SwampTurtle,
+            Species::SeaDragon,
+            Species::FlameWolf,
+            Species::RockBear,
         ]
     }
 
@@ -112,6 +119,9 @@ impl Species {
             Species::ThunderHawk => "雷鷹",
             Species::ThornBoar => "棘猪",
             Species::SwampTurtle => "沼亀",
+            Species::SeaDragon => "海竜",
+            Species::FlameWolf => "炎狼",
+            Species::RockBear => "岩熊",
         }
     }
 
@@ -125,7 +135,10 @@ impl Species {
             | Species::FireKirin
             | Species::ThunderHawk
             | Species::ThornBoar
-            | Species::SwampTurtle => 2,
+            | Species::SwampTurtle
+            | Species::SeaDragon
+            | Species::FlameWolf
+            | Species::RockBear => 2,
         }
     }
 
@@ -134,12 +147,16 @@ impl Species {
     }
 
     /// 進化先候補。最終形態 (tier 2) は空スライスを返す。
+    ///
+    /// 一次進化3種はそれぞれ3つの最終形態に分岐する。3属性 (水/陽/土) の
+    /// うちどれを重点的に餌やりしたかが `evolution_bias` で分岐先の重みになる
+    /// ため、「自属性を伸ばす」「他の2属性のどちらかに寄せる」の3択になる。
     pub fn evolution_targets(self) -> &'static [Species] {
         match self {
             Species::Tsubu => &[Species::AquaTsubu, Species::FlareTsubu, Species::EarthTsubu],
-            Species::AquaTsubu => &[Species::MistPrincess, Species::FrostHare],
-            Species::FlareTsubu => &[Species::FireKirin, Species::ThunderHawk],
-            Species::EarthTsubu => &[Species::ThornBoar, Species::SwampTurtle],
+            Species::AquaTsubu => &[Species::MistPrincess, Species::FrostHare, Species::SeaDragon],
+            Species::FlareTsubu => &[Species::FireKirin, Species::ThunderHawk, Species::FlameWolf],
+            Species::EarthTsubu => &[Species::ThornBoar, Species::SwampTurtle, Species::RockBear],
             _ => &[],
         }
     }
@@ -154,10 +171,13 @@ impl Species {
             (Species::Tsubu, Species::EarthTsubu) => Some(Affinity::Earth),
             (Species::AquaTsubu, Species::MistPrincess) => Some(Affinity::Flare),
             (Species::AquaTsubu, Species::FrostHare) => Some(Affinity::Earth),
+            (Species::AquaTsubu, Species::SeaDragon) => Some(Affinity::Aqua),
             (Species::FlareTsubu, Species::FireKirin) => Some(Affinity::Earth),
             (Species::FlareTsubu, Species::ThunderHawk) => Some(Affinity::Aqua),
+            (Species::FlareTsubu, Species::FlameWolf) => Some(Affinity::Flare),
             (Species::EarthTsubu, Species::ThornBoar) => Some(Affinity::Flare),
             (Species::EarthTsubu, Species::SwampTurtle) => Some(Affinity::Aqua),
+            (Species::EarthTsubu, Species::RockBear) => Some(Affinity::Earth),
             _ => None,
         }
     }
@@ -184,6 +204,9 @@ impl Species {
             Species::ThunderHawk => 12,
             Species::ThornBoar => 10,
             Species::SwampTurtle => 6,
+            Species::SeaDragon => 11,
+            Species::FlameWolf => 13,
+            Species::RockBear => 8,
         }
     }
 
@@ -200,6 +223,9 @@ impl Species {
             Species::ThunderHawk => 32,
             Species::ThornBoar => 60,
             Species::SwampTurtle => 70,
+            Species::SeaDragon => 50,
+            Species::FlameWolf => 38,
+            Species::RockBear => 65,
         }
     }
 
@@ -270,6 +296,9 @@ impl Species {
             Species::ThunderHawk => "⚡",
             Species::ThornBoar => "✱",
             Species::SwampTurtle => "◉",
+            Species::SeaDragon => "≈",
+            Species::FlameWolf => "▲",
+            Species::RockBear => "■",
         }
     }
 
@@ -293,6 +322,9 @@ impl Species {
             Species::ThunderHawk => &THUNDER_HAWK_SPRITE_ROWS,
             Species::ThornBoar => &THORN_BOAR_SPRITE_ROWS,
             Species::SwampTurtle => &SWAMP_TURTLE_SPRITE_ROWS,
+            Species::SeaDragon => &SEA_DRAGON_SPRITE_ROWS,
+            Species::FlameWolf => &FLAME_WOLF_SPRITE_ROWS,
+            Species::RockBear => &ROCK_BEAR_SPRITE_ROWS,
         }
     }
 }
@@ -372,6 +404,39 @@ const SWAMP_TURTLE_SPRITE_ROWS: [&str; 8] = [
     "..1111..",
     "..1221..",
     ".1....1.",
+];
+
+const SEA_DRAGON_SPRITE_ROWS: [&str; 8] = [
+    ".1.11.1.",
+    "..1111..",
+    ".111111.",
+    "11111111",
+    "11211211",
+    "11111111",
+    ".111111.",
+    "1.1111.1",
+];
+
+const FLAME_WOLF_SPRITE_ROWS: [&str; 8] = [
+    "1.....1.",
+    "11....1.",
+    ".11..11.",
+    "..1111..",
+    ".1111111",
+    "11211211",
+    ".111111.",
+    "..1111..",
+];
+
+const ROCK_BEAR_SPRITE_ROWS: [&str; 8] = [
+    "1.....1.",
+    "11....11",
+    ".111111.",
+    "11111111",
+    "11211211",
+    "11111111",
+    "11111111",
+    ".111111.",
 ];
 
 /// 個体の最大レベル。

@@ -108,11 +108,17 @@ mod tests {
             action_for_click(TOGGLE_TEAM_BASE),
             Some(PlayerAction::ToggleTeamMember(Species::Tsubu))
         );
+        let last_index = super::super::state::SPECIES_COUNT as u16 - 1;
         assert_eq!(
-            action_for_click(TOGGLE_TEAM_BASE + 9),
-            Some(PlayerAction::ToggleTeamMember(Species::SwampTurtle))
+            action_for_click(TOGGLE_TEAM_BASE + last_index),
+            Some(PlayerAction::ToggleTeamMember(
+                Species::from_index(last_index as usize).unwrap()
+            ))
         );
-        assert_eq!(action_for_click(TOGGLE_TEAM_BASE + 10), None);
+        assert_eq!(
+            action_for_click(TOGGLE_TEAM_BASE + last_index + 1),
+            None
+        );
     }
 
     #[test]

@@ -599,6 +599,28 @@ mod tests {
         assert!(aqua_wins > 20, "Aqua を極端に蓄積すればほぼ AquaTsubu に進化するはず (実績: {aqua_wins}/29)");
     }
 
+    /// 一次進化 → 最終形態の3分岐目 (自属性バイアス) が機能していること。
+    /// 例えば AquaTsubu は Flare/Earth 蓄積でシズク姫/氷ウサに寄るが、Aqua自体を
+    /// 蓄積すればワイルドカードである海竜に寄るはず。
+    #[test]
+    fn evolution_bias_favors_own_affinity_for_the_third_branch() {
+        let mut sea_dragon_wins = 0;
+        for seed in 1..30u32 {
+            let mut s = RanchState::new();
+            s.rng_state = seed;
+            s.affinity_feed[Affinity::Aqua.index()] = 1000;
+            s.population[Species::AquaTsubu.index()] = vec![Creature { level: MAX_LEVEL, xp: 0 }; 8];
+            evolve(&mut s, Species::AquaTsubu, 8);
+            if !s.population[Species::SeaDragon.index()].is_empty() {
+                sea_dragon_wins += 1;
+            }
+        }
+        assert!(
+            sea_dragon_wins > 20,
+            "Aqua を極端に蓄積すればほぼ海竜に進化するはず (実績: {sea_dragon_wins}/29)"
+        );
+    }
+
     // ── tick_battle ──────────────────────────────────────────────
 
     #[test]
