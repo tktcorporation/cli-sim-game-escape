@@ -56,9 +56,10 @@ const FOOD_INCOME_INTERVAL_TICKS: u64 = 10;
 
 /// 繁殖判定を行う間隔。毎tick判定すると個体数が体感できないほど速く増えるため、
 /// 食料収入と同じ「1秒に1回」のペースに落として、増える瞬間が分かるようにする。
-/// 種ごとのコスト・確率係数は `Species::reproduce_cost` / `reproduce_chance_per_mature` 参照。
 const REPRODUCE_INTERVAL_TICKS: u64 = 10;
+const REPRODUCE_CHANCE_PER_MATURE: f64 = 0.02;
 const REPRODUCE_CHANCE_CAP: f64 = 0.2;
+const REPRODUCE_COST: u64 = 3;
 
 /// 進化判定を行う間隔。繁殖と同じ理由 (毎tickだと体感できないほど速い) に加え、
 /// シミュレータで計測したところ毎tick判定だと閾値到達から数秒で進化してしまい、
@@ -167,22 +168,29 @@ fn tick_feed_focus_accumulation(state: &mut RanchState) {
 
 // ── Reproduction ───────────────────────────────────────────────────
 
+/// 繁殖で直接生まれるのは無属性種 (tier0) だけにする。上位種を増やす手段は
+/// 進化 (下位種を消費して1体誕生) と稀な野生個体の仲間入りに限定することで、
+/// 「無属性種を土台に積み上げて、じわじわ上位種を育てる」ピラミッド構造にする。
+/// tier1/2 が自分自身を直接繁殖できてしまうと、進化を経由せず上位種だけを
+/// 際限なく増やせてしまい、この構造が壊れる。
 fn tick_reproduction(state: &mut RanchState) {
     if !state.total_ticks.is_multiple_of(REPRODUCE_INTERVAL_TICKS) {
         return;
     }
     for &species in Species::all() {
+        if species.tier() != 0 {
+            continue;
+        }
         if state.total_population() >= state.capacity() {
             break;
         }
         let mature = state.mature_count(species);
-        let cost = species.reproduce_cost();
-        if mature == 0 || state.food < cost {
+        if mature == 0 || state.food < REPRODUCE_COST {
             continue;
         }
-        let chance = (mature as f64 * species.reproduce_chance_per_mature()).min(REPRODUCE_CHANCE_CAP);
+        let chance = (mature as f64 * REPRODUCE_CHANCE_PER_MATURE).min(REPRODUCE_CHANCE_CAP);
         if roll_chance(&mut state.rng_state, chance) {
-            state.food -= cost;
+            state.food -= REPRODUCE_COST;
             state.population[species.index()].push(Creature::new());
         }
     }
@@ -485,6 +493,26 @@ mod tests {
         }
         tick(&mut s, 2000);
         assert!(s.total_population() <= s.capacity());
+    }
+
+    /// 上位種 (tier1以上) は繁殖では直接増えず、進化 (もしくは稀な野生個体の
+    /// 仲間入り) でのみ増えること。「無属性種を土台に積み上げて上位種を育てる」
+    /// ピラミッド構造の前提。
+    #[test]
+    fn only_tier0_reproduces_directly() {
+        let mut s = RanchState::new();
+        s.food = 1_000_000;
+        s.capacity_upgrades = 50; // 収容数不足で弾かれないよう十分に広げておく
+        s.population[Species::AquaTsubu.index()] = vec![Creature { level: MAX_LEVEL, xp: 0 }; 20];
+        let aqua_count_before = s.population[Species::AquaTsubu.index()].len();
+        for _ in 0..500 {
+            tick_reproduction(&mut s);
+        }
+        assert_eq!(
+            s.population[Species::AquaTsubu.index()].len(),
+            aqua_count_before,
+            "tier1(AquaTsubu)は繁殖では直接増えないはず"
+        );
     }
 
     #[test]

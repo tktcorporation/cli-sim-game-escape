@@ -5,7 +5,10 @@
 //! ## コアループ
 //!
 //! 1. **成長**: 個体は tick 毎に XP を貯めてレベルアップする。Lv `MATURE_LEVEL` 以上で成熟扱いになる。
-//! 2. **増殖**: 同種の成熟個体がいれば、収容数に空きがある限り一定確率+食料消費で新しい個体 (Lv1) が生まれる。
+//! 2. **増殖**: 無属性種 (tier0) の成熟個体がいれば、収容数に空きがある限り一定確率+食料消費で
+//!    新しい個体 (Lv1) が生まれる。上位種 (tier1/2) は自分自身を繁殖できない — 増える手段は
+//!    進化と野生個体の仲間入りに限られる。無属性種を土台に積み上げて、じわじわ上位種を
+//!    育てていくピラミッド構造にするための制約。
 //! 3. **進化**: 同種の成熟個体が `Species::evolution_threshold` 体集まると確率判定が発生し、
 //!    成功すると同数の成熟個体を消費して次階層の種が1体生まれる。確率は個体数と平均レベルの
 //!    両方から決まるため、ただ増やすだけでなく育ててから集めた方が進化しやすい。
@@ -188,28 +191,6 @@ impl Species {
             0 => 5,
             1 => 8,
             _ => 0,
-        }
-    }
-
-    /// 繁殖1回あたりの食料コスト。上位種ほど高くする — 安く速く増える無属性種と、
-    /// コストは高いが強い最終形態のどちらに食料を投資するかという判断を生む
-    /// (Cookie Factory の「下位ほど安いが伸びが鈍く、上位ほど高いが伸びる」
-    /// 投資ジレンマの参照)。
-    pub fn reproduce_cost(self) -> u64 {
-        match self.tier() {
-            0 => 3,
-            1 => 6,
-            _ => 12,
-        }
-    }
-
-    /// 繁殖判定における成熟個体1体あたりの確率係数。上位種ほど増えにくくすることで、
-    /// 「ただ増やすなら無属性種、強さを取るなら最終形態」という選択を作る。
-    pub fn reproduce_chance_per_mature(self) -> f64 {
-        match self.tier() {
-            0 => 0.02,
-            1 => 0.015,
-            _ => 0.01,
         }
     }
 
@@ -827,28 +808,6 @@ mod tests {
                 assert!(sp.evolution_threshold() > 0);
                 assert!(!sp.evolution_targets().is_empty());
             }
-        }
-    }
-
-    /// 上位種ほど繁殖コストが高く、繁殖確率係数が低いこと。
-    /// 「安く速く増える無属性種」と「コストは高いが強い最終形態」の
-    /// どちらに食料を投資するかという判断を作るための前提 (idle game 1 = Cookie
-    /// Factory の、下位ほど安く上位ほど高いという投資ジレンマの参照)。
-    #[test]
-    fn reproduce_cost_and_chance_scale_by_tier() {
-        for tier in 0..2u8 {
-            let lower = Species::all().iter().find(|s| s.tier() == tier).unwrap();
-            let higher = Species::all().iter().find(|s| s.tier() == tier + 1).unwrap();
-            assert!(
-                lower.reproduce_cost() < higher.reproduce_cost(),
-                "tier{tier}よりtier{}の方が繁殖コストが高いはず",
-                tier + 1
-            );
-            assert!(
-                lower.reproduce_chance_per_mature() > higher.reproduce_chance_per_mature(),
-                "tier{tier}よりtier{}の方が繁殖確率係数が低いはず",
-                tier + 1
-            );
         }
     }
 
