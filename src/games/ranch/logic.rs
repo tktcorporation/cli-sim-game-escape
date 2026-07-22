@@ -248,6 +248,19 @@ fn evolve(state: &mut RanchState, species: Species, consume: u32) {
     let idx = roll_index(&mut state.rng_state, &weights);
     let target = targets[idx];
 
+    // 無属性種 (tier0) は繁殖の唯一の担い手で、上位種と違って進化で補充する経路が
+    // ない。ちょうど閾値ぶんしか成熟個体がいない状態で全消費すると、無属性種が
+    // 全滅して二度と繁殖できなくなり、放置ループが恒久的に止まってしまう。
+    // 必ず1体は繁殖用に残す。
+    let consume = if species.tier() == 0 {
+        consume.min(state.mature_count(species).saturating_sub(1))
+    } else {
+        consume
+    };
+    if consume == 0 {
+        return;
+    }
+
     consume_mature(state, species, consume);
     state.population[target.index()].push(Creature::new());
     state.evolution_flash = Some(EvolutionFlash { species: target, ticks_left: EVOLUTION_FLASH_TICKS });
@@ -631,6 +644,21 @@ mod tests {
             .filter(|&&sp| s.discovered[sp.index()])
             .count();
         assert_eq!(discovered_total, 1);
+    }
+
+    /// 無属性種 (tier0) は繁殖の唯一の担い手で、上位種と違って進化で補充する経路が
+    /// ない。成熟個体がちょうど閾値ぶんしかいなくても、進化後は必ず1体は繁殖用に
+    /// 残ること (でないと無属性種が全滅し、繁殖も進化も二度と起こせなくなる)。
+    #[test]
+    fn evolving_tier0_never_consumes_the_last_breeder() {
+        let mut s = RanchState::new();
+        let threshold = Species::Tsubu.evolution_threshold();
+        s.population[Species::Tsubu.index()] = vec![Creature { level: MAX_LEVEL, xp: 0 }; threshold as usize];
+        evolve(&mut s, Species::Tsubu, threshold);
+        assert!(
+            !s.population[Species::Tsubu.index()].is_empty(),
+            "無属性種は進化後も最低1体は残るはず"
+        );
     }
 
     /// 進化すると、進化先の種を指す演出フラグが立つこと
