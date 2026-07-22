@@ -34,7 +34,9 @@ pub struct RanchGame {
 fn is_save_worthy(action: PlayerAction) -> bool {
     matches!(
         action,
-        PlayerAction::Feed(_) | PlayerAction::UpgradeCapacity | PlayerAction::ToggleTeamMember(_)
+        PlayerAction::ToggleFeedFocus(_)
+            | PlayerAction::UpgradeCapacity
+            | PlayerAction::ToggleTeamMember(_)
     )
 }
 
@@ -85,13 +87,12 @@ impl Game for RanchGame {
         let ok = logic::apply_action(&mut self.state, action);
 
         match action {
-            PlayerAction::Feed(_) => sound::play(if ok { sound::PURCHASE } else { sound::ERROR }),
             PlayerAction::UpgradeCapacity => {
                 sound::play(if ok { sound::ENHANCE } else { sound::ERROR })
             }
-            PlayerAction::ToggleTeamMember(_) | PlayerAction::SetTab(_) => {
-                sound::play(sound::CLICK)
-            }
+            PlayerAction::ToggleFeedFocus(_)
+            | PlayerAction::ToggleTeamMember(_)
+            | PlayerAction::SetTab(_) => sound::play(sound::CLICK),
             PlayerAction::ScrollUp | PlayerAction::ScrollDown => {}
         }
 
@@ -147,12 +148,12 @@ mod tests {
     }
 
     #[test]
-    fn click_feed_consumes_food() {
+    fn click_toggles_feed_focus() {
         let mut g = RanchGame::new();
-        g.state.food = 1000;
-        let before = g.state.food;
         g.handle_input(&click(FEED_BASE + Affinity::Aqua.index() as u16));
-        assert!(g.state.food < before);
+        assert_eq!(g.state.feed_focus, Some(Affinity::Aqua));
+        g.handle_input(&click(FEED_BASE + Affinity::Aqua.index() as u16));
+        assert_eq!(g.state.feed_focus, None);
     }
 
     #[test]
@@ -205,7 +206,7 @@ mod tests {
 
     #[test]
     fn save_worthy_actions_classified_correctly() {
-        assert!(is_save_worthy(PlayerAction::Feed(Affinity::Aqua)));
+        assert!(is_save_worthy(PlayerAction::ToggleFeedFocus(Affinity::Aqua)));
         assert!(is_save_worthy(PlayerAction::UpgradeCapacity));
         assert!(is_save_worthy(PlayerAction::ToggleTeamMember(Species::Tsubu)));
         assert!(!is_save_worthy(PlayerAction::SetTab(Tab::Dex)));
@@ -213,11 +214,9 @@ mod tests {
     }
 
     #[test]
-    fn key_feed_shortcut_on_habitat_tab() {
+    fn key_feed_focus_shortcut_on_habitat_tab() {
         let mut g = RanchGame::new();
-        g.state.food = 1000;
-        let before = g.state.food;
         g.handle_input(&InputEvent::Key('1'));
-        assert!(g.state.food < before);
+        assert_eq!(g.state.feed_focus, Some(Affinity::Aqua));
     }
 }

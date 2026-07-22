@@ -48,12 +48,16 @@ fn roll_index(seed: &mut u32, weights: &[u32]) -> usize {
 // ── Tick balance constants ──────────────────────────────────────
 
 const PASSIVE_XP_PER_TICK: u32 = 1;
-const FEED_XP_BONUS: u32 = 15;
+/// 餌やり方針を選んでいる間、成長速度に上乗せする分。
+const FOCUS_XP_BONUS_PER_TICK: u32 = 1;
 
 const FOOD_INCOME_INTERVAL_TICKS: u64 = 10;
 
-const REPRODUCE_CHANCE_PER_MATURE: f64 = 0.01;
-const REPRODUCE_CHANCE_CAP: f64 = 0.15;
+/// 繁殖判定を行う間隔。毎tick判定すると個体数が体感できないほど速く増えるため、
+/// 食料収入と同じ「1秒に1回」のペースに落として、増える瞬間が分かるようにする。
+const REPRODUCE_INTERVAL_TICKS: u64 = 10;
+const REPRODUCE_CHANCE_PER_MATURE: f64 = 0.02;
+const REPRODUCE_CHANCE_CAP: f64 = 0.2;
 const REPRODUCE_COST: u64 = 3;
 
 const EVOLUTION_BASE_CHANCE: f64 = 0.02;
@@ -77,6 +81,7 @@ fn tick_once(state: &mut RanchState) {
     state.total_ticks += 1;
     tick_growth(state);
     tick_food_income(state);
+    tick_feed_focus_accumulation(state);
     tick_reproduction(state);
     tick_evolution(state);
     tick_battle(state);
@@ -85,9 +90,14 @@ fn tick_once(state: &mut RanchState) {
 // ── Growth ────────────────────────────────────────────────────────
 
 fn tick_growth(state: &mut RanchState) {
+    let xp_gain = if state.feed_focus.is_some() {
+        PASSIVE_XP_PER_TICK + FOCUS_XP_BONUS_PER_TICK
+    } else {
+        PASSIVE_XP_PER_TICK
+    };
     for creatures in state.population.iter_mut() {
         for c in creatures.iter_mut() {
-            grow_creature(c, PASSIVE_XP_PER_TICK);
+            grow_creature(c, xp_gain);
         }
     }
 }
@@ -126,9 +136,22 @@ fn tick_food_income(state: &mut RanchState) {
     state.food += 1 + mature_total;
 }
 
+/// 選択中の餌やり方針があれば、その属性を1秒ごとに蓄積する (進化の分岐バイアスに使う)。
+fn tick_feed_focus_accumulation(state: &mut RanchState) {
+    if !state.total_ticks.is_multiple_of(FOOD_INCOME_INTERVAL_TICKS) {
+        return;
+    }
+    if let Some(focus) = state.feed_focus {
+        state.affinity_feed[focus.index()] += 1;
+    }
+}
+
 // ── Reproduction ───────────────────────────────────────────────────
 
 fn tick_reproduction(state: &mut RanchState) {
+    if !state.total_ticks.is_multiple_of(REPRODUCE_INTERVAL_TICKS) {
+        return;
+    }
     for &species in Species::all() {
         if state.total_population() >= state.capacity() {
             break;
@@ -309,7 +332,7 @@ pub fn apply_action(state: &mut RanchState, action: PlayerAction) -> bool {
             state.tab_scroll.set(0);
             true
         }
-        PlayerAction::Feed(affinity) => feed(state, affinity),
+        PlayerAction::ToggleFeedFocus(affinity) => toggle_feed_focus(state, affinity),
         PlayerAction::UpgradeCapacity => upgrade_capacity(state),
         PlayerAction::ToggleTeamMember(species) => toggle_team_member(state, species),
         PlayerAction::ScrollUp => {
@@ -325,20 +348,17 @@ pub fn apply_action(state: &mut RanchState, action: PlayerAction) -> bool {
     }
 }
 
-fn feed(state: &mut RanchState, affinity: Affinity) -> bool {
-    let cost = state.feed_cost();
-    if state.food < cost {
-        return false;
+/// 餌やり方針をトグルする。同じ属性を選び直すと解除する。
+/// コストは無く、解除するまで `tick_growth` / `tick_feed_focus_accumulation` が
+/// 継続的に効果を適用し続けるので、都度クリックし直す必要はない。
+fn toggle_feed_focus(state: &mut RanchState, affinity: Affinity) -> bool {
+    if state.feed_focus == Some(affinity) {
+        state.feed_focus = None;
+        state.add_log("餌やりの方針を解除した");
+    } else {
+        state.feed_focus = Some(affinity);
+        state.add_log(format!("{}属性を重点的に育てる方針にした", affinity.name()));
     }
-    state.food -= cost;
-    state.affinity_feed[affinity.index()] += 1;
-
-    for creatures in state.population.iter_mut() {
-        for c in creatures.iter_mut() {
-            grow_creature(c, FEED_XP_BONUS);
-        }
-    }
-    state.add_log(format!("{}属性の餌を与えた", affinity.name()));
     true
 }
 
@@ -660,22 +680,65 @@ mod tests {
     // ── apply_action ─────────────────────────────────────────────
 
     #[test]
-    fn feed_fails_when_food_insufficient() {
+    fn toggle_feed_focus_sets_then_clears() {
         let mut s = RanchState::new();
-        s.food = 0;
-        assert!(!apply_action(&mut s, PlayerAction::Feed(Affinity::Aqua)));
+        assert!(apply_action(&mut s, PlayerAction::ToggleFeedFocus(Affinity::Flare)));
+        assert_eq!(s.feed_focus, Some(Affinity::Flare));
+        assert!(apply_action(&mut s, PlayerAction::ToggleFeedFocus(Affinity::Flare)));
+        assert_eq!(s.feed_focus, None, "同じ属性を選び直すと解除される");
     }
 
     #[test]
-    fn feed_consumes_food_and_grants_xp_and_affinity() {
+    fn toggle_feed_focus_switches_between_affinities() {
         let mut s = RanchState::new();
-        s.food = 1000;
+        apply_action(&mut s, PlayerAction::ToggleFeedFocus(Affinity::Aqua));
+        apply_action(&mut s, PlayerAction::ToggleFeedFocus(Affinity::Flare));
+        assert_eq!(s.feed_focus, Some(Affinity::Flare), "別の属性を選ぶと切り替わる");
+    }
+
+    #[test]
+    fn toggle_feed_focus_costs_nothing() {
+        let mut s = RanchState::new();
+        s.food = 0;
+        assert!(apply_action(&mut s, PlayerAction::ToggleFeedFocus(Affinity::Aqua)));
+        assert_eq!(s.food, 0, "餌やり方針の変更に食料コストは無い");
+    }
+
+    #[test]
+    fn feed_focus_speeds_up_growth_and_accumulates_affinity() {
+        let mut s = RanchState::new();
+        apply_action(&mut s, PlayerAction::ToggleFeedFocus(Affinity::Flare));
         let xp_before = s.population[Species::Tsubu.index()][0].xp;
-        assert!(apply_action(&mut s, PlayerAction::Feed(Affinity::Flare)));
-        assert!(s.food < 1000);
-        assert_eq!(s.affinity_feed[Affinity::Flare.index()], 1);
-        assert!(s.population[Species::Tsubu.index()][0].xp > xp_before
-            || s.population[Species::Tsubu.index()][0].level > 1);
+        tick(&mut s, FOOD_INCOME_INTERVAL_TICKS as u32);
+        assert!(
+            s.population[Species::Tsubu.index()][0].xp > xp_before
+                || s.population[Species::Tsubu.index()][0].level > 1,
+            "方針を選んでいる間は成長が進む"
+        );
+        assert_eq!(s.affinity_feed[Affinity::Flare.index()], 1, "1秒ごとに方針の属性が積まれる");
+    }
+
+    /// レベルアップの瞬間は xp が 0 に戻るため、単純な xp 比較だとちょうど
+    /// 閾値を跨いだ側が「xp が少ない」ように見えてしまう。レベルも含めた
+    /// 累積成長量で比較する (`xp_to_next_level(l) = 20*l` の等差数列の和)。
+    fn total_growth(c: &Creature) -> u32 {
+        10 * c.level as u32 * (c.level as u32 - 1) + c.xp
+    }
+
+    #[test]
+    fn without_feed_focus_growth_is_slower() {
+        let mut with_focus = RanchState::new();
+        apply_action(&mut with_focus, PlayerAction::ToggleFeedFocus(Affinity::Aqua));
+        let mut without_focus = RanchState::new();
+
+        tick(&mut with_focus, FOOD_INCOME_INTERVAL_TICKS as u32);
+        tick(&mut without_focus, FOOD_INCOME_INTERVAL_TICKS as u32);
+
+        assert!(
+            total_growth(&with_focus.population[Species::Tsubu.index()][0])
+                > total_growth(&without_focus.population[Species::Tsubu.index()][0]),
+            "方針を選んでいる方が成長が早い"
+        );
     }
 
     #[test]

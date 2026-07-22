@@ -11,7 +11,7 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
-use super::state::{Creature, RanchState, Species, Tab, AFFINITY_COUNT, SPECIES_COUNT, TEAM_SIZE};
+use super::state::{Affinity, Creature, RanchState, Species, Tab, AFFINITY_COUNT, SPECIES_COUNT, TEAM_SIZE};
 
 /// セーブデータのフォーマットバージョン。
 #[cfg(any(target_arch = "wasm32", test))]
@@ -46,6 +46,8 @@ struct GameSave {
     food: u64,
     /// index = `Affinity::index()`。
     affinity_feed: Vec<u32>,
+    /// 現在の餌やり方針 (`Affinity::index()`)。未選択なら `None`。
+    feed_focus: Option<u8>,
     capacity_upgrades: u32,
     /// index = `Species::index()`。
     discovered: Vec<bool>,
@@ -76,6 +78,7 @@ fn extract_save(state: &RanchState) -> SaveData {
                 .collect(),
             food: state.food,
             affinity_feed: state.affinity_feed.to_vec(),
+            feed_focus: state.feed_focus.map(|a| a.index() as u8),
             capacity_upgrades: state.capacity_upgrades,
             discovered: state.discovered.to_vec(),
             team: state
@@ -108,6 +111,7 @@ fn apply_save(state: &mut RanchState, save: &GameSave) {
     for (i, &v) in save.affinity_feed.iter().enumerate().take(AFFINITY_COUNT) {
         state.affinity_feed[i] = v;
     }
+    state.feed_focus = save.feed_focus.and_then(|idx| Affinity::from_index(idx as usize));
     state.capacity_upgrades = save.capacity_upgrades;
     for (i, &d) in save.discovered.iter().enumerate().take(SPECIES_COUNT) {
         state.discovered[i] = d;
@@ -220,6 +224,7 @@ mod tests {
         original.affinity_feed[0] = 3;
         original.affinity_feed[1] = 9;
         original.affinity_feed[2] = 1;
+        original.feed_focus = Some(Affinity::Flare);
         original.capacity_upgrades = 4;
         original.discovered[Species::FireKirin.index()] = true;
         original.team[0] = Some(Species::Tsubu);
@@ -249,6 +254,7 @@ mod tests {
         assert_eq!(restored.population[Species::FireKirin.index()].len(), 1);
         assert_eq!(restored.food, 12345);
         assert_eq!(restored.affinity_feed, [3, 9, 1]);
+        assert_eq!(restored.feed_focus, Some(Affinity::Flare));
         assert_eq!(restored.capacity_upgrades, 4);
         assert!(restored.discovered[Species::FireKirin.index()]);
         assert_eq!(restored.team[0], Some(Species::Tsubu));

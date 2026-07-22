@@ -9,9 +9,11 @@
 //! 3. **進化**: 同種の成熟個体が `Species::evolution_threshold` 体集まると確率判定が発生し、
 //!    成功すると同数の成熟個体を消費して次階層の種が1体生まれる。確率は個体数と平均レベルの
 //!    両方から決まるため、ただ増やすだけでなく育ててから集めた方が進化しやすい。
-//!    どの進化先になるかは `affinity_feed` (餌やりの蓄積) に重み付けされる — 明示はしないので、
-//!    プレイヤーは「何を与えると何に進化しやすいか」を結果から推測することになる。
-//! 4. **対戦**: チームに編成した種の最強個体の合計ステータスで、ステージの敵と自動的に戦う。
+//!    どの進化先になるかは `affinity_feed` (餌やり方針の蓄積) に重み付けされる — 明示はしないので、
+//!    プレイヤーは「何に方針を寄せると何に進化しやすいか」を結果から推測することになる。
+//! 4. **餌やり方針**: `feed_focus` に属性を1つ選んでおくと、選び直すまで継続的に成長が早まり
+//!    その属性が蓄積し続ける (毎回クリックし直す必要はない)。
+//! 5. **対戦**: チームに編成した種の最強個体の合計ステータスで、ステージの敵と自動的に戦う。
 //!    勝利した敵の種は野生個体として偶に仲間になることもある (繁殖以外の入手経路)。
 
 use std::cell::Cell;
@@ -241,6 +243,27 @@ impl Species {
         let steps = stage.saturating_sub(1) as f64;
         (base * (1.0 + 0.35 * steps)).round() as u64
     }
+
+    /// この種を表す絵文字/記号。牧場タブなどで個体をビジュアル表示する時に使う。
+    ///
+    /// TODO(プレイヤー体験を決める人向け): 全種同じ記号の仮実装のまま残してある。
+    /// 10種分の割り当てを埋めてほしい — 絵文字1文字でも記号1文字でも構わない。
+    /// 進化前後で見た目に関連性を持たせる (例: 水ツブ系はしずく系、鷹はワシ系) と、
+    /// 図鑑をめくった時に「これは水ツブの進化先か」と気付ける手がかりになる。
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Species::Tsubu => "●",
+            Species::AquaTsubu => "●",
+            Species::FlareTsubu => "●",
+            Species::EarthTsubu => "●",
+            Species::MistPrincess => "●",
+            Species::FrostHare => "●",
+            Species::FireKirin => "●",
+            Species::ThunderHawk => "●",
+            Species::ThornBoar => "●",
+            Species::SwampTurtle => "●",
+        }
+    }
 }
 
 /// 個体の最大レベル。
@@ -323,6 +346,9 @@ pub struct RanchState {
     pub food: u64,
     /// 餌やりの累積 (`Affinity::index()` でアクセス)。進化の分岐先バイアスに使う。
     pub affinity_feed: [u32; AFFINITY_COUNT],
+    /// 現在の餌やり方針。選んでおくと解除するまで継続的に成長を早め、
+    /// その属性を `affinity_feed` に積み続ける (都度クリックし直す必要はない)。
+    pub feed_focus: Option<Affinity>,
     /// 収容数拡張の購入回数。`capacity()` の算出に使う。
     pub capacity_upgrades: u32,
     /// 発見済みの種フラグ (繁殖 or 対戦での遭遇で立つ)。
@@ -367,6 +393,7 @@ impl RanchState {
             population,
             food: 30,
             affinity_feed: [0; AFFINITY_COUNT],
+            feed_focus: None,
             capacity_upgrades: 0,
             discovered,
             team: [None; TEAM_SIZE],
@@ -430,11 +457,6 @@ impl RanchState {
         (base * growth.powi(self.capacity_upgrades as i32)).round() as u64
     }
 
-    /// 餌やりのコスト (総飼育数が増えるほど上がる)。
-    pub fn feed_cost(&self) -> u64 {
-        5 + self.total_population() as u64
-    }
-
     /// 対戦チームの合計攻撃力。未編成のスロットや個体が0の種は寄与しない。
     pub fn team_atk(&self) -> u64 {
         self.team
@@ -487,6 +509,14 @@ mod tests {
         assert_eq!(s.capacity(), BASE_CAPACITY);
         assert_eq!(s.enemy_hp, s.enemy_max_hp);
         assert!(s.enemy_max_hp > 0);
+        assert_eq!(s.feed_focus, None, "初期状態では餌やり方針は未選択");
+    }
+
+    #[test]
+    fn every_species_has_a_glyph() {
+        for &sp in Species::all() {
+            assert!(!sp.glyph().is_empty(), "{:?} の glyph が空文字列になっている", sp);
+        }
     }
 
     #[test]
@@ -633,14 +663,6 @@ mod tests {
         s.capacity_upgrades = 3;
         let c3 = s.capacity_upgrade_cost();
         assert!(c3 > c0);
-    }
-
-    #[test]
-    fn feed_cost_grows_with_population() {
-        let mut s = RanchState::new();
-        let base_cost = s.feed_cost();
-        s.population[Species::AquaTsubu.index()] = vec![Creature::new(); 10];
-        assert!(s.feed_cost() > base_cost);
     }
 
     #[test]

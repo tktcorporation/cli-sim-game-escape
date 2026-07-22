@@ -115,7 +115,8 @@ fn render_habitat(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickS
         let mature = state.mature_count(species);
         let avg = state.average_mature_level(species);
         let mut spans = vec![
-            Span::styled(format!(" {:<8}", species.name()), Style::default().fg(Color::White)),
+            Span::styled(format!(" {} ", species.glyph()), Style::default().fg(species_color(species))),
+            Span::styled(format!("{:<8}", species.name()), Style::default().fg(Color::White)),
             Span::styled(format!("×{pop:<3}"), Style::default().fg(Color::Cyan)),
             Span::styled(format!(" 成熟{mature:<2}"), Style::default().fg(Color::LightGreen)),
             Span::styled(format!(" 平均Lv{avg:.1}"), Style::default().fg(Color::Yellow)),
@@ -127,20 +128,31 @@ fn render_habitat(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickS
             ));
         }
         cl.push(Line::from(spans));
+        cl.push(creature_glyphs_line(state, species));
     }
 
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
-        " 餌やり (成長を早める。何を与えるかは進化の方向にも影響する)",
+        " 餌やりの方針 (選ぶと解除するまで継続する。何を選ぶかは進化の方向にも影響する)",
         Style::default().fg(Color::DarkGray),
     )));
     for &affinity in Affinity::all() {
         let id = FEED_BASE + affinity.index() as u16;
+        let active = state.feed_focus == Some(affinity);
+        let marker = if active { "☑" } else { "☐" };
+        let style = if active {
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
         cl.push_clickable(
             Line::from(vec![
-                Span::styled(format!(" [{}] ", affinity.index() + 1), Style::default().fg(Color::Yellow)),
-                Span::styled(format!("{}属性の餌をやる", affinity.name()), Style::default().fg(Color::White)),
-                Span::styled(format!(" (餌-{})", state.feed_cost()), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!(" [{}] {marker} ", affinity.index() + 1), style),
+                Span::styled(format!("{}属性を重点的に育てる", affinity.name()), style),
+                Span::styled(
+                    format!("  蓄積{}", state.affinity_feed[affinity.index()]),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]),
             id,
         );
@@ -169,6 +181,48 @@ fn render_habitat(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickS
         .block(block)
         .arrow_color(Color::LightGreen)
         .render(f, area, cs);
+}
+
+/// 種ごとのアクセント色。進化元が近い種は近い色域にまとめてある
+/// (水系統は青系、陽系統は赤系、土系統は緑系)。
+fn species_color(species: Species) -> Color {
+    match species {
+        Species::Tsubu => Color::Gray,
+        Species::AquaTsubu => Color::LightBlue,
+        Species::FlareTsubu => Color::LightRed,
+        Species::EarthTsubu => Color::LightYellow,
+        Species::MistPrincess => Color::LightCyan,
+        Species::FrostHare => Color::Cyan,
+        Species::FireKirin => Color::Red,
+        Species::ThunderHawk => Color::Yellow,
+        Species::ThornBoar => Color::Green,
+        Species::SwampTurtle => Color::LightGreen,
+    }
+}
+
+/// 個体をグリフの並びとしてビジュアル表示する行。
+/// 成熟個体は明るい色で、未成熟はグレーで表示し、群れの成熟度を一目で分かるようにする。
+fn creature_glyphs_line(state: &RanchState, species: Species) -> Line<'static> {
+    const MAX_SHOWN: usize = 24;
+    let creatures = &state.population[species.index()];
+    let glyph = species.glyph();
+    let color = species_color(species);
+    let mut spans: Vec<Span<'static>> = vec![Span::raw("   ")];
+    for c in creatures.iter().take(MAX_SHOWN) {
+        let style = if c.is_mature() {
+            Style::default().fg(color).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        spans.push(Span::styled(glyph, style));
+    }
+    if creatures.len() > MAX_SHOWN {
+        spans.push(Span::styled(
+            format!(" …+{}", creatures.len() - MAX_SHOWN),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn tier_marker(tier: u8) -> &'static str {
@@ -207,6 +261,7 @@ fn render_dex(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickState
         cl.push(Line::from(vec![
             Span::styled(format!(" {} ", tier_marker(species.tier())), Style::default().fg(Color::DarkGray)),
             Span::styled(format!("{owned_marker} "), Style::default().fg(owned_color)),
+            Span::styled(format!("{} ", species.glyph()), Style::default().fg(species_color(species))),
             Span::styled(species.name(), Style::default().fg(Color::White)),
             Span::styled(format!("  所持{pop}"), Style::default().fg(Color::Cyan)),
         ]));
@@ -281,6 +336,7 @@ fn render_battle(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickSt
         cl.push_clickable(
             Line::from(vec![
                 Span::styled(format!(" {marker} "), style),
+                Span::styled(format!("{} ", species.glyph()), Style::default().fg(species_color(species))),
                 Span::styled(format!("{} ", species.name()), style),
                 stats,
             ]),

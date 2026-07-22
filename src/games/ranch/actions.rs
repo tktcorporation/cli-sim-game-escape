@@ -11,7 +11,7 @@ pub const TAB_DEX: u16 = 2;
 pub const TAB_BATTLE: u16 = 3;
 
 // ── Habitat actions ─────────────────────────────────────────────
-/// 餌やり (base + Affinity::index() 0..3)。
+/// 餌やり方針のトグル (base + Affinity::index() 0..3)。
 pub const FEED_BASE: u16 = 10;
 pub const UPGRADE_CAPACITY: u16 = 20;
 
@@ -27,7 +27,7 @@ pub const SCROLL_DOWN: u16 = 201;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlayerAction {
     SetTab(Tab),
-    Feed(Affinity),
+    ToggleFeedFocus(Affinity),
     UpgradeCapacity,
     ToggleTeamMember(Species),
     ScrollUp,
@@ -45,7 +45,7 @@ pub fn action_for_click(id: u16) -> Option<PlayerAction> {
         SCROLL_DOWN => Some(PlayerAction::ScrollDown),
         id if (FEED_BASE..FEED_BASE + super::state::AFFINITY_COUNT as u16).contains(&id) => {
             let idx = (id - FEED_BASE) as usize;
-            Affinity::from_index(idx).map(PlayerAction::Feed)
+            Affinity::from_index(idx).map(PlayerAction::ToggleFeedFocus)
         }
         id if (TOGGLE_TEAM_BASE..TOGGLE_TEAM_BASE + super::state::SPECIES_COUNT as u16)
             .contains(&id) =>
@@ -67,7 +67,7 @@ pub fn action_for_key(ch: char, current_tab: Tab) -> Option<PlayerAction> {
         'k' | 'K' => Some(PlayerAction::ScrollUp),
         '1'..='3' if matches!(current_tab, Tab::Habitat) => {
             let idx = (ch as u8 - b'1') as usize;
-            Affinity::from_index(idx).map(PlayerAction::Feed)
+            Affinity::from_index(idx).map(PlayerAction::ToggleFeedFocus)
         }
         'c' | 'C' if matches!(current_tab, Tab::Habitat) => Some(PlayerAction::UpgradeCapacity),
         _ => None,
@@ -86,10 +86,19 @@ mod tests {
     }
 
     #[test]
-    fn click_resolves_feed_by_affinity_index() {
-        assert_eq!(action_for_click(FEED_BASE), Some(PlayerAction::Feed(Affinity::Aqua)));
-        assert_eq!(action_for_click(FEED_BASE + 1), Some(PlayerAction::Feed(Affinity::Flare)));
-        assert_eq!(action_for_click(FEED_BASE + 2), Some(PlayerAction::Feed(Affinity::Earth)));
+    fn click_resolves_feed_focus_by_affinity_index() {
+        assert_eq!(
+            action_for_click(FEED_BASE),
+            Some(PlayerAction::ToggleFeedFocus(Affinity::Aqua))
+        );
+        assert_eq!(
+            action_for_click(FEED_BASE + 1),
+            Some(PlayerAction::ToggleFeedFocus(Affinity::Flare))
+        );
+        assert_eq!(
+            action_for_click(FEED_BASE + 2),
+            Some(PlayerAction::ToggleFeedFocus(Affinity::Earth))
+        );
         assert_eq!(action_for_click(FEED_BASE + 3), None);
     }
 
@@ -112,10 +121,10 @@ mod tests {
     }
 
     #[test]
-    fn key_feed_only_active_on_habitat_tab() {
+    fn key_feed_focus_only_active_on_habitat_tab() {
         assert_eq!(
             action_for_key('1', Tab::Habitat),
-            Some(PlayerAction::Feed(Affinity::Aqua))
+            Some(PlayerAction::ToggleFeedFocus(Affinity::Aqua))
         );
         assert_eq!(action_for_key('1', Tab::Battle), None);
     }
