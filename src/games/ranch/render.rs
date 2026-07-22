@@ -107,18 +107,16 @@ fn render_habitat(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickS
     )));
     cl.push(Line::from(""));
 
+    for line in mound_lines(state) {
+        cl.push(line);
+    }
+    cl.push(Line::from(""));
+
     for &species in Species::all() {
-        let pop = state.population[species.index()].len();
-        if pop == 0 {
+        if state.population[species.index()].is_empty() {
             continue;
         }
-        for line in species_card_lines(state, species) {
-            cl.push(line);
-        }
-        for line in pit_lines(state, species) {
-            cl.push(line);
-        }
-        cl.push(Line::from(""));
+        cl.push(species_summary_line(state, species));
     }
 
     cl.push(Line::from(""));
@@ -236,34 +234,30 @@ fn sprite_lines(species: Species) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// 種1体分のポートレート+ステータスをまとめたカード (4行)。
-/// ポートレート (4行) とステータス欄 (4行) を横に並べるため、各行の spans を連結する。
-fn species_card_lines(state: &RanchState, species: Species) -> Vec<Line<'static>> {
-    let portrait = sprite_lines(species);
-    let pop = state.population[species.index()].len();
-    let mature = state.mature_count(species);
-    let avg = state.average_mature_level(species);
+/// 図鑑タブ用、種1体分のポートレート+情報 (4行)。
+/// ポートレート (4行) と情報欄 (4行) を横に並べるため、各行の spans を連結する。
+fn dex_entry_lines(state: &RanchState, species: Species) -> Vec<Line<'static>> {
+    let idx = species.index();
+    let pop = state.population[idx].len();
+    let (owned_marker, owned_color) = if pop > 0 {
+        ("●", Color::LightGreen)
+    } else {
+        ("○", Color::DarkGray)
+    };
 
-    let mut info: Vec<Line<'static>> = Vec::with_capacity(4);
+    let portrait = sprite_lines(species);
+    let mut info: Vec<Line<'static>> = Vec::with_capacity(portrait.len());
     info.push(Line::from(vec![
-        Span::styled(species.name(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" ×{pop}"), Style::default().fg(Color::Cyan)),
+        Span::styled(format!("{} ", tier_marker(species.tier())), Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{owned_marker} "), Style::default().fg(owned_color)),
     ]));
     info.push(Line::from(Span::styled(
-        format!("成熟{mature}"),
-        Style::default().fg(Color::LightGreen),
+        species.name(),
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
     )));
-    info.push(Line::from(Span::styled(
-        format!("平均Lv{avg:.1}"),
-        Style::default().fg(Color::Yellow),
-    )));
-    if species.is_final_tier() {
-        info.push(Line::from(Span::styled("最終形態", Style::default().fg(Color::LightMagenta))));
-    } else {
-        info.push(Line::from(Span::styled(
-            format!("進化{}/{}", mature, species.evolution_threshold()),
-            Style::default().fg(Color::LightMagenta),
-        )));
+    info.push(Line::from(Span::styled(format!("所持{pop}"), Style::default().fg(Color::Cyan))));
+    while info.len() < portrait.len() {
+        info.push(Line::from(""));
     }
 
     portrait
@@ -278,51 +272,100 @@ fn species_card_lines(state: &RanchState, species: Species) -> Vec<Line<'static>
         .collect()
 }
 
-/// ピット (個体の積み上げ表示) の幅・高さ。テトリス/スイカゲームのように
-/// 下の行から埋まっていくのを見せるため、1体=1マスの矩形として扱う。
-const PIT_COLS: usize = 8;
-const PIT_ROWS: usize = 3;
-const PIT_CAPACITY: usize = PIT_COLS * PIT_ROWS;
+/// 牧場タブ用、種1体分の数値情報だけをまとめた1行 (ポートレートは全種混ぜの
+/// `mound_lines` が画面のメインビジュアルを担うので、ここには持たせない)。
+fn species_summary_line(state: &RanchState, species: Species) -> Line<'static> {
+    let pop = state.population[species.index()].len();
+    let mature = state.mature_count(species);
+    let avg = state.average_mature_level(species);
 
-/// 個体を「下から積み上がるピット」として表示する (最大 `PIT_CAPACITY` 体)。
-/// 成熟個体は明るい色で、未成熟はグレーで表示し、群れの成熟度を一目で分かるようにする。
+    let mut spans = vec![
+        Span::styled(format!(" {} ", species.glyph()), Style::default().fg(species_color(species))),
+        Span::styled(format!("{:<8}", species.name()), Style::default().fg(Color::White)),
+        Span::styled(format!("×{pop:<3}"), Style::default().fg(Color::Cyan)),
+        Span::styled(format!(" 成熟{mature:<2}"), Style::default().fg(Color::LightGreen)),
+        Span::styled(format!(" 平均Lv{avg:.1}"), Style::default().fg(Color::Yellow)),
+    ];
+    if species.is_final_tier() {
+        spans.push(Span::styled(" 最終形態", Style::default().fg(Color::LightMagenta)));
+    } else {
+        spans.push(Span::styled(
+            format!(" 進化{}/{}", mature, species.evolution_threshold()),
+            Style::default().fg(Color::LightMagenta),
+        ));
+    }
+    Line::from(spans)
+}
+
+/// 全種の個体を種の区別なく1つの群れに混ぜたリスト ((種, 成熟か) のペア)。
+/// 種ごとに1体ずつ順番に取り出すラウンドロビンにすることで、同じ種で固まらず
+/// 色とりどりに混ざった山に見えるようにする。
+fn all_creatures_mixed(state: &RanchState) -> Vec<(Species, bool)> {
+    let mut cursors = [0usize; SPECIES_COUNT];
+    let mut mixed = Vec::new();
+    loop {
+        let mut added = false;
+        for &species in Species::all() {
+            let idx = species.index();
+            let creatures = &state.population[idx];
+            if cursors[idx] < creatures.len() {
+                mixed.push((species, creatures[cursors[idx]].is_mature()));
+                cursors[idx] += 1;
+                added = true;
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+    mixed
+}
+
+/// 末広がりのピラミッド型に積み上がる「山」の各行の幅 (下から上へ)。
+const MOUND_ROW_WIDTHS_BOTTOM_UP: [usize; 7] = [13, 11, 9, 7, 5, 3, 1];
+
+/// ツムツムのホーム画面のように、全種混ぜた個体を種の区別なく1つの山として
+/// 積み上げる。`all_creatures_mixed` でラウンドロビンに混ぜたリストを、
+/// 土台 (下の行) から埋めていき、末広がりのピラミッド型のシルエットにする。
 /// 表示上限を超えた分は最終行に "+N" でまとめる。
-fn pit_lines(state: &RanchState, species: Species) -> Vec<Line<'static>> {
-    let creatures = &state.population[species.index()];
-    let glyph = species.glyph();
-    let color = species_color(species);
+fn mound_lines(state: &RanchState) -> Vec<Line<'static>> {
+    let base_width = MOUND_ROW_WIDTHS_BOTTOM_UP[0];
+    let capacity: usize = MOUND_ROW_WIDTHS_BOTTOM_UP.iter().sum();
 
-    let mut rows: Vec<Vec<Span<'static>>> = (0..PIT_ROWS).map(|_| Vec::with_capacity(PIT_COLS)).collect();
-    for i in 0..PIT_CAPACITY {
-        // 一番下の行 (画面上は最終行) から埋まっていくように、行番号を反転して積む。
-        let row_from_bottom = i / PIT_COLS;
-        let row = PIT_ROWS - 1 - row_from_bottom;
-        let span = match creatures.get(i) {
-            Some(c) => {
-                let style = if c.is_mature() {
-                    Style::default().fg(color).add_modifier(Modifier::BOLD)
+    let mixed = all_creatures_mixed(state);
+    let total = mixed.len();
+    let shown = total.min(capacity);
+
+    let mut idx = 0;
+    let mut rows_bottom_up: Vec<Vec<Span<'static>>> = Vec::with_capacity(MOUND_ROW_WIDTHS_BOTTOM_UP.len());
+    for &width in MOUND_ROW_WIDTHS_BOTTOM_UP.iter() {
+        let pad = (base_width - width) / 2;
+        let mut spans: Vec<Span<'static>> = vec![Span::raw(" ".repeat(pad + 3))];
+        for _ in 0..width {
+            let span = if idx < shown {
+                let (species, mature) = mixed[idx];
+                idx += 1;
+                let style = if mature {
+                    Style::default().fg(species_color(species)).add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(Color::DarkGray)
                 };
-                Span::styled(glyph, style)
-            }
-            None => Span::raw(" "),
-        };
-        rows[row].push(span);
+                Span::styled(species.glyph(), style)
+            } else {
+                Span::raw(" ")
+            };
+            spans.push(span);
+        }
+        rows_bottom_up.push(spans);
     }
 
-    let mut lines: Vec<Line<'static>> = rows
-        .into_iter()
-        .map(|spans| {
-            let mut full = vec![Span::raw("   ")];
-            full.extend(spans);
-            Line::from(full)
-        })
-        .collect();
+    // 頂点 (幅が狭い行) を先に描画し、土台 (幅が広い行) を最後に描画することで、
+    // 画面上で末広がりの山の形になる (土台は上のループで先に埋まっている)。
+    let mut lines: Vec<Line<'static>> = rows_bottom_up.into_iter().rev().map(Line::from).collect();
 
-    if creatures.len() > PIT_CAPACITY {
+    if total > capacity {
         lines.push(Line::from(Span::styled(
-            format!("   …+{}", creatures.len() - PIT_CAPACITY),
+            format!("   …+{}", total - capacity),
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -356,19 +399,10 @@ fn render_dex(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickState
             )));
             continue;
         }
-        let pop = state.population[idx].len();
-        let (owned_marker, owned_color) = if pop > 0 {
-            ("●", Color::LightGreen)
-        } else {
-            ("○", Color::DarkGray)
-        };
-        cl.push(Line::from(vec![
-            Span::styled(format!(" {} ", tier_marker(species.tier())), Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{owned_marker} "), Style::default().fg(owned_color)),
-            Span::styled(format!("{} ", species.glyph()), Style::default().fg(species_color(species))),
-            Span::styled(species.name(), Style::default().fg(Color::White)),
-            Span::styled(format!("  所持{pop}"), Style::default().fg(Color::Cyan)),
-        ]));
+        for line in dex_entry_lines(state, species) {
+            cl.push(line);
+        }
+        cl.push(Line::from(""));
     }
 
     let block = Block::default()
@@ -626,32 +660,52 @@ mod tests {
         assert_eq!(top_row.spans[0].style, Style::default());
     }
 
-    /// テトリス/スイカゲームのように、個体は下の行から積み上がっていくこと。
-    /// 上の行はまだ空 (スペースのまま) で、最下行だけが埋まっているはず。
+    /// ツムツムのように、個体は山の土台 (幅が広い行) から積み上がっていくこと。
+    /// 頂点 (幅が狭い行) はまだ空のはず。
     #[test]
-    fn pit_lines_fills_from_the_bottom_row_first() {
+    fn mound_lines_fills_from_the_base_row_first() {
         let mut state = RanchState::new();
         state.population[Species::Tsubu.index()] = vec![Creature::new(); 3];
-        let lines = pit_lines(&state, Species::Tsubu);
-        assert_eq!(lines.len(), PIT_ROWS);
+        let lines = mound_lines(&state);
+        assert_eq!(lines.len(), MOUND_ROW_WIDTHS_BOTTOM_UP.len());
 
         let glyph = Species::Tsubu.glyph();
-        let bottom_text: String = lines[PIT_ROWS - 1].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(bottom_text.matches(glyph).count(), 3, "最下行に3体分のグリフがあるはず");
+        let base_text: String = lines.last().unwrap().spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(base_text.matches(glyph).count(), 3, "土台の行に3体分のグリフがあるはず");
 
-        let top_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(top_text.matches(glyph).count(), 0, "最上行はまだ空のはず");
+        let peak_text: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(peak_text.matches(glyph).count(), 0, "頂点の行はまだ空のはず");
     }
 
-    /// ピット容量を超えた分は "+N" 表記で最終行にまとめられること。
+    /// 山の容量を超えた分は "+N" 表記で最終行にまとめられること。
     #[test]
-    fn pit_lines_overflow_appends_a_plus_n_line() {
+    fn mound_lines_overflow_appends_a_plus_n_line() {
         let mut state = RanchState::new();
-        state.population[Species::Tsubu.index()] = vec![Creature::new(); PIT_CAPACITY + 5];
-        let lines = pit_lines(&state, Species::Tsubu);
-        assert_eq!(lines.len(), PIT_ROWS + 1, "オーバーフロー行が1行追加されるはず");
+        let capacity: usize = MOUND_ROW_WIDTHS_BOTTOM_UP.iter().sum();
+        state.population[Species::Tsubu.index()] = vec![Creature::new(); capacity + 5];
+        let lines = mound_lines(&state);
+        assert_eq!(
+            lines.len(),
+            MOUND_ROW_WIDTHS_BOTTOM_UP.len() + 1,
+            "オーバーフロー行が1行追加されるはず"
+        );
         let overflow_text: String = lines.last().unwrap().spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(overflow_text.contains("+5"));
+    }
+
+    /// 種ごとに固めず、1体ずつ順番に取り出すラウンドロビンで混ぜること
+    /// (「全種混ざった一つの山」に見せるための前提)。
+    #[test]
+    fn all_creatures_mixed_interleaves_species_round_robin() {
+        let mut state = RanchState::new();
+        state.population[Species::Tsubu.index()] = vec![Creature::new(); 2];
+        state.population[Species::FireKirin.index()] = vec![Creature::new(); 2];
+        let species_sequence: Vec<Species> = all_creatures_mixed(&state).iter().map(|&(sp, _)| sp).collect();
+        assert_eq!(
+            species_sequence,
+            vec![Species::Tsubu, Species::FireKirin, Species::Tsubu, Species::FireKirin],
+            "種ごとに固めず交互に混ざるはず"
+        );
     }
 
     /// `clash_cooldown` (既存の対戦タイマー) をそのままアニメーション進捗に
@@ -699,6 +753,17 @@ mod tests {
         let line = arena_line(&state).unwrap();
         let symbols: Vec<&str> = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(symbols.iter().filter(|&&s| s == "✹").count(), 2, "両端に閃光が出るはず");
+    }
+
+    /// 図鑑の1エントリはポートレート (4行) と情報欄が横並びになった4行になること。
+    #[test]
+    fn dex_entry_lines_pairs_portrait_with_species_info() {
+        let state = RanchState::new();
+        let lines = dex_entry_lines(&state, Species::Tsubu);
+        assert_eq!(lines.len(), 4);
+        let joined: String = lines.iter().flat_map(|l| l.spans.iter()).map(|s| s.content.as_ref()).collect();
+        assert!(joined.contains(Species::Tsubu.name()));
+        assert!(joined.contains("所持"));
     }
 
     /// 未発見の種は「？？？」で伏せられ、名前が漏れないこと。
