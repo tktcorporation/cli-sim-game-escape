@@ -15,7 +15,7 @@ use crate::input::{is_narrow_layout, ClickState};
 use crate::widgets::{ClickableList, ScrollableTab, TabBar};
 
 use super::actions::{FEED_BASE, SCROLL_DOWN, SCROLL_UP, TAB_BATTLE, TAB_DEX, TAB_HABITAT, TOGGLE_TEAM_BASE, UPGRADE_CAPACITY};
-use super::state::{Affinity, RanchState, Species, Tab, SPECIES_COUNT};
+use super::state::{Affinity, RanchState, Species, Tab, CLASH_INTERVAL_TICKS, SPECIES_COUNT};
 
 pub fn render(state: &RanchState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
     let is_narrow = is_narrow_layout(area.width);
@@ -381,6 +381,56 @@ fn render_dex(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickState
         .render(f, area, cs);
 }
 
+/// クラッシュ演出のレーン幅 (アリーナの横幅、マス数)。
+const ARENA_LANE_WIDTH: usize = 14;
+
+/// 現在のクラッシュサイクル内での経過度合い (0.0=直後, 1.0=次の激突の瞬間)。
+///
+/// `clash_cooldown` は激突のたびに `CLASH_INTERVAL_TICKS` にリセットされ、以後は
+/// tick毎に1ずつ減っていく (詳細は `logic::tick_battle` 参照)。この既存カウンタを
+/// そのままアニメーションの時計として再利用するため、演出専用の新しいstateは
+/// 増やしていない — render.rs は読み取り専用のまま。
+fn clash_progress(state: &RanchState) -> f64 {
+    if state.clash_cooldown >= CLASH_INTERVAL_TICKS {
+        1.0
+    } else {
+        (CLASH_INTERVAL_TICKS - state.clash_cooldown) as f64 / CLASH_INTERVAL_TICKS as f64
+    }
+}
+
+/// 編成中のツブと敵を互いに投げつけ合うアリーナの1行。
+/// 自チームの代表個体が右へ、敵が左へ同時に飛び、中央付近ですれ違い、
+/// 激突の瞬間だけ両端に閃光を出す。チーム未編成なら `None`。
+fn arena_line(state: &RanchState) -> Option<Line<'static>> {
+    let ally = state.team.iter().flatten().next().copied()?;
+    let enemy = state.enemy_species;
+    let progress = clash_progress(state);
+    let last = (ARENA_LANE_WIDTH - 1) as f64;
+
+    let ally_pos = (progress * last).round() as usize;
+    let enemy_pos = (last - progress * last).round() as usize;
+    let ally_color = species_color(ally);
+    let enemy_color = species_color(enemy);
+
+    let mut cells: Vec<Span<'static>> = (0..ARENA_LANE_WIDTH).map(|_| Span::raw(" ")).collect();
+    if progress >= 1.0 {
+        cells[0] = Span::styled("✹", Style::default().fg(ally_color).add_modifier(Modifier::BOLD));
+        cells[ARENA_LANE_WIDTH - 1] =
+            Span::styled("✹", Style::default().fg(enemy_color).add_modifier(Modifier::BOLD));
+    } else if ally_pos == enemy_pos {
+        cells[ally_pos] = Span::styled("✹", Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    } else {
+        cells[ally_pos] =
+            Span::styled(ally.glyph(), Style::default().fg(ally_color).add_modifier(Modifier::BOLD));
+        cells[enemy_pos] =
+            Span::styled(enemy.glyph(), Style::default().fg(enemy_color).add_modifier(Modifier::BOLD));
+    }
+
+    let mut spans = vec![Span::raw(" ")];
+    spans.extend(cells);
+    Some(Line::from(spans))
+}
+
 fn render_battle(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickState, borders: Borders) {
     let mut cl = ClickableList::new();
     cl.push(Line::from(""));
@@ -403,6 +453,10 @@ fn render_battle(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickSt
             Style::default().fg(Color::LightGreen),
         ),
     ]));
+    if let Some(arena) = arena_line(state) {
+        cl.push(Line::from(""));
+        cl.push(arena);
+    }
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
         " 編成 (タップで追加/解除、最大3体)",
@@ -598,6 +652,53 @@ mod tests {
         assert_eq!(lines.len(), PIT_ROWS + 1, "オーバーフロー行が1行追加されるはず");
         let overflow_text: String = lines.last().unwrap().spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(overflow_text.contains("+5"));
+    }
+
+    /// `clash_cooldown` (既存の対戦タイマー) をそのままアニメーション進捗に
+    /// 変換できていること。リセット直後 (>=CLASH_INTERVAL_TICKS) は激突の瞬間 (1.0)、
+    /// それ以外は経過tick数に応じた0〜1未満の値になる。
+    #[test]
+    fn clash_progress_maps_cooldown_to_a_fraction_of_the_cycle() {
+        let mut state = RanchState::new();
+        state.clash_cooldown = CLASH_INTERVAL_TICKS;
+        assert_eq!(clash_progress(&state), 1.0);
+
+        state.clash_cooldown = CLASH_INTERVAL_TICKS - 1;
+        assert!((clash_progress(&state) - 0.2).abs() < f64::EPSILON);
+
+        state.clash_cooldown = 1;
+        assert!((clash_progress(&state) - 0.8).abs() < f64::EPSILON);
+    }
+
+    /// チーム未編成ではアリーナ演出そのものを出さないこと (戦闘が起きていないため)。
+    #[test]
+    fn arena_line_is_none_without_a_team() {
+        let state = RanchState::new();
+        assert!(arena_line(&state).is_none());
+    }
+
+    /// 飛行中 (激突前) は自チームと敵のグリフが別の位置に表示されること。
+    #[test]
+    fn arena_line_shows_ally_and_enemy_glyphs_mid_flight() {
+        let mut state = RanchState::new();
+        state.team[0] = Some(Species::Tsubu);
+        state.enemy_species = Species::FireKirin; // ally (Tsubu) と区別できる別種にする
+        state.clash_cooldown = CLASH_INTERVAL_TICKS - 1;
+        let line = arena_line(&state).unwrap();
+        let symbols: Vec<&str> = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(symbols.iter().filter(|&&s| s == Species::Tsubu.glyph()).count(), 1);
+        assert_eq!(symbols.iter().filter(|&&s| s == Species::FireKirin.glyph()).count(), 1);
+    }
+
+    /// 激突の瞬間 (進捗1.0) はレーン両端に閃光が出ること。
+    #[test]
+    fn arena_line_flashes_impact_at_the_edges_when_progress_reaches_one() {
+        let mut state = RanchState::new();
+        state.team[0] = Some(Species::Tsubu);
+        state.clash_cooldown = CLASH_INTERVAL_TICKS;
+        let line = arena_line(&state).unwrap();
+        let symbols: Vec<&str> = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(symbols.iter().filter(|&&s| s == "✹").count(), 2, "両端に閃光が出るはず");
     }
 
     /// 未発見の種は「？？？」で伏せられ、名前が漏れないこと。
