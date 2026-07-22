@@ -327,12 +327,38 @@ fn all_creatures_mixed(state: &RanchState) -> Vec<(Species, u8)> {
 /// 分かる」ようにする (成熟の有無だけの二値ではなく3段階のグラデーションにする)。
 fn creature_style(species: Species, level: u8) -> Style {
     let color = species_color(species);
-    if level < MATURE_LEVEL / 2 {
-        Style::default().fg(Color::DarkGray)
+    let style = Style::default().fg(color);
+    match growth_stage(level) {
+        0 => Style::default().fg(Color::DarkGray),
+        1 => style,
+        _ => style.add_modifier(Modifier::BOLD),
+    }
+}
+
+/// レベルを4段階の育ち具合に丸める。`growth_glyph` と対応させ、色だけでなく
+/// 形でも育ち具合が伝わるようにする。
+fn growth_stage(level: u8) -> u8 {
+    if level < 3 {
+        0
     } else if level < MATURE_LEVEL {
-        Style::default().fg(color)
+        1
+    } else if level < 8 {
+        2
     } else {
-        Style::default().fg(color).add_modifier(Modifier::BOLD)
+        3
+    }
+}
+
+/// 育ち具合を表す1マスの記号。1マスという解像度の制約の中でも「育つほど
+/// 満ちていく」のが見た目で分かるよう、Unicodeの四分割ブロック記号 (1マス内の
+/// 2x2の升目をfg/bgで塗り分けられる) を使って段階的に埋まっていく形にする —
+/// 半角ブロック `▀` で縦の解像度を2倍にするのと同じ発想を、縦横2x2に広げたもの。
+fn growth_glyph(stage: u8) -> &'static str {
+    match stage {
+        0 => "▖", // 左下1マスだけ — 芽生えたばかり
+        1 => "▄", // 下半分 — 育ち始め
+        2 => "▙", // 右上以外の3マス — もうすぐ成熟
+        _ => "█", // 満タン — 十分に育った
     }
 }
 
@@ -365,7 +391,7 @@ fn mound_lines(state: &RanchState) -> Vec<Line<'static>> {
             if Some(i) == flash_pos && flash.unwrap().ticks_left % 4 < 2 {
                 Span::styled("✨", Style::default().fg(Color::White).add_modifier(Modifier::BOLD))
             } else {
-                Span::styled(species.glyph(), creature_style(species, level))
+                Span::styled(growth_glyph(growth_stage(level)), creature_style(species, level))
             }
         })
         .collect();
@@ -571,7 +597,7 @@ fn render_battle(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickSt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::state::{Creature, EvolutionFlash};
+    use super::super::state::{Creature, EvolutionFlash, MAX_LEVEL};
     use ratzilla::ratatui::backend::TestBackend;
     use ratzilla::ratatui::Terminal;
 
@@ -689,7 +715,7 @@ mod tests {
         let lines = mound_lines(&state);
         assert_eq!(lines.len(), MOUND_ROW_WIDTHS_BOTTOM_UP.len());
 
-        let glyph = Species::Tsubu.glyph();
+        let glyph = growth_glyph(growth_stage(1)); // Creature::new() は Lv1
         let base_text: String = lines.last().unwrap().spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(base_text.matches(glyph).count(), 3, "土台の行に3体分のグリフがあるはず");
 
@@ -743,6 +769,16 @@ mod tests {
         let mature = creature_style(Species::Tsubu, MATURE_LEVEL);
         assert_eq!(mature.fg, Some(species_color(Species::Tsubu)));
         assert!(mature.add_modifier.contains(Modifier::BOLD));
+    }
+
+    /// レベルが上がるほど、四分割ブロック記号の埋まっている面積が単調に
+    /// 増えること (1マスという解像度の制約の中でも育ち具合が形で伝わる)。
+    #[test]
+    fn growth_glyph_fills_in_as_level_increases() {
+        assert_eq!(growth_glyph(growth_stage(1)), "▖");
+        assert_eq!(growth_glyph(growth_stage(3)), "▄");
+        assert_eq!(growth_glyph(growth_stage(MATURE_LEVEL)), "▙");
+        assert_eq!(growth_glyph(growth_stage(MAX_LEVEL)), "█");
     }
 
     /// 進化直後は、進化先の種の最新個体が数tickだけ点滅表示されること
