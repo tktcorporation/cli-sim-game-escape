@@ -55,7 +55,7 @@ struct GameSave {
     enemy_species: u8,
     enemy_hp: u64,
     enemy_max_hp: u64,
-    team_hp: u64,
+    damage_taken: u64,
     clash_cooldown: u32,
     stage_clears: u64,
     tab: u8,
@@ -87,7 +87,7 @@ fn extract_save(state: &RanchState) -> SaveData {
             enemy_species: state.enemy_species.index() as u8,
             enemy_hp: state.enemy_hp,
             enemy_max_hp: state.enemy_max_hp,
-            team_hp: state.team_hp,
+            damage_taken: state.damage_taken,
             clash_cooldown: state.clash_cooldown,
             stage_clears: state.stage_clears,
             tab: state.tab.to_save_id(),
@@ -117,9 +117,10 @@ fn apply_save(state: &mut RanchState, save: &GameSave) {
     }
     state.stage = save.stage;
     state.enemy_species = Species::from_index(save.enemy_species as usize).unwrap_or(Species::Tsubu);
-    state.enemy_hp = save.enemy_hp;
     state.enemy_max_hp = save.enemy_max_hp;
-    state.team_hp = save.team_hp;
+    // 改変/破損セーブで enemy_hp > enemy_max_hp になっていても表示が壊れないようクランプする。
+    state.enemy_hp = save.enemy_hp.min(state.enemy_max_hp);
+    state.damage_taken = save.damage_taken;
     state.clash_cooldown = save.clash_cooldown;
     state.stage_clears = save.stage_clears;
     state.tab = Tab::from_save_id(save.tab);
@@ -227,7 +228,7 @@ mod tests {
         original.enemy_species = Species::ThunderHawk;
         original.enemy_hp = 88;
         original.enemy_max_hp = 200;
-        original.team_hp = 55;
+        original.damage_taken = 55;
         original.clash_cooldown = 2;
         original.stage_clears = 16;
         original.tab = Tab::Battle;
@@ -257,7 +258,7 @@ mod tests {
         assert_eq!(restored.enemy_species, Species::ThunderHawk);
         assert_eq!(restored.enemy_hp, 88);
         assert_eq!(restored.enemy_max_hp, 200);
-        assert_eq!(restored.team_hp, 55);
+        assert_eq!(restored.damage_taken, 55);
         assert_eq!(restored.clash_cooldown, 2);
         assert_eq!(restored.stage_clears, 16);
         assert_eq!(restored.tab, Tab::Battle);
@@ -289,7 +290,7 @@ mod tests {
                 "enemy_species": 0,
                 "enemy_hp": 10,
                 "enemy_max_hp": 10,
-                "team_hp": 0,
+                "damage_taken": 0,
                 "clash_cooldown": 5,
                 "stage_clears": 0,
                 "tab": 0,
@@ -340,5 +341,23 @@ mod tests {
         assert_eq!(restored.affinity_feed[0], 1);
         assert_eq!(restored.affinity_feed[1], 0);
         assert!(restored.discovered[Species::Tsubu.index()]);
+    }
+
+    /// 改変/破損セーブで enemy_hp > enemy_max_hp でも、復元後は max でクランプされること。
+    #[test]
+    fn corrupted_enemy_hp_above_max_is_clamped_on_load() {
+        let json_corrupted = r#"{
+            "version": 1,
+            "game": {
+                "enemy_species": 0,
+                "enemy_hp": 99999,
+                "enemy_max_hp": 100
+            }
+        }"#;
+        let loaded: SaveData = serde_json::from_str(json_corrupted).unwrap();
+        let mut restored = RanchState::new();
+        apply_save(&mut restored, &loaded.game);
+        assert_eq!(restored.enemy_max_hp, 100);
+        assert_eq!(restored.enemy_hp, 100, "enemy_hp は enemy_max_hp でクランプされる");
     }
 }

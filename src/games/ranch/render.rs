@@ -240,7 +240,7 @@ fn render_battle(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickSt
     cl.push(Line::from(vec![
         Span::styled(" 味方チーム HP ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            format!("{}/{}", state.team_hp, state.team_max_hp()),
+            format!("{}/{}", state.team_hp(), state.team_max_hp()),
             Style::default().fg(Color::LightGreen),
         ),
     ]));
@@ -252,29 +252,37 @@ fn render_battle(state: &RanchState, f: &mut Frame, area: Rect, cs: &mut ClickSt
 
     for &species in Species::all() {
         let pop = state.population[species.index()].len();
-        if pop == 0 {
+        let in_team = state.team.contains(&Some(species));
+        // 進化で個体数が0になった種でも、編成中なら表示し続ける。
+        // ここで単純に pop==0 を弾くと、絶滅した種を編成解除する手段が
+        // 二度と描画されずチーム枠が永久にロックされてしまう。
+        if pop == 0 && !in_team {
             continue;
         }
-        let in_team = state.team.contains(&Some(species));
         let marker = if in_team { "☑" } else { "☐" };
         let style = if in_team {
             Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
-        let strongest_lv = state.strongest(species).map(|c| c.level).unwrap_or(0);
+        let stats = if pop == 0 {
+            Span::styled(" (絶滅 — 編成解除できます)", Style::default().fg(Color::Red))
+        } else {
+            let strongest_lv = state.strongest(species).map(|c| c.level).unwrap_or(0);
+            Span::styled(
+                format!(
+                    "Lv{strongest_lv} (ATK{} HP{})",
+                    species.atk_at_level(strongest_lv),
+                    species.hp_at_level(strongest_lv)
+                ),
+                Style::default().fg(Color::DarkGray),
+            )
+        };
         cl.push_clickable(
             Line::from(vec![
                 Span::styled(format!(" {marker} "), style),
                 Span::styled(format!("{} ", species.name()), style),
-                Span::styled(
-                    format!(
-                        "Lv{strongest_lv} (ATK{} HP{})",
-                        species.atk_at_level(strongest_lv),
-                        species.hp_at_level(strongest_lv)
-                    ),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                stats,
             ]),
             TOGGLE_TEAM_BASE + species.index() as u16,
         );
@@ -357,6 +365,21 @@ mod tests {
         terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
         let cs = cs.borrow();
         assert!(find(&cs, 80, 30, TOGGLE_TEAM_BASE + Species::Tsubu.index() as u16));
+    }
+
+    /// 進化で個体数が0になった種でも、編成中なら解除ボタンが描画され続けること。
+    /// (個体数0を理由に一覧から消すと、チーム枠が永久にロックされてしまう回帰防止)
+    #[test]
+    fn battle_tab_keeps_toggle_target_for_extinct_team_member() {
+        let mut state = RanchState::new();
+        state.tab = Tab::Battle;
+        state.team[0] = Some(Species::FireKirin);
+        assert!(state.population[Species::FireKirin.index()].is_empty());
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
+        let cs = cs.borrow();
+        assert!(find(&cs, 80, 30, TOGGLE_TEAM_BASE + Species::FireKirin.index() as u16));
     }
 
     /// 未発見の種は「？？？」で伏せられ、名前が漏れないこと。

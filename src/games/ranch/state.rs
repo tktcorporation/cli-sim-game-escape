@@ -334,7 +334,11 @@ pub struct RanchState {
     pub enemy_species: Species,
     pub enemy_hp: u64,
     pub enemy_max_hp: u64,
-    pub team_hp: u64,
+    /// チームが受けた累積ダメージ。編成 (team) を変更しても回復させない — 現在HPは
+    /// `team_max_hp() - damage_taken` の派生値として都度計算する (`team_hp()` 参照)。
+    /// 絶対値でHPを保持すると、編成をタップし直すたびに満タンへリセットされてしまい
+    /// (敗北の重みを無効化する無料回復になる)、対戦の緊張感が壊れるため。
+    pub damage_taken: u64,
     pub clash_cooldown: u32,
     pub stage_clears: u64,
 
@@ -370,7 +374,7 @@ impl RanchState {
             enemy_species,
             enemy_hp: 0,
             enemy_max_hp: 0,
-            team_hp: 0,
+            damage_taken: 0,
             clash_cooldown: CLASH_INTERVAL_TICKS,
             stage_clears: 0,
             tab: Tab::Habitat,
@@ -381,7 +385,6 @@ impl RanchState {
         };
         s.enemy_max_hp = enemy_species.stage_hp(stage);
         s.enemy_hp = s.enemy_max_hp;
-        s.team_hp = s.team_max_hp();
         s
     }
 
@@ -448,6 +451,12 @@ impl RanchState {
             .flatten()
             .filter_map(|&species| self.strongest(species).map(|c| species.hp_at_level(c.level)))
             .sum()
+    }
+
+    /// 対戦チームの現在HP。`damage_taken` からの派生値なので、編成を変更しても
+    /// (新メンバーのHP分だけ最大値が動く以外は) 現在値がリセットされない。
+    pub fn team_hp(&self) -> u64 {
+        self.team_max_hp().saturating_sub(self.damage_taken)
     }
 
     pub fn add_log(&mut self, msg: impl Into<String>) {

@@ -245,10 +245,10 @@ fn tick_battle(state: &mut RanchState) {
     }
 
     let enemy_atk = state.enemy_species.stage_atk(state.stage);
-    state.team_hp = state.team_hp.saturating_sub(enemy_atk);
-    if state.team_hp == 0 {
+    state.damage_taken = state.damage_taken.saturating_add(enemy_atk);
+    if state.team_hp() == 0 {
         state.add_log(format!("{}に敗れた… チームを立て直す", state.enemy_species.name()));
-        state.team_hp = state.team_max_hp();
+        state.damage_taken = 0;
     }
 }
 
@@ -274,7 +274,7 @@ fn win_stage(state: &mut RanchState) {
     state.discovered[state.enemy_species.index()] = true;
     state.enemy_max_hp = state.enemy_species.stage_hp(state.stage);
     state.enemy_hp = state.enemy_max_hp;
-    state.team_hp = state.team_max_hp();
+    state.damage_taken = 0;
 }
 
 // ── Player actions ─────────────────────────────────────────────────
@@ -330,15 +330,15 @@ fn upgrade_capacity(state: &mut RanchState) -> bool {
     true
 }
 
+/// `damage_taken` はあえて触らない — 編成 (team) を変更するだけで全回復できると、
+/// 瀕死のチームをタップし直すだけの無料回復になり、敗北の緊張感が失われるため。
 fn toggle_team_member(state: &mut RanchState, species: Species) -> bool {
     if let Some(slot) = state.team.iter().position(|s| *s == Some(species)) {
         state.team[slot] = None;
-        state.team_hp = state.team_max_hp();
         return true;
     }
     if let Some(slot) = state.team.iter().position(|s| s.is_none()) {
         state.team[slot] = Some(species);
-        state.team_hp = state.team_max_hp();
         return true;
     }
     false
@@ -533,7 +533,6 @@ mod tests {
         let mut s = RanchState::new();
         s.population[Species::Tsubu.index()][0].level = MAX_LEVEL;
         s.team[0] = Some(Species::Tsubu);
-        s.team_hp = s.team_max_hp();
         let enemy_hp_before = s.enemy_hp;
         tick(&mut s, CLASH_INTERVAL_TICKS);
         assert!(s.enemy_hp < enemy_hp_before);
@@ -544,12 +543,11 @@ mod tests {
         let mut s = RanchState::new();
         s.population[Species::Tsubu.index()][0].level = MAX_LEVEL;
         s.team[0] = Some(Species::Tsubu);
-        s.team_hp = s.team_max_hp();
         s.enemy_hp = 1; // 次のクラッシュで即死する体力に細工
         let stage_before = s.stage;
         tick(&mut s, CLASH_INTERVAL_TICKS);
         assert_eq!(s.stage, stage_before + 1);
-        assert_eq!(s.team_hp, s.team_max_hp(), "勝利後はチームが全回復する");
+        assert_eq!(s.team_hp(), s.team_max_hp(), "勝利後はチームが全回復する");
     }
 
     #[test]
@@ -557,12 +555,26 @@ mod tests {
         let mut s = RanchState::new();
         s.population[Species::Tsubu.index()][0].level = MAX_LEVEL;
         s.team[0] = Some(Species::Tsubu);
-        s.team_hp = 1; // 次のクラッシュで壊滅する体力に細工
+        s.damage_taken = s.team_max_hp() - 1; // 次のクラッシュで壊滅する体力に細工
         s.enemy_hp = s.enemy_max_hp * 1000; // 勝てないようにHPを底上げ
         let stage_before = s.stage;
         tick(&mut s, CLASH_INTERVAL_TICKS);
         assert_eq!(s.stage, stage_before, "敗北してもステージは後退しない");
-        assert_eq!(s.team_hp, s.team_max_hp(), "敗北後もチームは立て直される");
+        assert_eq!(s.team_hp(), s.team_max_hp(), "敗北後もチームは立て直される");
+    }
+
+    /// team を編成し直すだけでは `damage_taken` はリセットされない
+    /// (瀕死のチームをタップし直す無料回復エクスプロイトを防ぐ)。
+    #[test]
+    fn toggling_team_does_not_heal_damage_taken() {
+        let mut s = RanchState::new();
+        s.population[Species::Tsubu.index()][0].level = MAX_LEVEL;
+        apply_action(&mut s, PlayerAction::ToggleTeamMember(Species::Tsubu));
+        s.damage_taken = s.team_max_hp();
+        assert_eq!(s.team_hp(), 0);
+        apply_action(&mut s, PlayerAction::ToggleTeamMember(Species::Tsubu));
+        apply_action(&mut s, PlayerAction::ToggleTeamMember(Species::Tsubu));
+        assert_eq!(s.damage_taken, s.team_max_hp(), "編成変更でdamage_takenは変わらない");
     }
 
     // ── apply_action ─────────────────────────────────────────────
