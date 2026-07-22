@@ -60,6 +60,8 @@ const EVOLUTION_BASE_CHANCE: f64 = 0.02;
 const EVOLUTION_CHANCE_CAP: f64 = 0.5;
 /// 平均レベルが `MATURE_LEVEL` を1超えるごとに進化確率へ乗る係数。
 const EVOLUTION_LEVEL_FACTOR_PER_LEVEL: f64 = 0.2;
+/// 成熟個体数が閾値を1体超えるごとに進化確率へ乗る係数。
+const EVOLUTION_COUNT_FACTOR_PER_EXTRA: f64 = 0.1;
 
 const WILD_CAPTURE_CHANCE: f64 = 0.15;
 
@@ -156,13 +158,21 @@ fn tick_evolution(state: &mut RanchState) {
             continue;
         }
         let avg_level = state.average_mature_level(species);
-        let level_factor =
-            1.0 + (avg_level - MATURE_LEVEL as f64).max(0.0) * EVOLUTION_LEVEL_FACTOR_PER_LEVEL;
-        let chance = (EVOLUTION_BASE_CHANCE * level_factor).min(EVOLUTION_CHANCE_CAP);
+        let chance = evolution_chance(mature, threshold, avg_level);
         if roll_chance(&mut state.rng_state, chance) {
             evolve(state, species, threshold);
         }
     }
+}
+
+/// 進化確率。閾値超過分の個体数と平均レベルの両方が高いほど上がる —
+/// 「ただ増やす」より「育ててから集める」方が進化しやすくなる投資判断の核となる式。
+fn evolution_chance(mature: u32, threshold: u32, avg_level: f64) -> f64 {
+    let extra = mature.saturating_sub(threshold) as f64;
+    let count_factor = 1.0 + extra * EVOLUTION_COUNT_FACTOR_PER_EXTRA;
+    let level_factor =
+        1.0 + (avg_level - MATURE_LEVEL as f64).max(0.0) * EVOLUTION_LEVEL_FACTOR_PER_LEVEL;
+    (EVOLUTION_BASE_CHANCE * count_factor * level_factor).min(EVOLUTION_CHANCE_CAP)
 }
 
 /// `species` の成熟個体 `consume` 体を消費して次階層の種を1体誕生させる。
@@ -435,6 +445,37 @@ mod tests {
             tick_reproduction(&mut s);
         }
         assert!(s.food < 1_000_000, "繁殖のたびに食料が減る");
+    }
+
+    // ── evolution_chance ─────────────────────────────────────────
+
+    /// Codex review (PR #134): 閾値超過分の個体数が確率に反映されていなかった
+    /// (mature はゲート判定にしか使われず、5体でも50体でも同じ確率になっていた)
+    /// 回帰を防ぐテスト。
+    #[test]
+    fn evolution_chance_increases_with_mature_count_beyond_threshold() {
+        let threshold = Species::Tsubu.evolution_threshold();
+        let avg_level = MATURE_LEVEL as f64;
+        let at_threshold = evolution_chance(threshold, threshold, avg_level);
+        let well_past_threshold = evolution_chance(threshold * 3, threshold, avg_level);
+        assert!(
+            well_past_threshold > at_threshold,
+            "閾値を超えて個体数を増やすほど進化確率が上がるべき"
+        );
+    }
+
+    #[test]
+    fn evolution_chance_increases_with_average_level() {
+        let threshold = Species::Tsubu.evolution_threshold();
+        let low_level = evolution_chance(threshold, threshold, MATURE_LEVEL as f64);
+        let high_level = evolution_chance(threshold, threshold, MAX_LEVEL as f64);
+        assert!(high_level > low_level, "平均レベルが高いほど進化確率が上がるべき");
+    }
+
+    #[test]
+    fn evolution_chance_never_exceeds_cap() {
+        let chance = evolution_chance(1000, 5, MAX_LEVEL as f64);
+        assert!(chance <= EVOLUTION_CHANCE_CAP);
     }
 
     // ── tick_evolution / evolve ──────────────────────────────────
