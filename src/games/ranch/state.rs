@@ -259,27 +259,120 @@ impl Species {
         (base * 1.09_f64.powf(steps)).round() as u64
     }
 
-    /// この種を表す絵文字/記号。牧場タブなどで個体をビジュアル表示する時に使う。
-    ///
-    /// TODO(プレイヤー体験を決める人向け): 全種同じ記号の仮実装のまま残してある。
-    /// 10種分の割り当てを埋めてほしい — 絵文字1文字でも記号1文字でも構わない。
-    /// 進化前後で見た目に関連性を持たせる (例: 水ツブ系はしずく系、鷹はワシ系) と、
-    /// 図鑑をめくった時に「これは水ツブの進化先か」と気付ける手がかりになる。
+    /// この種を表す1文字の記号。個体数の並び表示など、ポートレートを出すには
+    /// 狭い場所で使う (ポートレート本体は `sprite_rows` 参照)。
     pub fn glyph(self) -> &'static str {
         match self {
-            Species::Tsubu => "●",
-            Species::AquaTsubu => "●",
-            Species::FlareTsubu => "●",
-            Species::EarthTsubu => "●",
-            Species::MistPrincess => "●",
-            Species::FrostHare => "●",
-            Species::FireKirin => "●",
-            Species::ThunderHawk => "●",
-            Species::ThornBoar => "●",
-            Species::SwampTurtle => "●",
+            Species::Tsubu | Species::AquaTsubu | Species::FlareTsubu | Species::EarthTsubu => "●",
+            Species::MistPrincess => "♛",
+            Species::FrostHare => "❄",
+            Species::FireKirin => "△",
+            Species::ThunderHawk => "⚡",
+            Species::ThornBoar => "✱",
+            Species::SwampTurtle => "◉",
+        }
+    }
+
+    /// ドット絵ポートレートのピクセル形状 (8列×8行固定)。
+    ///
+    /// 各文字は1ピクセルに対応する記号で、色の割り当ては render 側のパレットが
+    /// 解釈する ('.' は常に透明/背景)。ここでは形だけを定義し、着色 (state.rs は
+    /// ratatui に依存しない Pure Logic Pattern を守る) は持たない。
+    ///
+    /// tier0/1 (ツブ系) は共通の丸いブロブ形状を色違いで使い回す — 進化前後で
+    /// シルエットが同じことで「同じ系統」だと視覚的にも分かるようにしている。
+    /// tier2 (最終形態) は種ごとに固有のシルエットを持つ。
+    pub fn sprite_rows(self) -> &'static [&'static str; 8] {
+        match self {
+            Species::Tsubu | Species::AquaTsubu | Species::FlareTsubu | Species::EarthTsubu => {
+                &BLOB_SPRITE_ROWS
+            }
+            Species::MistPrincess => &MIST_PRINCESS_SPRITE_ROWS,
+            Species::FrostHare => &FROST_HARE_SPRITE_ROWS,
+            Species::FireKirin => &FIRE_KIRIN_SPRITE_ROWS,
+            Species::ThunderHawk => &THUNDER_HAWK_SPRITE_ROWS,
+            Species::ThornBoar => &THORN_BOAR_SPRITE_ROWS,
+            Species::SwampTurtle => &SWAMP_TURTLE_SPRITE_ROWS,
         }
     }
 }
+
+const BLOB_SPRITE_ROWS: [&str; 8] = [
+    "..1111..",
+    ".111111.",
+    "11111111",
+    "11211211",
+    "11111111",
+    "11111111",
+    ".111111.",
+    "..1111..",
+];
+
+const MIST_PRINCESS_SPRITE_ROWS: [&str; 8] = [
+    "..3.3...",
+    "...11...",
+    "..1111..",
+    ".111111.",
+    "11111111",
+    "11211211",
+    ".111111.",
+    "..1111..",
+];
+
+const FROST_HARE_SPRITE_ROWS: [&str; 8] = [
+    ".1....1.",
+    ".11..11.",
+    "..1111..",
+    ".111111.",
+    "11211211",
+    "11111111",
+    ".111111.",
+    "..1111..",
+];
+
+const FIRE_KIRIN_SPRITE_ROWS: [&str; 8] = [
+    "...1....",
+    "..111...",
+    ".11111..",
+    "1111111.",
+    "11211211",
+    ".1111111",
+    "..11111.",
+    "...111..",
+];
+
+const THUNDER_HAWK_SPRITE_ROWS: [&str; 8] = [
+    "1......1",
+    "11....11",
+    ".11..11.",
+    "..1111..",
+    ".111111.",
+    "11211211",
+    ".111111.",
+    "...11...",
+];
+
+const THORN_BOAR_SPRITE_ROWS: [&str; 8] = [
+    "1.1..1.1",
+    ".111111.",
+    "11111111",
+    "11211211",
+    "11111111",
+    ".111111.",
+    "1111111.",
+    ".1.11.1.",
+];
+
+const SWAMP_TURTLE_SPRITE_ROWS: [&str; 8] = [
+    ".111111.",
+    "11111111",
+    "11311311",
+    "11111111",
+    ".111111.",
+    "..1111..",
+    "..1221..",
+    ".1....1.",
+];
 
 /// 個体の最大レベル。
 pub const MAX_LEVEL: u8 = 10;
@@ -531,6 +624,33 @@ mod tests {
     fn every_species_has_a_glyph() {
         for &sp in Species::all() {
             assert!(!sp.glyph().is_empty(), "{:?} の glyph が空文字列になっている", sp);
+        }
+    }
+
+    /// 全種のスプライトが8列固定であること (render側の半角ブロック変換が
+    /// 幅のズレなく動くための前提条件)。行数は `[&str; 8]` 型で既に保証されている。
+    #[test]
+    fn every_sprite_row_is_exactly_eight_columns_wide() {
+        for &sp in Species::all() {
+            for (i, row) in sp.sprite_rows().iter().enumerate() {
+                assert_eq!(
+                    row.chars().count(),
+                    8,
+                    "{:?} の sprite_rows[{}] が8列ではない: {:?}",
+                    sp,
+                    i,
+                    row
+                );
+            }
+        }
+    }
+
+    /// tier0/1 (ツブ系) は同じブロブ形状を共有すること (色違いで系統を表す設計)。
+    #[test]
+    fn blob_family_shares_the_same_sprite_shape() {
+        let tsubu_shape = Species::Tsubu.sprite_rows();
+        for &sp in &[Species::AquaTsubu, Species::FlareTsubu, Species::EarthTsubu] {
+            assert_eq!(sp.sprite_rows(), tsubu_shape, "{:?} はツブと同じブロブ形状のはず", sp);
         }
     }
 
