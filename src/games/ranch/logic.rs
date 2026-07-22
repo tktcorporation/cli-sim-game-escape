@@ -243,6 +243,19 @@ fn tick_battle(state: &mut RanchState) {
     }
     state.clash_cooldown = CLASH_INTERVAL_TICKS;
 
+    // 編成変更で team_max_hp が damage_taken を下回り、攻撃も受けていないのに
+    // 既に「壊滅」状態になっていることがある (例: 被ダメージ蓄積後にメンバーを
+    // 減らして最大HPを下げた場合)。このまま攻撃させると、瀕死のはずのチームが
+    // 敵を倒してステージを進めてしまうため、攻撃前に壊滅判定を解決する。
+    // `team_max_hp() == 0` (そもそも戦力がない = 絶滅した種だけの編成) とは区別し、
+    // そちらは従来通り `atk == 0` の静かなスキップに任せる。
+    let max_hp = state.team_max_hp();
+    if max_hp > 0 && state.team_hp() == 0 {
+        state.add_log(format!("{}に敗れた… チームを立て直す", state.enemy_species.name()));
+        state.damage_taken = 0;
+        return;
+    }
+
     let atk = state.team_atk();
     if atk == 0 {
         return;
@@ -577,6 +590,32 @@ mod tests {
         let enemy_hp_before = s.enemy_hp;
         tick(&mut s, CLASH_INTERVAL_TICKS);
         assert!(s.enemy_hp < enemy_hp_before);
+    }
+
+    /// Codex review (PR #134): 編成変更で `team_max_hp` が `damage_taken` を
+    /// 下回ると、まだ攻撃を受けていないのに既に「壊滅」状態になる。この状態の
+    /// まま攻撃させると、瀕死のはずのチームが敵を倒してステージを進めてしまう
+    /// (無料の勝利+全回復) 回帰を防ぐ。
+    #[test]
+    fn shrinking_team_below_damage_taken_rebuilds_instead_of_attacking() {
+        let mut s = RanchState::new();
+        s.population[Species::Tsubu.index()][0].level = MAX_LEVEL;
+        s.population[Species::AquaTsubu.index()] = vec![Creature { level: MAX_LEVEL, xp: 0 }];
+        s.team[0] = Some(Species::Tsubu);
+        s.team[1] = Some(Species::AquaTsubu);
+        // 2体編成でまだ生きている (team_hp=10) 状態を作ってから、AquaTsubu を
+        // 編成解除して max_hp を Tsubu 1体分まで縮める。
+        s.damage_taken = s.team_max_hp() - 10;
+        apply_action(&mut s, PlayerAction::ToggleTeamMember(Species::AquaTsubu));
+        assert_eq!(s.team_hp(), 0, "縮小後は既に壊滅状態のはず");
+
+        s.enemy_hp = 1; // 攻撃が通ればステージが進んでしまう細工
+        let stage_before = s.stage;
+        tick(&mut s, CLASH_INTERVAL_TICKS);
+
+        assert_eq!(s.enemy_hp, 1, "壊滅状態のチームは攻撃できない");
+        assert_eq!(s.stage, stage_before, "壊滅状態から敵を倒してステージが進んではいけない");
+        assert_eq!(s.damage_taken, 0, "壊滅チームは立て直される");
     }
 
     #[test]
