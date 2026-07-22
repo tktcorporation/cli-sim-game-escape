@@ -56,10 +56,9 @@ const FOOD_INCOME_INTERVAL_TICKS: u64 = 10;
 
 /// 繁殖判定を行う間隔。毎tick判定すると個体数が体感できないほど速く増えるため、
 /// 食料収入と同じ「1秒に1回」のペースに落として、増える瞬間が分かるようにする。
+/// 種ごとのコスト・確率係数は `Species::reproduce_cost` / `reproduce_chance_per_mature` 参照。
 const REPRODUCE_INTERVAL_TICKS: u64 = 10;
-const REPRODUCE_CHANCE_PER_MATURE: f64 = 0.02;
 const REPRODUCE_CHANCE_CAP: f64 = 0.2;
-const REPRODUCE_COST: u64 = 3;
 
 /// 進化判定を行う間隔。繁殖と同じ理由 (毎tickだと体感できないほど速い) に加え、
 /// シミュレータで計測したところ毎tick判定だと閾値到達から数秒で進化してしまい、
@@ -177,12 +176,13 @@ fn tick_reproduction(state: &mut RanchState) {
             break;
         }
         let mature = state.mature_count(species);
-        if mature == 0 || state.food < REPRODUCE_COST {
+        let cost = species.reproduce_cost();
+        if mature == 0 || state.food < cost {
             continue;
         }
-        let chance = (mature as f64 * REPRODUCE_CHANCE_PER_MATURE).min(REPRODUCE_CHANCE_CAP);
+        let chance = (mature as f64 * species.reproduce_chance_per_mature()).min(REPRODUCE_CHANCE_CAP);
         if roll_chance(&mut state.rng_state, chance) {
-            state.food -= REPRODUCE_COST;
+            state.food -= cost;
             state.population[species.index()].push(Creature::new());
         }
     }
