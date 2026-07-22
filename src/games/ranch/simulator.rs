@@ -91,7 +91,11 @@ impl Policy for AutoRanchPolicy {
 }
 
 /// チーム編成を1手だけ進める: 絶滅した種が編成中なら解除、空きスロットが
-/// あれば未編成の種の中で最もレベルが高い個体を持つ種を追加する。
+/// あれば未編成の種の中で最もレベルが高い個体を持つ種を追加する。枠が
+/// 埋まっている場合でも、未編成に編成中の最弱種より強い種がいれば入れ替える
+/// (でないと「常に最強3体で埋める」というPolicyの想定と実装がずれ、より強い
+/// 種が後から手に入っても編成が更新されず、対戦の伸びしろを過小評価してしまう —
+/// Codex review: PR #134)。
 fn pick_team_action(state: &RanchState) -> Option<PlayerAction> {
     for &sp in state.team.iter().flatten() {
         if state.population[sp.index()].is_empty() {
@@ -100,18 +104,39 @@ fn pick_team_action(state: &RanchState) -> Option<PlayerAction> {
     }
 
     if state.team.iter().any(|slot| slot.is_none()) {
-        let candidate = Species::all()
-            .iter()
-            .copied()
-            .filter(|&sp| !state.team.contains(&Some(sp)))
-            .filter_map(|sp| state.strongest(sp).map(|c| (sp, c.level)))
-            .max_by_key(|&(_, lv)| lv);
-        if let Some((sp, _)) = candidate {
+        if let Some(sp) = strongest_unteamed_species(state) {
             return Some(PlayerAction::ToggleTeamMember(sp));
+        }
+        return None;
+    }
+
+    let weakest_teamed = state
+        .team
+        .iter()
+        .flatten()
+        .filter_map(|&sp| state.strongest(sp).map(|c| (sp, c.level)))
+        .min_by_key(|&(_, lv)| lv);
+    let strongest_unteamed = strongest_unteamed_species(state)
+        .and_then(|sp| state.strongest(sp).map(|c| (sp, c.level)));
+
+    if let (Some((weak_sp, weak_lv)), Some((_, strong_lv))) = (weakest_teamed, strongest_unteamed) {
+        if strong_lv > weak_lv {
+            return Some(PlayerAction::ToggleTeamMember(weak_sp));
         }
     }
 
     None
+}
+
+/// 未編成の種のうち、最もレベルが高い個体を持つ種。
+fn strongest_unteamed_species(state: &RanchState) -> Option<Species> {
+    Species::all()
+        .iter()
+        .copied()
+        .filter(|&sp| !state.team.contains(&Some(sp)))
+        .filter_map(|sp| state.strongest(sp).map(|c| (sp, c.level)))
+        .max_by_key(|&(_, lv)| lv)
+        .map(|(sp, _)| sp)
 }
 
 // ───────────────────────────────────────────────────────────────
@@ -269,6 +294,26 @@ impl Simulator {
 
 mod sanity_tests {
     use super::*;
+    use super::super::state::Creature;
+
+    /// Codex review (PR #134): 編成枠が埋まっている場合でも、未編成の種に
+    /// 編成中の最弱種より強い種がいれば入れ替えるはず (でないと
+    /// 「常に最強3体で埋める」というdoc comment通りに動かない)。
+    #[test]
+    fn pick_team_action_swaps_out_the_weakest_member_for_a_stronger_species() {
+        let mut state = RanchState::new();
+        state.population[Species::Tsubu.index()] = vec![Creature { level: 1, xp: 0 }];
+        state.population[Species::AquaTsubu.index()] = vec![Creature { level: 5, xp: 0 }];
+        state.population[Species::FlareTsubu.index()] = vec![Creature { level: 5, xp: 0 }];
+        state.team = [Some(Species::Tsubu), Some(Species::AquaTsubu), Some(Species::FlareTsubu)];
+        state.population[Species::EarthTsubu.index()] = vec![Creature { level: 8, xp: 0 }];
+
+        assert_eq!(
+            pick_team_action(&state),
+            Some(PlayerAction::ToggleTeamMember(Species::Tsubu)),
+            "最弱の編成メンバーを解除して、より強い未編成種と入れ替えられるようにするはず"
+        );
+    }
 
     /// `PlayerAction::ScrollUp/ScrollDown` は UI only。simulator policy が
     /// 絶対に生成しないことを確認する。
