@@ -334,12 +334,17 @@ fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: b
         None => Span::raw(""),
     };
 
-    let bar = hp_bar(state.hero.hp, state.hero.max_hp, 8);
+    // 狭幅では横幅が交戦中のモンスター名/HP表示と競合するため、ゲージ表示は
+    // 幅に余裕がある wide のみ。narrow は数値のみに留める (Codexレビュー指摘:
+    // 30桁幅だとゲージ込みで敵情報が見切れていた)。
+    let hp_text = if is_narrow {
+        format!(" HP {}/{} ", state.hero.hp, state.hero.max_hp)
+    } else {
+        let bar = hp_bar(state.hero.hp, state.hero.max_hp, 8);
+        format!(" {} {}/{} ", bar, state.hero.hp, state.hero.max_hp)
+    };
     let line1 = Line::from(vec![
-        Span::styled(
-            format!(" {} {}/{} ", bar, state.hero.hp, state.hero.max_hp),
-            Style::default().fg(hp_color).add_modifier(Modifier::BOLD),
-        ),
+        Span::styled(hp_text, Style::default().fg(hp_color).add_modifier(Modifier::BOLD)),
         Span::styled(
             format!("ATK{} DEF{}", state.hero.attack, defense),
             Style::default().fg(Color::Cyan),
@@ -584,6 +589,7 @@ fn render_hand(
 mod tests {
     use super::*;
     use ratzilla::ratatui::backend::TestBackend;
+    use ratzilla::ratatui::buffer::Cell;
     use ratzilla::ratatui::Terminal;
 
     #[test]
@@ -609,6 +615,40 @@ mod tests {
         assert!(narrow.ring.height > 0);
         assert!(narrow.hand.height > 0);
         assert!(narrow.log.height > 0);
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): HPゲージ込みの line1 が横幅を圧迫し、
+    /// 30桁幅の narrow レイアウトで交戦中のモンスター名/HP表示が
+    /// 見切れていた。narrow ではゲージを付けず数値のみに戻したので、
+    /// 想定される最小幅でも "VS " 以降の交戦情報が表示されることを確認する。
+    #[test]
+    fn narrow_header_leaves_room_for_combat_info() {
+        let mut state = LoopMarchState::new();
+        logic::start_or_resume_expedition(&mut state);
+        let pos = state.hero.position;
+        state.path[pos].monster = Some(Monster {
+            terrain: Terrain::Graveyard,
+            hp: 15,
+            max_hp: 15,
+            attack: 1,
+            elite: false,
+        });
+
+        let mut terminal = Terminal::new(TestBackend::new(30, 5)).unwrap();
+        let completed = terminal
+            .draw(|f| {
+                render_header(&state, f, Rect::new(0, 0, 30, 5), true);
+            })
+            .unwrap();
+
+        // Block(TOP|BOTTOM) の内側、line1 は area の2行目 (y=1)。
+        let line: String = (0..30)
+            .map(|x| completed.buffer.cell((x, 1)).map(Cell::symbol).unwrap_or(" "))
+            .collect();
+        assert!(
+            line.contains("VS"),
+            "narrow幅でも交戦相手の情報 (VS ...) が見切れず表示されるはず: {line:?}"
+        );
     }
 
     #[test]
