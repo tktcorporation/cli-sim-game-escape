@@ -28,7 +28,7 @@ use crate::widgets::ClickableGrid;
 
 use actions::*;
 use logic::UpgradeKind;
-use state::{Phase, HAND_MAX, RING_W};
+use state::{Phase, HAND_MAX, RING_H, RING_W};
 
 /// 拠点画面のスクロール1クリックあたりの行数。
 const CAMP_SCROLL_STEP: i32 = 2;
@@ -107,7 +107,7 @@ impl LoopMarchGame {
                 logic::select_hand(&mut self.state, (id - HAND_CLICK_BASE) as usize);
                 true
             }
-            id if id >= PATH_CLICK_BASE => {
+            id if (PATH_CLICK_BASE..PATH_CLICK_BASE + (RING_W * RING_H) as u16).contains(&id) => {
                 if let Some((gx, gy)) = ClickableGrid::decode(PATH_CLICK_BASE, RING_W, id) {
                     if let Some(path_index) = logic::ring_index_at(gx, gy) {
                         logic::place_selected(&mut self.state, path_index);
@@ -352,15 +352,29 @@ mod tests {
         assert!(!game.handle_input(&click(9)));
     }
 
-    /// id >= PATH_CLICK_BASE の範囲は ClickableGrid の登録先 (100..131) に
-    /// 限られるはずだが、handle_click 自体は factory と同じ規約で
-    /// 「decode に失敗しても click イベントとしては消費する」。
+    /// リング範囲内 (PATH_CLICK_BASE..+RING_W*RING_H) の decode 失敗
+    /// (=リング内部セル) はクリックイベントとして消費するが無視する。
     #[test]
-    fn out_of_range_grid_id_is_still_consumed_but_ignored() {
+    fn interior_grid_id_within_range_is_consumed_but_ignored() {
         let mut game = LoopMarchGame::new();
         game.handle_input(&click(CAMP_START_OR_RESUME));
         let before = game.state.selected_hand;
-        assert!(game.handle_input(&click(9999)));
+        // (1,1) はリング内部。id = PATH_CLICK_BASE + 1*RING_W + 1 (範囲内)
+        assert!(game.handle_input(&click(PATH_CLICK_BASE + RING_W as u16 + 1)));
         assert_eq!(game.state.selected_hand, before);
+    }
+
+    /// 範囲外の id (例: 戻るボタンの BACK_TO_MENU=65535) は道グリッドの
+    /// クリックとして飲み込んではならない。飲み込むと `handle_input` が
+    /// `true` を返し、main.rs の「戻る」処理が握り潰されてしまう
+    /// (回帰防止: Codexレビュー指摘)。
+    #[test]
+    fn out_of_range_id_like_back_button_is_not_consumed() {
+        let mut game = LoopMarchGame::new();
+        game.handle_input(&click(CAMP_START_OR_RESUME));
+        assert!(
+            !game.handle_input(&click(crate::BACK_TO_MENU)),
+            "戻るボタンのidを道クリックとして飲み込んでしまっている"
+        );
     }
 }

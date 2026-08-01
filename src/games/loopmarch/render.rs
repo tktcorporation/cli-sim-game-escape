@@ -102,6 +102,11 @@ fn render_camp_body(
     let mut cl = ClickableList::new();
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
+        " 遠征で魂を集めて、下の強化に使おう。強化は死んでも消えない。",
+        Style::default().fg(Color::DarkGray),
+    )));
+    cl.push(Line::from(""));
+    cl.push(Line::from(Span::styled(
         format!(
             " 魂: {}   自己ベスト: 第{}周",
             state.soul, state.best_lap
@@ -221,23 +226,26 @@ fn render_expedition_wide(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let h_chunks = Layout::default()
-        .direction(LayoutDir::Horizontal)
-        .constraints([Constraint::Length(20), Constraint::Min(20)])
+    // ヘッダーは資源の内訳(今回限り/永続)を文章で見せるため幅が要る。
+    // 左カラム(20桁、リング用)には収まらないので全幅に置き、
+    // その下でリングと手札を左右に分ける。
+    let top_chunks = Layout::default()
+        .direction(LayoutDir::Vertical)
+        .constraints([Constraint::Length(5), Constraint::Min(20)])
         .split(area);
 
-    let left_chunks = Layout::default()
-        .direction(LayoutDir::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Length(RING_H as u16 + 2)])
-        .split(h_chunks[0]);
+    let body_chunks = Layout::default()
+        .direction(LayoutDir::Horizontal)
+        .constraints([Constraint::Length(20), Constraint::Min(20)])
+        .split(top_chunks[1]);
 
     let right_chunks = Layout::default()
         .direction(LayoutDir::Vertical)
         .constraints([Constraint::Min(10), Constraint::Min(6)])
-        .split(h_chunks[1]);
+        .split(body_chunks[1]);
 
-    render_header(state, f, left_chunks[0], false);
-    render_ring(state, f, left_chunks[1], click_state);
+    render_header(state, f, top_chunks[0], false);
+    render_ring(state, f, body_chunks[0], click_state);
     render_hand(state, f, right_chunks[0], click_state);
     render_log(state, f, right_chunks[1], Borders::ALL);
 }
@@ -251,7 +259,7 @@ fn render_expedition_narrow(
     let chunks = Layout::default()
         .direction(LayoutDir::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(5),
             Constraint::Length(RING_H as u16 + 2),
             Constraint::Min(8),
             Constraint::Length(3),
@@ -303,18 +311,30 @@ fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: b
         combat_span,
     ]);
     let line2 = Line::from(Span::styled(
-        format!(
-            " 第{}周(自己ベスト{})  木材{} 石材{} 魂{}",
-            state.lap + 1,
-            state.best_lap,
-            state.wood,
-            state.stone,
-            state.soul
-        ),
+        format!(" 第{}周 (自己ベスト{}周)", state.lap + 1, state.best_lap),
         Style::default().fg(Color::White),
     ));
 
-    let widget = Paragraph::new(vec![line1, line2]).block(
+    // 資源は「このラン限りで死ぬと消える」ものと「死んでも残る」ものを
+    // 常時ラベルで分けて見せる — 死亡後に初めて気付く設計は分かりにくい
+    // というフィードバックを受け、基礎の経済構造は説明することにした
+    // (地形シナジーのような「発見させたい」要素とは区別している)。
+    let line3 = Line::from(vec![
+        Span::styled(" 今回限り:", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!(" 木材{} 石材{}", state.wood, state.stone),
+            Style::default().fg(Color::White),
+        ),
+        Span::styled("  永続:", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!(" 魂{}", state.soul),
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]);
+
+    let widget = Paragraph::new(vec![line1, line2, line3]).block(
         Block::default()
             .borders(borders)
             .border_style(Style::default().fg(Color::Yellow))
