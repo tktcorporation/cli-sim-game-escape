@@ -110,6 +110,11 @@ impl LoopMarchGame {
         if s.phase == Phase::Expedition {
             let layout = render::compute_expedition_layout(area, is_narrow_layout(area.width));
 
+            // 致命打の tick は hero.hp が 0 になった直後に handle_death が
+            // 即座に fresh_hero() で満タン復帰させるため、ここでは
+            // 「減った」判定を素通りする (increase になる)。その瞬間は
+            // 代わりに下の push_death (run_active の遷移検知) が発火するので
+            // 二重に演出が重ならず結果的に正しい。
             if s.hero.hp < prev.hero_hp {
                 effects.push_hero_hit(layout.header);
                 sound::play(sound::DAMAGE);
@@ -444,9 +449,17 @@ mod tests {
     /// (非アクティブ→アクティブ) で演出をトリガすると、trigger(3) が decay
     /// より先に上書きされ続けて「戦闘中ずっとアクティブ」になり、2発目以降の
     /// ヒットで演出が発火しなくなるバグがあった。HP の実測値差分で検知する
-    /// ことで、連続ヒットの毎回で `push_enemy_hit` が積まれることを確認する。
+    /// ことで、連続ヒットの毎回で演出が積まれることを確認する。
+    ///
+    /// このゲームの戦闘は「勇者の攻撃→(モンスターが生きていれば)即座に反撃」
+    /// が同一 tick 内で起きる設計のため、生存継続中は毎回 push_hero_hit と
+    /// push_enemy_hit が両方発火する。どちらが発火したかまでは
+    /// `EffectHost::is_running()` からは区別できないので、ここでは
+    /// 「2発目以降も演出が積まれ続けるか」を検証する
+    /// (`push_enemy_hit` だけを単独で確認するテストは
+    /// `detect_transitions_pushes_enemy_hit_on_killing_blow_without_hero_taking_damage`)。
     #[test]
-    fn detect_transitions_pushes_enemy_hit_on_every_consecutive_hit() {
+    fn detect_transitions_keeps_pushing_combat_effects_across_consecutive_ticks() {
         let mut game = LoopMarchGame::new();
         logic::start_or_resume_expedition(&mut game.state);
         let pos = game.state.hero.position;
@@ -473,6 +486,45 @@ mod tests {
         assert!(
             game.effects.borrow().is_running(),
             "同じ相手への2発目でも演出が積まれるはず (毎tick戦闘が続く限りhurt_flashは非活性化しない)"
+        );
+    }
+
+    /// `push_enemy_hit` 単独の発火を、勇者が被弾しないケース (倒した瞬間は
+    /// 反撃を受けない) で切り分けて確認する。
+    #[test]
+    fn detect_transitions_pushes_enemy_hit_on_killing_blow_without_hero_taking_damage() {
+        let mut game = LoopMarchGame::new();
+        logic::start_or_resume_expedition(&mut game.state);
+        let pos = game.state.hero.position;
+        let hero_atk = game.state.hero.attack;
+        game.state.path[pos].monster = Some(state::Monster {
+            terrain: state::Terrain::Graveyard,
+            hp: hero_atk, // ちょうど1発で倒せるHP
+            max_hp: hero_atk,
+            attack: 999, // 生きていれば致命的だが、倒した瞬間は反撃を受けない
+            elite: false,
+        });
+        let area = Rect::new(0, 0, 80, 30);
+
+        // 直接 state を書き換えただけでは `game.prev` (前回スナップショット)
+        // にモンスターの存在が反映されない。実ゲームでは render() が毎フレーム
+        // detect_transitions を呼んでいるので、一度呼んで「モンスターが
+        // そこにいる」状態を prev に記録させてから本題のヒットを与える。
+        game.detect_transitions(area);
+        assert!(
+            !game.effects.borrow().is_running(),
+            "モンスターが湧いただけでは (まだ攻撃していないので) 演出は積まれない"
+        );
+
+        let hero_hp_before = game.state.hero.hp;
+        logic::tick(&mut game.state);
+        assert_eq!(game.state.hero.hp, hero_hp_before, "倒した瞬間は反撃を受けない");
+        assert!(game.state.path[pos].monster.is_none(), "1発で倒れているはず");
+
+        game.detect_transitions(area);
+        assert!(
+            game.effects.borrow().is_running(),
+            "勇者は無傷でも、撃破の一撃自体は enemy_hit として演出が積まれるはず"
         );
     }
 
