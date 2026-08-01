@@ -388,6 +388,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 // Let the game handle back first (e.g., sub-screen → main screen).
                 // Only go to menu if the game didn't consume it.
                 if !game.handle_input(event) {
+                    game.on_leave();
                     *state = AppState::Menu { scroll: 0, selected: 0 };
                 }
             } else {

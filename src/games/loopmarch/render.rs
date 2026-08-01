@@ -228,11 +228,7 @@ fn render_expedition_wide(
 
     let left_chunks = Layout::default()
         .direction(LayoutDir::Vertical)
-        .constraints([
-            Constraint::Length(4),
-            Constraint::Length(RING_H as u16 + 2),
-            Constraint::Min(3),
-        ])
+        .constraints([Constraint::Length(4), Constraint::Length(RING_H as u16 + 2)])
         .split(h_chunks[0]);
 
     let right_chunks = Layout::default()
@@ -242,7 +238,6 @@ fn render_expedition_wide(
 
     render_header(state, f, left_chunks[0], false);
     render_ring(state, f, left_chunks[1], click_state);
-    render_hint(f, left_chunks[2]);
     render_hand(state, f, right_chunks[0], click_state);
     render_log(state, f, right_chunks[1], Borders::ALL);
 }
@@ -338,15 +333,6 @@ fn monster_name(m: &Monster) -> &'static str {
     }
 }
 
-fn render_hint(f: &mut Frame, area: Rect) {
-    let widget = Paragraph::new(Line::from(Span::styled(
-        " カードを選んで道をタップで配置",
-        Style::default().fg(Color::DarkGray),
-    )))
-    .wrap(Wrap { trim: false });
-    f.render_widget(widget, area);
-}
-
 /// 道の1マス分の表示テキストとスタイルを決める。
 /// 優先順位: モンスター > 勇者 > 地形 > 空き道。
 ///
@@ -355,6 +341,17 @@ fn render_hint(f: &mut Frame, area: Rect) {
 /// いるマス」でもある。勇者を最優先で表示すると敵が常に隠れてしまうため、
 /// 交戦中は敵の姿を勇者色(黄背景)で強調して見せる。
 fn cell_visual(state: &LoopMarchState, path_index: usize) -> (String, Style) {
+    let (text, style) = cell_visual_base(state, path_index);
+    if state.cursor == path_index {
+        // キーボード操作用カーソル。地形/モンスター/勇者の表示はそのまま
+        // 保ちつつ、下線だけ重ねて現在地を示す。
+        (text, style.add_modifier(Modifier::UNDERLINED))
+    } else {
+        (text, style)
+    }
+}
+
+fn cell_visual_base(state: &LoopMarchState, path_index: usize) -> (String, Style) {
     let slot = &state.path[path_index];
     let hero_here = state.hero.position == path_index;
 
@@ -388,6 +385,19 @@ fn cell_visual(state: &LoopMarchState, path_index: usize) -> (String, Style) {
     }
 
     match slot.terrain {
+        Some(Terrain::Forest) => {
+            // 森が2つ以上隣接している (シナジー成立) と見た目を変える。
+            // 「なぜ」は説明しない — 気付いたプレイヤーへの発見の余地として残す。
+            let clustered = logic::forest_cluster_size(&state.path, path_index) >= 2;
+            let style = if clustered {
+                Style::default()
+                    .fg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Green)
+            };
+            (format!("{} ", Terrain::Forest.symbol()), style)
+        }
         Some(t) => (format!("{} ", t.symbol()), Style::default().fg(t.color())),
         None => (". ".to_string(), Style::default().fg(Color::DarkGray)),
     }
@@ -436,6 +446,10 @@ fn render_hand(
     click_state: &Rc<RefCell<ClickState>>,
 ) {
     let mut cl = ClickableList::new();
+    cl.push(Line::from(Span::styled(
+        " カードを選んで→道をタップで配置",
+        Style::default().fg(Color::DarkGray),
+    )));
     for (i, card) in state.hand.iter().enumerate() {
         match card {
             Some(t) => {
@@ -449,11 +463,16 @@ fn render_hand(
                     Style::default().fg(t.color()).add_modifier(Modifier::BOLD)
                 };
                 let marker = if selected { "▶" } else { " " };
+                let hint_style = if selected {
+                    Style::default().fg(Color::Black).bg(t.color())
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                };
                 cl.push_clickable(
-                    Line::from(Span::styled(
-                        format!(" {marker}[{}] {}", i + 1, t.name()),
-                        style,
-                    )),
+                    Line::from(vec![
+                        Span::styled(format!(" {marker}[{}] {} ", i + 1, t.name()), style),
+                        Span::styled(t.resource_hint(), hint_style),
+                    ]),
                     HAND_CLICK_BASE + i as u16,
                 );
             }
@@ -531,6 +550,22 @@ mod tests {
         state.path[5].terrain = Some(Terrain::Forest);
         let (text, _) = cell_visual(&state, 5);
         assert_eq!(text.trim(), Terrain::Forest.symbol().to_string());
+    }
+
+    #[test]
+    fn cell_visual_highlights_clustered_forest_differently_from_isolated() {
+        let mut state = LoopMarchState::new();
+        logic::start_or_resume_expedition(&mut state);
+        state.path[5].terrain = Some(Terrain::Forest);
+        let (_, isolated_style) = cell_visual(&state, 5);
+
+        state.path[6].terrain = Some(Terrain::Forest);
+        let (_, clustered_style) = cell_visual(&state, 5);
+
+        assert_ne!(
+            isolated_style, clustered_style,
+            "隣接森ができた前後で見た目が変わらないと、プレイヤーがシナジーに気付く手がかりが無い"
+        );
     }
 
     #[test]

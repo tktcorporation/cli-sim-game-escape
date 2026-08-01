@@ -119,6 +119,12 @@ impl LoopMarchGame {
         }
     }
 
+    fn flush_save(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        save::save_game(&self.state);
+        self.save_countdown = save::AUTOSAVE_INTERVAL;
+    }
+
     fn handle_key(&mut self, key: char) -> bool {
         match self.state.phase {
             Phase::Camp => match key {
@@ -154,6 +160,19 @@ impl LoopMarchGame {
                     logic::go_to_camp(&mut self.state);
                     true
                 }
+                'h' => {
+                    logic::move_cursor(&mut self.state, -1);
+                    true
+                }
+                'l' => {
+                    logic::move_cursor(&mut self.state, 1);
+                    true
+                }
+                ' ' => {
+                    let cursor = self.state.cursor;
+                    logic::place_selected(&mut self.state, cursor);
+                    true
+                }
                 _ => false,
             },
         }
@@ -183,10 +202,14 @@ impl Game for LoopMarchGame {
 
         self.save_countdown = self.save_countdown.saturating_sub(delta_ticks);
         if self.save_countdown == 0 || died_this_tick {
-            #[cfg(target_arch = "wasm32")]
-            save::save_game(&self.state);
-            self.save_countdown = save::AUTOSAVE_INTERVAL;
+            self.flush_save();
         }
+    }
+
+    fn on_leave(&mut self) {
+        // メニューに戻る操作でこのインスタンスは破棄されるため、直近の
+        // オートセーブ以降に増えた魂・拠点強化・乱数状態を確実に残す。
+        self.flush_save();
     }
 
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
@@ -229,6 +252,24 @@ mod tests {
         game.handle_input(&click(CAMP_START_OR_RESUME));
         game.handle_input(&click(HAND_CLICK_BASE));
         assert_eq!(game.state.selected_hand, Some(0));
+    }
+
+    #[test]
+    fn keyboard_only_flow_can_place_terrain() {
+        // Codex指摘: キーボードのみでは地形配置ができなかった。
+        // 選択(数字キー) → 移動(h/l) → 配置(space) が一通り動くことを確認する。
+        let mut game = LoopMarchGame::new();
+        game.handle_input(&InputEvent::Key(' ')); // 拠点で遠征開始
+        game.handle_input(&InputEvent::Key('1')); // 手札0番を選択
+        assert_eq!(game.state.selected_hand, Some(0));
+
+        game.handle_input(&InputEvent::Key('l'));
+        game.handle_input(&InputEvent::Key('l'));
+        assert_eq!(game.state.cursor, 2);
+
+        game.handle_input(&InputEvent::Key(' ')); // カーソル位置に配置
+        assert!(game.state.path[2].terrain.is_some());
+        assert_eq!(game.state.selected_hand, None, "配置後は選択解除される");
     }
 
     #[test]
@@ -285,6 +326,21 @@ mod tests {
             game.save_countdown,
             save::AUTOSAVE_INTERVAL,
             "死亡直後はタイマー未満でも即セーブ扱いになる"
+        );
+    }
+
+    #[test]
+    fn on_leave_flushes_save_before_returning_to_menu() {
+        let mut game = LoopMarchGame::new();
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000; // オートセーブにはまだ遠い
+        game.state.soul = 42;
+
+        game.on_leave();
+
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL,
+            "メニューへ戻る直前はオートセーブのタイマーを待たず即セーブする"
         );
     }
 

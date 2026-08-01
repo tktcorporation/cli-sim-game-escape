@@ -28,6 +28,12 @@ pub trait Game {
     /// Advance game logic by `delta_ticks` discrete ticks.
     fn tick(&mut self, delta_ticks: u32);
 
+    /// Called once, right before the player leaves this game back to the
+    /// main menu. Games that only autosave on a timer/event would otherwise
+    /// lose progress made since the last save if the player quits early;
+    /// override this to flush a save. No-op by default.
+    fn on_leave(&mut self) {}
+
     /// Render the game into the given area.
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>);
 }

@@ -57,6 +57,17 @@ impl Terrain {
         }
     }
 
+    /// 手札で見せる「置くと何が起きるか」の要約。シナジー(隣接効果)は
+    /// あえて書かない — 基礎メカニクスの透明性と発見の余地を両立させる。
+    pub fn resource_hint(self) -> &'static str {
+        match self {
+            Terrain::Meadow => "安全・魂少量",
+            Terrain::Forest => "狼→木材",
+            Terrain::Mountain => "ゴーレム→石材",
+            Terrain::Graveyard => "骸骨→魂",
+        }
+    }
+
     pub fn symbol(self) -> char {
         match self {
             Terrain::Meadow => '.',
@@ -182,6 +193,9 @@ pub struct LoopMarchState {
     pub lap: u32,
     pub move_progress: u32,
     pub selected_hand: Option<usize>,
+    /// キーボード操作用の道カーソル (h/l で移動、space で配置)。
+    /// タップ操作の座標クリックとは独立した、並行の配置手段。
+    pub cursor: usize,
 
     // ── 永続 (死亡・リロードしてもリセットされない) ──
     pub soul: u32,
@@ -219,6 +233,7 @@ impl LoopMarchState {
             lap: 0,
             move_progress: 0,
             selected_hand: None,
+            cursor: 0,
             soul: 0,
             camp,
             best_lap: 0,

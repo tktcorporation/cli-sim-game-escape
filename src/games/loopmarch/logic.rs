@@ -97,7 +97,8 @@ pub fn mountain_synergy_defense(path: &[PathSlot]) -> i32 {
 }
 
 /// `index` を含む森タイルの連続数 (ループの前後をたどって数える)。
-fn forest_cluster_size(path: &[PathSlot], index: usize) -> usize {
+/// `render.rs` がシナジー成立(≥2)の視覚ヒントを出す判定にも使う。
+pub fn forest_cluster_size(path: &[PathSlot], index: usize) -> usize {
     let n = path.len();
     if path[index].terrain != Some(Terrain::Forest) {
         return 0;
@@ -265,7 +266,17 @@ fn spawn_monster(state: &mut LoopMarchState, pos: usize, terrain: Terrain) {
 /// 遠征スコープ (道の配置・木材・石材) は失うが、永続資源 (魂) と
 /// 拠点強化は残る。
 fn handle_death(state: &mut LoopMarchState) {
-    state.add_log("力尽きた…拠点へ撤退する。");
+    state.add_log(format!(
+        "力尽きた…拠点へ撤退する。(第{}周まで到達)",
+        state.lap + 1
+    ));
+    // 「魂だけが残る」非対称性を結論として言わず、失った量と残った量を
+    // 数字でそのまま並べて見せる — プレイヤー自身に気付いてもらう。
+    state.add_log(format!(
+        "木材 {}→0 / 石材 {}→0 / 魂 {} (そのまま)",
+        state.wood, state.stone, state.soul
+    ));
+
     state.phase = Phase::Camp;
     state.run_active = false;
     state.path = vec![PathSlot::default(); PATH_LEN];
@@ -274,6 +285,7 @@ fn handle_death(state: &mut LoopMarchState) {
     state.lap = 0;
     state.move_progress = 0;
     state.selected_hand = None;
+    state.cursor = 0;
     state.hero = state.camp.fresh_hero();
     state.hand = vec![None; HAND_MAX];
 }
@@ -296,6 +308,7 @@ pub fn start_or_resume_expedition(state: &mut LoopMarchState) {
     state.stone = 0;
     state.lap = 0;
     state.move_progress = 0;
+    state.cursor = 0;
     state.hero = state.camp.fresh_hero();
 
     state.hand = draw_starting_hand(state.camp.starting_hand_size(), &mut state.rng_state);
@@ -308,6 +321,13 @@ pub fn go_to_camp(state: &mut LoopMarchState) {
     if state.phase == Phase::Expedition {
         state.phase = Phase::Camp;
     }
+}
+
+/// キーボード操作用の道カーソルを前後に動かす (ループするので端は無い)。
+pub fn move_cursor(state: &mut LoopMarchState, delta: i32) {
+    let n = state.path.len() as i32;
+    let next = (state.cursor as i32 + delta).rem_euclid(n);
+    state.cursor = next as usize;
 }
 
 /// 手札のカードを選択/選択解除する。
@@ -719,6 +739,34 @@ mod tests {
         assert_eq!(s.hero.hp, s.camp.hero_max_hp());
     }
 
+    #[test]
+    fn death_logs_lost_and_kept_resources_explicitly() {
+        let mut s = expedition_state();
+        s.wood = 7;
+        s.stone = 4;
+        s.soul = 12;
+        s.hero.position = 3;
+        s.hero.attack = 0;
+        s.hero.hp = 1;
+        s.path[3].monster = Some(Monster {
+            terrain: Terrain::Graveyard,
+            hp: 100,
+            max_hp: 100,
+            attack: 50,
+            elite: false,
+        });
+
+        tick(&mut s);
+
+        let recap = s.log.iter().find(|l| l.contains("7→0"));
+        assert!(
+            recap.is_some(),
+            "死亡時に失った資源/残った魂を数字で明示していない: {:?}",
+            s.log
+        );
+        assert!(recap.unwrap().contains("12"), "残った魂の量が見えていない");
+    }
+
     // ── 遠征の開始/再開 ──
 
     #[test]
@@ -818,6 +866,35 @@ mod tests {
         s.hand[0] = None;
         select_hand(&mut s, 0);
         assert_eq!(s.selected_hand, None);
+    }
+
+    // ── キーボードカーソル ──
+
+    #[test]
+    fn move_cursor_advances_and_wraps_forward() {
+        let mut s = expedition_state();
+        s.cursor = PATH_LEN - 1;
+        move_cursor(&mut s, 1);
+        assert_eq!(s.cursor, 0, "末尾から進むと先頭に戻る (ループ)");
+    }
+
+    #[test]
+    fn move_cursor_wraps_backward() {
+        let mut s = expedition_state();
+        s.cursor = 0;
+        move_cursor(&mut s, -1);
+        assert_eq!(s.cursor, PATH_LEN - 1, "先頭から戻ると末尾に回る (ループ)");
+    }
+
+    #[test]
+    fn place_selected_at_cursor_works_like_click_placement() {
+        let mut s = expedition_state();
+        s.hand[0] = Some(Terrain::Forest);
+        s.selected_hand = Some(0);
+        s.cursor = 7;
+        let cursor = s.cursor;
+        assert!(place_selected(&mut s, cursor));
+        assert_eq!(s.path[7].terrain, Some(Terrain::Forest));
     }
 
     #[test]
