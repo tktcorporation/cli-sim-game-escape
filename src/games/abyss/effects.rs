@@ -1,8 +1,10 @@
 //! 演出レイヤー (共通 `crate::effects::EffectHost` の薄いラッパー)。
 //!
-//! ratatui 描画後の Buffer に shader 風の post-process を当てる。
-//! state.rs / logic.rs を一切変更せず、AbyssGame::render の最後に
-//! `process(...)` を呼ぶだけで動く設計。
+//! ratatui 描画後の Buffer に shader 風の post-process を当てる。ここでの
+//! 演出 (push_* メソッド) を増やす分には state.rs / logic.rs の変更は不要で、
+//! AbyssGame::render の最後に `process(...)` を呼ぶだけで動く設計
+//! (被弾フラッシュの残り時間自体は state.rs 側で `crate::effects::FlashTimer`
+//! を使って管理しており、これとは別レイヤー)。
 //!
 //! ## なぜ render 内で push するか
 //! Effect は area (Rect) を必要とし、area は render 時にしか確定しない。

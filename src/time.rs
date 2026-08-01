@@ -6,9 +6,10 @@
 
 /// Read the current high-resolution timestamp (ms since page navigation).
 /// Returns `None` when the Performance API is unavailable (rare, e.g.
-/// headless or sandboxed contexts); callers must decide what `None` means
-/// for them (e.g. skip this frame's timing update rather than treating it
-/// as happening at t=0).
+/// headless or sandboxed contexts). Callers must decide how to degrade:
+/// e.g. click dedup skips its check entirely, while `GameTime`/`FrameClock`
+/// fall back to `unwrap_or(0.0)` and rely on delta-clamping to neutralize
+/// the resulting jump.
 pub fn now_ms() -> Option<f64> {
     web_sys::window().and_then(|w| w.performance()).map(|p| p.now())
 }
