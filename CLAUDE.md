@@ -23,6 +23,8 @@ Ratzilla (ratatui wrapper) を使用し、10 ticks/sec の固定タイムステ�
 - **Pure Logic Pattern**: logic.rs に純粋関数、state.rs にデータ、render.rs は読み取り専用
 - **Trait-Based Games**: 新ゲーム追加時に main.rs の変更不要
 - **Responsive**: 60列を閾値にワイド/ナローレイアウトを切り替え
+- **Simulation-Driven Balance**: ゲーム開発・バランス調整は simulator.rs の自動プレイ
+  シミュレーターとセットで行う（詳細は `.claude/rules/game-simulation.md`）
 - 日本語 UI
 
 ### PR前チェックリスト
