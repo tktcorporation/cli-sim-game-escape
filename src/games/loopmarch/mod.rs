@@ -60,15 +60,17 @@ impl Default for LoopMarchGame {
 /// 先に上書きされ続けると `is_active()` が戦闘中ずっと true のままになり
 /// (= abyss のように攻撃間隔がフラッシュ長より長い前提が成り立たない)、
 /// 2発目以降のヒットで演出・音が発火しなくなるため。
+///
+/// モンスター側は HP ではなく `enemy_hit_count` の差分で見る。HP スナップ
+/// ショット比較だと、1回のバッチ tick 内でモンスターが出現→撃破まで完結した
+/// 場合に前後とも「不在」に見えてヒットが検出できないため。
 #[derive(Clone, Copy, Default)]
 struct PrevSnapshot {
     lap: u32,
     best_lap: u32,
     run_active: bool,
     hero_hp: i32,
-    /// 勇者の現在地マスにいるモンスターの HP。マスが変わったりモンスターが
-    /// 不在なら `None`。
-    monster_hp_here: Option<i32>,
+    enemy_hit_count: u32,
 }
 
 impl LoopMarchGame {
@@ -98,7 +100,7 @@ impl LoopMarchGame {
             best_lap: s.best_lap,
             run_active: s.run_active,
             hero_hp: s.hero.hp,
-            monster_hp_here: s.path[s.hero.position].monster.as_ref().map(|m| m.hp),
+            enemy_hit_count: s.enemy_hit_count,
         }
     }
 
@@ -120,15 +122,7 @@ impl LoopMarchGame {
                 sound::play(sound::DAMAGE);
             }
 
-            let monster_hp_here = s.path[s.hero.position].monster.as_ref().map(|m| m.hp);
-            // 撃破されて消えた (Some → None) 場合も、直前の一撃がヒットした
-            // ことに変わりはないのでフラッシュ対象に含める。
-            let enemy_hit = match (prev.monster_hp_here, monster_hp_here) {
-                (Some(prev_hp), Some(cur_hp)) => cur_hp < prev_hp,
-                (Some(_), None) => true,
-                _ => false,
-            };
-            if enemy_hit {
+            if s.enemy_hit_count != prev.enemy_hit_count {
                 effects.push_enemy_hit(layout.ring);
             }
 
@@ -490,7 +484,10 @@ mod tests {
     }
 
     /// `push_enemy_hit` 単独の発火を、勇者が被弾しないケース (倒した瞬間は
-    /// 反撃を受けない) で切り分けて確認する。
+    /// 反撃を受けない) で切り分けて確認する。モンスターの出現は
+    /// `detect_transitions` に一度も観測させないまま tick で倒すことで、
+    /// HP の有無ではなく `enemy_hit_count` の差分で検知していることも
+    /// あわせて確認する。
     #[test]
     fn detect_transitions_pushes_enemy_hit_on_killing_blow_without_hero_taking_damage() {
         let mut game = LoopMarchGame::new();
@@ -506,16 +503,6 @@ mod tests {
         });
         let area = Rect::new(0, 0, 80, 30);
 
-        // 直接 state を書き換えただけでは `game.prev` (前回スナップショット)
-        // にモンスターの存在が反映されない。実ゲームでは render() が毎フレーム
-        // detect_transitions を呼んでいるので、一度呼んで「モンスターが
-        // そこにいる」状態を prev に記録させてから本題のヒットを与える。
-        game.detect_transitions(area);
-        assert!(
-            !game.effects.borrow().is_running(),
-            "モンスターが湧いただけでは (まだ攻撃していないので) 演出は積まれない"
-        );
-
         let hero_hp_before = game.state.hero.hp;
         logic::tick(&mut game.state);
         assert_eq!(game.state.hero.hp, hero_hp_before, "倒した瞬間は反撃を受けない");
@@ -525,6 +512,39 @@ mod tests {
         assert!(
             game.effects.borrow().is_running(),
             "勇者は無傷でも、撃破の一撃自体は enemy_hit として演出が積まれるはず"
+        );
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): 遅延フレームで複数 tick が一括消化される
+    /// と、モンスターの出現から撃破までが1回も render (detect_transitions) を
+    /// 挟まずに完結することがある。HP スナップショット比較だと前後とも
+    /// 「不在」に見えてヒットが検出できなかったが、`enemy_hit_count` は
+    /// tick 処理の中で直接インクリメントされるため、render の頻度に関わらず
+    /// 検出できることを確認する。
+    #[test]
+    fn detect_transitions_catches_enemy_hit_even_when_batched_ticks_skip_rendering() {
+        let mut game = LoopMarchGame::new();
+        logic::start_or_resume_expedition(&mut game.state);
+        let pos = game.state.hero.position;
+        let hero_atk = game.state.hero.attack;
+        game.state.path[pos].monster = Some(state::Monster {
+            terrain: state::Terrain::Graveyard,
+            hp: hero_atk, // ちょうど1発で倒せるHP
+            max_hp: hero_atk,
+            attack: 999,
+            elite: false,
+        });
+        let area = Rect::new(0, 0, 80, 30);
+
+        // detect_transitions を一度も呼ばずに複数 tick 消化する
+        // (= 遅延フレームで render がスキップされた状態を模す)。
+        logic::tick_n(&mut game.state, 3);
+        assert!(game.state.path[pos].monster.is_none(), "1発で倒れているはず");
+
+        game.detect_transitions(area);
+        assert!(
+            game.effects.borrow().is_running(),
+            "render を挟まないバッチ内で出現から撃破まで完結しても、ヒット演出は失われないはず"
         );
     }
 

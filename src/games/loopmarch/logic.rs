@@ -157,6 +157,7 @@ fn resolve_combat_tick(state: &mut LoopMarchState) {
         Some(monster) => {
             monster.hp -= hero_atk;
             state.enemy_hurt_flash.trigger(3);
+            state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
             if monster.hp <= 0 {
                 Some((monster.terrain, monster.elite))
             } else {
