@@ -363,11 +363,17 @@ fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: b
     line1_spans.push(combat_span);
     let line1 = Line::from(line1_spans);
 
-    let lap_text = format!(" 第{}周 (自己ベスト{}周)", state.lap + 1, state.best_lap);
-    let mut line2_spans = vec![Span::styled(lap_text, Style::default().fg(Color::White))];
+    let lap_text = format!(" 第{}周 (ベスト{}周)", state.lap + 1, state.best_lap);
+    // ATK/DEF (narrowのみ、line1から追い出したもの) は周回数より優先度の
+    // 高い戦況情報なので先に置く。ratatui は Span を先頭から順に描画幅を
+    // 使い切るまで印字するため、先頭に置いたテキストは常に全て表示され、
+    // 溢れた分は後続の (周回数のような相対的に重要度が低い) テキストが
+    // 削れる (Codexレビュー指摘: 周回数を先に置くとDEFの方が見切れていた)。
+    let mut line2_spans = Vec::new();
     if let Some(stats) = line2_stats {
         line2_spans.push(Span::styled(stats, Style::default().fg(Color::Cyan)));
     }
+    line2_spans.push(Span::styled(lap_text, Style::default().fg(Color::White)));
     let line2 = Line::from(line2_spans);
 
     // 資源は「このラン限りで死ぬと消える」ものと「死んでも残る」ものを
@@ -720,6 +726,37 @@ mod tests {
         assert_eq!(fit_monster_name("スケルトン", 12, 10), "ス", "残り幅2 (全角1文字分) だけ表示する");
         assert_eq!(fit_monster_name("スケルトン", 10, 10), "", "残り幅0なら空文字になる");
         assert_eq!(fit_monster_name("スケルトン", 5, 10), "", "予算がマイナスになっても panic しない");
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): 周回数テキストは全角文字を含むため
+    /// 見た目以上に表示幅を消費する ("第1周 (自己ベスト0周)" だけで22桁)。
+    /// 以前は周回数を先に置いていたため、1周目・自己ベスト0周という
+    /// 最短の値でも narrow (30桁) で line2 が溢れ、後ろに置いた DEF が
+    /// 見切れていた。ATK/DEF を先頭に固定したので、ratatui が Span を
+    /// 先頭から順に描画する性質上、桁数がどう増えても必ず全て表示される
+    /// (溢れた分は後続の周回数テキストの方が削れる)。
+    #[test]
+    fn narrow_line2_never_truncates_atk_def_even_with_typical_lap_text() {
+        let mut state = LoopMarchState::new();
+        logic::start_or_resume_expedition(&mut state);
+        let defense = logic::mountain_synergy_defense(&state.path);
+
+        let mut terminal = Terminal::new(TestBackend::new(30, 5)).unwrap();
+        let completed = terminal
+            .draw(|f| {
+                render_header(&state, f, Rect::new(0, 0, 30, 5), true);
+            })
+            .unwrap();
+
+        // line2 は area の3行目 (y=2)。ATK/DEF は line2 の先頭 (全角文字より
+        // 前) に置かれる純粋ASCIIなので、Buffer再構成でも安全に検証できる。
+        let line: String = (0..30)
+            .map(|x| completed.buffer.cell((x, 2)).map(|c| c.symbol()).unwrap_or(" "))
+            .collect();
+        assert!(
+            line.contains(&format!("ATK{} DEF{defense}", state.hero.attack)),
+            "ATK/DEFは先頭に置かれるので常に全て表示されるはず: {line:?}"
+        );
     }
 
     #[test]
