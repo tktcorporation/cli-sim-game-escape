@@ -14,6 +14,9 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
+use crate::effects::FlashTimer;
+
+#[cfg(any(target_arch = "wasm32", test))]
 use super::state::{AbyssState, EquipmentId, FloorKind, Tab, EQUIPMENT_COUNT, LANE_COUNT};
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -187,8 +190,8 @@ fn apply_save(state: &mut AbyssState, save: &GameSave) {
     state.current_enemy.max_hp = 0;
     state.last_enemy_damage = None;
     state.last_hero_damage = None;
-    state.hero_hurt_flash = 0;
-    state.enemy_hurt_flash = 0;
+    state.hero_hurt_flash = FlashTimer::new();
+    state.enemy_hurt_flash = FlashTimer::new();
     state.descent_flash = 0;
     state.last_gacha = None;
     state.log.clear();

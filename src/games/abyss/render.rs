@@ -10,6 +10,7 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
+use crate::theme;
 use crate::widgets::{Clickable, ClickableList, TabBar};
 
 use super::actions::*;
@@ -233,8 +234,8 @@ fn render_hero_panel(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool
     let max_hp = state.hero_max_hp();
     let bar_width = (area.width.saturating_sub(2)).clamp(8, 20);
 
-    let hero_name_color = if state.hero_hurt_flash > 0 {
-        Color::Red
+    let hero_name_color = if state.hero_hurt_flash.is_active() {
+        theme::DAMAGE_FLASH.color
     } else {
         Color::Cyan
     };
@@ -290,8 +291,8 @@ fn render_hero_panel(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool
 fn render_enemy_panel(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool) {
     let bar_width = (area.width.saturating_sub(2)).clamp(8, 20);
 
-    let name_color = if state.enemy_hurt_flash > 0 {
-        Color::Yellow
+    let name_color = if state.enemy_hurt_flash.is_active() {
+        theme::HIT_FLASH.color
     } else if state.current_enemy.is_boss {
         Color::Red
     } else {
@@ -355,7 +356,7 @@ fn make_hp_bar_line(cur: u64, max: u64, width: u16, color: Color) -> Vec<Span<'s
     let frac = if max == 0 { 0.0 } else { (cur as f64 / max as f64).clamp(0.0, 1.0) };
     let filled = (frac * width as f64).round() as u16;
     let bar: String = (0..width)
-        .map(|i| if i < filled { '█' } else { '░' })
+        .map(|i| if i < filled { theme::BAR_FULL } else { theme::BAR_EMPTY })
         .collect();
     vec![
         Span::styled(format!(" {}", bar), Style::default().fg(color)),
@@ -369,7 +370,7 @@ fn make_hp_bar_line(cur: u64, max: u64, width: u16, color: Color) -> Vec<Span<'s
 fn make_progress_line(label: &'static str, frac: f32, width: u16, color: Color) -> Vec<Span<'static>> {
     let filled = (frac as f64 * width as f64).round() as u16;
     let bar: String = (0..width)
-        .map(|i| if i < filled { '▰' } else { '▱' })
+        .map(|i| if i < filled { theme::PROGRESS_FULL } else { theme::PROGRESS_EMPTY })
         .collect();
     vec![
         Span::styled(label, Style::default().fg(Color::DarkGray)),

@@ -19,6 +19,8 @@
 
 use std::cell::Cell;
 
+use crate::effects::FlashTimer;
+
 use super::config::BalanceConfig;
 
 /// 魂の永続強化。死亡しても残り、全体倍率を提供する。
@@ -614,8 +616,8 @@ pub struct AbyssState {
 
     // ── 演出 / ログ ──
     pub log: Vec<String>,
-    pub hero_hurt_flash: u32,
-    pub enemy_hurt_flash: u32,
+    pub hero_hurt_flash: FlashTimer,
+    pub enemy_hurt_flash: FlashTimer,
     pub last_enemy_damage: Option<(u64, u32, bool)>,
     pub last_hero_damage: Option<(u64, u32)>,
     pub descent_flash: u32,
@@ -662,8 +664,8 @@ impl AbyssState {
             total_kills: 0,
             deaths: 0,
             log: Vec::new(),
-            hero_hurt_flash: 0,
-            enemy_hurt_flash: 0,
+            hero_hurt_flash: FlashTimer::new(),
+            enemy_hurt_flash: FlashTimer::new(),
             last_enemy_damage: None,
             last_hero_damage: None,
             descent_flash: 0,

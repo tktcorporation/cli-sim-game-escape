@@ -4,6 +4,16 @@
 //! this into a fixed number of discrete ticks per second, making game
 //! logic deterministic and fully testable.
 
+/// Read the current high-resolution timestamp (ms since page navigation).
+/// Returns `None` when the Performance API is unavailable (rare, e.g.
+/// headless or sandboxed contexts). Callers must decide how to degrade:
+/// e.g. click dedup skips its check entirely, while `GameTime`/`FrameClock`
+/// fall back to `unwrap_or(0.0)` and rely on delta-clamping to neutralize
+/// the resulting jump.
+pub fn now_ms() -> Option<f64> {
+    web_sys::window().and_then(|w| w.performance()).map(|p| p.now())
+}
+
 pub struct GameTime {
     /// Milliseconds per tick (e.g. 100ms = 10 ticks/sec)
     ms_per_tick: f64,
