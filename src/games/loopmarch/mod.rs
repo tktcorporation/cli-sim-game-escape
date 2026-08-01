@@ -76,11 +76,11 @@ impl LoopMarchGame {
                 true
             }
             CAMP_START_OR_RESUME => {
-                logic::start_or_resume_expedition(&mut self.state);
+                self.start_or_resume_and_flush();
                 true
             }
             REFILL_HAND => {
-                logic::refill_hand(&mut self.state);
+                self.refill_and_flush();
                 true
             }
             GO_TO_CAMP => {
@@ -137,6 +137,27 @@ impl LoopMarchGame {
         bought
     }
 
+    /// 遠征を開始/再開する。新規開始時は手札を引くために rng_state が
+    /// 進む — `Game::tick` の差分検知は tick 間の変化しか見ないため、
+    /// クリック/キー操作起因のこの変化は自分で明示的に保存する。
+    fn start_or_resume_and_flush(&mut self) {
+        let rng_before = self.state.rng_state;
+        logic::start_or_resume_expedition(&mut self.state);
+        if self.state.rng_state != rng_before {
+            self.flush_save();
+        }
+    }
+
+    /// 手札を補充し、成功時は即セーブする。補充は乱数でカードを引くため
+    /// rng_state を進める。
+    fn refill_and_flush(&mut self) -> bool {
+        let refilled = logic::refill_hand(&mut self.state);
+        if refilled {
+            self.flush_save();
+        }
+        refilled
+    }
+
     fn handle_key(&mut self, key: char) -> bool {
         match self.state.phase {
             Phase::Camp => match key {
@@ -153,7 +174,7 @@ impl LoopMarchGame {
                     true
                 }
                 ' ' | 's' => {
-                    logic::start_or_resume_expedition(&mut self.state);
+                    self.start_or_resume_and_flush();
                     true
                 }
                 _ => false,
@@ -165,7 +186,7 @@ impl LoopMarchGame {
                     true
                 }
                 'r' => {
-                    logic::refill_hand(&mut self.state);
+                    self.refill_and_flush();
                     true
                 }
                 'c' => {
@@ -205,10 +226,11 @@ impl Game for LoopMarchGame {
 
     fn tick(&mut self, delta_ticks: u32) {
         let was_run_active = self.state.run_active;
-        // 魂・自己ベスト周回数は tick 中 (討伐報酬・草原到達・周回達成) に
-        // 増えうる。ブラウザのタブを閉じる/リロードするタイミングは検知
-        // できないため、増えた瞬間にタイマーを待たず保存しておく。
-        let persistent_before = (self.state.soul, self.state.best_lap);
+        // 魂・自己ベスト周回数・乱数状態は tick 中 (討伐報酬・草原到達・
+        // 周回達成・モンスター湧き判定) に変わりうる永続データ。ブラウザの
+        // タブを閉じる/リロードするタイミングは検知できないため、変化した
+        // 瞬間にタイマーを待たず保存しておく。
+        let persistent_before = (self.state.soul, self.state.best_lap, self.state.rng_state);
 
         logic::tick_n(&mut self.state, delta_ticks);
 
@@ -216,8 +238,8 @@ impl Game for LoopMarchGame {
         // 「死んでも魂は残る」が核となる約束なので、その直後にリロード/
         // タブを閉じられても失われないようにする。
         let died_this_tick = was_run_active && !self.state.run_active;
-        let persistent_changed =
-            (self.state.soul, self.state.best_lap) != persistent_before;
+        let persistent_changed = (self.state.soul, self.state.best_lap, self.state.rng_state)
+            != persistent_before;
 
         self.save_countdown = self.save_countdown.saturating_sub(delta_ticks);
         if self.save_countdown == 0 || died_this_tick || persistent_changed {
@@ -366,6 +388,64 @@ mod tests {
             game.save_countdown,
             save::AUTOSAVE_INTERVAL,
             "魂が増えた tick は即セーブ扱いになるべき"
+        );
+    }
+
+    #[test]
+    fn starting_new_expedition_flushes_save_immediately() {
+        // Codex指摘: 遠征開始は手札を引くためrng_stateを進めるが、
+        // tickベースの差分検知はクリック操作起因の変化を捉えられない。
+        // 明示的なflushで即座に保存されるべき。
+        let mut game = LoopMarchGame::new();
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+
+        game.handle_input(&click(CAMP_START_OR_RESUME));
+
+        assert_eq!(game.state.phase, Phase::Expedition);
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL,
+            "新規遠征開始(手札を引く=rng_state進行)は即セーブされるべき"
+        );
+    }
+
+    #[test]
+    fn resuming_active_expedition_does_not_force_flush() {
+        // 遠征中に拠点を覗いて戻るだけなら rng_state は変化しないので、
+        // 無駄な書き込みを避けるべき。
+        let mut game = LoopMarchGame::new();
+        game.handle_input(&click(CAMP_START_OR_RESUME));
+        logic::go_to_camp(&mut game.state);
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+
+        game.handle_input(&click(CAMP_START_OR_RESUME));
+
+        assert_eq!(game.state.phase, Phase::Expedition);
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL + 1000,
+            "拠点⇔遠征の表示切り替えだけでは何も変化していないのでセーブ不要"
+        );
+    }
+
+    #[test]
+    fn refill_hand_click_flushes_save_immediately() {
+        // Codex指摘: 手札補充もランダムなカードを引くためrng_stateを
+        // 進めるが、tickベースの差分検知では捉えられない。
+        let mut game = LoopMarchGame::new();
+        game.handle_input(&click(CAMP_START_OR_RESUME));
+        game.state.hand = vec![None; HAND_MAX];
+        game.state.wood = 10;
+        game.state.stone = 10;
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+
+        game.handle_input(&click(REFILL_HAND));
+
+        assert!(game.state.hand.iter().any(|c| c.is_some()));
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL,
+            "手札補充成功(rng_state進行)は即セーブされるべき"
         );
     }
 
