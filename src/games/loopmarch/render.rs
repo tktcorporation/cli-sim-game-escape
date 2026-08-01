@@ -15,8 +15,8 @@ use crate::widgets::{ClickableGrid, ClickableList, ScrollableTab};
 use super::actions::*;
 use super::logic;
 use super::state::{
-    CampUpgrades, LoopMarchState, Terrain, Phase, REFILL_STONE_COST, REFILL_WOOD_COST, RING_H,
-    RING_W,
+    CampUpgrades, LoopMarchState, Monster, Phase, Terrain, REFILL_STONE_COST, REFILL_WOOD_COST,
+    RING_H, RING_W,
 };
 
 pub fn render(
@@ -259,12 +259,16 @@ fn render_expedition_narrow(
             Constraint::Length(4),
             Constraint::Length(RING_H as u16 + 2),
             Constraint::Min(8),
+            Constraint::Length(3),
         ])
         .split(area);
 
     render_header(state, f, chunks[0], true);
     render_ring(state, f, chunks[1], click_state);
     render_hand(state, f, chunks[2], click_state);
+    // 「資源が足りない」「そこには既に地形がある」等のフィードバックは
+    // ログでしか伝えていないため、狭幅でも省略しない (1行に圧縮)。
+    render_log(state, f, chunks[3], Borders::TOP);
 }
 
 fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: bool) {
@@ -282,6 +286,16 @@ fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: b
         Borders::ALL
     };
 
+    // 交戦中は敵の名前とHPも見せる — さもないと「@が止まってHPが減る」
+    // だけでプレイヤーが何と戦っているのか分からない。
+    let combat_span = match &state.path[state.hero.position].monster {
+        Some(m) => Span::styled(
+            format!("  VS {} {}/{}", monster_name(m), m.hp.max(0), m.max_hp),
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ),
+        None => Span::raw(""),
+    };
+
     let line1 = Line::from(vec![
         Span::styled(
             format!(" HP {}/{} ", state.hero.hp, state.hero.max_hp),
@@ -291,6 +305,7 @@ fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: b
             format!("ATK{} DEF{}", state.hero.attack, defense),
             Style::default().fg(Color::Cyan),
         ),
+        combat_span,
     ]);
     let line2 = Line::from(Span::styled(
         format!(
@@ -313,6 +328,16 @@ fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: b
     f.render_widget(widget, area);
 }
 
+fn monster_name(m: &Monster) -> &'static str {
+    match (m.terrain, m.elite) {
+        (Terrain::Forest, true) => "強化された狼",
+        (Terrain::Forest, false) => "狼",
+        (Terrain::Mountain, _) => "ゴーレム",
+        (Terrain::Graveyard, _) => "スケルトン",
+        (Terrain::Meadow, _) => "?",
+    }
+}
+
 fn render_hint(f: &mut Frame, area: Rect) {
     let widget = Paragraph::new(Line::from(Span::styled(
         " カードを選んで道をタップで配置",
@@ -323,19 +348,16 @@ fn render_hint(f: &mut Frame, area: Rect) {
 }
 
 /// 道の1マス分の表示テキストとスタイルを決める。
-/// 優先順位: 勇者 > モンスター > 地形 > 空き道。
+/// 優先順位: モンスター > 勇者 > 地形 > 空き道。
+///
+/// モンスターは湧いた地形マスに勇者が到達して初めて発生し、勇者は倒すまで
+/// 同じマスに留まって戦う。つまり「モンスターがいるマス」は常に「勇者が
+/// いるマス」でもある。勇者を最優先で表示すると敵が常に隠れてしまうため、
+/// 交戦中は敵の姿を勇者色(黄背景)で強調して見せる。
 fn cell_visual(state: &LoopMarchState, path_index: usize) -> (String, Style) {
-    if state.hero.position == path_index {
-        return (
-            "@ ".to_string(),
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        );
-    }
-
     let slot = &state.path[path_index];
+    let hero_here = state.hero.position == path_index;
+
     if let Some(m) = &slot.monster {
         let ch = match (m.terrain, m.elite) {
             (Terrain::Forest, true) => 'W',
@@ -344,9 +366,24 @@ fn cell_visual(state: &LoopMarchState, path_index: usize) -> (String, Style) {
             (Terrain::Graveyard, _) => 's',
             (Terrain::Meadow, _) => '?',
         };
+        let style = if hero_here {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        };
+        return (format!("{ch} "), style);
+    }
+
+    if hero_here {
         return (
-            format!("{ch} "),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            "@ ".to_string(),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         );
     }
 
@@ -362,13 +399,13 @@ fn render_ring(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let positions = logic::ring_positions();
     let mut lines: Vec<Line> = Vec::with_capacity(RING_H);
     for gy in 0..RING_H {
         let mut spans: Vec<Span> = Vec::with_capacity(RING_W);
         for gx in 0..RING_W {
-            let idx = positions.iter().position(|&(x, y)| x == gx && y == gy);
-            let (text, style) = match idx {
+            // 座標⇔道インデックスの変換は logic::ring_index_at を単一の
+            // ソースとする (mod.rs のクリック判定と描画をずれさせない)。
+            let (text, style) = match logic::ring_index_at(gx, gy) {
                 Some(i) => cell_visual(state, i),
                 None => ("  ".to_string(), Style::default()),
             };
@@ -498,7 +535,7 @@ mod tests {
         let mut state = LoopMarchState::new();
         logic::start_or_resume_expedition(&mut state);
         state.path[5].terrain = Some(Terrain::Forest);
-        state.path[5].monster = Some(super::super::state::Monster {
+        state.path[5].monster = Some(Monster {
             terrain: Terrain::Forest,
             hp: 5,
             max_hp: 5,
@@ -507,5 +544,29 @@ mod tests {
         });
         let (text, _) = cell_visual(&state, 5);
         assert_eq!(text.trim(), "w");
+    }
+
+    /// 戦闘は勇者が敵のマスに留まって行われる (`resolve_combat_tick` は
+    /// `hero.position` のマスしか見ない) — つまり敵がいるマスは常に勇者が
+    /// いるマスでもある。勇者を最優先で表示すると敵の姿が実プレイで一度も
+    /// 見えなくなるため、この共存ケースの表示を固定する回帰テスト。
+    #[test]
+    fn cell_visual_shows_monster_glyph_even_when_hero_is_fighting_it() {
+        let mut state = LoopMarchState::new();
+        logic::start_or_resume_expedition(&mut state);
+        state.hero.position = 5;
+        state.path[5].monster = Some(Monster {
+            terrain: Terrain::Forest,
+            hp: 5,
+            max_hp: 5,
+            attack: 2,
+            elite: false,
+        });
+        let (text, _) = cell_visual(&state, 5);
+        assert_eq!(
+            text.trim(),
+            "w",
+            "勇者と同じマスでも敵の姿が見えないと何と戦っているか分からない"
+        );
     }
 }

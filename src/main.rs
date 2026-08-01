@@ -27,6 +27,9 @@ pub const MENU_SELECT_METROPOLIS: u16 = 6;
 pub const MENU_SELECT_SETTINGS: u16 = 7;
 pub const MENU_SCROLL_UP: u16 = 8;
 pub const MENU_SCROLL_DOWN: u16 = 9;
+// 1-9 は Menu scope で使い切っているため、Settings scope (10-15) の
+// 次番から採る。scope が異なる衝突は無害 (ClickScope で分離される) だが、
+// 追加者が採番に迷わないよう連続させている。
 pub const MENU_SELECT_LOOPMARCH: u16 = 16;
 
 /// Last valid index of the main menu cards (7 games + settings → 0..=7).

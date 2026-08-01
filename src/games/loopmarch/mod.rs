@@ -165,10 +165,16 @@ impl Game for LoopMarchGame {
     }
 
     fn tick(&mut self, delta_ticks: u32) {
+        let was_run_active = self.state.run_active;
         logic::tick_n(&mut self.state, delta_ticks);
 
+        // 死亡直後(run_active: true→false)はタイマーを待たず即セーブする。
+        // 「死んでも魂は残る」が核となる約束なので、その直後にリロード/
+        // タブを閉じられても失われないようにする。
+        let died_this_tick = was_run_active && !self.state.run_active;
+
         self.save_countdown = self.save_countdown.saturating_sub(delta_ticks);
-        if self.save_countdown == 0 {
+        if self.save_countdown == 0 || died_this_tick {
             #[cfg(target_arch = "wasm32")]
             save::save_game(&self.state);
             self.save_countdown = save::AUTOSAVE_INTERVAL;
@@ -246,6 +252,32 @@ mod tests {
         game.handle_input(&click(CAMP_START_OR_RESUME));
         game.tick(state::MOVE_TICKS);
         assert_eq!(game.state.hero.position, 1);
+    }
+
+    #[test]
+    fn death_forces_immediate_save_countdown_reset() {
+        let mut game = LoopMarchGame::new();
+        game.handle_input(&click(CAMP_START_OR_RESUME));
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000; // タイマーにはまだ遠い
+        game.state.hero.attack = 0;
+        game.state.hero.hp = 1;
+        game.state.hero.position = 0;
+        game.state.path[0].monster = Some(state::Monster {
+            terrain: state::Terrain::Graveyard,
+            hp: 100,
+            max_hp: 100,
+            attack: 999,
+            elite: false,
+        });
+
+        game.tick(1);
+
+        assert_eq!(game.state.phase, Phase::Camp, "この tick で死亡しているはず");
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL,
+            "死亡直後はタイマー未満でも即セーブ扱いになる"
+        );
     }
 
     #[test]

@@ -63,7 +63,8 @@ pub fn ring_index_at(gx: usize, gy: usize) -> Option<usize> {
 }
 
 /// 隣接 (ループ上で前後1マス) している岩山タイルのペア数。
-/// 多いほど勇者の防御に一時ボーナスが乗る (シナジー: 岩山の連なり)。
+/// 盤面から毎tick再計算する常時ボーナスとして勇者の防御に乗る
+/// (シナジー: 岩山の連なり)。
 pub fn mountain_synergy_defense(path: &[PathSlot]) -> i32 {
     let n = path.len();
     let mut pairs = 0;
@@ -94,7 +95,9 @@ fn forest_cluster_size(path: &[PathSlot], index: usize) -> usize {
         size += 1;
         i = (i + n - 1) % n;
     }
-    size
+    // リング全周が森だと前方・後方の両ループが同じ他マスを踏破し、
+    // 二重計上されて n を超える。ループ上に存在するタイル数を超えない。
+    size.min(n)
 }
 
 /// ゲーム全体を `n` tick 進める。
@@ -365,6 +368,8 @@ pub enum UpgradeKind {
 
 /// 魂を消費して拠点強化を購入する。遠征中の勇者にも即座に反映される
 /// (次の遠征開始時に camp の値から再計算されるので二重反映にはならない)。
+/// 最大HP強化は現在HPも同じ量だけ回復する — 拠点訪問がついでの回復
+/// 手段にもなる仕様として意図的にそうしている。
 pub fn purchase_upgrade(state: &mut LoopMarchState, kind: UpgradeKind) -> bool {
     match kind {
         UpgradeKind::MaxHp => {
@@ -492,6 +497,17 @@ mod tests {
         path[6].terrain = Some(Terrain::Forest);
         path[7].terrain = Some(Terrain::Forest);
         assert_eq!(forest_cluster_size(&path, 6), 3);
+    }
+
+    #[test]
+    fn forest_cluster_size_full_ring_does_not_double_count() {
+        // 全マス森だと前方探索・後方探索が同じ他マスを両方踏破するため、
+        // 単純合算では PATH_LEN を超えてしまう (2*PATH_LEN-1)。
+        let path = vec![
+            PathSlot { terrain: Some(Terrain::Forest), monster: None };
+            PATH_LEN
+        ];
+        assert_eq!(forest_cluster_size(&path, 0), PATH_LEN);
     }
 
     #[test]
