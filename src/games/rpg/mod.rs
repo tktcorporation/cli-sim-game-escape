@@ -62,6 +62,15 @@ struct PrevSnapshot {
     known_weaknesses_count: usize,
 }
 
+/// 致命打を受けた瞬間 (同じフレーム内で `hero_hit_count` の増加と死亡による
+/// 村への帰還が両方進むケース) かどうか。true の間は被弾演出/音を抑制し、
+/// 死亡演出/音 (DEFEAT) だけを単独で伝える — 両方鳴らすと Web Audio の
+/// 再生と Vibration API の呼び出しが競合し、被弾側の振動が死亡側に
+/// 上書きされてしまうため。
+fn is_death_exit_this_frame(floor_num: u32, prev_floor_num: u32, last_dungeon_exit_was_death: bool) -> bool {
+    floor_num == 0 && prev_floor_num > 0 && last_dungeon_exit_was_death
+}
+
 impl RpgGame {
     pub fn new() -> Self {
         let state = RpgState::new();
@@ -95,8 +104,9 @@ impl RpgGame {
         let in_dungeon = s.dungeon.is_some();
         let layout = render::compute_layout(area, in_dungeon, s.scene == Scene::DungeonExplore);
         let floor_num = s.dungeon.as_ref().map(|d| d.floor_num).unwrap_or(0);
+        let died_this_frame = is_death_exit_this_frame(floor_num, prev.floor_num, s.last_dungeon_exit_was_death);
 
-        if s.hero_hit_count != prev.hero_hit_count {
+        if s.hero_hit_count != prev.hero_hit_count && !died_this_frame {
             effects.push_hero_hit(layout.status_bar);
             sound::play(sound::HIT_HERO);
         }
@@ -832,6 +842,76 @@ mod tests {
         assert!(g.state.last_dungeon_exit_was_death);
         g.detect_transitions(area());
         assert!(g.effects.borrow().is_running());
+    }
+
+    /// `is_death_exit_this_frame` の境界値テスト。tachyonfx の `EffectManager`
+    /// は「どの演出が積まれたか」を外から観測する手段を提供しないため
+    /// (`is_running()` は積まれた演出の集合ではなく1つでも残っているかしか
+    /// 返さない)、被弾演出の抑制条件そのものはこの純粋関数を直接検証する
+    /// 方が `detect_transitions` 経由の統合テストより確実に検証できる。
+    #[test]
+    fn death_exit_gate_true_only_when_leaving_dungeon_via_death() {
+        assert!(
+            is_death_exit_this_frame(0, 1, true),
+            "ダンジョン(floor_num>0)から村(floor_num=0)への死亡による退出はゲートがかかるはず"
+        );
+        assert!(
+            !is_death_exit_this_frame(0, 0, true),
+            "元々村にいた(floor_numの変化なし)場合はゲートがかからないはず"
+        );
+        assert!(
+            !is_death_exit_this_frame(0, 1, false),
+            "生還 (撤退・クリア) による退出はゲートがかからないはず"
+        );
+        assert!(
+            !is_death_exit_this_frame(1, 2, true),
+            "村に戻っていない (階段で1つ浅い階へ) 場合はゲートがかからないはず"
+        );
+    }
+
+    /// 回帰テスト: 致命打を受けた瞬間、実際に `hero_hit_count` の増加と
+    /// `last_dungeon_exit_was_death=true` への遷移が同じ `on_player_action`
+    /// 呼び出し内で同時に起きることを確認する。これが起きなければ
+    /// `is_death_exit_this_frame` によるゲート自体が不要になるため、
+    /// このテストは上のゲート判定テストとセットで初めて修正の妥当性を示す。
+    #[test]
+    fn lethal_hit_and_death_transition_happen_within_the_same_action() {
+        let mut g = make_game();
+        into_dungeon(&mut g);
+        g.detect_transitions(area());
+        drain_effects(&g, area());
+        g.state.hp = 1;
+        let map = g.state.dungeon.as_mut().unwrap();
+        let (px, py) = (map.player_x, map.player_y);
+        map.monsters.clear();
+        let mut placed = false;
+        for &dir in &[state::Facing::North, state::Facing::East, state::Facing::South, state::Facing::West] {
+            let nx = px as i32 + dir.dx();
+            let ny = py as i32 + dir.dy();
+            if !map.in_bounds(nx, ny) { continue; }
+            let (ux, uy) = (nx as usize, ny as usize);
+            if !map.cell(ux, uy).is_walkable() { continue; }
+            map.monsters.push(state::Monster {
+                kind: state::EnemyKind::Slime, x: ux, y: uy, hp: 10, max_hp: 10,
+                awake: true, charging: false, affix: None,
+            });
+            placed = true;
+            break;
+        }
+        assert!(placed, "隣接できる歩行可能マスが見つからなかった");
+        let hero_hit_count_before = g.state.hero_hit_count;
+        let floor_num_before = g.prev.get().floor_num;
+        logic::on_player_action(&mut g.state);
+        assert_ne!(
+            g.state.hero_hit_count, hero_hit_count_before,
+            "致命打も通常の被弾としてカウントされるはず"
+        );
+        assert!(g.state.last_dungeon_exit_was_death);
+        let floor_num_after = g.state.dungeon.as_ref().map(|d| d.floor_num).unwrap_or(0);
+        assert!(
+            is_death_exit_this_frame(floor_num_after, floor_num_before, g.state.last_dungeon_exit_was_death),
+            "このフレームは被弾検知と死亡検知が衝突するため、ゲートが働くはず"
+        );
     }
 
     #[test]
