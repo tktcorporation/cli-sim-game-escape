@@ -8,6 +8,7 @@
 //!   3. 死亡すると拠点へ撤退。木材/石材と道の配置は失うが、魂と拠点強化は残る
 
 pub mod actions;
+pub mod effects;
 pub mod logic;
 pub mod render;
 pub mod save;
@@ -16,17 +17,21 @@ pub mod state;
 #[cfg(test)]
 mod simulator;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
 
+use crate::effects::{FlashTimer, FrameClock};
 use crate::games::{Game, GameChoice};
-use crate::input::{ClickState, InputEvent};
+use crate::input::{is_narrow_layout, ClickState, InputEvent};
+use crate::sound;
+use crate::time;
 use crate::widgets::ClickableGrid;
 
 use actions::*;
+use effects::LoopMarchEffects;
 use logic::UpgradeKind;
 use state::{Phase, HAND_MAX, RING_H, RING_W};
 
@@ -35,6 +40,9 @@ const CAMP_SCROLL_STEP: i32 = 2;
 
 pub struct LoopMarchGame {
     pub state: state::LoopMarchState,
+    effects: RefCell<LoopMarchEffects>,
+    prev: Cell<PrevSnapshot>,
+    frame_clock: FrameClock,
     save_countdown: u32,
 }
 
@@ -42,6 +50,17 @@ impl Default for LoopMarchGame {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 前フレームの state スナップショット。render 毎に差分を見て演出をトリガする
+/// (`detect_transitions`)。
+#[derive(Clone, Copy, Default)]
+struct PrevSnapshot {
+    lap: u32,
+    best_lap: u32,
+    run_active: bool,
+    hero_hurt_flash: FlashTimer,
+    enemy_hurt_flash: FlashTimer,
 }
 
 impl LoopMarchGame {
@@ -55,10 +74,57 @@ impl LoopMarchGame {
             s
         };
 
+        let prev = Self::snapshot(&state);
         Self {
             state,
+            effects: RefCell::new(LoopMarchEffects::new()),
+            prev: Cell::new(prev),
+            frame_clock: FrameClock::new(),
             save_countdown: save::AUTOSAVE_INTERVAL,
         }
+    }
+
+    fn snapshot(s: &state::LoopMarchState) -> PrevSnapshot {
+        PrevSnapshot {
+            lap: s.lap,
+            best_lap: s.best_lap,
+            run_active: s.run_active,
+            hero_hurt_flash: s.hero_hurt_flash,
+            enemy_hurt_flash: s.enemy_hurt_flash,
+        }
+    }
+
+    fn detect_transitions(&self, area: Rect) {
+        let prev = self.prev.get();
+        let mut effects = self.effects.borrow_mut();
+        let s = &self.state;
+
+        if s.phase == Phase::Expedition {
+            let layout = render::compute_expedition_layout(area, is_narrow_layout(area.width));
+
+            if !prev.hero_hurt_flash.is_active() && s.hero_hurt_flash.is_active() {
+                effects.push_hero_hit(layout.header);
+                sound::play(sound::DAMAGE);
+            }
+            if !prev.enemy_hurt_flash.is_active() && s.enemy_hurt_flash.is_active() {
+                effects.push_enemy_hit(layout.ring);
+            }
+            if s.lap > prev.lap {
+                effects.push_lap_complete(layout.ring);
+                sound::play(sound::VICTORY);
+            }
+        }
+
+        if s.best_lap > prev.best_lap {
+            effects.push_best_lap_achievement(area);
+        }
+
+        if prev.run_active && !s.run_active {
+            effects.push_death(area);
+            sound::play(sound::DEFEAT);
+        }
+
+        self.prev.set(Self::snapshot(s));
     }
 
     fn handle_click(&mut self, action_id: u16) -> bool {
@@ -85,6 +151,7 @@ impl LoopMarchGame {
             }
             GO_TO_CAMP => {
                 logic::go_to_camp(&mut self.state);
+                sound::play(sound::CLICK);
                 true
             }
             CAMP_SCROLL_UP => {
@@ -105,12 +172,14 @@ impl LoopMarchGame {
             }
             id if (HAND_CLICK_BASE..HAND_CLICK_BASE + HAND_MAX as u16).contains(&id) => {
                 logic::select_hand(&mut self.state, (id - HAND_CLICK_BASE) as usize);
+                sound::play(sound::CLICK);
                 true
             }
             id if (PATH_CLICK_BASE..PATH_CLICK_BASE + (RING_W * RING_H) as u16).contains(&id) => {
                 if let Some((gx, gy)) = ClickableGrid::decode(PATH_CLICK_BASE, RING_W, id) {
                     if let Some(path_index) = logic::ring_index_at(gx, gy) {
-                        logic::place_selected(&mut self.state, path_index);
+                        let placed = logic::place_selected(&mut self.state, path_index);
+                        sound::play(if placed { sound::CLICK } else { sound::ERROR });
                     }
                 }
                 true
@@ -131,6 +200,7 @@ impl LoopMarchGame {
     /// 書き込み、離脱タイミングに関わらず失われないようにする。
     fn purchase_and_flush(&mut self, kind: UpgradeKind) -> bool {
         let bought = logic::purchase_upgrade(&mut self.state, kind);
+        sound::play(if bought { sound::PURCHASE } else { sound::ERROR });
         if bought {
             self.flush_save();
         }
@@ -143,6 +213,7 @@ impl LoopMarchGame {
     fn start_or_resume_and_flush(&mut self) {
         let rng_before = self.state.rng_state;
         logic::start_or_resume_expedition(&mut self.state);
+        sound::play(sound::CLICK);
         if self.state.rng_state != rng_before {
             self.flush_save();
         }
@@ -152,6 +223,7 @@ impl LoopMarchGame {
     /// rng_state を進める。
     fn refill_and_flush(&mut self) -> bool {
         let refilled = logic::refill_hand(&mut self.state);
+        sound::play(if refilled { sound::PURCHASE } else { sound::ERROR });
         if refilled {
             self.flush_save();
         }
@@ -183,6 +255,7 @@ impl LoopMarchGame {
                 '1' | '2' | '3' | '4' => {
                     let idx = (key as u8 - b'1') as usize;
                     logic::select_hand(&mut self.state, idx);
+                    sound::play(sound::CLICK);
                     true
                 }
                 'r' => {
@@ -191,6 +264,7 @@ impl LoopMarchGame {
                 }
                 'c' => {
                     logic::go_to_camp(&mut self.state);
+                    sound::play(sound::CLICK);
                     true
                 }
                 'h' => {
@@ -203,7 +277,8 @@ impl LoopMarchGame {
                 }
                 ' ' => {
                     let cursor = self.state.cursor;
-                    logic::place_selected(&mut self.state, cursor);
+                    let placed = logic::place_selected(&mut self.state, cursor);
+                    sound::play(if placed { sound::CLICK } else { sound::ERROR });
                     true
                 }
                 _ => false,
@@ -254,7 +329,10 @@ impl Game for LoopMarchGame {
     }
 
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+        self.detect_transitions(area);
         render::render(&self.state, f, area, click_state);
+        let elapsed = self.frame_clock.elapsed(time::now_ms().unwrap_or(0.0));
+        self.effects.borrow_mut().process(elapsed, f.buffer_mut(), area);
     }
 }
 

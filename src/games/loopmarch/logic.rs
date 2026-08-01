@@ -1,5 +1,7 @@
 //! 周回討伐 — ゲームロジック。純粋関数のみ、フルテスト可能。
 
+use crate::effects::FlashTimer;
+
 use super::state::{
     CampUpgrades, LoopMarchState, Monster, Phase, PathSlot, Terrain, ATTACK_PER_LEVEL, HAND_MAX,
     HP_PER_LEVEL, MOVE_TICKS, PATH_LEN, REFILL_STONE_COST, REFILL_WOOD_COST, RING_H, RING_W,
@@ -128,6 +130,8 @@ pub fn tick_n(state: &mut LoopMarchState, n: u32) {
 
 /// 1 tick 進める。拠点にいる間は何もしない。
 pub fn tick(state: &mut LoopMarchState) {
+    state.hero_hurt_flash.tick(1);
+    state.enemy_hurt_flash.tick(1);
     if state.phase != Phase::Expedition || state.hero.hp <= 0 {
         return;
     }
@@ -152,6 +156,7 @@ fn resolve_combat_tick(state: &mut LoopMarchState) {
     let defeated_reward = match state.path[pos].monster.as_mut() {
         Some(monster) => {
             monster.hp -= hero_atk;
+            state.enemy_hurt_flash.trigger(3);
             if monster.hp <= 0 {
                 Some((monster.terrain, monster.elite))
             } else {
@@ -174,6 +179,7 @@ fn resolve_combat_tick(state: &mut LoopMarchState) {
     };
     let dmg = (monster_attack - defense).max(1);
     state.hero.hp -= dmg;
+    state.hero_hurt_flash.trigger(3);
     if state.hero.hp <= 0 {
         state.hero.hp = 0;
         handle_death(state);
@@ -291,6 +297,9 @@ fn handle_death(state: &mut LoopMarchState) {
     state.cursor = 0;
     state.hero = state.camp.fresh_hero();
     state.hand = vec![None; HAND_MAX];
+    // 次の遠征に前回の残りフラッシュが漏れて見えないようリセットする。
+    state.hero_hurt_flash = FlashTimer::new();
+    state.enemy_hurt_flash = FlashTimer::new();
 }
 
 /// 拠点から遠征に出発 (または再開) する。
@@ -313,6 +322,8 @@ pub fn start_or_resume_expedition(state: &mut LoopMarchState) {
     state.move_progress = 0;
     state.cursor = 0;
     state.hero = state.camp.fresh_hero();
+    state.hero_hurt_flash = FlashTimer::new();
+    state.enemy_hurt_flash = FlashTimer::new();
 
     state.hand = draw_starting_hand(state.camp.starting_hand_size(), &mut state.rng_state);
     state.selected_hand = None;
@@ -709,6 +720,55 @@ mod tests {
     }
 
     #[test]
+    fn combat_tick_triggers_hero_and_enemy_hurt_flash_when_monster_survives() {
+        let mut s = expedition_state();
+        let pos = s.hero.position;
+        s.path[pos].monster = Some(Monster {
+            terrain: Terrain::Graveyard,
+            hp: 100,
+            max_hp: 100,
+            attack: 3,
+            elite: false,
+        });
+        assert!(!s.hero_hurt_flash.is_active());
+        assert!(!s.enemy_hurt_flash.is_active());
+
+        tick(&mut s);
+
+        assert!(s.hero_hurt_flash.is_active(), "モンスターの反撃で勇者側のフラッシュが立つはず");
+        assert!(s.enemy_hurt_flash.is_active(), "勇者の攻撃でモンスター側のフラッシュが立つはず");
+    }
+
+    #[test]
+    fn defeating_monster_triggers_enemy_hurt_flash_but_not_hero_hurt_flash() {
+        let mut s = expedition_state();
+        let pos = s.hero.position;
+        s.hero.attack = 100;
+        s.path[pos].monster = Some(Monster {
+            terrain: Terrain::Graveyard,
+            hp: 1,
+            max_hp: 1,
+            attack: 3,
+            elite: false,
+        });
+
+        tick(&mut s);
+
+        assert!(s.enemy_hurt_flash.is_active(), "撃破の一撃でもフラッシュは立つ");
+        assert!(!s.hero_hurt_flash.is_active(), "倒した瞬間は反撃を受けないので勇者側は立たない");
+    }
+
+    #[test]
+    fn hurt_flash_decays_over_ticks() {
+        let mut s = expedition_state();
+        s.hero_hurt_flash.trigger(2);
+        tick(&mut s);
+        assert!(s.hero_hurt_flash.is_active());
+        tick(&mut s);
+        assert!(!s.hero_hurt_flash.is_active());
+    }
+
+    #[test]
     fn death_resets_run_scope_but_keeps_soul_and_camp_upgrades() {
         let mut s = expedition_state();
         s.soul = 50;
@@ -740,6 +800,27 @@ mod tests {
             "道の配置は死亡でリセットされる"
         );
         assert_eq!(s.hero.hp, s.camp.hero_max_hp());
+    }
+
+    #[test]
+    fn death_resets_hurt_flash() {
+        let mut s = expedition_state();
+        s.hero.attack = 0;
+        s.hero.hp = 1;
+        let pos = s.hero.position;
+        s.path[pos].monster = Some(Monster {
+            terrain: Terrain::Graveyard,
+            hp: 100,
+            max_hp: 100,
+            attack: 50,
+            elite: false,
+        });
+
+        tick(&mut s);
+
+        assert_eq!(s.phase, Phase::Camp, "この tick で死亡しているはず");
+        assert!(!s.hero_hurt_flash.is_active(), "死亡直後の演出フラグは持ち越さない");
+        assert!(!s.enemy_hurt_flash.is_active());
     }
 
     #[test]

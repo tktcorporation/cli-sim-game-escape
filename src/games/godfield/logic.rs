@@ -56,6 +56,9 @@ pub const BETWEEN_TURNS_TICKS: u32 = 4;
 /// large `delta_ticks` without misbehaving because they don't track elapsed
 /// time at all.
 pub fn tick(state: &mut GfState, mut delta_ticks: u32) {
+    for p in &mut state.players {
+        p.hurt_flash.tick(delta_ticks);
+    }
     while delta_ticks > 0 {
         match state.phase {
             Phase::CpuTurn { idx, ticks_left } => {
@@ -337,6 +340,7 @@ pub fn apply_damage(state: &mut GfState, idx: usize, dmg: i32) {
     let (name, hp, max_hp, just_died) = {
         let p = &mut state.players[idx];
         p.hp = (p.hp - dmg).max(0);
+        p.hurt_flash.trigger(3);
         let just_died = p.hp == 0 && p.alive;
         if just_died { p.alive = false; }
         (p.name.clone(), p.hp, p.max_hp, just_died)
@@ -742,6 +746,38 @@ mod tests {
         resolve_attack(&mut s, 0, 1, &[0]);
         assert_eq!(s.players[1].hp, 0);
         assert!(!s.players[1].alive);
+    }
+
+    #[test]
+    fn apply_damage_triggers_hurt_flash() {
+        let mut s = make_state();
+        assert!(!s.players[1].hurt_flash.is_active());
+        apply_damage(&mut s, 1, 5);
+        assert!(s.players[1].hurt_flash.is_active());
+    }
+
+    #[test]
+    fn apply_damage_with_zero_or_negative_does_not_trigger_hurt_flash() {
+        let mut s = make_state();
+        apply_damage(&mut s, 1, 0);
+        assert!(!s.players[1].hurt_flash.is_active());
+        apply_damage(&mut s, 1, -5);
+        assert!(!s.players[1].hurt_flash.is_active());
+    }
+
+    #[test]
+    fn tick_decays_hurt_flash_for_all_players() {
+        let mut s = make_state();
+        apply_damage(&mut s, 1, 5);
+        apply_damage(&mut s, 2, 5);
+        // PlayerAction は timer を持たないフェーズなので、tick は hurt_flash の
+        // 減衰だけを行い、ターン進行には影響しない。
+        tick(&mut s, 2);
+        assert!(s.players[1].hurt_flash.is_active());
+        assert!(s.players[2].hurt_flash.is_active());
+        tick(&mut s, 10);
+        assert!(!s.players[1].hurt_flash.is_active());
+        assert!(!s.players[2].hurt_flash.is_active());
     }
 
     #[test]

@@ -10,6 +10,7 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
+use crate::theme;
 use crate::widgets::{ClickableGrid, ClickableList, ScrollableTab};
 
 use super::actions::*;
@@ -220,34 +221,70 @@ fn render_expedition(
     }
 }
 
+/// 遠征画面の主要パネルの Rect。演出のトリガー領域を決める
+/// `detect_transitions` からも参照するため公開する。
+pub struct ExpeditionLayout {
+    pub header: Rect,
+    pub ring: Rect,
+    pub hand: Rect,
+    pub log: Rect,
+}
+
+/// narrow/wide でチャンク構成が異なるため、両方をここに集約する
+/// (render 側とトリガー領域算出側で計算がずれないようにするため)。
+pub fn compute_expedition_layout(area: Rect, is_narrow: bool) -> ExpeditionLayout {
+    if is_narrow {
+        let chunks = Layout::default()
+            .direction(LayoutDir::Vertical)
+            .constraints([
+                Constraint::Length(5),
+                Constraint::Length(RING_H as u16 + 2),
+                Constraint::Min(8),
+                Constraint::Length(3),
+            ])
+            .split(area);
+        ExpeditionLayout {
+            header: chunks[0],
+            ring: chunks[1],
+            hand: chunks[2],
+            log: chunks[3],
+        }
+    } else {
+        // ヘッダーは資源の内訳(今回限り/永続)を文章で見せるため幅が要る。
+        // 左カラム(20桁、リング用)には収まらないので全幅に置き、
+        // その下でリングと手札を左右に分ける。
+        let top_chunks = Layout::default()
+            .direction(LayoutDir::Vertical)
+            .constraints([Constraint::Length(5), Constraint::Min(20)])
+            .split(area);
+        let body_chunks = Layout::default()
+            .direction(LayoutDir::Horizontal)
+            .constraints([Constraint::Length(20), Constraint::Min(20)])
+            .split(top_chunks[1]);
+        let right_chunks = Layout::default()
+            .direction(LayoutDir::Vertical)
+            .constraints([Constraint::Min(10), Constraint::Min(6)])
+            .split(body_chunks[1]);
+        ExpeditionLayout {
+            header: top_chunks[0],
+            ring: body_chunks[0],
+            hand: right_chunks[0],
+            log: right_chunks[1],
+        }
+    }
+}
+
 fn render_expedition_wide(
     state: &LoopMarchState,
     f: &mut Frame,
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    // ヘッダーは資源の内訳(今回限り/永続)を文章で見せるため幅が要る。
-    // 左カラム(20桁、リング用)には収まらないので全幅に置き、
-    // その下でリングと手札を左右に分ける。
-    let top_chunks = Layout::default()
-        .direction(LayoutDir::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Min(20)])
-        .split(area);
-
-    let body_chunks = Layout::default()
-        .direction(LayoutDir::Horizontal)
-        .constraints([Constraint::Length(20), Constraint::Min(20)])
-        .split(top_chunks[1]);
-
-    let right_chunks = Layout::default()
-        .direction(LayoutDir::Vertical)
-        .constraints([Constraint::Min(10), Constraint::Min(6)])
-        .split(body_chunks[1]);
-
-    render_header(state, f, top_chunks[0], false);
-    render_ring(state, f, body_chunks[0], click_state);
-    render_hand(state, f, right_chunks[0], click_state);
-    render_log(state, f, right_chunks[1], Borders::ALL);
+    let layout = compute_expedition_layout(area, false);
+    render_header(state, f, layout.header, false);
+    render_ring(state, f, layout.ring, click_state);
+    render_hand(state, f, layout.hand, click_state);
+    render_log(state, f, layout.log, Borders::ALL);
 }
 
 fn render_expedition_narrow(
@@ -256,27 +293,20 @@ fn render_expedition_narrow(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let chunks = Layout::default()
-        .direction(LayoutDir::Vertical)
-        .constraints([
-            Constraint::Length(5),
-            Constraint::Length(RING_H as u16 + 2),
-            Constraint::Min(8),
-            Constraint::Length(3),
-        ])
-        .split(area);
-
-    render_header(state, f, chunks[0], true);
-    render_ring(state, f, chunks[1], click_state);
-    render_hand(state, f, chunks[2], click_state);
+    let layout = compute_expedition_layout(area, true);
+    render_header(state, f, layout.header, true);
+    render_ring(state, f, layout.ring, click_state);
+    render_hand(state, f, layout.hand, click_state);
     // 「資源が足りない」「そこには既に地形がある」等のフィードバックは
     // ログでしか伝えていないため、狭幅でも省略しない (1行に圧縮)。
-    render_log(state, f, chunks[3], Borders::TOP);
+    render_log(state, f, layout.log, Borders::TOP);
 }
 
 fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: bool) {
     let defense = logic::mountain_synergy_defense(&state.path);
-    let hp_color = if state.hero.hp * 3 <= state.hero.max_hp {
+    let hp_color = if state.hero_hurt_flash.is_active() {
+        theme::DAMAGE_FLASH.color
+    } else if state.hero.hp * 3 <= state.hero.max_hp {
         Color::Red
     } else if state.hero.hp * 3 <= state.hero.max_hp * 2 {
         Color::Yellow
@@ -291,17 +321,23 @@ fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: b
 
     // 交戦中は敵の名前とHPも見せる — さもないと「@が止まってHPが減る」
     // だけでプレイヤーが何と戦っているのか分からない。
+    let enemy_color = if state.enemy_hurt_flash.is_active() {
+        theme::HIT_FLASH.color
+    } else {
+        Color::Red
+    };
     let combat_span = match &state.path[state.hero.position].monster {
         Some(m) => Span::styled(
             format!("  VS {} {}/{}", monster_name(m), m.hp.max(0), m.max_hp),
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default().fg(enemy_color).add_modifier(Modifier::BOLD),
         ),
         None => Span::raw(""),
     };
 
+    let bar = hp_bar(state.hero.hp, state.hero.max_hp, 8);
     let line1 = Line::from(vec![
         Span::styled(
-            format!(" HP {}/{} ", state.hero.hp, state.hero.max_hp),
+            format!(" {} {}/{} ", bar, state.hero.hp, state.hero.max_hp),
             Style::default().fg(hp_color).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
@@ -341,6 +377,19 @@ fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: b
             .title(" 周回討伐 "),
     );
     f.render_widget(widget, area);
+}
+
+fn hp_bar(hp: i32, max: i32, width: usize) -> String {
+    if max <= 0 {
+        return String::new();
+    }
+    let filled = ((hp.max(0) as f32 / max as f32) * width as f32).round() as usize;
+    let filled = filled.min(width);
+    let mut s = String::with_capacity(width);
+    for i in 0..width {
+        s.push(if i < filled { theme::BAR_FULL } else { theme::BAR_EMPTY });
+    }
+    s
 }
 
 fn monster_name(m: &Monster) -> &'static str {
@@ -536,6 +585,31 @@ mod tests {
     use super::*;
     use ratzilla::ratatui::backend::TestBackend;
     use ratzilla::ratatui::Terminal;
+
+    #[test]
+    fn hp_bar_lengths_correct() {
+        assert_eq!(hp_bar(0, 30, 8), "░░░░░░░░");
+        assert_eq!(hp_bar(30, 30, 8), "████████");
+        assert_eq!(hp_bar(15, 30, 8), "████░░░░");
+        // Negative HP clamps to empty.
+        assert_eq!(hp_bar(-5, 30, 8), "░░░░░░░░");
+    }
+
+    #[test]
+    fn compute_expedition_layout_wide_and_narrow_both_fit_within_area() {
+        let area = Rect::new(0, 0, 80, 30);
+        let wide = compute_expedition_layout(area, false);
+        assert!(wide.header.height > 0);
+        assert!(wide.ring.height > 0);
+        assert!(wide.hand.height > 0);
+        assert!(wide.log.height > 0);
+
+        let narrow = compute_expedition_layout(area, true);
+        assert!(narrow.header.height > 0);
+        assert!(narrow.ring.height > 0);
+        assert!(narrow.hand.height > 0);
+        assert!(narrow.log.height > 0);
+    }
 
     #[test]
     fn ring_click_targets_match_rendered_cells() {
