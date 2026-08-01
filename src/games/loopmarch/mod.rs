@@ -64,15 +64,15 @@ impl LoopMarchGame {
     fn handle_click(&mut self, action_id: u16) -> bool {
         match action_id {
             CAMP_UPGRADE_MAX_HP => {
-                logic::purchase_upgrade(&mut self.state, UpgradeKind::MaxHp);
+                self.purchase_and_flush(UpgradeKind::MaxHp);
                 true
             }
             CAMP_UPGRADE_ATTACK => {
-                logic::purchase_upgrade(&mut self.state, UpgradeKind::Attack);
+                self.purchase_and_flush(UpgradeKind::Attack);
                 true
             }
             CAMP_UPGRADE_EXTRA_CARD => {
-                logic::purchase_upgrade(&mut self.state, UpgradeKind::ExtraCard);
+                self.purchase_and_flush(UpgradeKind::ExtraCard);
                 true
             }
             CAMP_START_OR_RESUME => {
@@ -125,19 +125,31 @@ impl LoopMarchGame {
         self.save_countdown = save::AUTOSAVE_INTERVAL;
     }
 
+    /// 拠点強化を購入し、成功時は即セーブする。ブラウザのタブを閉じる/
+    /// リロードは検知できない (`pagehide` 等のフックが無い) ため、頻度の
+    /// 低い永続データの変更はオートセーブのタイマーを待たずその場で
+    /// 書き込み、離脱タイミングに関わらず失われないようにする。
+    fn purchase_and_flush(&mut self, kind: UpgradeKind) -> bool {
+        let bought = logic::purchase_upgrade(&mut self.state, kind);
+        if bought {
+            self.flush_save();
+        }
+        bought
+    }
+
     fn handle_key(&mut self, key: char) -> bool {
         match self.state.phase {
             Phase::Camp => match key {
                 '1' => {
-                    logic::purchase_upgrade(&mut self.state, UpgradeKind::MaxHp);
+                    self.purchase_and_flush(UpgradeKind::MaxHp);
                     true
                 }
                 '2' => {
-                    logic::purchase_upgrade(&mut self.state, UpgradeKind::Attack);
+                    self.purchase_and_flush(UpgradeKind::Attack);
                     true
                 }
                 '3' => {
-                    logic::purchase_upgrade(&mut self.state, UpgradeKind::ExtraCard);
+                    self.purchase_and_flush(UpgradeKind::ExtraCard);
                     true
                 }
                 ' ' | 's' => {
@@ -193,15 +205,22 @@ impl Game for LoopMarchGame {
 
     fn tick(&mut self, delta_ticks: u32) {
         let was_run_active = self.state.run_active;
+        // 魂・自己ベスト周回数は tick 中 (討伐報酬・草原到達・周回達成) に
+        // 増えうる。ブラウザのタブを閉じる/リロードするタイミングは検知
+        // できないため、増えた瞬間にタイマーを待たず保存しておく。
+        let persistent_before = (self.state.soul, self.state.best_lap);
+
         logic::tick_n(&mut self.state, delta_ticks);
 
         // 死亡直後(run_active: true→false)はタイマーを待たず即セーブする。
         // 「死んでも魂は残る」が核となる約束なので、その直後にリロード/
         // タブを閉じられても失われないようにする。
         let died_this_tick = was_run_active && !self.state.run_active;
+        let persistent_changed =
+            (self.state.soul, self.state.best_lap) != persistent_before;
 
         self.save_countdown = self.save_countdown.saturating_sub(delta_ticks);
-        if self.save_countdown == 0 || died_this_tick {
+        if self.save_countdown == 0 || died_this_tick || persistent_changed {
             self.flush_save();
         }
     }
@@ -326,6 +345,58 @@ mod tests {
             game.save_countdown,
             save::AUTOSAVE_INTERVAL,
             "死亡直後はタイマー未満でも即セーブ扱いになる"
+        );
+    }
+
+    #[test]
+    fn soul_gain_during_tick_forces_immediate_save() {
+        // タブを閉じる/リロードは検知できないので、魂が増えた瞬間に
+        // タイマーを待たず保存しておかないと、その進捗は失われる。
+        let mut game = LoopMarchGame::new();
+        game.handle_input(&click(CAMP_START_OR_RESUME));
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+        game.state.path[0].terrain = Some(state::Terrain::Meadow);
+        game.state.hero.position = state::PATH_LEN - 1;
+        game.state.move_progress = state::MOVE_TICKS - 1;
+
+        game.tick(1); // 草原に到達 → 魂+1
+
+        assert_eq!(game.state.soul, 1);
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL,
+            "魂が増えた tick は即セーブ扱いになるべき"
+        );
+    }
+
+    #[test]
+    fn purchase_upgrade_click_flushes_save_immediately() {
+        let mut game = LoopMarchGame::new();
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+        game.state.soul = 100;
+
+        game.handle_input(&click(CAMP_UPGRADE_MAX_HP));
+
+        assert_eq!(game.state.camp.max_hp_level, 1);
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL,
+            "拠点強化の購入成功時は即セーブされるべき"
+        );
+    }
+
+    #[test]
+    fn failed_purchase_does_not_reset_save_timer() {
+        let mut game = LoopMarchGame::new();
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+        game.state.soul = 0; // 買えない
+
+        game.handle_input(&click(CAMP_UPGRADE_MAX_HP));
+
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL + 1000,
+            "何も変化していないのに毎回セーブし直す必要はない"
         );
     }
 
