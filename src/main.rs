@@ -27,9 +27,10 @@ pub const MENU_SELECT_METROPOLIS: u16 = 6;
 pub const MENU_SELECT_SETTINGS: u16 = 7;
 pub const MENU_SCROLL_UP: u16 = 8;
 pub const MENU_SCROLL_DOWN: u16 = 9;
+pub const MENU_SELECT_LOOPMARCH: u16 = 16;
 
-/// Last valid index of the main menu cards (6 games + settings → 0..=6).
-const MENU_LAST_INDEX: u8 = 6;
+/// Last valid index of the main menu cards (7 games + settings → 0..=7).
+const MENU_LAST_INDEX: u8 = 7;
 
 /// Cursor → menu action, used for the A button on the main menu.
 enum MenuPick {
@@ -45,6 +46,7 @@ fn menu_pick_for(idx: u8) -> MenuPick {
         3 => MenuPick::Game(GameChoice::Abyss),
         4 => MenuPick::Game(GameChoice::Godfield),
         5 => MenuPick::Game(GameChoice::Metropolis),
+        6 => MenuPick::Game(GameChoice::LoopMarch),
         _ => MenuPick::Settings,
     }
 }
@@ -55,6 +57,7 @@ const SETTINGS_RESET_ABYSS: u16 = 11;
 const SETTINGS_RESET_METROPOLIS: u16 = 12;
 const SETTINGS_CONFIRM_YES: u16 = 13;
 const SETTINGS_CONFIRM_NO: u16 = 14;
+const SETTINGS_RESET_LOOPMARCH: u16 = 15;
 
 /// Use `elementFromPoint` to find which grid cell was clicked.
 ///
@@ -266,6 +269,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 InputEvent::Key('6') | InputEvent::Click(_, MENU_SELECT_METROPOLIS) => {
                     Some(MenuPick::Game(GameChoice::Metropolis))
                 }
+                InputEvent::Key('7') | InputEvent::Click(_, MENU_SELECT_LOOPMARCH) => {
+                    Some(MenuPick::Game(GameChoice::LoopMarch))
+                }
                 InputEvent::Key('0') | InputEvent::Click(_, MENU_SELECT_SETTINGS) => {
                     Some(MenuPick::Settings)
                 }
@@ -346,6 +352,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     InputEvent::Key('3') | InputEvent::Click(_, SETTINGS_RESET_METROPOLIS) => {
                         *confirm_reset = Some(GameChoice::Metropolis);
                     }
+                    InputEvent::Key('4') | InputEvent::Click(_, SETTINGS_RESET_LOOPMARCH) => {
+                        *confirm_reset = Some(GameChoice::LoopMarch);
+                    }
                     InputEvent::Key('q') | InputEvent::Click(_, BACK_TO_MENU) => {
                         *state = AppState::Menu { scroll: 0, selected: 0 };
                     }
@@ -374,6 +383,7 @@ fn perform_reset(game: &GameChoice) {
         GameChoice::Cookie => games::cookie::save::delete_save(),
         GameChoice::Abyss => games::abyss::save::delete_save(),
         GameChoice::Metropolis => games::metropolis::save::delete_save(),
+        GameChoice::LoopMarch => games::loopmarch::save::delete_save(),
         _ => {}
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -552,6 +562,7 @@ fn render_menu(
         ("深淵潜行 (Abyss Idle)", "自動戦闘で深層を目指す放置型ローグダンジョン", MENU_SELECT_ABYSS, '▶', Color::LightBlue),
         ("神の戦場 (God Field)", "4人で戦うターン制カードバトルロイヤル", MENU_SELECT_GODFIELD, '▶', Color::Red),
         ("Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶', Color::LightCyan),
+        ("周回討伐", "地形を配置し勇者が自動周回するローグライト", MENU_SELECT_LOOPMARCH, '▶', Color::LightGreen),
         ("設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 
@@ -788,6 +799,18 @@ fn render_settings_main(
     );
 
     cl.push(Line::from(""));
+
+    // 周回討伐
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
+            Span::styled("周回討伐", Style::default().fg(Color::White)),
+            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
+        ]),
+        SETTINGS_RESET_LOOPMARCH,
+    );
+
+    cl.push(Line::from(""));
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
         " ※ Tiny Factory / Dungeon Dive / God Field は",
@@ -819,6 +842,7 @@ fn render_confirm_dialog(
         GameChoice::Cookie => "Cookie Factory",
         GameChoice::Abyss => "深淵潜行",
         GameChoice::Metropolis => "Idle Metropolis",
+        GameChoice::LoopMarch => "周回討伐",
         _ => "Unknown",
     };
 

@@ -1,0 +1,283 @@
+//! 周回討伐 — ゲーム状態。
+//!
+//! 純粋なデータ定義のみ。ロジックは logic.rs、描画は render.rs に置く
+//! (Pure Logic Pattern)。
+
+use std::cell::Cell;
+
+use ratzilla::ratatui::style::Color;
+
+/// ループの道の総マス数。
+pub const PATH_LEN: usize = 20;
+/// 道を矩形リングとして描画する際の外形サイズ (幅×高さ)。
+/// 周長 = 2*RING_W + 2*RING_H - 4 = PATH_LEN。
+pub const RING_W: usize = 8;
+pub const RING_H: usize = 4;
+
+/// 手札の最大枚数 (拠点強化で 3→4 に増える)。
+pub const HAND_MAX: usize = 4;
+
+/// 1マス移動にかかる tick 数 (10 ticks/sec 固定なので 0.5 秒/マス)。
+pub const MOVE_TICKS: u32 = 5;
+
+pub const BASE_MAX_HP: i32 = 30;
+pub const BASE_ATTACK: i32 = 4;
+pub const HP_PER_LEVEL: i32 = 5;
+pub const ATTACK_PER_LEVEL: i32 = 1;
+
+/// 手札補充1回分のコスト (ラン限定資源のみ)。
+pub const REFILL_WOOD_COST: u32 = 3;
+pub const REFILL_STONE_COST: u32 = 3;
+
+/// 地形の種類。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Terrain {
+    Meadow,
+    Forest,
+    Mountain,
+    Graveyard,
+}
+
+impl Terrain {
+    pub fn all() -> &'static [Terrain] {
+        &[
+            Terrain::Meadow,
+            Terrain::Forest,
+            Terrain::Mountain,
+            Terrain::Graveyard,
+        ]
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Terrain::Meadow => "草原",
+            Terrain::Forest => "森",
+            Terrain::Mountain => "岩山",
+            Terrain::Graveyard => "墓地",
+        }
+    }
+
+    pub fn symbol(self) -> char {
+        match self {
+            Terrain::Meadow => '.',
+            Terrain::Forest => '♣',
+            Terrain::Mountain => '▲',
+            Terrain::Graveyard => '†',
+        }
+    }
+
+    pub fn color(self) -> Color {
+        match self {
+            Terrain::Meadow => Color::Green,
+            Terrain::Forest => Color::LightGreen,
+            Terrain::Mountain => Color::Gray,
+            Terrain::Graveyard => Color::Magenta,
+        }
+    }
+
+    /// 空きマスに湧き判定を行う確率 (1000分率)。草原は湧かない。
+    pub fn spawn_chance_per_mille(self) -> u32 {
+        match self {
+            Terrain::Meadow => 0,
+            Terrain::Forest => 550,
+            Terrain::Mountain => 500,
+            Terrain::Graveyard => 700,
+        }
+    }
+}
+
+/// 道の上に湧いたモンスター。
+#[derive(Clone, Debug)]
+pub struct Monster {
+    pub terrain: Terrain,
+    pub hp: i32,
+    pub max_hp: i32,
+    pub attack: i32,
+    /// シナジー条件を満たして強化された個体か。
+    pub elite: bool,
+}
+
+/// 道の1マス。
+#[derive(Clone, Debug, Default)]
+pub struct PathSlot {
+    pub terrain: Option<Terrain>,
+    pub monster: Option<Monster>,
+}
+
+/// 拠点の恒久強化レベル。魂で購入し、勇者が死亡してもリセットされない。
+#[derive(Clone, Debug, Default)]
+pub struct CampUpgrades {
+    pub max_hp_level: u32,
+    pub attack_level: u32,
+    /// 0 または 1 (一度きりの解放)。
+    pub extra_card_level: u32,
+}
+
+impl CampUpgrades {
+    pub const EXTRA_CARD_COST: u32 = 20;
+
+    pub fn max_hp_cost(&self) -> u32 {
+        10 + self.max_hp_level * 8
+    }
+
+    pub fn attack_cost(&self) -> u32 {
+        12 + self.attack_level * 10
+    }
+
+    pub fn hero_max_hp(&self) -> i32 {
+        BASE_MAX_HP + self.max_hp_level as i32 * HP_PER_LEVEL
+    }
+
+    pub fn hero_attack(&self) -> i32 {
+        BASE_ATTACK + self.attack_level as i32 * ATTACK_PER_LEVEL
+    }
+
+    pub fn starting_hand_size(&self) -> usize {
+        3 + self.extra_card_level.min(1) as usize
+    }
+
+    /// 現在の拠点強化を反映した、満タンHPの勇者を新規に作る。
+    /// 新規開始・死亡後・セーブ復元の3箇所で同じ計算をしないための共通化。
+    pub fn fresh_hero(&self) -> Hero {
+        Hero {
+            hp: self.hero_max_hp(),
+            max_hp: self.hero_max_hp(),
+            attack: self.hero_attack(),
+            position: 0,
+        }
+    }
+}
+
+/// 勇者 (遠征スコープ、死亡時にリセットされる)。
+#[derive(Clone, Debug)]
+pub struct Hero {
+    pub hp: i32,
+    pub max_hp: i32,
+    pub attack: i32,
+    pub position: usize,
+}
+
+/// どちらの画面を表示しているか。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// 拠点: 恒久強化の購入 + 遠征の開始/再開。
+    Camp,
+    /// 遠征中: ループを周回して戦う。
+    Expedition,
+}
+
+pub struct LoopMarchState {
+    pub phase: Phase,
+    /// 遠征が進行中か。false の間は拠点の出発ボタンが「新規遠征開始」
+    /// (状態を全リセット)、true なら「遠征に戻る」(状態を保ったまま
+    /// 表示を戻すだけ) として振る舞う。
+    pub run_active: bool,
+
+    // ── 遠征スコープ (死亡 or 新規開始でリセットされる) ──
+    pub path: Vec<PathSlot>,
+    pub hero: Hero,
+    pub wood: u32,
+    pub stone: u32,
+    pub hand: Vec<Option<Terrain>>,
+    pub lap: u32,
+    pub move_progress: u32,
+    pub selected_hand: Option<usize>,
+
+    // ── 永続 (死亡・リロードしてもリセットされない) ──
+    pub soul: u32,
+    pub camp: CampUpgrades,
+    pub best_lap: u32,
+
+    // ── UI / メタ ──
+    pub log: Vec<String>,
+    pub rng_state: u32,
+    /// 拠点画面のスクロール位置。`Game::render(&self, ...)` から
+    /// (`&mut self` 無しで) クランプ書き戻しできるよう `Cell` で持つ。
+    pub camp_scroll: Cell<u16>,
+}
+
+impl Default for LoopMarchState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LoopMarchState {
+    pub fn new() -> Self {
+        let camp = CampUpgrades::default();
+        let hero = camp.fresh_hero();
+        Self {
+            phase: Phase::Camp,
+            run_active: false,
+            path: vec![PathSlot::default(); PATH_LEN],
+            hero,
+            wood: 0,
+            stone: 0,
+            hand: vec![None; HAND_MAX],
+            lap: 0,
+            move_progress: 0,
+            selected_hand: None,
+            soul: 0,
+            camp,
+            best_lap: 0,
+            log: vec!["周回討伐へようこそ。まずは拠点で遠征に出よう。".into()],
+            rng_state: 0x1234_5678,
+            camp_scroll: Cell::new(0),
+        }
+    }
+
+    pub fn add_log(&mut self, text: impl Into<String>) {
+        self.log.push(text.into());
+        if self.log.len() > 30 {
+            self.log.remove(0);
+        }
+    }
+
+    pub fn scroll_camp(&self, delta: i32) {
+        let cur = self.camp_scroll.get() as i32;
+        let next = (cur + delta).clamp(0, u16::MAX as i32) as u16;
+        self.camp_scroll.set(next);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_state() {
+        let s = LoopMarchState::new();
+        assert_eq!(s.phase, Phase::Camp);
+        assert!(!s.run_active);
+        assert_eq!(s.path.len(), PATH_LEN);
+        assert_eq!(s.hand.len(), HAND_MAX);
+        assert_eq!(s.soul, 0);
+        assert_eq!(s.hero.max_hp, BASE_MAX_HP);
+        assert_eq!(s.hero.attack, BASE_ATTACK);
+    }
+
+    #[test]
+    fn camp_upgrade_costs_grow_with_level() {
+        let mut camp = CampUpgrades::default();
+        let base_cost = camp.max_hp_cost();
+        camp.max_hp_level += 1;
+        assert!(camp.max_hp_cost() > base_cost);
+    }
+
+    #[test]
+    fn starting_hand_size_grows_with_extra_card_upgrade() {
+        let mut camp = CampUpgrades::default();
+        assert_eq!(camp.starting_hand_size(), 3);
+        camp.extra_card_level = 1;
+        assert_eq!(camp.starting_hand_size(), 4);
+    }
+
+    #[test]
+    fn log_truncation() {
+        let mut s = LoopMarchState::new();
+        for i in 0..40 {
+            s.add_log(format!("msg {i}"));
+        }
+        assert!(s.log.len() <= 30);
+    }
+}
