@@ -4,10 +4,11 @@ pub mod abyss;
 pub mod cookie;
 pub mod factory;
 pub mod godfield;
+pub mod loopmarch;
 pub mod metropolis;
 pub mod rpg;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use ratzilla::ratatui::layout::Rect;
@@ -27,6 +28,12 @@ pub trait Game {
     /// Advance game logic by `delta_ticks` discrete ticks.
     fn tick(&mut self, delta_ticks: u32);
 
+    /// Called once, right before the player leaves this game back to the
+    /// main menu. Games that only autosave on a timer/event would otherwise
+    /// lose progress made since the last save if the player quits early;
+    /// override this to flush a save. No-op by default.
+    fn on_leave(&mut self) {}
+
     /// Render the game into the given area.
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>);
 }
@@ -40,6 +47,7 @@ pub enum GameChoice {
     Abyss,
     Godfield,
     Metropolis,
+    LoopMarch,
 }
 
 /// Top-level application state.
@@ -57,6 +65,9 @@ pub enum AppState {
     /// `confirm_reset` is `Some(game)` when a confirmation dialog is shown.
     Settings {
         confirm_reset: Option<GameChoice>,
+        /// リセット項目一覧のスクロール位置。`Cell` で持つのは、描画側
+        /// (`&self` 相当の借用) がクランプ済みの値を書き戻せるようにするため。
+        scroll: Cell<u16>,
     },
     /// Playing a game.
     Playing {
@@ -73,5 +84,6 @@ pub fn create_game(choice: &GameChoice) -> Box<dyn Game> {
         GameChoice::Abyss => Box::new(abyss::AbyssGame::new()),
         GameChoice::Godfield => Box::new(godfield::GodFieldGame::new()),
         GameChoice::Metropolis => Box::new(metropolis::MetropolisGame::new()),
+        GameChoice::LoopMarch => Box::new(loopmarch::LoopMarchGame::new()),
     }
 }

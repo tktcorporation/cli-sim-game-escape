@@ -1,11 +1,15 @@
-use std::{cell::RefCell, io, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    io,
+    rc::Rc,
+};
 
 use cli_sim_game_escape::games::{self, create_game, AppState, GameChoice};
 use cli_sim_game_escape::input::{
     is_narrow_layout, pixel_x_to_col, pixel_y_to_row, ClickScope, ClickState, InputEvent,
 };
 use cli_sim_game_escape::sound;
-use cli_sim_game_escape::widgets::{Clickable, ClickableList};
+use cli_sim_game_escape::widgets::{Clickable, ClickableList, ScrollableTab};
 use cli_sim_game_escape::time::GameTime;
 use cli_sim_game_escape::BACK_TO_MENU;
 
@@ -27,9 +31,13 @@ pub const MENU_SELECT_METROPOLIS: u16 = 6;
 pub const MENU_SELECT_SETTINGS: u16 = 7;
 pub const MENU_SCROLL_UP: u16 = 8;
 pub const MENU_SCROLL_DOWN: u16 = 9;
+// 1-9 は Menu scope で使い切っているため、Settings scope (10-15) の
+// 次番から採る。scope が異なる衝突は無害 (ClickScope で分離される) だが、
+// 追加者が採番に迷わないよう連続させている。
+pub const MENU_SELECT_LOOPMARCH: u16 = 16;
 
-/// Last valid index of the main menu cards (6 games + settings → 0..=6).
-const MENU_LAST_INDEX: u8 = 6;
+/// Last valid index of the main menu cards (7 games + settings → 0..=7).
+const MENU_LAST_INDEX: u8 = 7;
 
 /// Cursor → menu action, used for the A button on the main menu.
 enum MenuPick {
@@ -45,6 +53,7 @@ fn menu_pick_for(idx: u8) -> MenuPick {
         3 => MenuPick::Game(GameChoice::Abyss),
         4 => MenuPick::Game(GameChoice::Godfield),
         5 => MenuPick::Game(GameChoice::Metropolis),
+        6 => MenuPick::Game(GameChoice::LoopMarch),
         _ => MenuPick::Settings,
     }
 }
@@ -55,6 +64,11 @@ const SETTINGS_RESET_ABYSS: u16 = 11;
 const SETTINGS_RESET_METROPOLIS: u16 = 12;
 const SETTINGS_CONFIRM_YES: u16 = 13;
 const SETTINGS_CONFIRM_NO: u16 = 14;
+const SETTINGS_RESET_LOOPMARCH: u16 = 15;
+const SETTINGS_SCROLL_UP: u16 = 17;
+const SETTINGS_SCROLL_DOWN: u16 = 18;
+/// 1クリック/1行キー入力あたりのスクロール量。
+const SETTINGS_SCROLL_STEP: i32 = 3;
 
 /// Use `elementFromPoint` to find which grid cell was clicked.
 ///
@@ -266,6 +280,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 InputEvent::Key('6') | InputEvent::Click(_, MENU_SELECT_METROPOLIS) => {
                     Some(MenuPick::Game(GameChoice::Metropolis))
                 }
+                InputEvent::Key('7') | InputEvent::Click(_, MENU_SELECT_LOOPMARCH) => {
+                    Some(MenuPick::Game(GameChoice::LoopMarch))
+                }
                 InputEvent::Key('0') | InputEvent::Click(_, MENU_SELECT_SETTINGS) => {
                     Some(MenuPick::Settings)
                 }
@@ -283,7 +300,10 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                         *state = AppState::Playing { game };
                     }
                     MenuPick::Settings => {
-                        *state = AppState::Settings { confirm_reset: None };
+                        *state = AppState::Settings {
+                            confirm_reset: None,
+                            scroll: Cell::new(0),
+                        };
                     }
                 }
             } else {
@@ -317,7 +337,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 }
             }
         }
-        AppState::Settings { confirm_reset } => {
+        AppState::Settings { confirm_reset, scroll } => {
             if confirm_reset.is_some() {
                 // Confirmation dialog is active
                 match event {
@@ -326,6 +346,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                         perform_reset(&game);
                         *state = AppState::Settings {
                             confirm_reset: None,
+                            scroll: Cell::new(0),
                         };
                     }
                     InputEvent::Key('n')
@@ -346,6 +367,15 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     InputEvent::Key('3') | InputEvent::Click(_, SETTINGS_RESET_METROPOLIS) => {
                         *confirm_reset = Some(GameChoice::Metropolis);
                     }
+                    InputEvent::Key('4') | InputEvent::Click(_, SETTINGS_RESET_LOOPMARCH) => {
+                        *confirm_reset = Some(GameChoice::LoopMarch);
+                    }
+                    InputEvent::Key('k') | InputEvent::Click(_, SETTINGS_SCROLL_UP) => {
+                        adjust_scroll(scroll, -SETTINGS_SCROLL_STEP);
+                    }
+                    InputEvent::Key('j') | InputEvent::Click(_, SETTINGS_SCROLL_DOWN) => {
+                        adjust_scroll(scroll, SETTINGS_SCROLL_STEP);
+                    }
                     InputEvent::Key('q') | InputEvent::Click(_, BACK_TO_MENU) => {
                         *state = AppState::Menu { scroll: 0, selected: 0 };
                     }
@@ -358,6 +388,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 // Let the game handle back first (e.g., sub-screen → main screen).
                 // Only go to menu if the game didn't consume it.
                 if !game.handle_input(event) {
+                    game.on_leave();
                     *state = AppState::Menu { scroll: 0, selected: 0 };
                 }
             } else {
@@ -367,6 +398,14 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
     }
 }
 
+/// `Cell<u16>` スクロール値を負にならないよう飽和加算/減算で更新する。
+/// 上限側のクランプは描画側 (`ScrollableTab`) がコンテンツ高さに合わせて行う。
+fn adjust_scroll(cell: &Cell<u16>, delta: i32) {
+    let cur = cell.get() as i32;
+    let next = (cur + delta).clamp(0, u16::MAX as i32) as u16;
+    cell.set(next);
+}
+
 /// Delete localStorage save data for the specified game.
 fn perform_reset(game: &GameChoice) {
     #[cfg(target_arch = "wasm32")]
@@ -374,6 +413,7 @@ fn perform_reset(game: &GameChoice) {
         GameChoice::Cookie => games::cookie::save::delete_save(),
         GameChoice::Abyss => games::abyss::save::delete_save(),
         GameChoice::Metropolis => games::metropolis::save::delete_save(),
+        GameChoice::LoopMarch => games::loopmarch::save::delete_save(),
         _ => {}
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -464,8 +504,8 @@ fn main() -> io::Result<()> {
                 AppState::Menu { scroll, selected } => {
                     render_menu(f, size, &click_state, scroll, *selected);
                 }
-                AppState::Settings { confirm_reset } => {
-                    render_settings(f, size, &click_state, confirm_reset.as_ref());
+                AppState::Settings { confirm_reset, scroll } => {
+                    render_settings(f, size, &click_state, confirm_reset.as_ref(), scroll);
                 }
                 AppState::Playing { game } => {
                     // Tick game logic
@@ -552,6 +592,7 @@ fn render_menu(
         ("深淵潜行 (Abyss Idle)", "自動戦闘で深層を目指す放置型ローグダンジョン", MENU_SELECT_ABYSS, '▶', Color::LightBlue),
         ("神の戦場 (God Field)", "4人で戦うターン制カードバトルロイヤル", MENU_SELECT_GODFIELD, '▶', Color::Red),
         ("Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶', Color::LightCyan),
+        ("周回討伐", "地形を配置し勇者が自動周回するローグライト", MENU_SELECT_LOOPMARCH, '▶', Color::LightGreen),
         ("設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 
@@ -680,6 +721,7 @@ fn render_settings(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
     confirm_reset: Option<&GameChoice>,
+    scroll: &Cell<u16>,
 ) {
     let is_narrow = is_narrow_layout(area.width);
     let borders = if is_narrow {
@@ -715,7 +757,7 @@ fn render_settings(
     if let Some(game) = confirm_reset {
         render_confirm_dialog(f, chunks[1], click_state, borders, game);
     } else {
-        render_settings_main(f, chunks[1], click_state, borders);
+        render_settings_main(f, chunks[1], click_state, borders, scroll);
     }
 
     // Footer — back to menu
@@ -741,6 +783,7 @@ fn render_settings_main(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
     borders: Borders,
+    scroll: &Cell<u16>,
 ) {
     let mut cl = ClickableList::new();
 
@@ -788,6 +831,18 @@ fn render_settings_main(
     );
 
     cl.push(Line::from(""));
+
+    // 周回討伐
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
+            Span::styled("周回討伐", Style::default().fg(Color::White)),
+            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
+        ]),
+        SETTINGS_RESET_LOOPMARCH,
+    );
+
+    cl.push(Line::from(""));
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
         " ※ Tiny Factory / Dungeon Dive / God Field は",
@@ -802,10 +857,11 @@ fn render_settings_main(
         .borders(borders)
         .border_style(Style::default().fg(Color::Green))
         .title(" Data Reset ");
-    {
-        let mut cs = click_state.borrow_mut();
-        cl.render(f, area, block, &mut cs, false, 0);
-    }
+    let mut cs = click_state.borrow_mut();
+    ScrollableTab::new(cl, scroll, SETTINGS_SCROLL_UP, SETTINGS_SCROLL_DOWN)
+        .block(block)
+        .arrow_color(Color::Green)
+        .render(f, area, &mut cs);
 }
 
 fn render_confirm_dialog(
@@ -819,6 +875,7 @@ fn render_confirm_dialog(
         GameChoice::Cookie => "Cookie Factory",
         GameChoice::Abyss => "深淵潜行",
         GameChoice::Metropolis => "Idle Metropolis",
+        GameChoice::LoopMarch => "周回討伐",
         _ => "Unknown",
     };
 

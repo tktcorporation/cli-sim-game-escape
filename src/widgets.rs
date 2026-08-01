@@ -551,8 +551,6 @@ impl<'a> ScrollableTab<'a> {
     /// Enable line wrapping. When false (default) one logical line maps to
     /// one visual row; with wrap, long lines may consume multiple rows and
     /// the scroll/clamp math accounts for wrap-expanded heights.
-    /// Currently kept ready for the abyss migration that uses `wrap=narrow`.
-    #[allow(dead_code)]
     pub fn wrap(mut self, w: bool) -> Self {
         self.wrap = w;
         self
