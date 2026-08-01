@@ -11,7 +11,7 @@ use cli_sim_game_escape::input::{
 use cli_sim_game_escape::sound;
 use cli_sim_game_escape::theme;
 use cli_sim_game_escape::widgets::{Clickable, ClickableList, ScrollableTab};
-use cli_sim_game_escape::time::GameTime;
+use cli_sim_game_escape::time::{now_ms, GameTime};
 use cli_sim_game_escape::BACK_TO_MENU;
 
 use ratzilla::event::{KeyCode, MouseButton, MouseEventKind};
@@ -158,17 +158,6 @@ fn pixel_fallback_to_cell(
     let row = pixel_y_to_row(local_y, rect.height(), terminal_rows)?;
     let col = pixel_x_to_col(local_x, rect.width(), terminal_cols)?;
     Some((row, col))
-}
-
-/// Read the current high-resolution timestamp (ms since page navigation).
-/// Returns `None` when the Performance API is unavailable (rare, e.g.
-/// headless or sandboxed contexts); callers must decide what `None` means
-/// for them — for tap dedup, that means *skip* dedup rather than treating
-/// every tap as happening "now".
-fn now_ms() -> Option<f64> {
-    web_sys::window()
-        .and_then(|w| w.performance())
-        .map(|p| p.now())
 }
 
 /// Process a tap/click at the given client coordinates.

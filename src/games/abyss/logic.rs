@@ -19,8 +19,8 @@ pub fn tick(state: &mut AbyssState, delta_ticks: u32) {
     }
 
     // 演出 tick の減衰
-    state.hero_hurt_flash = state.hero_hurt_flash.saturating_sub(delta_ticks);
-    state.enemy_hurt_flash = state.enemy_hurt_flash.saturating_sub(delta_ticks);
+    state.hero_hurt_flash.tick(delta_ticks);
+    state.enemy_hurt_flash.tick(delta_ticks);
     state.descent_flash = state.descent_flash.saturating_sub(delta_ticks);
     if let Some((_, ref mut life, _)) = state.last_enemy_damage {
         *life = life.saturating_sub(delta_ticks);
@@ -73,7 +73,7 @@ fn step_one_tick(state: &mut AbyssState) {
         let actual = dmg.min(state.current_enemy.hp);
         state.current_enemy.hp -= actual;
         state.last_enemy_damage = Some((actual, 6, crit));
-        state.enemy_hurt_flash = 3;
+        state.enemy_hurt_flash.trigger(3);
 
         let focus_max = state.config.hero.focus_max;
         state.combat_focus = (state.combat_focus + 1).min(focus_max);
@@ -93,7 +93,7 @@ fn step_one_tick(state: &mut AbyssState) {
         let actual = dmg.min(state.hero_hp);
         state.hero_hp -= actual;
         state.last_hero_damage = Some((actual, 6));
-        state.hero_hurt_flash = 3;
+        state.hero_hurt_flash.trigger(3);
         state.current_enemy.atk_cooldown = state.current_enemy.atk_period;
 
         if state.hero_hp == 0 {

@@ -234,7 +234,7 @@ fn render_hero_panel(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool
     let max_hp = state.hero_max_hp();
     let bar_width = (area.width.saturating_sub(2)).clamp(8, 20);
 
-    let hero_name_color = if state.hero_hurt_flash > 0 {
+    let hero_name_color = if state.hero_hurt_flash.is_active() {
         theme::DAMAGE_FLASH.color
     } else {
         Color::Cyan
@@ -291,7 +291,7 @@ fn render_hero_panel(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool
 fn render_enemy_panel(state: &AbyssState, f: &mut Frame, area: Rect, narrow: bool) {
     let bar_width = (area.width.saturating_sub(2)).clamp(8, 20);
 
-    let name_color = if state.enemy_hurt_flash > 0 {
+    let name_color = if state.enemy_hurt_flash.is_active() {
         theme::HIT_FLASH.color
     } else if state.current_enemy.is_boss {
         Color::Red

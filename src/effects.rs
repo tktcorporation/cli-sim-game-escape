@@ -41,6 +41,11 @@ impl EffectHost {
     pub fn process(&mut self, elapsed: Duration, buf: &mut Buffer, area: Rect) {
         self.manager.process_effects(elapsed, buf, area);
     }
+
+    /// 現在進行中の演出があるか。
+    pub fn is_running(&self) -> bool {
+        self.manager.is_running()
+    }
 }
 
 impl Default for EffectHost {
@@ -53,30 +58,32 @@ impl Default for EffectHost {
 ///
 /// ゲームロジックの tick は固定 10/sec だが、`render()` はブラウザの実際の
 /// フレームレートで呼ばれるため、演出を滑らかに進めるにはこの実時間差分が要る。
+///
+/// [`crate::time::GameTime`] と同じく、タイムスタンプは呼び出し側が注入する
+/// (内部で `web_sys` を呼ばない)。これにより native (cargo test) でも
+/// wasm 依存なしに `elapsed` の計算ロジックを検証できる。
 pub struct FrameClock {
-    last_render_ms: Cell<f64>,
+    last_render_ms: Cell<Option<f64>>,
 }
 
 impl FrameClock {
     pub fn new() -> Self {
-        Self { last_render_ms: Cell::new(0.0) }
+        Self { last_render_ms: Cell::new(None) }
     }
 
-    /// 前回の呼び出しからの経過時間。初回呼び出しは基準点が無いので `Duration::ZERO`。
-    /// ブラウザ外 (native cargo test) では wall clock が取れないため常に `Duration::ZERO`。
-    pub fn elapsed(&self) -> Duration {
-        let now = now_ms().unwrap_or(0.0);
-        let prev = self.last_render_ms.get();
-        self.last_render_ms.set(now);
-        if prev == 0.0 {
-            Duration::ZERO
-        } else {
-            let delta_ms = (now - prev).clamp(0.0, 100.0);
-            if !delta_ms.is_finite() {
-                return Duration::ZERO;
-            }
-            Duration::from_millis(delta_ms as u32)
+    /// 前回の呼び出しからの経過時間。`now_ms` は [`crate::time::now_ms`] 等で
+    /// 呼び出し側が計測した wall-clock タイムスタンプ。初回呼び出しは基準点が
+    /// 無いので `Duration::ZERO`。
+    pub fn elapsed(&self, now_ms: f64) -> Duration {
+        let prev = self.last_render_ms.replace(Some(now_ms));
+        let Some(prev) = prev else {
+            return Duration::ZERO;
+        };
+        let delta_ms = (now_ms - prev).clamp(0.0, 100.0);
+        if !delta_ms.is_finite() {
+            return Duration::ZERO;
         }
+        Duration::from_millis(delta_ms as u32)
     }
 }
 
@@ -84,10 +91,6 @@ impl Default for FrameClock {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn now_ms() -> Option<f64> {
-    web_sys::window().and_then(|w| w.performance()).map(|p| p.now())
 }
 
 /// 一時的な視覚フラッシュ (被弾時に名前を赤くする等) の残り tick 数。
@@ -170,9 +173,53 @@ mod tests {
         assert_eq!(t.ticks_left(), 10);
     }
 
-    // FrameClock::elapsed() は web_sys::window() を経由するため、native
-    // (cargo test) 上で呼ぶと wasm-bindgen が "cannot access imported statics
-    // on non-wasm targets" で panic する。ブラウザ (wasm32) からのみ到達可能な
-    // 経路であり、Game::render() を経由しないユニットテストではこの経路に
-    // 到達しない。ここでは意図的にテストを書かない。
+    #[test]
+    fn frame_clock_first_call_returns_zero() {
+        let clock = FrameClock::new();
+        assert_eq!(clock.elapsed(1_000.0), Duration::ZERO);
+    }
+
+    #[test]
+    fn frame_clock_computes_delta_between_calls() {
+        let clock = FrameClock::new();
+        clock.elapsed(1_000.0);
+        assert_eq!(clock.elapsed(1_050.0), Duration::from_millis(50));
+    }
+
+    #[test]
+    fn frame_clock_clamps_large_gaps_to_100ms() {
+        let clock = FrameClock::new();
+        clock.elapsed(0.0);
+        // タブが非アクティブ化された後の復帰等、大きな gap は tachyonfx
+        // の演出が一気に完了しないよう 100ms に丸める。
+        assert_eq!(clock.elapsed(10_000.0), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn frame_clock_never_returns_negative_delta() {
+        let clock = FrameClock::new();
+        clock.elapsed(1_000.0);
+        // タイムスタンプが逆行する (通常は起きないが) ケースでも 0 に丸める。
+        assert_eq!(clock.elapsed(900.0), Duration::ZERO);
+    }
+
+    #[test]
+    fn effect_host_reports_running_between_push_and_completion() {
+        use ratzilla::ratatui::style::Color;
+        use tachyonfx::fx;
+
+        let area = Rect::new(0, 0, 10, 3);
+        let mut host = EffectHost::new();
+        assert!(!host.is_running(), "push 前は running ではない");
+
+        host.push(fx::fade_from_fg(Color::Red, Duration::from_millis(100)), area);
+        assert!(host.is_running(), "push した直後は running");
+
+        let mut buf = Buffer::empty(area);
+        host.process(Duration::from_millis(50), &mut buf, area);
+        assert!(host.is_running(), "duration 未満の経過では running のまま");
+
+        host.process(Duration::from_millis(100), &mut buf, area);
+        assert!(!host.is_running(), "duration を超えた経過で完了し running でなくなる");
+    }
 }

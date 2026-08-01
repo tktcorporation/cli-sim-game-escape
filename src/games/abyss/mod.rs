@@ -27,10 +27,11 @@ use std::rc::Rc;
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
 
-use crate::effects::FrameClock;
+use crate::effects::{FlashTimer, FrameClock};
 use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 use crate::sound;
+use crate::time;
 
 use actions::*;
 use effects::AbyssEffects;
@@ -63,8 +64,8 @@ fn is_save_worthy(action: PlayerAction) -> bool {
 #[derive(Clone, Copy, Default)]
 struct PrevSnapshot {
     floor: u32,
-    enemy_hurt_flash: u32,
-    hero_hurt_flash: u32,
+    enemy_hurt_flash: FlashTimer,
+    hero_hurt_flash: FlashTimer,
     enemy_is_boss: bool,
     last_enemy_dmg: Option<(u64, bool)>,
     gacha_total_pulls: u64,
@@ -119,11 +120,11 @@ impl AbyssGame {
 
         // 雑魚への通常ヒット (enemy_hurt_flash) は 1 戦闘で何度も鳴って耳障りなので
         // 音は付けない。被弾とクリティカルとボス周りだけにフィードバックを集約。
-        if prev.enemy_hurt_flash == 0 && s.enemy_hurt_flash > 0 {
+        if !prev.enemy_hurt_flash.is_active() && s.enemy_hurt_flash.is_active() {
             effects.push_enemy_hit(layout.enemy_panel);
         }
 
-        if prev.hero_hurt_flash == 0 && s.hero_hurt_flash > 0 {
+        if !prev.hero_hurt_flash.is_active() && s.hero_hurt_flash.is_active() {
             effects.push_hero_hit(layout.hero_panel);
             sound::play(sound::HIT_HERO);
         }
@@ -353,7 +354,7 @@ impl Game for AbyssGame {
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
         self.detect_transitions(area);
         render::render(&self.state, f, area, click_state);
-        let elapsed = self.frame_clock.elapsed();
+        let elapsed = self.frame_clock.elapsed(time::now_ms().unwrap_or(0.0));
         self.effects
             .borrow_mut()
             .process(elapsed, f.buffer_mut(), area);
