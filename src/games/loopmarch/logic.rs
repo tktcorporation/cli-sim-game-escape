@@ -33,6 +33,24 @@ fn random_terrain(seed: &mut u32) -> Terrain {
     all[rng_below(seed, all.len() as u32) as usize]
 }
 
+/// 遠征開始時の手札を組み立てる。森と岩山を必ず1枚ずつ確保する —
+/// でないと木材と石材のどちらかが永久に0のままとなり、両方を要求する
+/// 手札補充 (`refill_hand`) が二度と成立しない詰み状態になり得る
+/// (草原/墓地はどちらの資源も生まないため)。残り枠のみ完全ランダム。
+fn draw_starting_hand(hand_size: usize, seed: &mut u32) -> Vec<Option<Terrain>> {
+    let mut hand = vec![None; HAND_MAX];
+    if hand_size > 0 {
+        hand[0] = Some(Terrain::Forest);
+    }
+    if hand_size > 1 {
+        hand[1] = Some(Terrain::Mountain);
+    }
+    for slot in hand.iter_mut().skip(2).take(hand_size.saturating_sub(2)) {
+        *slot = Some(random_terrain(seed));
+    }
+    hand
+}
+
 /// リング上の各 `path` インデックスに対応する矩形グリッド座標 `(gx, gy)` を
 /// 時計回りに列挙する。`render.rs` の表示と `mod.rs` のクリック判定の
 /// 両方から参照される、道の唯一の座標変換ソース。
@@ -280,12 +298,7 @@ pub fn start_or_resume_expedition(state: &mut LoopMarchState) {
     state.move_progress = 0;
     state.hero = state.camp.fresh_hero();
 
-    let hand_size = state.camp.starting_hand_size();
-    let mut hand = vec![None; HAND_MAX];
-    for slot in hand.iter_mut().take(hand_size) {
-        *slot = Some(random_terrain(&mut state.rng_state));
-    }
-    state.hand = hand;
+    state.hand = draw_starting_hand(state.camp.starting_hand_size(), &mut state.rng_state);
     state.selected_hand = None;
     state.add_log("遠征開始！");
 }
@@ -713,6 +726,22 @@ mod tests {
         let s = expedition_state();
         let filled = s.hand.iter().filter(|c| c.is_some()).count();
         assert_eq!(filled, 3);
+    }
+
+    #[test]
+    fn starting_hand_always_guarantees_wood_and_stone_sources() {
+        // 森(木材源)/岩山(石材源)のどちらかが初期手札に無いと、両方を
+        // 要求する refill_hand が永久に成立しない詰み状態になり得る。
+        // 何度出発し直しても必ず両方が手札に含まれることを保証する。
+        for seed in 1..200u32 {
+            let mut s = LoopMarchState::new();
+            s.rng_state = seed;
+            start_or_resume_expedition(&mut s);
+            let has_forest = s.hand.contains(&Some(Terrain::Forest));
+            let has_mountain = s.hand.contains(&Some(Terrain::Mountain));
+            assert!(has_forest, "seed={seed}: 初期手札に森が無い");
+            assert!(has_mountain, "seed={seed}: 初期手札に岩山が無い");
+        }
     }
 
     #[test]

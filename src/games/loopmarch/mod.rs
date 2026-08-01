@@ -95,6 +95,14 @@ impl LoopMarchGame {
                 self.state.scroll_camp(CAMP_SCROLL_STEP);
                 true
             }
+            HAND_SCROLL_UP => {
+                self.state.scroll_hand(-CAMP_SCROLL_STEP);
+                true
+            }
+            HAND_SCROLL_DOWN => {
+                self.state.scroll_hand(CAMP_SCROLL_STEP);
+                true
+            }
             id if (HAND_CLICK_BASE..HAND_CLICK_BASE + HAND_MAX as u16).contains(&id) => {
                 logic::select_hand(&mut self.state, (id - HAND_CLICK_BASE) as usize);
                 true

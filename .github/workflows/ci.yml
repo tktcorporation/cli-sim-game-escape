@@ -41,7 +41,10 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
-      - run: cargo install trunk
+      # --locked: trunk が同梱する Cargo.lock をそのまま使う。無指定だと
+      # trunk の推移的依存 (lightningcss 等) が最新のセマバー互換更新を
+      # 拾い直し、上流の非互換なパッチリリースでビルドが壊れることがある。
+      - run: cargo install trunk --locked
       - run: trunk build
 
   e2e:
@@ -60,7 +63,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - run: cargo install trunk
+      # --locked: trunk が同梱する Cargo.lock をそのまま使う。無指定だと
+      # trunk の推移的依存 (lightningcss 等) が最新のセマバー互換更新を
+      # 拾い直し、上流の非互換なパッチリリースでビルドが壊れることがある。
+      - run: cargo install trunk --locked
       - run: trunk build
       - run: npm install
       # `--with-deps` で chromium 本体 + 必要 OS lib (libnss3 等) を一括導入。

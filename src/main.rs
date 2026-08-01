@@ -1,11 +1,15 @@
-use std::{cell::RefCell, io, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    io,
+    rc::Rc,
+};
 
 use cli_sim_game_escape::games::{self, create_game, AppState, GameChoice};
 use cli_sim_game_escape::input::{
     is_narrow_layout, pixel_x_to_col, pixel_y_to_row, ClickScope, ClickState, InputEvent,
 };
 use cli_sim_game_escape::sound;
-use cli_sim_game_escape::widgets::{Clickable, ClickableList};
+use cli_sim_game_escape::widgets::{Clickable, ClickableList, ScrollableTab};
 use cli_sim_game_escape::time::GameTime;
 use cli_sim_game_escape::BACK_TO_MENU;
 
@@ -61,6 +65,10 @@ const SETTINGS_RESET_METROPOLIS: u16 = 12;
 const SETTINGS_CONFIRM_YES: u16 = 13;
 const SETTINGS_CONFIRM_NO: u16 = 14;
 const SETTINGS_RESET_LOOPMARCH: u16 = 15;
+const SETTINGS_SCROLL_UP: u16 = 17;
+const SETTINGS_SCROLL_DOWN: u16 = 18;
+/// 1クリック/1行キー入力あたりのスクロール量。
+const SETTINGS_SCROLL_STEP: i32 = 3;
 
 /// Use `elementFromPoint` to find which grid cell was clicked.
 ///
@@ -292,7 +300,10 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                         *state = AppState::Playing { game };
                     }
                     MenuPick::Settings => {
-                        *state = AppState::Settings { confirm_reset: None };
+                        *state = AppState::Settings {
+                            confirm_reset: None,
+                            scroll: Cell::new(0),
+                        };
                     }
                 }
             } else {
@@ -326,7 +337,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 }
             }
         }
-        AppState::Settings { confirm_reset } => {
+        AppState::Settings { confirm_reset, scroll } => {
             if confirm_reset.is_some() {
                 // Confirmation dialog is active
                 match event {
@@ -335,6 +346,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                         perform_reset(&game);
                         *state = AppState::Settings {
                             confirm_reset: None,
+                            scroll: Cell::new(0),
                         };
                     }
                     InputEvent::Key('n')
@@ -358,6 +370,12 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     InputEvent::Key('4') | InputEvent::Click(_, SETTINGS_RESET_LOOPMARCH) => {
                         *confirm_reset = Some(GameChoice::LoopMarch);
                     }
+                    InputEvent::Key('k') | InputEvent::Click(_, SETTINGS_SCROLL_UP) => {
+                        adjust_scroll(scroll, -SETTINGS_SCROLL_STEP);
+                    }
+                    InputEvent::Key('j') | InputEvent::Click(_, SETTINGS_SCROLL_DOWN) => {
+                        adjust_scroll(scroll, SETTINGS_SCROLL_STEP);
+                    }
                     InputEvent::Key('q') | InputEvent::Click(_, BACK_TO_MENU) => {
                         *state = AppState::Menu { scroll: 0, selected: 0 };
                     }
@@ -377,6 +395,14 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
             }
         }
     }
+}
+
+/// `Cell<u16>` スクロール値を負にならないよう飽和加算/減算で更新する。
+/// 上限側のクランプは描画側 (`ScrollableTab`) がコンテンツ高さに合わせて行う。
+fn adjust_scroll(cell: &Cell<u16>, delta: i32) {
+    let cur = cell.get() as i32;
+    let next = (cur + delta).clamp(0, u16::MAX as i32) as u16;
+    cell.set(next);
 }
 
 /// Delete localStorage save data for the specified game.
@@ -477,8 +503,8 @@ fn main() -> io::Result<()> {
                 AppState::Menu { scroll, selected } => {
                     render_menu(f, size, &click_state, scroll, *selected);
                 }
-                AppState::Settings { confirm_reset } => {
-                    render_settings(f, size, &click_state, confirm_reset.as_ref());
+                AppState::Settings { confirm_reset, scroll } => {
+                    render_settings(f, size, &click_state, confirm_reset.as_ref(), scroll);
                 }
                 AppState::Playing { game } => {
                     // Tick game logic
@@ -694,6 +720,7 @@ fn render_settings(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
     confirm_reset: Option<&GameChoice>,
+    scroll: &Cell<u16>,
 ) {
     let is_narrow = is_narrow_layout(area.width);
     let borders = if is_narrow {
@@ -729,7 +756,7 @@ fn render_settings(
     if let Some(game) = confirm_reset {
         render_confirm_dialog(f, chunks[1], click_state, borders, game);
     } else {
-        render_settings_main(f, chunks[1], click_state, borders);
+        render_settings_main(f, chunks[1], click_state, borders, scroll);
     }
 
     // Footer — back to menu
@@ -755,6 +782,7 @@ fn render_settings_main(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
     borders: Borders,
+    scroll: &Cell<u16>,
 ) {
     let mut cl = ClickableList::new();
 
@@ -828,10 +856,11 @@ fn render_settings_main(
         .borders(borders)
         .border_style(Style::default().fg(Color::Green))
         .title(" Data Reset ");
-    {
-        let mut cs = click_state.borrow_mut();
-        cl.render(f, area, block, &mut cs, false, 0);
-    }
+    let mut cs = click_state.borrow_mut();
+    ScrollableTab::new(cl, scroll, SETTINGS_SCROLL_UP, SETTINGS_SCROLL_DOWN)
+        .block(block)
+        .arrow_color(Color::Green)
+        .render(f, area, &mut cs);
 }
 
 fn render_confirm_dialog(

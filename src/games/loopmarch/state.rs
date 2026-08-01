@@ -194,6 +194,8 @@ pub struct LoopMarchState {
     /// 拠点画面のスクロール位置。`Game::render(&self, ...)` から
     /// (`&mut self` 無しで) クランプ書き戻しできるよう `Cell` で持つ。
     pub camp_scroll: Cell<u16>,
+    /// 遠征画面の手札パネルのスクロール位置。
+    pub hand_scroll: Cell<u16>,
 }
 
 impl Default for LoopMarchState {
@@ -223,6 +225,7 @@ impl LoopMarchState {
             log: vec!["周回討伐へようこそ。まずは拠点で遠征に出よう。".into()],
             rng_state: 0x1234_5678,
             camp_scroll: Cell::new(0),
+            hand_scroll: Cell::new(0),
         }
     }
 
@@ -234,10 +237,18 @@ impl LoopMarchState {
     }
 
     pub fn scroll_camp(&self, delta: i32) {
-        let cur = self.camp_scroll.get() as i32;
-        let next = (cur + delta).clamp(0, u16::MAX as i32) as u16;
-        self.camp_scroll.set(next);
+        adjust_scroll(&self.camp_scroll, delta);
     }
+
+    pub fn scroll_hand(&self, delta: i32) {
+        adjust_scroll(&self.hand_scroll, delta);
+    }
+}
+
+fn adjust_scroll(cell: &Cell<u16>, delta: i32) {
+    let cur = cell.get() as i32;
+    let next = (cur + delta).clamp(0, u16::MAX as i32) as u16;
+    cell.set(next);
 }
 
 #[cfg(test)]

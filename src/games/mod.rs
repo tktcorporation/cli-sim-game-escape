@@ -8,7 +8,7 @@ pub mod loopmarch;
 pub mod metropolis;
 pub mod rpg;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use ratzilla::ratatui::layout::Rect;
@@ -59,6 +59,9 @@ pub enum AppState {
     /// `confirm_reset` is `Some(game)` when a confirmation dialog is shown.
     Settings {
         confirm_reset: Option<GameChoice>,
+        /// リセット項目一覧のスクロール位置。`Cell` で持つのは、描画側
+        /// (`&self` 相当の借用) がクランプ済みの値を書き戻せるようにするため。
+        scroll: Cell<u16>,
     },
     /// Playing a game.
     Playing {

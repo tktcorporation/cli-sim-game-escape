@@ -9,8 +9,10 @@ pub const GO_TO_CAMP: u16 = 6;
 pub const CAMP_SCROLL_UP: u16 = 7;
 pub const CAMP_SCROLL_DOWN: u16 = 8;
 
-/// 手札クリック: action_id = HAND_CLICK_BASE + hand_index
+/// 手札クリック: action_id = HAND_CLICK_BASE + hand_index (HAND_MAX 枠ぶん、10..14 を占有)
 pub const HAND_CLICK_BASE: u16 = 10;
+pub const HAND_SCROLL_UP: u16 = 14;
+pub const HAND_SCROLL_DOWN: u16 = 15;
 
 /// 道クリック (ClickableGrid): action_id = PATH_CLICK_BASE + gy * RING_W + gx
 pub const PATH_CLICK_BASE: u16 = 100;

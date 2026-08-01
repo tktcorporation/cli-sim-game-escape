@@ -486,7 +486,10 @@ fn render_hand(
         .border_style(Style::default().fg(Color::DarkGray))
         .title(" 手札 ");
     let mut cs = click_state.borrow_mut();
-    cl.render(f, area, block, &mut cs, false, 0);
+    ScrollableTab::new(cl, &state.hand_scroll, HAND_SCROLL_UP, HAND_SCROLL_DOWN)
+        .block(block)
+        .arrow_color(Color::DarkGray)
+        .render(f, area, &mut cs);
 }
 
 #[cfg(test)]
