@@ -3,6 +3,8 @@
 //! Design: roguelike grid-based dungeon crawler with inline combat,
 //! satiety, random affixes, quests, prayer, and pets.
 
+use crate::effects::FlashTimer;
+
 // ── Elements ──────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1126,6 +1128,30 @@ pub struct RpgState {
     /// When set, the player has hit a level-up that gates a skill choice.
     /// The dungeon turn engine refuses to advance until they pick.
     pub pending_skill_choice: Option<(SkillKind, SkillKind)>,
+
+    // ── 演出 ──
+    /// 被弾直後の数tickだけHP表示を強調するためのタイマー。render.rs が
+    /// `is_active()` を見て色を上書きする (演出トリガの検知には使わない —
+    /// 下の `*_count` を参照)。`trigger(3)` = 300ms (10 ticks/sec) で、
+    /// `theme::DAMAGE_FLASH` の全画面フェード (160ms) より意図的に長くして
+    /// ある — 一瞬のフラッシュが消えた後もHP表示の赤みだけは少し長く残り、
+    /// 「今ダメージを受けた」という余韻を伝える。
+    pub hero_hurt_flash: FlashTimer,
+    /// 被弾/与ダメージ/クリティカル/チャージ開始の単調増加カウンタ。
+    /// 1ターンの行動解決の中で同じ種類のイベントが複数回起きることが
+    /// あるため (Swift affix の連続行動、複数体の同時攻撃等)、演出トリガは
+    /// 状態の has-happened フラグではなくこの差分で判定する — フラグ方式だと
+    /// 「起きた→起きたまま」の2回目以降を取りこぼす。
+    pub hero_hit_count: u32,
+    pub enemy_hit_count: u32,
+    pub crit_count: u32,
+    pub charge_count: u32,
+    /// `Scene::DungeonExplore` → `Scene::Overworld` の直近の遷移が死亡による
+    /// ものか。retreat_to_town/process_dungeon_death のどちらも
+    /// enter_overworld を呼ぶだけで見分けが付かないため、遷移の意味を
+    /// logic.rs 側で明示しておく (render 側は detect_transitions で
+    /// シーン遷移のエッジと合わせて読むだけ)。
+    pub last_dungeon_exit_was_death: bool,
 }
 
 pub const SATIETY_MAX_DEFAULT: u32 = 1000;
@@ -1191,6 +1217,12 @@ impl RpgState {
             met_blacksmith: false,
             learned_skills: vec![SkillKind::Fire],
             pending_skill_choice: None,
+            hero_hurt_flash: FlashTimer::new(),
+            hero_hit_count: 0,
+            enemy_hit_count: 0,
+            crit_count: 0,
+            charge_count: 0,
+            last_dungeon_exit_was_death: false,
         };
         // Load the village map so the player spawns on the overworld.
         s.dungeon = Some(super::overworld_map::generate_overworld());

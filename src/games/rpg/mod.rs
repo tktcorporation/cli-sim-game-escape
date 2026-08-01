@@ -7,6 +7,7 @@
 pub mod actions;
 pub mod dungeon_map;
 pub mod dungeon_view;
+pub mod effects;
 pub mod events;
 pub mod logic;
 pub mod lore;
@@ -16,27 +17,144 @@ pub mod state;
 #[cfg(test)]
 pub mod simulator;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
 
+use crate::effects::FrameClock;
 use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
+use crate::sound;
+use crate::time;
 
 use actions::*;
+use effects::RpgEffects;
 use state::{Overlay, RpgState, Scene};
 
 pub struct RpgGame {
     state: RpgState,
+    effects: RefCell<RpgEffects>,
+    prev: Cell<PrevSnapshot>,
+    frame_clock: FrameClock,
+}
+
+/// 前フレームの state スナップショット。render 毎に差分を見て演出をトリガする
+/// (`detect_transitions`)。
+///
+/// 被弾/クリティカル検知は `hero_hit_count`/`enemy_hit_count`/`crit_count` の
+/// 差分で行い、`FlashTimer::is_active()` のエッジは使わない。Swift affix の
+/// 同ターン2回行動や複数体の同時攻撃で1ターン内に複数回ヒットが起きうるため、
+/// エッジ検知だと2発目以降を見落とす。
+#[derive(Clone, Copy)]
+struct PrevSnapshot {
+    scene: Scene,
+    /// 村マップは 0、ダンジョンは 1 以上。フロア到達・帰還の両方をこの1値の
+    /// 増減だけで判定できる (overworld_map.rs が floor_num=0 を保証する)。
+    floor_num: u32,
+    hero_hit_count: u32,
+    enemy_hit_count: u32,
+    crit_count: u32,
+    charge_count: u32,
+    level: u32,
+    max_floor_reached: u32,
+    known_weaknesses_count: usize,
 }
 
 impl RpgGame {
     pub fn new() -> Self {
+        let state = RpgState::new();
+        let prev = Self::snapshot(&state);
         Self {
-            state: RpgState::new(),
+            state,
+            effects: RefCell::new(RpgEffects::new()),
+            prev: Cell::new(prev),
+            frame_clock: FrameClock::new(),
         }
+    }
+
+    fn snapshot(s: &RpgState) -> PrevSnapshot {
+        PrevSnapshot {
+            scene: s.scene,
+            floor_num: s.dungeon.as_ref().map(|d| d.floor_num).unwrap_or(0),
+            hero_hit_count: s.hero_hit_count,
+            enemy_hit_count: s.enemy_hit_count,
+            crit_count: s.crit_count,
+            charge_count: s.charge_count,
+            level: s.level,
+            max_floor_reached: s.max_floor_reached,
+            known_weaknesses_count: s.known_weaknesses.len(),
+        }
+    }
+
+    fn detect_transitions(&self, area: Rect) {
+        let prev = self.prev.get();
+        let mut effects = self.effects.borrow_mut();
+        let s = &self.state;
+        let in_dungeon = s.dungeon.is_some();
+        let layout = render::compute_layout(area, in_dungeon, s.scene == Scene::DungeonExplore);
+        let floor_num = s.dungeon.as_ref().map(|d| d.floor_num).unwrap_or(0);
+
+        if s.hero_hit_count != prev.hero_hit_count {
+            effects.push_hero_hit(layout.status_bar);
+            sound::play(sound::HIT_HERO);
+        }
+
+        // 敵ヒットは音を付けない (abyss と同じ理由: 1戦闘で何度も鳴って耳障り)。
+        if s.enemy_hit_count != prev.enemy_hit_count {
+            effects.push_enemy_hit(layout.scene_content);
+        }
+
+        if s.crit_count != prev.crit_count {
+            effects.push_critical(layout.scene_content);
+            sound::play(sound::CRITICAL);
+        }
+
+        if s.charge_count != prev.charge_count {
+            effects.push_charge_warning(layout.scene_content);
+            sound::play(sound::ERROR);
+        }
+
+        if s.known_weaknesses.len() > prev.known_weaknesses_count {
+            effects.push_weakness_discovered(layout.scene_content);
+            sound::play(sound::SELECT);
+        }
+
+        // 新たな最深到達 (自己ベスト更新) と、既に踏破済みの階への降下は
+        // 同じ「floor_numが増える」イベントだが体験としては別物なので、
+        // 両方の演出を毎回重ねがけせず新記録の方を優先する。
+        if floor_num > prev.floor_num {
+            if s.max_floor_reached > prev.max_floor_reached {
+                effects.push_new_record(area);
+                sound::play(sound::FLOOR_CLEAR);
+            } else {
+                effects.push_descend(area);
+                sound::play(sound::FLOOR_CLEAR);
+            }
+        } else if floor_num > 0 && floor_num < prev.floor_num {
+            effects.push_ascend(area);
+        } else if floor_num == 0 && prev.floor_num > 0 {
+            if s.last_dungeon_exit_was_death {
+                effects.push_death(area);
+                sound::play(sound::DEFEAT);
+            } else {
+                effects.push_return_to_town(area);
+                sound::play(sound::VICTORY);
+            }
+        }
+
+        if prev.scene != Scene::GameClear && s.scene == Scene::GameClear {
+            effects.push_boss_defeated(layout.scene_content);
+            sound::play(sound::BOSS_APPEAR);
+        }
+
+        if s.level > prev.level {
+            effects.push_level_up(layout.status_bar);
+            sound::play(sound::LEVEL_UP);
+        }
+
+        self.prev.set(Self::snapshot(s));
     }
 }
 
@@ -48,7 +166,19 @@ impl Game for RpgGame {
     fn handle_input(&mut self, event: &InputEvent) -> bool {
         match event {
             InputEvent::Key(ch) => handle_key(&mut self.state, *ch),
-            InputEvent::Click(_, id) => handle_click(&mut self.state, *id),
+            InputEvent::Click(_, id) => {
+                let consumed = handle_click(&mut self.state, *id);
+                // マップタップ/D-padは移動と同時に攻撃を伴うことがあり、
+                // 攻撃時は detect_transitions が専用音 (HIT_HERO/CRITICAL等) を
+                // 鳴らすため、ここで汎用クリック音を重ねると二重に鳴ってしまう。
+                // 純粋な移動タップはキー入力と同様に無音のままにし、それ以外の
+                // 明示的な操作 (ボタン・メニュー) だけに成功/失敗の音を付ける。
+                let is_movement_tap = (MAP_TAP_BASE..DPAD_BASE + 9).contains(id);
+                if !is_movement_tap {
+                    sound::play(if consumed { sound::CLICK } else { sound::ERROR });
+                }
+                consumed
+            }
         }
     }
 
@@ -57,7 +187,10 @@ impl Game for RpgGame {
     }
 
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+        self.detect_transitions(area);
         render::render(&self.state, f, area, click_state);
+        let elapsed = self.frame_clock.elapsed(time::now_ms().unwrap_or(0.0));
+        self.effects.borrow_mut().process(elapsed, f.buffer_mut(), area);
     }
 }
 
@@ -532,6 +665,17 @@ mod tests {
         logic::enter_dungeon(&mut g.state, 1);
     }
 
+    /// `EffectHost::is_running()` は `process()` で経過時間を消化するまで
+    /// true のまま残る。「baselineをprevに記録するための detect_transitions
+    /// 呼び出し」自体が (init_dungeon 等の) 本物の遷移を検知して演出を積んで
+    /// しまうケースでは、その残留エフェクトが後続の assert!(is_running()) を
+    /// 汚染してしまう。この関数で確実に使い切ってから本題の検証に入る。
+    fn drain_effects(g: &RpgGame, area: Rect) {
+        let mut buf = ratzilla::ratatui::buffer::Buffer::empty(area);
+        g.effects.borrow_mut().process(tachyonfx::Duration::from_millis(5000), &mut buf, area);
+        assert!(!g.effects.borrow().is_running(), "drain_effects後は演出が残っていないはず");
+    }
+
     #[test]
     fn starts_in_overworld_with_village_loaded() {
         let g = make_game();
@@ -571,6 +715,158 @@ mod tests {
         assert_eq!(g.state.scene, Scene::Overworld);
         let map = g.state.dungeon.as_ref().unwrap();
         assert!(map.is_overworld);
+    }
+
+    fn area() -> Rect {
+        Rect::new(0, 0, 80, 30)
+    }
+
+    #[test]
+    fn detect_transitions_pushes_hero_hit_on_count_change() {
+        let mut g = make_game();
+        // 構築直後 (村, floor_numも変化なし) なので演出は何も積まれていない。
+        assert!(!g.effects.borrow().is_running());
+        g.state.hero_hurt_flash.trigger(3);
+        g.state.hero_hit_count = g.state.hero_hit_count.wrapping_add(1);
+        g.detect_transitions(area());
+        assert!(g.effects.borrow().is_running());
+    }
+
+    /// 回帰テスト: Swift affix の同ターン2回行動などで hero_hit_count が
+    /// render を挟まず連続して増える場合でも、差分検知なので毎回演出が
+    /// 積まれるはず (`FlashTimer::is_active()` のエッジ検知だと2発目以降を
+    /// 見落とすため、カウンタ差分方式を採用している)。
+    #[test]
+    fn detect_transitions_keeps_pushing_on_consecutive_hits_within_one_turn() {
+        let mut g = make_game();
+        assert!(!g.effects.borrow().is_running());
+        g.state.hero_hurt_flash.trigger(3);
+        g.state.hero_hit_count = g.state.hero_hit_count.wrapping_add(2); // 1ターン内に2回ヒット
+        g.detect_transitions(area());
+        assert!(g.effects.borrow().is_running(), "2回ヒット分もまとめて検知され演出が積まれるはず");
+    }
+
+    #[test]
+    fn detect_transitions_pushes_critical_on_crit_count_change() {
+        let mut g = make_game();
+        assert!(!g.effects.borrow().is_running());
+        g.state.crit_count = g.state.crit_count.wrapping_add(1);
+        g.detect_transitions(area());
+        assert!(g.effects.borrow().is_running());
+    }
+
+    #[test]
+    fn detect_transitions_pushes_effect_on_first_floor_entry() {
+        let mut g = make_game();
+        g.detect_transitions(area()); // 初期状態 (村, floor_num=0) を prev に記録
+        into_dungeon(&mut g); // floor_num: 0 -> 1 (同時に max_floor_reached も 0 -> 1)
+        g.detect_transitions(area());
+        assert!(g.effects.borrow().is_running());
+    }
+
+    /// 回帰テスト: 既に到達済みの深さへ再度潜った場合 (自己ベスト更新を
+    /// 伴わない降下) は push_new_record ではなく push_descend が発火する
+    /// はず — floor_num の直接操作で「既踏破フロアへの降下」を再現する
+    /// (ascend/descend の実際の導線 (階段) はイベント解決を介するため単体
+    /// テストでは floor_num を直接書き換える方が意図が明確)。
+    #[test]
+    fn detect_transitions_pushes_plain_descend_when_not_a_new_record() {
+        let mut g = make_game();
+        into_dungeon(&mut g); // floor_num: 0 -> 1, max_floor_reached: 0 -> 1
+        g.state.max_floor_reached = 3; // 既に3階まで到達済みという体で上書きする
+        g.state.dungeon.as_mut().unwrap().floor_num = 2;
+        // ここまでの変化 (入場・到達済み扱いへの書き換え) を prev に吸収する。
+        // この呼び出し自体は floor_num の増加を検知して何かしら演出を積むため、
+        // drain_effects で使い切ってからでないと次のアサーションが
+        // 「本当に検証対象の分岐が発火したか」を保証できない。
+        g.detect_transitions(area());
+        drain_effects(&g, area());
+        g.state.dungeon.as_mut().unwrap().floor_num = 3; // 既踏破の3階まで降りる (自己ベスト更新なし)
+        g.detect_transitions(area());
+        assert!(
+            g.effects.borrow().is_running(),
+            "自己ベスト更新を伴わない降下でも通常の descend 演出は積まれるはず"
+        );
+    }
+
+    #[test]
+    fn detect_transitions_pushes_ascend_when_floor_decreases_without_reaching_village() {
+        let mut g = make_game();
+        into_dungeon(&mut g);
+        g.state.dungeon.as_mut().unwrap().floor_num = 3;
+        g.detect_transitions(area()); // ここまでを prev に吸収する
+        drain_effects(&g, area()); // 上の呼び出しで積まれた演出を使い切る
+        g.state.dungeon.as_mut().unwrap().floor_num = 2; // 村へは戻らず1つ浅い階へ
+        g.detect_transitions(area());
+        assert!(g.effects.borrow().is_running());
+    }
+
+    #[test]
+    fn detect_transitions_pushes_effect_on_death_and_marks_reason() {
+        let mut g = make_game();
+        into_dungeon(&mut g);
+        g.detect_transitions(area()); // ダンジョン内にいる状態を prev に記録
+        drain_effects(&g, area()); // 入場自体の演出を使い切ってからでないと死亡演出の検証が汚染される
+        g.state.hp = 1; // スライムの一撃 (Slime.max(1)ダメージ) で確実に0になる
+        let map = g.state.dungeon.as_mut().unwrap();
+        let (px, py) = (map.player_x, map.player_y);
+        map.monsters.clear();
+        let mut placed = false;
+        for &dir in &[state::Facing::North, state::Facing::East, state::Facing::South, state::Facing::West] {
+            let nx = px as i32 + dir.dx();
+            let ny = py as i32 + dir.dy();
+            if !map.in_bounds(nx, ny) { continue; }
+            let (ux, uy) = (nx as usize, ny as usize);
+            if !map.cell(ux, uy).is_walkable() { continue; }
+            // can_charge=false のスライムを隣接させ、必ず通常攻撃で hp を 0 にする。
+            map.monsters.push(state::Monster {
+                kind: state::EnemyKind::Slime, x: ux, y: uy, hp: 10, max_hp: 10,
+                awake: true, charging: false, affix: None,
+            });
+            placed = true;
+            break;
+        }
+        assert!(placed, "隣接できる歩行可能マスが見つからなかった");
+        logic::on_player_action(&mut g.state);
+        assert_eq!(g.state.scene, Scene::Overworld, "HP0での行動後は村へ戻るはず");
+        assert!(g.state.last_dungeon_exit_was_death);
+        g.detect_transitions(area());
+        assert!(g.effects.borrow().is_running());
+    }
+
+    #[test]
+    fn detect_transitions_pushes_effect_on_voluntary_return_and_marks_reason() {
+        let mut g = make_game();
+        into_dungeon(&mut g);
+        g.detect_transitions(area()); // ダンジョン内にいる状態を prev に記録
+        drain_effects(&g, area()); // 入場自体の演出を使い切ってからでないと帰還演出の検証が汚染される
+        logic::retreat_to_town(&mut g.state);
+        assert_eq!(g.state.scene, Scene::Overworld);
+        assert!(!g.state.last_dungeon_exit_was_death);
+        g.detect_transitions(area());
+        assert!(g.effects.borrow().is_running());
+    }
+
+    #[test]
+    fn detect_transitions_pushes_level_up_effect() {
+        let mut g = make_game();
+        g.detect_transitions(area()); // 起動直後 (Lv1) を prev に記録
+        assert!(!g.effects.borrow().is_running());
+        // 実際の撃破経路 (attack_monster) を通すと enemy_hit_count も同時に
+        // 増えてしまい、「level up 由来で発火したか」を切り分けられない。
+        // レベル値だけを直接変えて level up 検知を単独で検証する。
+        g.state.level += 1;
+        g.detect_transitions(area());
+        assert!(g.effects.borrow().is_running());
+    }
+
+    #[test]
+    fn detect_transitions_pushes_new_record_effect() {
+        let mut g = make_game();
+        g.detect_transitions(area());
+        into_dungeon(&mut g); // max_floor_reached: 0 -> 1
+        g.detect_transitions(area());
+        assert!(g.effects.borrow().is_running());
     }
 
     #[test]

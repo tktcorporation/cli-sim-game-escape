@@ -15,9 +15,15 @@ use super::state::{
     MAX_LEVEL,
 };
 
-// ── Tick (no-op: command-based game) ─────────────────────────
+// ── Tick ───────────────────────────────────────────────────────
+//
+// このゲームはコマンド駆動 (プレイヤーの行動が起点) なので、10 ticks/sec の
+// 固定タイムステップはゲーム進行そのものには使わない。render 側が毎フレーム
+// 呼ぶ被弾表示タイマーの減衰だけがここで必要になる。
 
-pub fn tick(_state: &mut RpgState, _delta_ticks: u32) {}
+pub fn tick(state: &mut RpgState, delta_ticks: u32) {
+    state.hero_hurt_flash.tick(delta_ticks);
+}
 
 // ── Cursor navigation (Issue: arrow + A/B unification) ───────
 //
@@ -472,6 +478,8 @@ pub fn pray(state: &mut RpgState) -> bool {
         // Curse (low chance)
         let dmg = state.max_hp / 6;
         state.hp = state.hp.saturating_sub(dmg).max(1);
+        state.hero_hurt_flash.trigger(3);
+        state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
         state.add_log("…神は応えなかった。心に虚しさが残る…");
     } else if roll < blessing_thresh {
         // Major blessing
@@ -860,6 +868,10 @@ pub fn attack_monster(state: &mut RpgState, idx: usize) {
         m.hp = m.hp.saturating_sub(damage);
         m.awake = true;
     }
+    state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
+    if is_crit {
+        state.crit_count = state.crit_count.wrapping_add(1);
+    }
 
     let weak_str = match einfo.weakness {
         Some(e) if Some(e) == player_element
@@ -1039,6 +1051,10 @@ fn tick_satiety(state: &mut RpgState) {
         // Starving — drain HP each turn
         let drain = (state.max_hp / 30).max(1);
         state.hp = state.hp.saturating_sub(drain);
+        // hit_count は増やさない: 飢餓は満腹度0の間ずっと毎ターン発生するため、
+        // 一撃ごとに画面全体をフラッシュさせると毎ターンうるさくなる。
+        // HPバーの色 (hero_hurt_flash) だけは反映して「削れている」ことを伝える。
+        state.hero_hurt_flash.trigger(3);
         if state.turn_count.is_multiple_of(5) {
             state.add_log(&format!("飢えで体力が削れる… -{}HP", drain));
         }
@@ -1133,6 +1149,8 @@ fn monster_act(state: &mut RpgState, idx: usize) {
         if adjacent_to_player {
             let damage = (eff_atk * 2).saturating_sub(state.total_def() / 2).max(1);
             state.hp = state.hp.saturating_sub(damage);
+            state.hero_hurt_flash.trigger(3);
+            state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
             state.add_log(&format!("{}の渾身の一撃！ {}ダメージ！", m_name, damage));
         } else {
             state.add_log(&format!("{}の渾身の一撃は空振り…", m_name));
@@ -1148,6 +1166,7 @@ fn monster_act(state: &mut RpgState, idx: usize) {
         // can shield, heal, or step out of range.
         if can_charge && rng_range(state, 100) < 25 {
             state.dungeon.as_mut().unwrap().monsters[idx].charging = true;
+            state.charge_count = state.charge_count.wrapping_add(1);
             state.add_log(&format!("⚡{}が力を溜めている！防御か回避を！", m_name));
             return;
         }
@@ -1157,6 +1176,8 @@ fn monster_act(state: &mut RpgState, idx: usize) {
             damage += 3;
         }
         state.hp = state.hp.saturating_sub(damage);
+        state.hero_hurt_flash.trigger(3);
+        state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
         state.add_log(&format!("{}の攻撃！ {}ダメージ！", m_name, damage));
         return;
     }
@@ -1516,6 +1537,8 @@ fn apply_event_outcome(state: &mut RpgState, outcome: &EventOutcome) -> bool {
     } else if outcome.hp_change < 0 {
         let damage = (-outcome.hp_change) as u32;
         state.hp = state.hp.saturating_sub(damage);
+        state.hero_hurt_flash.trigger(3);
+        state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
     } else if outcome.hp_change > 0 {
         state.hp = (state.hp + outcome.hp_change as u32).min(state.max_hp);
     }
@@ -1649,6 +1672,7 @@ pub fn retreat_to_town(state: &mut RpgState) {
     } else {
         state.add_log("村に戻った。");
     }
+    state.last_dungeon_exit_was_death = false;
     enter_overworld(state);
 }
 
@@ -1666,6 +1690,7 @@ fn process_dungeon_death(state: &mut RpgState) {
     state.mp = state.max_mp / 2;
     state.satiety = state.satiety_max / 2;
     state.add_log(&format!("力尽きた… {}G失った", lost_gold));
+    state.last_dungeon_exit_was_death = true;
     enter_overworld(state);
 }
 
@@ -1748,6 +1773,7 @@ fn cast_damage_skill(state: &mut RpgState, skill: SkillKind, idx: usize) {
         m.hp = m.hp.saturating_sub(damage);
         m.awake = true;
     }
+    state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
 
     let weak_str = if is_weak { " [弱点!]" } else { "" };
     let name = einfo.name;
@@ -2250,6 +2276,92 @@ mod tests {
     }
 
     #[test]
+    fn attack_monster_increments_enemy_hit_count() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: 0, y: 0, hp: 999, max_hp: 999,
+            awake: true, charging: false, affix: None,
+        });
+        let before = s.enemy_hit_count;
+        attack_monster(&mut s, 0);
+        assert_eq!(s.enemy_hit_count, before + 1);
+    }
+
+    #[test]
+    fn monster_attack_triggers_hero_hurt_flash() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        let px = map.player_x;
+        let py = map.player_y;
+        let mut placed = false;
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            let nx = px as i32 + dir.dx();
+            let ny = py as i32 + dir.dy();
+            if !map.in_bounds(nx, ny) { continue; }
+            let (ux, uy) = (nx as usize, ny as usize);
+            if !map.cell(ux, uy).is_walkable() { continue; }
+            map.monsters.clear();
+            map.monsters.push(Monster {
+                kind: EnemyKind::Slime, x: ux, y: uy, hp: 999, max_hp: 999,
+                awake: true, charging: false, affix: None,
+            });
+            placed = true;
+            break;
+        }
+        assert!(placed, "隣接できる歩行可能マスが見つからなかった");
+        assert!(!s.hero_hurt_flash.is_active());
+        // charge 抽選 (25%) に外れるまで数回試す。通常攻撃なら必ず hero_hurt_flash が立つ。
+        for _ in 0..20 {
+            monster_act(&mut s, 0);
+            if s.hero_hurt_flash.is_active() {
+                return;
+            }
+            // charge の場合は次のtickで解放される。解放も hero_hurt_flash を立てる。
+            if s.dungeon.as_ref().unwrap().monsters[0].charging {
+                monster_act(&mut s, 0);
+                assert!(s.hero_hurt_flash.is_active(), "チャージ解放も被弾フラッシュを立てるはず");
+                return;
+            }
+        }
+        panic!("20回試行しても被弾フラッシュが一度も立たなかった");
+    }
+
+    #[test]
+    fn tick_decays_hero_hurt_flash() {
+        let mut s = RpgState::new();
+        s.hero_hurt_flash.trigger(3);
+        tick(&mut s, 2);
+        assert!(s.hero_hurt_flash.is_active());
+        tick(&mut s, 10);
+        assert!(!s.hero_hurt_flash.is_active());
+    }
+
+    #[test]
+    fn retreat_to_town_marks_exit_as_not_death() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        s.last_dungeon_exit_was_death = true; // 前回のrunの残り値を汚染させておく
+        retreat_to_town(&mut s);
+        assert!(!s.last_dungeon_exit_was_death);
+        assert_eq!(s.scene, Scene::Overworld);
+    }
+
+    #[test]
+    fn dungeon_death_marks_exit_as_death() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        s.hp = 0;
+        process_dungeon_death(&mut s);
+        assert!(s.last_dungeon_exit_was_death);
+        assert_eq!(s.scene, Scene::Overworld);
+        assert!(s.hp > 0, "死亡処理後はHPが回復した状態で村に戻るはず");
+    }
+
+    #[test]
     fn quest_slay_progress() {
         let mut s = RpgState::new();
         s.active_quest = Some(Quest {
@@ -2460,6 +2572,43 @@ mod tests {
             "200 trials never rolled into the charge branch — \
              test setup is broken"
         );
+    }
+
+    /// 回帰テスト: Swift affix の敵が「チャージ解放→同ターン内に新たな
+    /// チャージ抽選」を行うケース (上の `swift_charging_enemy_does_not_release_same_turn`
+    /// と同じ前提) でも、`charge_count` が新たな警告演出のトリガとして
+    /// 正しく増分することを確認する。真偽値のエッジ検知 (非chargingから
+    /// chargingへの遷移) だと、解放直後の同ターン再チャージが「true→
+    /// (解放でfalseを経由せず)true」に見えて検知漏れするため、単調増加
+    /// カウンタ方式を採用している。
+    #[test]
+    fn charge_count_increments_even_when_recharging_within_the_same_turn() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        spawn_adjacent(&mut s, EnemyKind::Golem, Some(EnemyAffix::Swift));
+
+        let mut saw_recharge = false;
+        for trial_seed in 0u64..500 {
+            s.rng_seed = trial_seed;
+            let m = &mut s.dungeon.as_mut().unwrap().monsters[0];
+            m.charging = true; // 前ターンから継続中のチャージを解放させる
+            m.hp = m.max_hp;
+            let before = s.charge_count;
+
+            monster_turn(&mut s);
+
+            let charging_after = s.dungeon.as_ref().unwrap().monsters[0].charging;
+            if charging_after {
+                saw_recharge = true;
+                assert_eq!(
+                    s.charge_count,
+                    before + 1,
+                    "解放後の同ターン内チャージも charge_count に反映されるはず (seed {trial_seed})"
+                );
+                break;
+            }
+        }
+        assert!(saw_recharge, "500 シードでも解放直後の同ターン再チャージが起きなかった — テスト設定が壊れている");
     }
 
     /// Spawn a monster of `kind` on a walkable tile adjacent to the player.
