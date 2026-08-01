@@ -240,11 +240,14 @@ fn spawn_monster(state: &mut LoopMarchState, pos: usize, terrain: Terrain) {
         && forest_cluster_size(&state.path, pos) >= 2
         && rng_below(&mut state.rng_state, 1000) < 500;
 
+    // 初期HP/攻撃力の勇者でも、初回の手札補充(木材3+石材3)成立前に
+    // 死んでしまう確率が低くなるよう調整した値 (simulator.rs の
+    // 統計テストで検証)。
     let (base_hp, base_atk) = match (terrain, elite) {
-        (Terrain::Forest, false) => (8, 2),
-        (Terrain::Forest, true) => (14, 3),
-        (Terrain::Mountain, _) => (16, 3),
-        (Terrain::Graveyard, _) => (5, 2),
+        (Terrain::Forest, false) => (6, 1),
+        (Terrain::Forest, true) => (10, 2),
+        (Terrain::Mountain, _) => (11, 2),
+        (Terrain::Graveyard, _) => (4, 1),
         (Terrain::Meadow, _) => unreachable!("Meadow は arrive_at_tile で別処理される"),
     };
     let hp = ((base_hp as f64) * difficulty).round().max(1.0) as i32;

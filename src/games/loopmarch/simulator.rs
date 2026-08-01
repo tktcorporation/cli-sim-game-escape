@@ -55,6 +55,49 @@ fn long_run_never_panics_and_keeps_invariants() {
     );
 }
 
+/// 初期手札(森/岩山/ランダム)を隣接3マスにそのまま置く、という典型的な
+/// 初回プレイの挙動で、初回の手札補充(木材3+石材3)成立前に死亡してしまう
+/// 割合を大量のシード試行で測る。ここが高すぎると「補充できたことがない」
+/// という体感になる — 敵性能を調整した際の回帰を検知するための基準値。
+#[test]
+fn first_refill_is_reachable_without_excessive_death_rate() {
+    use super::logic::start_or_resume_expedition;
+
+    const RUNS: u32 = 1000;
+    const MAX_TICKS: u32 = 20_000;
+
+    let mut died_before_success = 0u32;
+
+    for seed in 1..=RUNS {
+        let mut s = LoopMarchState::new();
+        s.rng_state = seed;
+        start_or_resume_expedition(&mut s);
+        for (i, slot) in [0usize, 1, 2].into_iter().enumerate() {
+            logic::select_hand(&mut s, i);
+            logic::place_selected(&mut s, slot);
+        }
+
+        for _ in 0..MAX_TICKS {
+            let was_run_active = s.run_active;
+            logic::tick(&mut s);
+            if was_run_active && !s.run_active {
+                died_before_success += 1;
+                break;
+            }
+            if s.wood >= 3 && s.stone >= 3 {
+                break;
+            }
+        }
+    }
+
+    let death_rate = died_before_success as f64 / RUNS as f64;
+    assert!(
+        death_rate < 0.15,
+        "初回補充成立前の死亡率が高すぎる: {:.1}% (died={died_before_success}/{RUNS})",
+        death_rate * 100.0
+    );
+}
+
 #[test]
 fn death_does_not_reduce_persistent_soul() {
     // handle_death が永続資源 (魂) に誤って触れていないかの回帰テスト。
