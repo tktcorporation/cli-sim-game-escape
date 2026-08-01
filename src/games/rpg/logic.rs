@@ -1280,6 +1280,7 @@ fn pet_turn(state: &mut RpgState) {
             state.add_log(&format!("{}が{}に{}ダメージ！", pet.name, target_name, dmg));
             let map = state.dungeon.as_mut().unwrap();
             map.monsters[idx].hp = map.monsters[idx].hp.saturating_sub(dmg);
+            state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
             if map.monsters[idx].hp == 0 {
                 let killed_kind = map.monsters[idx].kind;
                 let pre = map.monsters[idx].max_hp;
@@ -2288,6 +2289,50 @@ mod tests {
         let before = s.enemy_hit_count;
         attack_monster(&mut s, 0);
         assert_eq!(s.enemy_hit_count, before + 1);
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): ペットの攻撃はプレイヤーの攻撃・
+    /// スキルとは別経路 (pet_turn) でモンスターにダメージを与えるため、
+    /// enemy_hit_count の増分を忘れると「ペットが毎ターン殴っているのに
+    /// 一撃演出が一切出ない」という抜け漏れになる。
+    #[test]
+    fn pet_attack_increments_enemy_hit_count() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        let px = map.player_x;
+        let py = map.player_y;
+        map.monsters.clear();
+        let mut monster_spot = None;
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            let nx = px as i32 + dir.dx();
+            let ny = py as i32 + dir.dy();
+            if !map.in_bounds(nx, ny) { continue; }
+            let (ux, uy) = (nx as usize, ny as usize);
+            if !map.cell(ux, uy).is_walkable() { continue; }
+            monster_spot = Some((ux, uy));
+            break;
+        }
+        let (mx, my) = monster_spot.expect("隣接できる歩行可能マスが見つからなかった");
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: mx, y: my, hp: 999, max_hp: 999,
+            awake: true, charging: false, affix: None,
+        });
+        // ペットをプレイヤーの元位置に置く。モンスターはプレイヤーの隣接マス
+        // に置いたので、プレイヤーの位置はモンスターとも必ず隣接している。
+        s.pet = Some(Pet {
+            kind: EnemyKind::Slime,
+            name: "テストペット".to_string(),
+            x: px,
+            y: py,
+            hp: 20,
+            max_hp: 20,
+            level: 1,
+        });
+
+        let before = s.enemy_hit_count;
+        pet_turn(&mut s);
+        assert_eq!(s.enemy_hit_count, before + 1, "ペットの攻撃もenemy_hit_countに反映されるはず");
     }
 
     #[test]

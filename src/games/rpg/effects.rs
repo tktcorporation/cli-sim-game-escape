@@ -120,9 +120,13 @@ impl RpgEffects {
         self.host.push(effect, area);
     }
 
-    /// 魔王撃破 (ゲームクリア) 演出。ダンジョン画面が dissolve で消える。
+    /// 魔王撃破 (ゲームクリア) 演出。detect_transitions → render → process の
+    /// 順で呼ばれるため、この時点で Buffer には既に新しい GameClear 画面が
+    /// 描画済み。dissolve (消えていく演出) を使うと「今描画されたクリア画面」
+    /// が一瞬消えてから元に戻るという逆効果になるため、coalesce (組み上がって
+    /// 現れる演出) でクリア画面自体が出現するように見せる。
     pub fn push_boss_defeated(&mut self, scene: Rect) {
-        let effect = fx::dissolve(Duration::from_millis(600));
+        let effect = fx::coalesce(Duration::from_millis(600));
         self.host.push(effect, scene);
     }
 

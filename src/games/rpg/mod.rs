@@ -146,7 +146,7 @@ impl RpgGame {
 
         if prev.scene != Scene::GameClear && s.scene == Scene::GameClear {
             effects.push_boss_defeated(layout.scene_content);
-            sound::play(sound::BOSS_APPEAR);
+            sound::play(sound::VICTORY);
         }
 
         if s.level > prev.level {
