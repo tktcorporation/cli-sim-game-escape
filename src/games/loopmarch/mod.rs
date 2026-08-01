@@ -23,7 +23,7 @@ use std::rc::Rc;
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
 
-use crate::effects::{FlashTimer, FrameClock};
+use crate::effects::FrameClock;
 use crate::games::{Game, GameChoice};
 use crate::input::{is_narrow_layout, ClickState, InputEvent};
 use crate::sound;
@@ -54,13 +54,21 @@ impl Default for LoopMarchGame {
 
 /// 前フレームの state スナップショット。render 毎に差分を見て演出をトリガする
 /// (`detect_transitions`)。
+///
+/// ヒット検知には `hero_hurt_flash`/`enemy_hurt_flash` の活性化エッジではなく
+/// HP の実測値を使う。戦闘は毎 tick 発生しうるため、trigger(3) が decay より
+/// 先に上書きされ続けると `is_active()` が戦闘中ずっと true のままになり
+/// (= abyss のように攻撃間隔がフラッシュ長より長い前提が成り立たない)、
+/// 2発目以降のヒットで演出・音が発火しなくなるため。
 #[derive(Clone, Copy, Default)]
 struct PrevSnapshot {
     lap: u32,
     best_lap: u32,
     run_active: bool,
-    hero_hurt_flash: FlashTimer,
-    enemy_hurt_flash: FlashTimer,
+    hero_hp: i32,
+    /// 勇者の現在地マスにいるモンスターの HP。マスが変わったりモンスターが
+    /// 不在なら `None`。
+    monster_hp_here: Option<i32>,
 }
 
 impl LoopMarchGame {
@@ -89,8 +97,8 @@ impl LoopMarchGame {
             lap: s.lap,
             best_lap: s.best_lap,
             run_active: s.run_active,
-            hero_hurt_flash: s.hero_hurt_flash,
-            enemy_hurt_flash: s.enemy_hurt_flash,
+            hero_hp: s.hero.hp,
+            monster_hp_here: s.path[s.hero.position].monster.as_ref().map(|m| m.hp),
         }
     }
 
@@ -102,13 +110,23 @@ impl LoopMarchGame {
         if s.phase == Phase::Expedition {
             let layout = render::compute_expedition_layout(area, is_narrow_layout(area.width));
 
-            if !prev.hero_hurt_flash.is_active() && s.hero_hurt_flash.is_active() {
+            if s.hero.hp < prev.hero_hp {
                 effects.push_hero_hit(layout.header);
                 sound::play(sound::DAMAGE);
             }
-            if !prev.enemy_hurt_flash.is_active() && s.enemy_hurt_flash.is_active() {
+
+            let monster_hp_here = s.path[s.hero.position].monster.as_ref().map(|m| m.hp);
+            // 撃破されて消えた (Some → None) 場合も、直前の一撃がヒットした
+            // ことに変わりはないのでフラッシュ対象に含める。
+            let enemy_hit = match (prev.monster_hp_here, monster_hp_here) {
+                (Some(prev_hp), Some(cur_hp)) => cur_hp < prev_hp,
+                (Some(_), None) => true,
+                _ => false,
+            };
+            if enemy_hit {
                 effects.push_enemy_hit(layout.ring);
             }
+
             if s.lap > prev.lap {
                 effects.push_lap_complete(layout.ring);
                 sound::play(sound::VICTORY);
@@ -420,6 +438,42 @@ mod tests {
         game.handle_input(&click(CAMP_START_OR_RESUME));
         game.tick(state::MOVE_TICKS);
         assert_eq!(game.state.hero.position, 1);
+    }
+
+    /// 回帰テスト: 戦闘は毎 tick 発生しうるため、`hurt_flash` の活性化エッジ
+    /// (非アクティブ→アクティブ) で演出をトリガすると、trigger(3) が decay
+    /// より先に上書きされ続けて「戦闘中ずっとアクティブ」になり、2発目以降の
+    /// ヒットで演出が発火しなくなるバグがあった。HP の実測値差分で検知する
+    /// ことで、連続ヒットの毎回で `push_enemy_hit` が積まれることを確認する。
+    #[test]
+    fn detect_transitions_pushes_enemy_hit_on_every_consecutive_hit() {
+        let mut game = LoopMarchGame::new();
+        logic::start_or_resume_expedition(&mut game.state);
+        let pos = game.state.hero.position;
+        game.state.path[pos].monster = Some(state::Monster {
+            terrain: state::Terrain::Graveyard,
+            hp: 100,
+            max_hp: 100,
+            attack: 1,
+            elite: false,
+        });
+        let area = Rect::new(0, 0, 80, 30);
+
+        logic::tick(&mut game.state);
+        game.detect_transitions(area);
+        assert!(game.effects.borrow().is_running(), "1発目で演出が積まれるはず");
+
+        // Effect を使い切って running でない状態に戻す。
+        let mut buf = ratzilla::ratatui::buffer::Buffer::empty(area);
+        game.effects.borrow_mut().process(tachyonfx::Duration::from_millis(500), &mut buf, area);
+        assert!(!game.effects.borrow().is_running());
+
+        logic::tick(&mut game.state);
+        game.detect_transitions(area);
+        assert!(
+            game.effects.borrow().is_running(),
+            "同じ相手への2発目でも演出が積まれるはず (毎tick戦闘が続く限りhurt_flashは非活性化しない)"
+        );
     }
 
     #[test]

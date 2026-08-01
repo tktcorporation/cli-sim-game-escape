@@ -62,6 +62,11 @@ impl LoopMarchEffects {
     pub fn process(&mut self, elapsed: Duration, buf: &mut Buffer, area: Rect) {
         self.host.process(elapsed, buf, area);
     }
+
+    /// 現在進行中の演出があるか。
+    pub fn is_running(&self) -> bool {
+        self.host.is_running()
+    }
 }
 
 impl Default for LoopMarchEffects {
