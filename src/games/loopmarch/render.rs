@@ -326,35 +326,49 @@ fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: b
     } else {
         Color::Red
     };
-    let combat_span = match &state.path[state.hero.position].monster {
-        Some(m) => Span::styled(
-            format!("  VS {} {}/{}", monster_name(m), m.hp.max(0), m.max_hp),
-            Style::default().fg(enemy_color).add_modifier(Modifier::BOLD),
-        ),
-        None => Span::raw(""),
-    };
+    let enemy_style = Style::default().fg(enemy_color).add_modifier(Modifier::BOLD);
+    let stats_text = format!("ATK{} DEF{}", state.hero.attack, defense);
 
     // 狭幅では横幅が交戦中のモンスター名/HP表示と競合するため、ゲージ表示は
-    // 幅に余裕がある wide のみ。narrow は数値のみに留める (Codexレビュー指摘:
-    // 30桁幅だとゲージ込みで敵情報が見切れていた)。
-    let hp_text = if is_narrow {
-        format!(" HP {}/{} ", state.hero.hp, state.hero.max_hp)
+    // 幅に余裕がある wide のみ。narrow は数値のみに留め、ATK/DEF は line2 に
+    // 逃がして交戦情報 (敵の名前+HP) の表示幅を確保する
+    // (Codexレビュー指摘: 30桁幅だとゲージ込み・ATK/DEF同居だと敵情報が
+    // 見切れていた)。それでも HP が育って桁数が増えると幅を圧迫しうるため、
+    // 数値側は削らず敵の名前だけを残り幅に合わせて切り詰める。
+    let (hp_text, line1_stats, line2_stats, combat_span) = if is_narrow {
+        let hp_text = format!(" HP{}/{} ", state.hero.hp, state.hero.max_hp);
+        let monster = state.path[state.hero.position].monster.as_ref();
+        let combat_text = narrow_combat_text(monster, &hp_text, area.width);
+        (hp_text, None, Some(format!(" {stats_text}")), Span::styled(combat_text, enemy_style))
     } else {
         let bar = hp_bar(state.hero.hp, state.hero.max_hp, 8);
-        format!(" {} {}/{} ", bar, state.hero.hp, state.hero.max_hp)
+        let hp_text = format!(" {} {}/{} ", bar, state.hero.hp, state.hero.max_hp);
+        let combat_span = match &state.path[state.hero.position].monster {
+            Some(m) => Span::styled(
+                format!("  VS {} {}/{}", monster_name(m), m.hp.max(0), m.max_hp),
+                enemy_style,
+            ),
+            None => Span::raw(""),
+        };
+        (hp_text, Some(stats_text), None, combat_span)
     };
-    let line1 = Line::from(vec![
-        Span::styled(hp_text, Style::default().fg(hp_color).add_modifier(Modifier::BOLD)),
-        Span::styled(
-            format!("ATK{} DEF{}", state.hero.attack, defense),
-            Style::default().fg(Color::Cyan),
-        ),
-        combat_span,
-    ]);
-    let line2 = Line::from(Span::styled(
-        format!(" 第{}周 (自己ベスト{}周)", state.lap + 1, state.best_lap),
-        Style::default().fg(Color::White),
-    ));
+
+    let mut line1_spans = vec![Span::styled(
+        hp_text,
+        Style::default().fg(hp_color).add_modifier(Modifier::BOLD),
+    )];
+    if let Some(stats) = line1_stats {
+        line1_spans.push(Span::styled(stats, Style::default().fg(Color::Cyan)));
+    }
+    line1_spans.push(combat_span);
+    let line1 = Line::from(line1_spans);
+
+    let lap_text = format!(" 第{}周 (自己ベスト{}周)", state.lap + 1, state.best_lap);
+    let mut line2_spans = vec![Span::styled(lap_text, Style::default().fg(Color::White))];
+    if let Some(stats) = line2_stats {
+        line2_spans.push(Span::styled(stats, Style::default().fg(Color::Cyan)));
+    }
+    let line2 = Line::from(line2_spans);
 
     // 資源は「このラン限りで死ぬと消える」ものと「死んでも残る」ものを
     // 常時ラベルで分けて見せる — 死亡後に初めて気付く設計は分かりにくい
@@ -382,6 +396,44 @@ fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: b
             .title(" 周回討伐 "),
     );
     f.render_widget(widget, area);
+}
+
+/// 表示上の幅 (半角=1/全角=2) を返す。ratatui の Buffer もこの幅で描画を
+/// 打ち切るため、切り詰め計算は文字数ではなくこの幅で行う必要がある
+/// (文字数で計算すると、全角文字を含む名前が実際の残り幅の2倍まで
+/// 書き込まれてしまう)。
+fn display_width(s: &str) -> usize {
+    Span::raw(s).width()
+}
+
+/// 敵名を表示可能な残り幅に収まるよう切り詰める。HP数値 (`fixed_width` に
+/// 含まれる) は戦況判断に必須なので絶対に削らず、余白がなくなった時は
+/// 名前の方を短くする (最悪 空文字になっても数値は必ず表示される)。
+fn fit_monster_name(name: &str, available_width: usize, fixed_width: usize) -> String {
+    let width_budget = available_width.saturating_sub(fixed_width);
+    let mut name = name.to_string();
+    while display_width(&name) > width_budget {
+        if name.pop().is_none() {
+            break;
+        }
+    }
+    name
+}
+
+/// narrow レイアウトの line1 における「VS 敵名 HP/最大HP」部分のテキストを
+/// 組み立てる。Span化やBuffer描画から切り離してあるので、幅の予算計算を
+/// 単体で (全角文字を含む Buffer 経由の再構成に頼らず) テストできる。
+fn narrow_combat_text(monster: Option<&Monster>, hp_text: &str, area_width: u16) -> String {
+    match monster {
+        Some(m) => {
+            let prefix = "VS ";
+            let hp_suffix = format!(" {}/{}", m.hp.max(0), m.max_hp);
+            let fixed_width = display_width(hp_text) + display_width(prefix) + display_width(&hp_suffix);
+            let name = fit_monster_name(monster_name(m), area_width as usize, fixed_width);
+            format!("{prefix}{name}{hp_suffix}")
+        }
+        None => String::new(),
+    }
 }
 
 fn hp_bar(hp: i32, max: i32, width: usize) -> String {
@@ -589,7 +641,6 @@ fn render_hand(
 mod tests {
     use super::*;
     use ratzilla::ratatui::backend::TestBackend;
-    use ratzilla::ratatui::buffer::Cell;
     use ratzilla::ratatui::Terminal;
 
     #[test]
@@ -617,38 +668,58 @@ mod tests {
         assert!(narrow.log.height > 0);
     }
 
-    /// 回帰テスト (Codexレビュー指摘): HPゲージ込みの line1 が横幅を圧迫し、
-    /// 30桁幅の narrow レイアウトで交戦中のモンスター名/HP表示が
-    /// 見切れていた。narrow ではゲージを付けず数値のみに戻したので、
-    /// 想定される最小幅でも "VS " 以降の交戦情報が表示されることを確認する。
+    /// 回帰テスト (Codexレビュー指摘): "VS" という文字列の有無だけを見る
+    /// アサーションだと、名前やHPの桁が実際に見切れていても検出できない
+    /// (以前のテストがまさにその穴を突かれた)。narrow (30桁) の通常プレイ
+    /// 相当の値なら、敵の名前とHPが両方省略されずに表示されることを、
+    /// Buffer 再構成 (全角文字を挟むと空白セルが混ざり文字列比較が壊れる)
+    /// を経由せず、実際に描画へ渡すテキストそのもので直接確認する。
     #[test]
-    fn narrow_header_leaves_room_for_combat_info() {
-        let mut state = LoopMarchState::new();
-        logic::start_or_resume_expedition(&mut state);
-        let pos = state.hero.position;
-        state.path[pos].monster = Some(Monster {
-            terrain: Terrain::Graveyard,
+    fn narrow_combat_text_shows_full_enemy_name_and_hp_at_typical_stats() {
+        let monster = Monster {
+            terrain: Terrain::Graveyard, // monster_name() = "スケルトン"
             hp: 15,
             max_hp: 15,
             attack: 1,
             elite: false,
-        });
+        };
+        let hp_text = " HP30/30 ";
+        let text = narrow_combat_text(Some(&monster), hp_text, 30);
+        assert_eq!(text, "VS スケルトン 15/15", "敵の名前とHPが両方省略されずに表示されるはず");
+    }
 
-        let mut terminal = Terminal::new(TestBackend::new(30, 5)).unwrap();
-        let completed = terminal
-            .draw(|f| {
-                render_header(&state, f, Rect::new(0, 0, 30, 5), true);
-            })
-            .unwrap();
-
-        // Block(TOP|BOTTOM) の内側、line1 は area の2行目 (y=1)。
-        let line: String = (0..30)
-            .map(|x| completed.buffer.cell((x, 1)).map(Cell::symbol).unwrap_or(" "))
-            .collect();
+    /// 回帰テスト (Codexレビュー指摘): 拠点強化でHPが育って桁数が増えても、
+    /// 戦況判断に必須の敵HP数値だけは絶対に見切れないことを確認する
+    /// (見切れて良いのは残り幅を使い切った時の名前の方のみ)。
+    #[test]
+    fn narrow_combat_text_never_truncates_enemy_hp_even_with_large_numbers() {
+        let monster = Monster {
+            terrain: Terrain::Forest,
+            hp: 150,
+            max_hp: 150,
+            attack: 1,
+            elite: true, // monster_name() = "強化された狼" (最長級の名前)
+        };
+        let hp_text = " HP130/130 "; // 勇者のHPも3桁まで育った想定
+        let text = narrow_combat_text(Some(&monster), hp_text, 30);
         assert!(
-            line.contains("VS"),
-            "narrow幅でも交戦相手の情報 (VS ...) が見切れず表示されるはず: {line:?}"
+            text.ends_with("150/150"),
+            "名前が切り詰められることはあっても、敵のHP数値は見切れないはず: {text:?}"
         );
+        assert!(
+            display_width(hp_text) + display_width(&text) <= 30,
+            "30桁幅に収まらなければならない: hp_text={hp_text:?} combat={text:?}"
+        );
+    }
+
+    #[test]
+    fn fit_monster_name_truncates_by_display_width_not_char_count() {
+        // "スケルトン" は全角5文字 = 表示幅10。文字数ではなく表示幅で
+        // 予算判定することを確認する (全角文字は1文字で幅2を消費する)。
+        assert_eq!(fit_monster_name("スケルトン", 30, 10), "スケルトン", "幅に余裕があれば切り詰めない");
+        assert_eq!(fit_monster_name("スケルトン", 12, 10), "ス", "残り幅2 (全角1文字分) だけ表示する");
+        assert_eq!(fit_monster_name("スケルトン", 10, 10), "", "残り幅0なら空文字になる");
+        assert_eq!(fit_monster_name("スケルトン", 5, 10), "", "予算がマイナスになっても panic しない");
     }
 
     #[test]

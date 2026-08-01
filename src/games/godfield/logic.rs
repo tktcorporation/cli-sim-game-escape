@@ -56,36 +56,52 @@ pub const BETWEEN_TURNS_TICKS: u32 = 4;
 /// large `delta_ticks` without misbehaving because they don't track elapsed
 /// time at all.
 pub fn tick(state: &mut GfState, mut delta_ticks: u32) {
-    for p in &mut state.players {
-        p.hurt_flash.tick(delta_ticks);
-    }
     while delta_ticks > 0 {
         match state.phase {
             Phase::CpuTurn { idx, ticks_left } => {
                 if delta_ticks >= ticks_left {
+                    decay_hurt_flashes(state, ticks_left);
                     delta_ticks -= ticks_left;
                     run_cpu_turn(state, idx);
                     advance_to_next_turn(state);
                     // Loop continues — the new phase (BetweenTurns or
                     // CpuTurn for the next NPC) may consume more ticks.
                 } else {
+                    decay_hurt_flashes(state, delta_ticks);
                     state.phase = Phase::CpuTurn { idx, ticks_left: ticks_left - delta_ticks };
                     break;
                 }
             }
             Phase::BetweenTurns { ticks_left } => {
                 if delta_ticks >= ticks_left {
+                    decay_hurt_flashes(state, ticks_left);
                     delta_ticks -= ticks_left;
                     begin_turn(state);
                 } else {
+                    decay_hurt_flashes(state, delta_ticks);
                     state.phase = Phase::BetweenTurns { ticks_left: ticks_left - delta_ticks };
                     break;
                 }
             }
-            // Phases without a timer: nothing to advance.  Stop so we don't
+            // Phases without a timer: nothing to advance, so the remaining
+            // budget elapses here without further events. Stop so we don't
             // spin forever burning ticks against a wall.
-            _ => break,
+            _ => {
+                decay_hurt_flashes(state, delta_ticks);
+                break;
+            }
         }
+    }
+}
+
+/// `ticks` 分だけ被弾フラッシュを減衰させる。バッチ tick の消化チャンクごと
+/// (= 実際にその時間が経過した区切りごと) に呼ぶ必要がある。まとめて一括で
+/// 減衰させると、チャンクの途中で新たに trigger() されたフラッシュが
+/// 「本来ならバッチ内で減衰しきっているはずの分」まで遡って引かれてしまい、
+/// 次の render で不自然に長く残って見える (Codexレビュー指摘)。
+fn decay_hurt_flashes(state: &mut GfState, ticks: u32) {
+    for p in &mut state.players {
+        p.hurt_flash.tick(ticks);
     }
 }
 
@@ -778,6 +794,37 @@ mod tests {
         tick(&mut s, 10);
         assert!(!s.players[1].hurt_flash.is_active());
         assert!(!s.players[2].hurt_flash.is_active());
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): 遅延フレームで delta_ticks が
+    /// バッチ消化されると、`CpuTurn` の残り `ticks_left` を跨いだ後の
+    /// フェーズ (ここでは `BetweenTurns`) が消費する分でも hurt_flash が
+    /// 正しく減衰しなければならない。以前は tick() の冒頭でバッチ全体を
+    /// 一括減衰していたため、ヒットの瞬間より後に trigger() された
+    /// フラッシュには「バッチ内でヒット後に実際に経過した tick 数」が
+    /// 反映されず、本来ならバッチ内で減衰しきっているはずなのに
+    /// 次の render まで残って見えていた。
+    #[test]
+    fn tick_decays_hurt_flash_triggered_mid_batch_using_only_the_ticks_after_it() {
+        let mut s = make_state();
+        // 人間 (idx 0) と CPU (idx 1) だけを生存させ、CPUの攻撃対象を確定させる。
+        s.players[2].alive = false;
+        s.players[3].alive = false;
+        set_hand(&mut s, 0, &[]); // 無防備にして必ずダメージが通るようにする
+        set_hand(&mut s, 1, &[Card::Greatsword; HAND_SIZE]);
+        // CpuTurn の残りが1 tickというバッチ途中で攻撃が起きる状況を再現する。
+        s.phase = Phase::CpuTurn { idx: 1, ticks_left: 1 };
+
+        // 1 tick 消化後にCPUが攻撃 (hurt_flash.trigger(3)) → 残り4 tick は
+        // BetweenTurns の消化に使われる。4 >= 3 なので、このバッチ内で
+        // フラッシュは完全に減衰しきるはず。
+        tick(&mut s, 5);
+
+        assert!(s.players[0].hp < STARTING_HP, "前提: CPUの攻撃で人間がダメージを受けていること");
+        assert!(
+            !s.players[0].hurt_flash.is_active(),
+            "ヒット後に残っていた4 tick (>= flash長3) で、同じバッチ内に完全減衰するはず"
+        );
     }
 
     #[test]
