@@ -12,10 +12,52 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
+use crate::theme;
 use crate::widgets::ClickableList;
 
 use super::actions::*;
 use super::state::*;
+
+/// 主要パネルの Rect。演出のトリガー領域を決める `detect_transitions` からも
+/// 参照するため公開する。
+pub struct GfLayout {
+    pub status: Rect,
+    pub hand: Rect,
+    pub action: Rect,
+    pub log: Rect,
+}
+
+/// Vertical sections:
+///   1 status (one row per player + border)
+///   2 hand (one row per card + header + border)
+///   3 action / context-specific picker — height varies with phase so
+///     pickers that list 3 targets + cancel + header still fit
+///   4 log (rest, min 3)
+pub fn compute_layout(area: Rect, phase: &Phase) -> GfLayout {
+    let action_h: u16 = match phase {
+        Phase::PlayerAction => 7,         // header + 4 actions
+        Phase::PlayerSelectTarget => 7,    // header + up to 3 targets + cancel
+        Phase::PlayerSelectWeapons => 6,
+        Phase::PlayerSelectHeal | Phase::PlayerSelectSpecial => 5,
+        _ => 5,
+    };
+    let constraints = [
+        Constraint::Length(NUM_PLAYERS as u16 + 2),
+        Constraint::Length(HAND_SIZE as u16 + 3),
+        Constraint::Length(action_h),
+        Constraint::Min(3),
+    ];
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+    GfLayout {
+        status: chunks[0],
+        hand: chunks[1],
+        action: chunks[2],
+        log: chunks[3],
+    }
+}
 
 pub fn render(
     state: &GfState,
@@ -39,34 +81,11 @@ pub fn render(
         Borders::ALL
     };
 
-    // Vertical sections:
-    //   1 status (one row per player + border)
-    //   2 hand (one row per card + header + border)
-    //   3 action / context-specific picker — height varies with phase so
-    //     pickers that list 3 targets + cancel + header still fit
-    //   4 log (rest, min 3)
-    let action_h: u16 = match state.phase {
-        Phase::PlayerAction => 7,         // header + 4 actions
-        Phase::PlayerSelectTarget => 7,    // header + up to 3 targets + cancel
-        Phase::PlayerSelectWeapons => 6,
-        Phase::PlayerSelectHeal | Phase::PlayerSelectSpecial => 5,
-        _ => 5,
-    };
-    let constraints = [
-        Constraint::Length(NUM_PLAYERS as u16 + 2),
-        Constraint::Length(HAND_SIZE as u16 + 3),
-        Constraint::Length(action_h),
-        Constraint::Min(3),
-    ];
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area);
-
-    render_status(state, f, chunks[0], borders);
-    render_hand(state, f, chunks[1], borders, click_state);
-    render_action_panel(state, f, chunks[2], borders, click_state);
-    render_log(state, f, chunks[3], borders);
+    let layout = compute_layout(area, &state.phase);
+    render_status(state, f, layout.status, borders);
+    render_hand(state, f, layout.hand, borders, click_state);
+    render_action_panel(state, f, layout.action, borders, click_state);
+    render_log(state, f, layout.log, borders);
 }
 
 // ── Intro screen ───────────────────────────────────────────────
@@ -230,7 +249,9 @@ fn render_status(state: &GfState, f: &mut Frame, area: Rect, borders: Borders) {
         } else {
             Span::raw("")
         };
-        let name_style = if p.alive {
+        let name_style = if p.hurt_flash.is_active() {
+            Style::default().fg(theme::DAMAGE_FLASH.color).add_modifier(Modifier::BOLD)
+        } else if p.alive {
             Style::default().fg(Color::White)
         } else {
             Style::default().fg(Color::DarkGray).add_modifier(Modifier::CROSSED_OUT)
@@ -259,7 +280,7 @@ fn hp_bar(hp: i32, max: i32, width: usize) -> String {
     let mut s = String::with_capacity(width + 2);
     s.push('[');
     for i in 0..width {
-        s.push(if i < filled { '█' } else { '░' });
+        s.push(if i < filled { theme::BAR_FULL } else { theme::BAR_EMPTY });
     }
     s.push(']');
     s

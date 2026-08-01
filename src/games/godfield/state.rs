@@ -4,6 +4,8 @@
 
 use std::collections::VecDeque;
 
+use crate::effects::FlashTimer;
+
 // ── Cards ──────────────────────────────────────────────────────
 
 /// All cards in the game.  Each card has a static definition queried via
@@ -147,6 +149,8 @@ pub struct Player {
     pub hand: Vec<Card>,
     pub alive: bool,
     pub is_human: bool,
+    /// 被弾直後の一時的な強調表示の残り tick 数。
+    pub hurt_flash: FlashTimer,
 }
 
 impl Player {
@@ -158,6 +162,7 @@ impl Player {
             hand: Vec::new(),
             alive: true,
             is_human,
+            hurt_flash: FlashTimer::new(),
         }
     }
 }

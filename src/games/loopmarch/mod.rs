@@ -8,6 +8,7 @@
 //!   3. 死亡すると拠点へ撤退。木材/石材と道の配置は失うが、魂と拠点強化は残る
 
 pub mod actions;
+pub mod effects;
 pub mod logic;
 pub mod render;
 pub mod save;
@@ -16,17 +17,21 @@ pub mod state;
 #[cfg(test)]
 mod simulator;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
 
+use crate::effects::FrameClock;
 use crate::games::{Game, GameChoice};
-use crate::input::{ClickState, InputEvent};
+use crate::input::{is_narrow_layout, ClickState, InputEvent};
+use crate::sound;
+use crate::time;
 use crate::widgets::ClickableGrid;
 
 use actions::*;
+use effects::LoopMarchEffects;
 use logic::UpgradeKind;
 use state::{Phase, HAND_MAX, RING_H, RING_W};
 
@@ -35,6 +40,9 @@ const CAMP_SCROLL_STEP: i32 = 2;
 
 pub struct LoopMarchGame {
     pub state: state::LoopMarchState,
+    effects: RefCell<LoopMarchEffects>,
+    prev: Cell<PrevSnapshot>,
+    frame_clock: FrameClock,
     save_countdown: u32,
 }
 
@@ -42,6 +50,27 @@ impl Default for LoopMarchGame {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 前フレームの state スナップショット。render 毎に差分を見て演出をトリガする
+/// (`detect_transitions`)。
+///
+/// ヒット検知には `hero_hurt_flash`/`enemy_hurt_flash` の活性化エッジではなく
+/// HP の実測値を使う。戦闘は毎 tick 発生しうるため、trigger(3) が decay より
+/// 先に上書きされ続けると `is_active()` が戦闘中ずっと true のままになり
+/// (= abyss のように攻撃間隔がフラッシュ長より長い前提が成り立たない)、
+/// 2発目以降のヒットで演出・音が発火しなくなるため。
+///
+/// モンスター側は HP ではなく `enemy_hit_count` の差分で見る。HP スナップ
+/// ショット比較だと、1回のバッチ tick 内でモンスターが出現→撃破まで完結した
+/// 場合に前後とも「不在」に見えてヒットが検出できないため。
+#[derive(Clone, Copy, Default)]
+struct PrevSnapshot {
+    lap: u32,
+    best_lap: u32,
+    run_active: bool,
+    hero_hp: i32,
+    enemy_hit_count: u32,
 }
 
 impl LoopMarchGame {
@@ -55,10 +84,64 @@ impl LoopMarchGame {
             s
         };
 
+        let prev = Self::snapshot(&state);
         Self {
             state,
+            effects: RefCell::new(LoopMarchEffects::new()),
+            prev: Cell::new(prev),
+            frame_clock: FrameClock::new(),
             save_countdown: save::AUTOSAVE_INTERVAL,
         }
+    }
+
+    fn snapshot(s: &state::LoopMarchState) -> PrevSnapshot {
+        PrevSnapshot {
+            lap: s.lap,
+            best_lap: s.best_lap,
+            run_active: s.run_active,
+            hero_hp: s.hero.hp,
+            enemy_hit_count: s.enemy_hit_count,
+        }
+    }
+
+    fn detect_transitions(&self, area: Rect) {
+        let prev = self.prev.get();
+        let mut effects = self.effects.borrow_mut();
+        let s = &self.state;
+
+        if s.phase == Phase::Expedition {
+            let layout = render::compute_expedition_layout(area, is_narrow_layout(area.width));
+
+            // 致命打の tick は hero.hp が 0 になった直後に handle_death が
+            // 即座に fresh_hero() で満タン復帰させるため、ここでは
+            // 「減った」判定を素通りする (increase になる)。その瞬間は
+            // 代わりに下の push_death (run_active の遷移検知) が発火するので
+            // 二重に演出が重ならず結果的に正しい。
+            if s.hero.hp < prev.hero_hp {
+                effects.push_hero_hit(layout.header);
+                sound::play(sound::DAMAGE);
+            }
+
+            if s.enemy_hit_count != prev.enemy_hit_count {
+                effects.push_enemy_hit(layout.ring);
+            }
+
+            if s.lap > prev.lap {
+                effects.push_lap_complete(layout.ring);
+                sound::play(sound::VICTORY);
+            }
+        }
+
+        if s.best_lap > prev.best_lap {
+            effects.push_best_lap_achievement(area);
+        }
+
+        if prev.run_active && !s.run_active {
+            effects.push_death(area);
+            sound::play(sound::DEFEAT);
+        }
+
+        self.prev.set(Self::snapshot(s));
     }
 
     fn handle_click(&mut self, action_id: u16) -> bool {
@@ -85,6 +168,7 @@ impl LoopMarchGame {
             }
             GO_TO_CAMP => {
                 logic::go_to_camp(&mut self.state);
+                sound::play(sound::CLICK);
                 true
             }
             CAMP_SCROLL_UP => {
@@ -105,12 +189,14 @@ impl LoopMarchGame {
             }
             id if (HAND_CLICK_BASE..HAND_CLICK_BASE + HAND_MAX as u16).contains(&id) => {
                 logic::select_hand(&mut self.state, (id - HAND_CLICK_BASE) as usize);
+                sound::play(sound::CLICK);
                 true
             }
             id if (PATH_CLICK_BASE..PATH_CLICK_BASE + (RING_W * RING_H) as u16).contains(&id) => {
                 if let Some((gx, gy)) = ClickableGrid::decode(PATH_CLICK_BASE, RING_W, id) {
                     if let Some(path_index) = logic::ring_index_at(gx, gy) {
-                        logic::place_selected(&mut self.state, path_index);
+                        let placed = logic::place_selected(&mut self.state, path_index);
+                        sound::play(if placed { sound::CLICK } else { sound::ERROR });
                     }
                 }
                 true
@@ -131,6 +217,7 @@ impl LoopMarchGame {
     /// 書き込み、離脱タイミングに関わらず失われないようにする。
     fn purchase_and_flush(&mut self, kind: UpgradeKind) -> bool {
         let bought = logic::purchase_upgrade(&mut self.state, kind);
+        sound::play(if bought { sound::PURCHASE } else { sound::ERROR });
         if bought {
             self.flush_save();
         }
@@ -143,6 +230,7 @@ impl LoopMarchGame {
     fn start_or_resume_and_flush(&mut self) {
         let rng_before = self.state.rng_state;
         logic::start_or_resume_expedition(&mut self.state);
+        sound::play(sound::CLICK);
         if self.state.rng_state != rng_before {
             self.flush_save();
         }
@@ -152,6 +240,7 @@ impl LoopMarchGame {
     /// rng_state を進める。
     fn refill_and_flush(&mut self) -> bool {
         let refilled = logic::refill_hand(&mut self.state);
+        sound::play(if refilled { sound::PURCHASE } else { sound::ERROR });
         if refilled {
             self.flush_save();
         }
@@ -183,6 +272,7 @@ impl LoopMarchGame {
                 '1' | '2' | '3' | '4' => {
                     let idx = (key as u8 - b'1') as usize;
                     logic::select_hand(&mut self.state, idx);
+                    sound::play(sound::CLICK);
                     true
                 }
                 'r' => {
@@ -191,6 +281,7 @@ impl LoopMarchGame {
                 }
                 'c' => {
                     logic::go_to_camp(&mut self.state);
+                    sound::play(sound::CLICK);
                     true
                 }
                 'h' => {
@@ -203,7 +294,8 @@ impl LoopMarchGame {
                 }
                 ' ' => {
                     let cursor = self.state.cursor;
-                    logic::place_selected(&mut self.state, cursor);
+                    let placed = logic::place_selected(&mut self.state, cursor);
+                    sound::play(if placed { sound::CLICK } else { sound::ERROR });
                     true
                 }
                 _ => false,
@@ -254,7 +346,10 @@ impl Game for LoopMarchGame {
     }
 
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+        self.detect_transitions(area);
         render::render(&self.state, f, area, click_state);
+        let elapsed = self.frame_clock.elapsed(time::now_ms().unwrap_or(0.0));
+        self.effects.borrow_mut().process(elapsed, f.buffer_mut(), area);
     }
 }
 
@@ -342,6 +437,115 @@ mod tests {
         game.handle_input(&click(CAMP_START_OR_RESUME));
         game.tick(state::MOVE_TICKS);
         assert_eq!(game.state.hero.position, 1);
+    }
+
+    /// 回帰テスト: 戦闘は毎 tick 発生しうるため、`hurt_flash` の活性化エッジ
+    /// (非アクティブ→アクティブ) で演出をトリガすると、trigger(3) が decay
+    /// より先に上書きされ続けて「戦闘中ずっとアクティブ」になり、2発目以降の
+    /// ヒットで演出が発火しなくなるバグがあった。HP の実測値差分で検知する
+    /// ことで、連続ヒットの毎回で演出が積まれることを確認する。
+    ///
+    /// このゲームの戦闘は「勇者の攻撃→(モンスターが生きていれば)即座に反撃」
+    /// が同一 tick 内で起きる設計のため、生存継続中は毎回 push_hero_hit と
+    /// push_enemy_hit が両方発火する。どちらが発火したかまでは
+    /// `EffectHost::is_running()` からは区別できないので、ここでは
+    /// 「2発目以降も演出が積まれ続けるか」を検証する
+    /// (`push_enemy_hit` だけを単独で確認するテストは
+    /// `detect_transitions_pushes_enemy_hit_on_killing_blow_without_hero_taking_damage`)。
+    #[test]
+    fn detect_transitions_keeps_pushing_combat_effects_across_consecutive_ticks() {
+        let mut game = LoopMarchGame::new();
+        logic::start_or_resume_expedition(&mut game.state);
+        let pos = game.state.hero.position;
+        game.state.path[pos].monster = Some(state::Monster {
+            terrain: state::Terrain::Graveyard,
+            hp: 100,
+            max_hp: 100,
+            attack: 1,
+            elite: false,
+        });
+        let area = Rect::new(0, 0, 80, 30);
+
+        logic::tick(&mut game.state);
+        game.detect_transitions(area);
+        assert!(game.effects.borrow().is_running(), "1発目で演出が積まれるはず");
+
+        // Effect を使い切って running でない状態に戻す。
+        let mut buf = ratzilla::ratatui::buffer::Buffer::empty(area);
+        game.effects.borrow_mut().process(tachyonfx::Duration::from_millis(500), &mut buf, area);
+        assert!(!game.effects.borrow().is_running());
+
+        logic::tick(&mut game.state);
+        game.detect_transitions(area);
+        assert!(
+            game.effects.borrow().is_running(),
+            "同じ相手への2発目でも演出が積まれるはず (毎tick戦闘が続く限りhurt_flashは非活性化しない)"
+        );
+    }
+
+    /// `push_enemy_hit` 単独の発火を、勇者が被弾しないケース (倒した瞬間は
+    /// 反撃を受けない) で切り分けて確認する。モンスターの出現は
+    /// `detect_transitions` に一度も観測させないまま tick で倒すことで、
+    /// HP の有無ではなく `enemy_hit_count` の差分で検知していることも
+    /// あわせて確認する。
+    #[test]
+    fn detect_transitions_pushes_enemy_hit_on_killing_blow_without_hero_taking_damage() {
+        let mut game = LoopMarchGame::new();
+        logic::start_or_resume_expedition(&mut game.state);
+        let pos = game.state.hero.position;
+        let hero_atk = game.state.hero.attack;
+        game.state.path[pos].monster = Some(state::Monster {
+            terrain: state::Terrain::Graveyard,
+            hp: hero_atk, // ちょうど1発で倒せるHP
+            max_hp: hero_atk,
+            attack: 999, // 生きていれば致命的だが、倒した瞬間は反撃を受けない
+            elite: false,
+        });
+        let area = Rect::new(0, 0, 80, 30);
+
+        let hero_hp_before = game.state.hero.hp;
+        logic::tick(&mut game.state);
+        assert_eq!(game.state.hero.hp, hero_hp_before, "倒した瞬間は反撃を受けない");
+        assert!(game.state.path[pos].monster.is_none(), "1発で倒れているはず");
+
+        game.detect_transitions(area);
+        assert!(
+            game.effects.borrow().is_running(),
+            "勇者は無傷でも、撃破の一撃自体は enemy_hit として演出が積まれるはず"
+        );
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): 遅延フレームで複数 tick が一括消化される
+    /// と、モンスターの出現から撃破までが1回も render (detect_transitions) を
+    /// 挟まずに完結することがある。HP スナップショット比較だと前後とも
+    /// 「不在」に見えてヒットが検出できなかったが、`enemy_hit_count` は
+    /// tick 処理の中で直接インクリメントされるため、render の頻度に関わらず
+    /// 検出できることを確認する。
+    #[test]
+    fn detect_transitions_catches_enemy_hit_even_when_batched_ticks_skip_rendering() {
+        let mut game = LoopMarchGame::new();
+        logic::start_or_resume_expedition(&mut game.state);
+        let pos = game.state.hero.position;
+        let hero_atk = game.state.hero.attack;
+        game.state.path[pos].monster = Some(state::Monster {
+            terrain: state::Terrain::Graveyard,
+            hp: hero_atk, // ちょうど1発で倒せるHP
+            max_hp: hero_atk,
+            attack: 999,
+            elite: false,
+        });
+        let area = Rect::new(0, 0, 80, 30);
+
+        // detect_transitions を一度も呼ばずに複数 tick 消化する
+        // (= 遅延フレームで render がスキップされた状態を模す)。
+        logic::tick_n(&mut game.state, 3);
+        assert!(game.state.path[pos].monster.is_none(), "1発で倒れているはず");
+
+        game.detect_transitions(area);
+        assert!(
+            game.effects.borrow().is_running(),
+            "render を挟まないバッチ内で出現から撃破まで完結しても、ヒット演出は失われないはず"
+        );
     }
 
     #[test]

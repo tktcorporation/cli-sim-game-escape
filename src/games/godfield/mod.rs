@@ -6,29 +6,101 @@
 //! See `state::Phase` for the input state machine.
 
 pub mod actions;
+pub mod effects;
 pub mod logic;
 pub mod render;
 pub mod state;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
 
+use crate::effects::{FlashTimer, FrameClock};
 use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
+use crate::sound;
+use crate::time;
 
 use actions::*;
-use state::{Card, CardKind, GfState, Phase};
+use effects::GfEffects;
+use state::{Card, CardKind, GfState, Phase, NUM_PLAYERS};
 
 pub struct GodFieldGame {
     state: GfState,
+    effects: RefCell<GfEffects>,
+    prev: Cell<PrevSnapshot>,
+    frame_clock: FrameClock,
+}
+
+/// 前フレームの state スナップショット。render 毎に差分を見て演出をトリガする
+/// (`detect_transitions`)。
+#[derive(Clone, Copy, Default)]
+struct PrevSnapshot {
+    is_victory: bool,
+    is_defeat: bool,
+    hurt_flashes: [FlashTimer; NUM_PLAYERS],
+    alive: [bool; NUM_PLAYERS],
 }
 
 impl GodFieldGame {
     pub fn new() -> Self {
-        Self { state: GfState::new(initial_seed()) }
+        let state = GfState::new(initial_seed());
+        let prev = Self::snapshot(&state);
+        Self {
+            state,
+            effects: RefCell::new(GfEffects::new()),
+            prev: Cell::new(prev),
+            frame_clock: FrameClock::new(),
+        }
+    }
+
+    fn snapshot(s: &GfState) -> PrevSnapshot {
+        let mut hurt_flashes = [FlashTimer::new(); NUM_PLAYERS];
+        let mut alive = [false; NUM_PLAYERS];
+        for (i, p) in s.players.iter().enumerate() {
+            hurt_flashes[i] = p.hurt_flash;
+            alive[i] = p.alive;
+        }
+        PrevSnapshot {
+            is_victory: s.phase == Phase::Victory,
+            is_defeat: s.phase == Phase::Defeat,
+            hurt_flashes,
+            alive,
+        }
+    }
+
+    fn detect_transitions(&self, area: Rect) {
+        let prev = self.prev.get();
+        let mut effects = self.effects.borrow_mut();
+        let s = &self.state;
+        let layout = render::compute_layout(area, &s.phase);
+
+        for (i, p) in s.players.iter().enumerate() {
+            if !prev.hurt_flashes[i].is_active() && p.hurt_flash.is_active() {
+                effects.push_player_hit(layout.status);
+                // CPU同士の被弾も毎回鳴らすと耳障りなので、自分が被弾した時だけ音を出す
+                // (abyss の enemy_hurt_flash が無音なのと同じ配慮)。
+                if p.is_human {
+                    sound::play(sound::DAMAGE);
+                }
+            }
+            if prev.alive[i] && !p.alive {
+                effects.push_death(layout.status);
+            }
+        }
+
+        if !prev.is_victory && s.phase == Phase::Victory {
+            effects.push_victory(area);
+            sound::play(sound::VICTORY);
+        }
+        if !prev.is_defeat && s.phase == Phase::Defeat {
+            effects.push_defeat(area);
+            sound::play(sound::DEFEAT);
+        }
+
+        self.prev.set(Self::snapshot(s));
     }
 }
 
@@ -63,7 +135,10 @@ impl Game for GodFieldGame {
     }
 
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+        self.detect_transitions(area);
         render::render(&self.state, f, area, click_state);
+        let elapsed = self.frame_clock.elapsed(time::now_ms().unwrap_or(0.0));
+        self.effects.borrow_mut().process(elapsed, f.buffer_mut(), area);
     }
 }
 
@@ -74,6 +149,7 @@ fn handle_key(state: &mut GfState, ch: char) -> bool {
         Phase::Intro => {
             if matches!(ch, '1' | ' ' | '\n') {
                 logic::begin_turn(state);
+                sound::play(sound::CLICK);
                 return true;
             }
             false
@@ -82,16 +158,30 @@ fn handle_key(state: &mut GfState, ch: char) -> bool {
             if matches!(ch, '1' | ' ' | '\n') {
                 *state = GfState::new(state.rng_seed.wrapping_add(1));
                 logic::begin_turn(state);
+                sound::play(sound::CLICK);
                 return true;
             }
             false
         }
         Phase::PlayerAction => match ch {
-            'A' | 'a' => enter_attack_phase(state),
-            'H' | 'h' => enter_heal_phase(state),
-            'S' | 's' => enter_special_phase(state),
+            'A' | 'a' => {
+                let ok = enter_attack_phase(state);
+                sound::play(if ok { sound::CLICK } else { sound::ERROR });
+                ok
+            }
+            'H' | 'h' => {
+                let ok = enter_heal_phase(state);
+                sound::play(if ok { sound::CLICK } else { sound::ERROR });
+                ok
+            }
+            'S' | 's' => {
+                let ok = enter_special_phase(state);
+                sound::play(if ok { sound::CLICK } else { sound::ERROR });
+                ok
+            }
             'P' | 'p' => {
                 logic::human_pass(state);
+                sound::play(sound::CLICK);
                 true
             }
             _ => false,
@@ -100,12 +190,18 @@ fn handle_key(state: &mut GfState, ch: char) -> bool {
             '0' | '-' => {
                 state.selected_weapons.clear();
                 state.phase = Phase::PlayerAction;
+                sound::play(sound::CLICK);
                 true
             }
-            ' ' | '\n' => logic::confirm_weapons(state),
+            ' ' | '\n' => {
+                let ok = logic::confirm_weapons(state);
+                sound::play(if ok { sound::CLICK } else { sound::ERROR });
+                ok
+            }
             d if d.is_ascii_digit() => {
                 let idx = (d as u32 - '1' as u32) as usize;
                 logic::toggle_weapon_selection(state, idx);
+                sound::play(sound::CLICK);
                 true
             }
             _ => false,
@@ -113,13 +209,16 @@ fn handle_key(state: &mut GfState, ch: char) -> bool {
         Phase::PlayerSelectTarget => match ch {
             '0' | '-' => {
                 state.phase = Phase::PlayerSelectWeapons;
+                sound::play(sound::CLICK);
                 true
             }
             d if d.is_ascii_digit() => {
                 // Map '1'..='3' to player indices 1..=3 (skipping self).
                 let n = (d as u32 - '0' as u32) as usize;
                 if n >= 1 && n < state.players.len() {
-                    return logic::human_attack(state, n);
+                    let ok = logic::human_attack(state, n);
+                    sound::play(if ok { sound::CLICK } else { sound::ERROR });
+                    return ok;
                 }
                 false
             }
@@ -128,22 +227,28 @@ fn handle_key(state: &mut GfState, ch: char) -> bool {
         Phase::PlayerSelectHeal => match ch {
             '0' | '-' => {
                 state.phase = Phase::PlayerAction;
+                sound::play(sound::CLICK);
                 true
             }
             d if d.is_ascii_digit() => {
                 let idx = (d as u32 - '1' as u32) as usize;
-                logic::human_heal(state, idx)
+                let ok = logic::human_heal(state, idx);
+                sound::play(if ok { sound::CLICK } else { sound::ERROR });
+                ok
             }
             _ => false,
         },
         Phase::PlayerSelectSpecial => match ch {
             '0' | '-' => {
                 state.phase = Phase::PlayerAction;
+                sound::play(sound::CLICK);
                 true
             }
             d if d.is_ascii_digit() => {
                 let idx = (d as u32 - '1' as u32) as usize;
-                logic::human_use_special(state, idx)
+                let ok = logic::human_use_special(state, idx);
+                sound::play(if ok { sound::CLICK } else { sound::ERROR });
+                ok
             }
             _ => false,
         },
@@ -158,6 +263,7 @@ fn handle_click(state: &mut GfState, id: u16) -> bool {
         Phase::Intro => {
             if id == ACTION_START {
                 logic::begin_turn(state);
+                sound::play(sound::CLICK);
                 return true;
             }
             false
@@ -166,16 +272,30 @@ fn handle_click(state: &mut GfState, id: u16) -> bool {
             if id == ACTION_RESTART {
                 *state = GfState::new(state.rng_seed.wrapping_add(1));
                 logic::begin_turn(state);
+                sound::play(sound::CLICK);
                 return true;
             }
             false
         }
         Phase::PlayerAction => match id {
-            ACTION_ATTACK => enter_attack_phase(state),
-            ACTION_HEAL => enter_heal_phase(state),
-            ACTION_SPECIAL => enter_special_phase(state),
+            ACTION_ATTACK => {
+                let ok = enter_attack_phase(state);
+                sound::play(if ok { sound::CLICK } else { sound::ERROR });
+                ok
+            }
+            ACTION_HEAL => {
+                let ok = enter_heal_phase(state);
+                sound::play(if ok { sound::CLICK } else { sound::ERROR });
+                ok
+            }
+            ACTION_SPECIAL => {
+                let ok = enter_special_phase(state);
+                sound::play(if ok { sound::CLICK } else { sound::ERROR });
+                ok
+            }
             ACTION_PASS => {
                 logic::human_pass(state);
+                sound::play(sound::CLICK);
                 true
             }
             _ => false,
@@ -184,14 +304,18 @@ fn handle_click(state: &mut GfState, id: u16) -> bool {
             if id == ACTION_CANCEL {
                 state.selected_weapons.clear();
                 state.phase = Phase::PlayerAction;
+                sound::play(sound::CLICK);
                 return true;
             }
             if id == ACTION_CONFIRM_WEAPONS {
-                return logic::confirm_weapons(state);
+                let ok = logic::confirm_weapons(state);
+                sound::play(if ok { sound::CLICK } else { sound::ERROR });
+                return ok;
             }
             if (HAND_BASE..HAND_BASE + 16).contains(&id) {
                 let idx = (id - HAND_BASE) as usize;
                 logic::toggle_weapon_selection(state, idx);
+                sound::play(sound::CLICK);
                 return true;
             }
             false
@@ -199,33 +323,42 @@ fn handle_click(state: &mut GfState, id: u16) -> bool {
         Phase::PlayerSelectTarget => {
             if id == ACTION_CANCEL {
                 state.phase = Phase::PlayerSelectWeapons;
+                sound::play(sound::CLICK);
                 return true;
             }
             if (TARGET_BASE..TARGET_BASE + 16).contains(&id) {
                 let idx = (id - TARGET_BASE) as usize;
-                return logic::human_attack(state, idx);
+                let ok = logic::human_attack(state, idx);
+                sound::play(if ok { sound::CLICK } else { sound::ERROR });
+                return ok;
             }
             false
         }
         Phase::PlayerSelectHeal => {
             if id == ACTION_CANCEL {
                 state.phase = Phase::PlayerAction;
+                sound::play(sound::CLICK);
                 return true;
             }
             if (HAND_BASE..HAND_BASE + 16).contains(&id) {
                 let idx = (id - HAND_BASE) as usize;
-                return logic::human_heal(state, idx);
+                let ok = logic::human_heal(state, idx);
+                sound::play(if ok { sound::CLICK } else { sound::ERROR });
+                return ok;
             }
             false
         }
         Phase::PlayerSelectSpecial => {
             if id == ACTION_CANCEL {
                 state.phase = Phase::PlayerAction;
+                sound::play(sound::CLICK);
                 return true;
             }
             if (HAND_BASE..HAND_BASE + 16).contains(&id) {
                 let idx = (id - HAND_BASE) as usize;
-                return logic::human_use_special(state, idx);
+                let ok = logic::human_use_special(state, idx);
+                sound::play(if ok { sound::CLICK } else { sound::ERROR });
+                return ok;
             }
             false
         }

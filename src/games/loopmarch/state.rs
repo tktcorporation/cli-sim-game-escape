@@ -7,6 +7,8 @@ use std::cell::Cell;
 
 use ratzilla::ratatui::style::Color;
 
+use crate::effects::FlashTimer;
+
 /// ループの道の総マス数。
 pub const PATH_LEN: usize = 20;
 /// 道を矩形リングとして描画する際の外形サイズ (幅×高さ)。
@@ -202,6 +204,15 @@ pub struct LoopMarchState {
     pub camp: CampUpgrades,
     pub best_lap: u32,
 
+    // ── 演出 (遠征スコープ、死亡時にリセットされる) ──
+    pub hero_hurt_flash: FlashTimer,
+    pub enemy_hurt_flash: FlashTimer,
+    /// モンスターへのヒット回数の単調増加カウンタ。バッチ tick 内でモンスターの
+    /// 出現→撃破が完結すると HP のスナップショット比較だけではヒットを検出でき
+    /// ないため、render 側は HP ではなくこのカウンタの差分でヒット演出を判定する
+    /// (死亡時にリセットしなくても差分比較なので問題ない)。
+    pub enemy_hit_count: u32,
+
     // ── UI / メタ ──
     pub log: Vec<String>,
     pub rng_state: u32,
@@ -237,6 +248,9 @@ impl LoopMarchState {
             soul: 0,
             camp,
             best_lap: 0,
+            hero_hurt_flash: FlashTimer::new(),
+            enemy_hurt_flash: FlashTimer::new(),
+            enemy_hit_count: 0,
             log: vec!["周回討伐へようこそ。まずは拠点で遠征に出よう。".into()],
             rng_state: 0x1234_5678,
             camp_scroll: Cell::new(0),
