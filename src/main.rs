@@ -9,6 +9,7 @@ use cli_sim_game_escape::input::{
     is_narrow_layout, pixel_x_to_col, pixel_y_to_row, ClickScope, ClickState, InputEvent,
 };
 use cli_sim_game_escape::sound;
+use cli_sim_game_escape::theme;
 use cli_sim_game_escape::widgets::{Clickable, ClickableList, ScrollableTab};
 use cli_sim_game_escape::time::GameTime;
 use cli_sim_game_escape::BACK_TO_MENU;
@@ -583,16 +584,18 @@ fn render_menu(
     // rows: blank / title / description; sharing the action ID across
     // title + desc lets the player tap either row.
     // accent はゲームの「顔」となる固有色。タイトル文字に常時乗せることで、
-    // 一覧をスクロールした時にどのゲームか色で識別できる。
+    // 一覧をスクロールした時にどのゲームか色で識別できる。ゲーム内 UI とも
+    // 共有できるよう `theme::accent` を単一ソースにしている
+    // (「設定」は GameChoice を持たないメニュー項目なので固定色のまま)。
     type Entry = (&'static str, &'static str, u16, char, Color);
     const MENU_ENTRIES: &[Entry] = &[
-        ("Cookie Factory", "クッキーをクリックして増やす放置ゲーム", MENU_SELECT_COOKIE, '▶', Color::LightYellow),
-        ("Tiny Factory", "工場を作って生産ラインを最適化する放置ゲーム", MENU_SELECT_FACTORY, '▶', Color::Cyan),
-        ("Dungeon Dive", "ダンジョンを探索して帰還するローグライト風RPG", MENU_SELECT_RPG, '▶', Color::LightRed),
-        ("深淵潜行 (Abyss Idle)", "自動戦闘で深層を目指す放置型ローグダンジョン", MENU_SELECT_ABYSS, '▶', Color::LightBlue),
-        ("神の戦場 (God Field)", "4人で戦うターン制カードバトルロイヤル", MENU_SELECT_GODFIELD, '▶', Color::Red),
-        ("Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶', Color::LightCyan),
-        ("周回討伐", "地形を配置し勇者が自動周回するローグライト", MENU_SELECT_LOOPMARCH, '▶', Color::LightGreen),
+        ("Cookie Factory", "クッキーをクリックして増やす放置ゲーム", MENU_SELECT_COOKIE, '▶', theme::accent(&GameChoice::Cookie)),
+        ("Tiny Factory", "工場を作って生産ラインを最適化する放置ゲーム", MENU_SELECT_FACTORY, '▶', theme::accent(&GameChoice::Factory)),
+        ("Dungeon Dive", "ダンジョンを探索して帰還するローグライト風RPG", MENU_SELECT_RPG, '▶', theme::accent(&GameChoice::Rpg)),
+        ("深淵潜行 (Abyss Idle)", "自動戦闘で深層を目指す放置型ローグダンジョン", MENU_SELECT_ABYSS, '▶', theme::accent(&GameChoice::Abyss)),
+        ("神の戦場 (God Field)", "4人で戦うターン制カードバトルロイヤル", MENU_SELECT_GODFIELD, '▶', theme::accent(&GameChoice::Godfield)),
+        ("Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶', theme::accent(&GameChoice::Metropolis)),
+        ("周回討伐", "地形を配置し勇者が自動周回するローグライト", MENU_SELECT_LOOPMARCH, '▶', theme::accent(&GameChoice::LoopMarch)),
         ("設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 

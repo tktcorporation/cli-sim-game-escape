@@ -446,6 +446,25 @@
           tone(c, 'triangle', 784, 0.14, 0.10, 0.16);
         },
 
+        // ── 汎用フィードバック (特定ゲームに紐付かない) ──
+        // ダメージを受けた/与えた。低音 + 短ノイズで、キャラを問わず使える。
+        damage:   function(c) {
+          tone(c, 'square', 180, 0.08, 0.09);
+          noiseBurst(c, 0.05, 0.045, 500);
+        },
+        // 勝利。4 音上昇アルペジオ。
+        victory:  function(c) {
+          tone(c, 'triangle', 587, 0.08, 0.10, 0.00);
+          tone(c, 'triangle', 740, 0.08, 0.10, 0.08);
+          tone(c, 'triangle', 880, 0.10, 0.10, 0.16);
+          tone(c, 'triangle', 1175, 0.20, 0.12, 0.24);
+        },
+        // 敗北。下降 2 音。
+        defeat:   function(c) {
+          tone(c, 'sawtooth', 330, 0.14, 0.09, 0.00);
+          tone(c, 'sawtooth', 220, 0.20, 0.09, 0.12);
+        },
+
         // ── abyss ──
         // 自分が被弾。低音 + 短ノイズ。
         hit_hero:  function(c) {
@@ -490,6 +509,10 @@
         purchase: 18,
         enhance:  [10, 30, 10],
         level_up: [12, 30, 12, 30, 20],
+        // ── 汎用フィードバック ──
+        damage:   30,
+        victory:  [15, 25, 15, 25, 30],
+        defeat:   [40, 60, 40],
         // ── abyss ──
         gacha:       [30, 20, 50],
         hit_hero:    40,

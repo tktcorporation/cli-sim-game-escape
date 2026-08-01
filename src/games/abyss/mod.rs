@@ -26,15 +26,11 @@ use std::rc::Rc;
 
 use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Frame;
-use tachyonfx::Duration;
 
+use crate::effects::FrameClock;
 use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 use crate::sound;
-
-fn now_ms() -> Option<f64> {
-    web_sys::window().and_then(|w| w.performance()).map(|p| p.now())
-}
 
 use actions::*;
 use effects::AbyssEffects;
@@ -45,7 +41,7 @@ pub struct AbyssGame {
     pub state: AbyssState,
     effects: RefCell<AbyssEffects>,
     prev: Cell<PrevSnapshot>,
-    last_render_ms: Cell<f64>,
+    frame_clock: FrameClock,
     save_countdown: u32,
 }
 
@@ -90,7 +86,7 @@ impl AbyssGame {
             state,
             effects: RefCell::new(AbyssEffects::new()),
             prev: Cell::new(prev),
-            last_render_ms: Cell::new(0.0),
+            frame_clock: FrameClock::new(),
             save_countdown: save::AUTOSAVE_INTERVAL,
         }
     }
@@ -163,21 +159,6 @@ impl AbyssGame {
         }
 
         self.prev.set(Self::snapshot(s));
-    }
-
-    fn compute_elapsed(&self) -> Duration {
-        let now = now_ms().unwrap_or(0.0);
-        let prev = self.last_render_ms.get();
-        self.last_render_ms.set(now);
-        if prev == 0.0 {
-            Duration::ZERO
-        } else {
-            let delta_ms = (now - prev).clamp(0.0, 100.0);
-            if !delta_ms.is_finite() {
-                return Duration::ZERO;
-            }
-            Duration::from_millis(delta_ms as u32)
-        }
     }
 
     fn click_to_action(&self, action_id: u16) -> Option<PlayerAction> {
@@ -372,7 +353,7 @@ impl Game for AbyssGame {
     fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
         self.detect_transitions(area);
         render::render(&self.state, f, area, click_state);
-        let elapsed = self.compute_elapsed();
+        let elapsed = self.frame_clock.elapsed();
         self.effects
             .borrow_mut()
             .process(elapsed, f.buffer_mut(), area);

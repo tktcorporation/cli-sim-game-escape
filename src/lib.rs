@@ -8,9 +8,11 @@
 //! のみ。残りのモジュールも同居させているのは、追加の worker 化や統合
 //! テストから再利用できる余地を残すため。
 
+pub mod effects;
 pub mod games;
 pub mod input;
 pub mod sound;
+pub mod theme;
 pub mod time;
 pub mod widgets;
 
