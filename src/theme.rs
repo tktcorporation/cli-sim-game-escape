@@ -45,13 +45,21 @@ pub fn hp_bar_string(ratio: f64, width: usize) -> String {
     s
 }
 
+/// この比率を上回る間は green、以下になると yellow 以下の警戒色に変わる。
+/// バー色 ([`hp_ratio_color`]) とテキスト警告 (各ゲームの `render_hp_warning`
+/// 相当) の両方がこの定数を参照することで、閾値がずれて「バーは黄色なのに
+/// 警告文が出ない」ような不整合を防ぐ。
+pub const HP_CAUTION_RATIO: f64 = 2.0 / 3.0;
+/// この比率以下で red (危険表示) になる。
+pub const HP_DANGER_RATIO: f64 = 1.0 / 3.0;
+
 /// HP 比率から警戒色を 3 段階 (green > 2/3 > yellow > 1/3 > red) で返す。
 /// ゲームをまたいで同じ閾値にすることで、プレイヤーが「黄色は危険」を
 /// 学習し直さずに済む。
 pub fn hp_ratio_color(ratio: f64) -> Color {
-    if ratio > 2.0 / 3.0 {
+    if ratio > HP_CAUTION_RATIO {
         Color::Green
-    } else if ratio > 1.0 / 3.0 {
+    } else if ratio > HP_DANGER_RATIO {
         Color::Yellow
     } else {
         Color::Red

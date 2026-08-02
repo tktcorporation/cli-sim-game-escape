@@ -57,16 +57,26 @@ pub fn compute_visibility(map: &DungeonMap) -> HashSet<(usize, usize)> {
 
 // ── Theme Colors ─────────────────────────────────────────────
 
+/// wall_color を白側に寄せて明るくした値を floor_dot_color として返す。
+/// 暗い RGB を直接置くと `dark_floor_color` (fog、Rgb(20,20,20)) との
+/// コントラストがほぼ無くなり、「今見えている床」と「記憶にあるだけの床」
+/// が区別できなくなるため、必ずこの関数経由で明るさを確保する。
+fn lighten_toward_white(r: u8, g: u8, b: u8, amount: f64) -> Color {
+    let mix = |c: u8| (c as f64 + (255.0 - c as f64) * amount).round() as u8;
+    Color::Rgb(mix(r), mix(g), mix(b))
+}
+
 fn theme_colors(theme: FloorTheme) -> (Color, Color) {
     // (wall_color, floor_dot_color)
-    match theme {
-        FloorTheme::Village => (Color::Rgb(140, 100, 60), Color::Rgb(60, 80, 50)),
-        FloorTheme::MossyRuins => (Color::Rgb(100, 130, 100), Color::Rgb(40, 55, 40)),
-        FloorTheme::Underground => (Color::Rgb(100, 100, 140), Color::Rgb(40, 40, 55)),
-        FloorTheme::AncientTemple => (Color::Rgb(150, 125, 80), Color::Rgb(55, 45, 30)),
-        FloorTheme::VolcanicDepths => (Color::Rgb(160, 70, 40), Color::Rgb(60, 30, 15)),
-        FloorTheme::DemonCastle => (Color::Rgb(120, 65, 150), Color::Rgb(50, 25, 60)),
-    }
+    let (r, g, b) = match theme {
+        FloorTheme::Village => (140, 100, 60),
+        FloorTheme::MossyRuins => (100, 130, 100),
+        FloorTheme::Underground => (100, 100, 140),
+        FloorTheme::AncientTemple => (150, 125, 80),
+        FloorTheme::VolcanicDepths => (160, 70, 40),
+        FloorTheme::DemonCastle => (120, 65, 150),
+    };
+    (Color::Rgb(r, g, b), lighten_toward_white(r, g, b, 0.55))
 }
 
 // ── 2D Map Rendering ─────────────────────────────────────────
@@ -375,6 +385,28 @@ mod tests {
         assert_eq!(mossy, mossy_floor);
         assert_eq!(volcanic, volcanic_floor);
         assert_ne!(mossy, volcanic, "テーマごとに床の色が変わるはず");
+    }
+
+    #[test]
+    fn theme_floor_dot_color_stays_bright_enough_to_read() {
+        // dark_floor_color (fog、Rgb(20,20,20)) と見分けが付くように、
+        // 各テーマの floor_dot は全チャンネルが十分明るくなければならない。
+        for theme in [
+            FloorTheme::Village,
+            FloorTheme::MossyRuins,
+            FloorTheme::Underground,
+            FloorTheme::AncientTemple,
+            FloorTheme::VolcanicDepths,
+            FloorTheme::DemonCastle,
+        ] {
+            let Color::Rgb(r, g, b) = theme_colors(theme).1 else {
+                panic!("floor_dot_color は Rgb であるべき");
+            };
+            assert!(
+                r > 150 && g > 150 && b > 150,
+                "{theme:?} の floor_dot_color が暗すぎる: ({r}, {g}, {b})"
+            );
+        }
     }
 
     #[test]

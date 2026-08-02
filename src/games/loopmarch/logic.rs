@@ -197,11 +197,11 @@ fn resolve_combat_tick(state: &mut LoopMarchState) {
             monster.hp -= hero_atk;
             state.enemy_hurt_flash.trigger(3);
             state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
-            state.last_enemy_damage = Some((hero_atk, DAMAGE_DISPLAY_TICKS));
+            // とどめの一撃はオーバーキル分を含むため、表示 (ヘッダー・ログ共通)
+            // には実際に削れた量 (残りHPを超えない分) だけを見せる。
+            let actual_damage = hero_atk.min(hp_before_hit);
+            state.last_enemy_damage = Some((actual_damage, DAMAGE_DISPLAY_TICKS));
             if monster.hp <= 0 {
-                // とどめの一撃はオーバーキル分を含むため、ログには実際に
-                // 削れた量 (残りHPを超えない分) だけを見せる。
-                let actual_damage = hero_atk.min(hp_before_hit);
                 Some((monster.terrain, monster.elite, monster.tier, monster.cluster_bonus, actual_damage))
             } else {
                 None
@@ -284,11 +284,11 @@ fn advance_hero(state: &mut LoopMarchState) {
     arrive_at_tile(state);
 }
 
-/// 直前に完了したラップで増減した資源をログに出す。ラップ開始時点との
-/// 差分を見せることで「今の1周でどれだけ稼げたか」を数字で振り返れるようにする。
 /// 拠点画面の推移グラフに表示する履歴の最大件数。古いラップの分は捨てる。
 const SOUL_HISTORY_CAP: usize = 30;
 
+/// 直前に完了したラップで増減した資源をログに出す。ラップ開始時点との
+/// 差分を見せることで「今の1周でどれだけ稼げたか」を数字で振り返れるようにする。
 fn log_lap_summary(state: &mut LoopMarchState) {
     let wood_delta = state.wood as i64 - state.lap_start_wood as i64;
     let stone_delta = state.stone as i64 - state.lap_start_stone as i64;
@@ -1245,7 +1245,11 @@ mod tests {
 
         tick(&mut s);
 
-        assert_eq!(s.last_enemy_damage, Some((100, DAMAGE_DISPLAY_TICKS)));
+        assert_eq!(
+            s.last_enemy_damage,
+            Some((1, DAMAGE_DISPLAY_TICKS)),
+            "オーバーキル分を含まず、実際に削れたHP量がヘッダー表示にも使われるはず"
+        );
         assert!(s.last_hero_damage.is_none(), "倒した瞬間は反撃を受けないので記録されない");
     }
 

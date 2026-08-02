@@ -250,7 +250,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
     }
 
     match &mut *state {
-        AppState::Menu { scroll, selected } => {
+        AppState::Menu { scroll: _, selected } => {
             let direct = match event {
                 InputEvent::Key('1') | InputEvent::Click(_, MENU_SELECT_COOKIE) => {
                     Some(MenuPick::Game(GameChoice::Cookie))
@@ -298,17 +298,14 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 }
             } else {
                 match event {
-                    // Arrow up/k: move highlight up. Auto-scroll so the
-                    // selection always stays visible (keeps the UX usable
-                    // when the menu list is taller than the viewport).
+                    // Arrow up/k, down/j: move the highlight. `render_menu`
+                    // re-clamps `scroll` every frame using each card's actual
+                    // (wrap-aware, so variable-height) row count, so the
+                    // selection is guaranteed to stay visible without this
+                    // handler needing to duplicate that layout math.
                     InputEvent::Key('k') | InputEvent::Click(_, MENU_SCROLL_UP) => {
                         let before = *selected;
                         *selected = selected.saturating_sub(1);
-                        // 3 lines per game card → keep ~one card above
-                        let target = (*selected as u16) * 3;
-                        if *scroll > target {
-                            *scroll = target;
-                        }
                         if *selected != before {
                             sound::play(sound::CLICK);
                         }
@@ -316,9 +313,6 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     InputEvent::Key('j') | InputEvent::Click(_, MENU_SCROLL_DOWN) => {
                         let before = *selected;
                         *selected = (*selected + 1).min(MENU_LAST_INDEX);
-                        // No upper-bound auto-scroll here — render_menu
-                        // re-clamps `scroll` against the actual viewport.
-                        *scroll = scroll.saturating_add(0);
                         if *selected != before {
                             sound::play(sound::CLICK);
                         }

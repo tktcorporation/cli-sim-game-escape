@@ -614,6 +614,16 @@ fn radar_blips(
         .collect()
 }
 
+/// braille セル1つは 2(横)×4(縦) の疑似ピクセル。x_bounds/y_bounds を固定
+/// のまま横長の `area` にそのまま描くと、疑似ピクセル密度が横方向だけ
+/// 上がって円が横に伸びた楕円になる。等密度になる正方形 (幅 = 高さ*2 cell)
+/// を `area` から中央寄せで切り出し、円が常に円のまま見えるようにする。
+fn square_radar_area(area: Rect) -> Rect {
+    let square_w = (area.height.saturating_mul(2)).min(area.width);
+    let x_offset = (area.width - square_w) / 2;
+    Rect::new(area.x + x_offset, area.y, square_w, area.height)
+}
+
 /// 索敵レーダー — プレイヤーを中心に、視界内にいるモンスターを距離・方角で
 /// 表示する。隣接1体の情報だけでは伝わらない「周囲に何体いるか」を常時
 /// 見せて、探索の緊張感を底上げする。
@@ -634,7 +644,7 @@ fn render_radar(map: &DungeonMap, f: &mut Frame, area: Rect) {
                 ctx.draw(&Points { coords: &pts, color });
             }
         });
-    f.render_widget(canvas, area);
+    f.render_widget(canvas, square_radar_area(area));
 }
 
 /// Two-button row: A (context-sensitive) and B (open menu).
@@ -761,12 +771,12 @@ fn render_dpad(
 fn render_hp_warning(cl: &mut ClickableList, state: &RpgState) {
     let max_hp = state.effective_max_hp();
     let hp_ratio = if max_hp > 0 { state.hp as f64 / max_hp as f64 } else { 1.0 };
-    if hp_ratio <= 0.25 && hp_ratio > 0.0 {
+    if hp_ratio <= theme::HP_DANGER_RATIO && hp_ratio > 0.0 {
         cl.push(Line::from(Span::styled(
             " ※ 体力が危険！",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )));
-    } else if hp_ratio <= 0.5 {
+    } else if hp_ratio <= theme::HP_CAUTION_RATIO {
         cl.push(Line::from(Span::styled(
             " ※ 傷が痛む…",
             Style::default().fg(Color::Yellow),
@@ -1680,6 +1690,25 @@ mod tests {
             charging: false,
             affix: None,
         }
+    }
+
+    #[test]
+    fn square_radar_area_centers_a_square_in_a_wide_rect() {
+        let area = Rect::new(0, 10, 48, 7);
+        let squared = square_radar_area(area);
+
+        assert_eq!(squared.height, 7, "高さはそのまま");
+        assert_eq!(squared.width, 14, "幅 = 高さ*2 に収まるはず (7*2)");
+        assert_eq!(squared.x, 17, "中央寄せ: (48-14)/2 = 17");
+        assert_eq!(squared.y, area.y);
+    }
+
+    #[test]
+    fn square_radar_area_is_noop_when_already_narrow_enough() {
+        let area = Rect::new(5, 0, 10, 7);
+        let squared = square_radar_area(area);
+
+        assert_eq!(squared, area, "幅が既に高さ*2以下なら切り詰めない");
     }
 
     #[test]
