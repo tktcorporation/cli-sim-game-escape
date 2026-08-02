@@ -460,11 +460,7 @@ fn render_explore_panel(
     let dpad_h = 3_u16.min(inner.height.saturating_sub(3));
     let ab_h: u16 = if inner.height > dpad_h + 1 { 1 } else { 0 };
     let info_h = inner.height.saturating_sub(dpad_h + ab_h);
-    // 索敵レーダー: 隣接1体の情報だけでは伝わらない周辺の敵配置を常時見せる。
-    // テキスト情報を圧迫しない余裕がある時だけ確保する。村 (is_overworld)
-    // には索敵すべき脅威が無いため、常に空の円になってしまうので出さない
-    // (フロア演出全般が村では変化しない方針と揃える)。
-    let radar_h: u16 = if !map.is_overworld && info_h >= 12 && inner.width >= 9 { 7 } else { 0 };
+    let radar_h = radar_height_for(map.is_overworld, info_h, inner.width);
     let radar_area = Rect::new(inner.x, inner.y, inner.width, radar_h);
     let info_area = Rect::new(inner.x, inner.y + radar_h, inner.width, info_h - radar_h);
     let ab_area = Rect::new(inner.x, inner.y + info_h, inner.width, ab_h);
@@ -571,6 +567,26 @@ fn render_explore_panel(
         render_ab_buttons(state, f, ab_area, click_state);
     }
     render_dpad(map, f, dpad_area, click_state);
+}
+
+/// 固定の索敵レーダー高さ (行数)。
+const RADAR_H: u16 = 7;
+/// info_area は wrap はしてもスクロールはしないので、最悪ケース (隣接する
+/// チャージ中モンスター 5行 + 与ダメージポップアップ 1行 + ペットHP 1行 +
+/// HP/満腹度警告 最大2行 = 9行) が収まらないと下の行が見切れる。
+const INFO_WORST_CASE_ROWS: u16 = 9;
+
+/// 索敵レーダー — 隣接1体の情報だけでは伝わらない周辺の敵配置を常時見せる。
+/// `info_area` (隣接モンスター・与ダメージポップアップ・ペットHP・HP/満腹度
+/// 警告) の最悪ケースがちゃんと収まる高さがある時だけ確保する。村
+/// (`is_overworld`) には索敵すべき脅威が無いため、常に空の円になって
+/// しまうので出さない (フロア演出全般が村では変化しない方針と揃える)。
+fn radar_height_for(is_overworld: bool, info_h: u16, width: u16) -> u16 {
+    if !is_overworld && info_h >= RADAR_H + INFO_WORST_CASE_ROWS && width >= 9 {
+        RADAR_H
+    } else {
+        0
+    }
 }
 
 // 部屋の中にいる時は compute_visibility が部屋全体 (10タイル超のことも
@@ -1690,6 +1706,19 @@ mod tests {
             charging: false,
             affix: None,
         }
+    }
+
+    #[test]
+    fn radar_height_for_reserves_enough_info_rows_for_worst_case() {
+        // 7 (radar) + 9 (worst case info) = 16 未満ならレーダーを出さない。
+        assert_eq!(radar_height_for(false, 15, 20), 0, "境界未満は0");
+        assert_eq!(radar_height_for(false, 16, 20), 7, "境界ちょうどなら出る");
+    }
+
+    #[test]
+    fn radar_height_for_is_zero_in_overworld_or_narrow_width() {
+        assert_eq!(radar_height_for(true, 30, 20), 0, "村では出さない");
+        assert_eq!(radar_height_for(false, 30, 8), 0, "幅9未満では出さない");
     }
 
     #[test]
