@@ -8,8 +8,8 @@
 
 use ratzilla::ratatui::buffer::Buffer;
 use ratzilla::ratatui::layout::Rect;
-use tachyonfx::fx;
-use tachyonfx::{Duration, Motion};
+use tachyonfx::fx::{self, Glitch};
+use tachyonfx::{Duration, IntoEffect, Motion, SimpleRng};
 
 use crate::effects::EffectHost;
 use crate::theme;
@@ -56,6 +56,27 @@ impl LoopMarchEffects {
         let preset = theme::SETBACK_FLASH;
         let effect = fx::sweep_in(Motion::DownToUp, 8, 6, preset.color, Duration::from_millis(preset.duration_ms));
         self.host.push(effect, area);
+    }
+
+    /// 地形タイルを重ね置きで強化した瞬間の演出。文字が組み上がるように
+    /// 見せることで、既存マスがワンランク上のものに生まれ変わった感を出す。
+    pub fn push_terrain_tier_up(&mut self, ring: Rect) {
+        let effect = fx::coalesce(Duration::from_millis(400));
+        self.host.push(effect, ring);
+    }
+
+    /// エリートモンスター出現の瞬間の演出。「森の奥で唸り声がした」という
+    /// ログの不穏さを、盤面が一瞬化けるGlitchで視覚的に裏付ける。
+    pub fn push_elite_spawn(&mut self, ring: Rect) {
+        let glitch = Glitch::builder()
+            .rng(SimpleRng::default())
+            .action_ms(30..120)
+            .action_start_delay_ms(0..80)
+            .cell_glitch_ratio(0.35)
+            .build()
+            .into_effect();
+        let effect = fx::with_duration(Duration::from_millis(250), glitch);
+        self.host.push(effect, ring);
     }
 
     /// 1 フレーム分の経過時間を進めて、Buffer に effect を適用する。

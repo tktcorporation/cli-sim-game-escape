@@ -23,6 +23,19 @@ use super::state::{
 
 pub fn tick(state: &mut RpgState, delta_ticks: u32) {
     state.hero_hurt_flash.tick(delta_ticks);
+
+    if let Some((_, ref mut life)) = state.last_hero_damage {
+        *life = life.saturating_sub(delta_ticks);
+    }
+    if let Some((_, ref mut life, _)) = state.last_enemy_damage {
+        *life = life.saturating_sub(delta_ticks);
+    }
+    if matches!(state.last_hero_damage, Some((_, 0))) {
+        state.last_hero_damage = None;
+    }
+    if matches!(state.last_enemy_damage, Some((_, 0, _))) {
+        state.last_enemy_damage = None;
+    }
 }
 
 // ── Cursor navigation (Issue: arrow + A/B unification) ───────
@@ -107,6 +120,56 @@ pub(super) fn rng_range(state: &mut RpgState, max: u32) -> u32 {
     if max == 0 { return 0; }
     state.rng_seed = next_rng(state.rng_seed);
     ((state.rng_seed >> 33) % max as u64) as u32
+}
+
+// ── Hero damage ──────────────────────────────────────────────
+
+/// 勇者へのダメージを適用し、被弾演出 (`hero_hurt_flash`) とダメージ
+/// ポップアップ (`last_hero_damage`) を記録する、勇者被弾の唯一の適用経路。
+///
+/// ポップアップに出す量は必ず「実際に減ったHP量」(戻り値) にする —
+/// `raw_damage` をそのまま出すと、HPの下限 (0、または `floor_at_one` が
+/// 効かせる下限の1) で一部/全部吸収された時に、表示上は食らったのに
+/// HPが動いていないという矛盾が起きるため。
+///
+/// * `floor_at_one` — true なら HP を 1 未満に落とさない (呪いのように
+///   「痛いが死にはしない」効果用)。false なら通常通り 0 まで落ちる。
+/// * `count_hit` — false ならバッチ tick 内の連続ヒット検出用カウンタ
+///   (`hero_hit_count`) を増やさない (満腹度0中の毎ターン飢餓ダメージ等、
+///   1ヒットとして数えると画面フラッシュが毎ターン発生してしまう演出のため)。
+fn apply_hero_damage(state: &mut RpgState, raw_damage: u32, floor_at_one: bool, count_hit: bool) -> u32 {
+    let hp_before = state.hp;
+    state.hp = state.hp.saturating_sub(raw_damage);
+    if floor_at_one {
+        state.hp = state.hp.max(1);
+    }
+    let actual_damage = hp_before.saturating_sub(state.hp);
+    state.hero_hurt_flash.trigger(3);
+    if count_hit {
+        state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
+    }
+    if actual_damage > 0 {
+        state.last_hero_damage = Some((actual_damage, 6));
+    }
+    actual_damage
+}
+
+/// モンスターへのダメージを適用し、ヒットカウンタ (`enemy_hit_count`) と
+/// ダメージポップアップ (`last_enemy_damage`) を記録する、モンスター被弾の
+/// 唯一の適用経路。ポップアップには必ず実際に減ったHP量 (戻り値) を使う —
+/// とどめの一撃は `raw_damage` にオーバーキル分を含むため、そのまま出すと
+/// 残りHPを超える数値が表示されてしまう。
+fn apply_enemy_damage(state: &mut RpgState, idx: usize, raw_damage: u32, is_crit: bool) -> u32 {
+    let hp_before = state.dungeon.as_ref().unwrap().monsters[idx].hp;
+    {
+        let m = &mut state.dungeon.as_mut().unwrap().monsters[idx];
+        m.hp = m.hp.saturating_sub(raw_damage);
+        m.awake = true;
+    }
+    let actual_damage = hp_before.min(raw_damage);
+    state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
+    state.last_enemy_damage = Some((actual_damage, 6, is_crit));
+    actual_damage
 }
 
 // ── Overworld (village) ─────────────────────────────────────
@@ -477,9 +540,7 @@ pub fn pray(state: &mut RpgState) -> bool {
     if roll < 10 {
         // Curse (low chance)
         let dmg = state.max_hp / 6;
-        state.hp = state.hp.saturating_sub(dmg).max(1);
-        state.hero_hurt_flash.trigger(3);
-        state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
+        apply_hero_damage(state, dmg, true, true);
         state.add_log("…神は応えなかった。心に虚しさが残る…");
     } else if roll < blessing_thresh {
         // Major blessing
@@ -863,12 +924,7 @@ pub fn attack_monster(state: &mut RpgState, idx: usize) {
 
     let damage = base + bonus;
 
-    {
-        let m = &mut state.dungeon.as_mut().unwrap().monsters[idx];
-        m.hp = m.hp.saturating_sub(damage);
-        m.awake = true;
-    }
-    state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
+    let actual_damage = apply_enemy_damage(state, idx, damage, is_crit);
     if is_crit {
         state.crit_count = state.crit_count.wrapping_add(1);
     }
@@ -879,9 +935,9 @@ pub fn attack_monster(state: &mut RpgState, idx: usize) {
         _ => "",
     };
     if is_crit {
-        state.add_log(&format!("会心の一撃！ {}に{}ダメージ{}", m_name, damage, weak_str));
+        state.add_log(&format!("会心の一撃！ {}に{}ダメージ{}", m_name, actual_damage, weak_str));
     } else {
-        state.add_log(&format!("{}に{}ダメージ{}", m_name, damage, weak_str));
+        state.add_log(&format!("{}に{}ダメージ{}", m_name, actual_damage, weak_str));
     }
     if !weak_str.is_empty() {
         note_weakness_discovery(state, kind);
@@ -1050,13 +1106,12 @@ fn tick_satiety(state: &mut RpgState) {
     } else {
         // Starving — drain HP each turn
         let drain = (state.max_hp / 30).max(1);
-        state.hp = state.hp.saturating_sub(drain);
         // hit_count は増やさない: 飢餓は満腹度0の間ずっと毎ターン発生するため、
         // 一撃ごとに画面全体をフラッシュさせると毎ターンうるさくなる。
         // HPバーの色 (hero_hurt_flash) だけは反映して「削れている」ことを伝える。
-        state.hero_hurt_flash.trigger(3);
+        let actual_drain = apply_hero_damage(state, drain, false, false);
         if state.turn_count.is_multiple_of(5) {
-            state.add_log(&format!("飢えで体力が削れる… -{}HP", drain));
+            state.add_log(&format!("飢えで体力が削れる… -{}HP", actual_drain));
         }
     }
 }
@@ -1148,10 +1203,8 @@ fn monster_act(state: &mut RpgState, idx: usize) {
         // Release charged attack
         if adjacent_to_player {
             let damage = (eff_atk * 2).saturating_sub(state.total_def() / 2).max(1);
-            state.hp = state.hp.saturating_sub(damage);
-            state.hero_hurt_flash.trigger(3);
-            state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
-            state.add_log(&format!("{}の渾身の一撃！ {}ダメージ！", m_name, damage));
+            let actual = apply_hero_damage(state, damage, false, true);
+            state.add_log(&format!("{}の渾身の一撃！ {}ダメージ！", m_name, actual));
         } else {
             state.add_log(&format!("{}の渾身の一撃は空振り…", m_name));
         }
@@ -1175,10 +1228,8 @@ fn monster_act(state: &mut RpgState, idx: usize) {
         if m_affix == Some(EnemyAffix::Burning) {
             damage += 3;
         }
-        state.hp = state.hp.saturating_sub(damage);
-        state.hero_hurt_flash.trigger(3);
-        state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
-        state.add_log(&format!("{}の攻撃！ {}ダメージ！", m_name, damage));
+        let actual = apply_hero_damage(state, damage, false, true);
+        state.add_log(&format!("{}の攻撃！ {}ダメージ！", m_name, actual));
         return;
     }
 
@@ -1277,10 +1328,9 @@ fn pet_turn(state: &mut RpgState) {
             let target_def = enemy_info(m.kind).def;
             let dmg = pet_atk.saturating_sub(target_def / 2).max(1);
             let target_name = enemy_info(m.kind).name;
-            state.add_log(&format!("{}が{}に{}ダメージ！", pet.name, target_name, dmg));
+            let actual_dmg = apply_enemy_damage(state, idx, dmg, false);
+            state.add_log(&format!("{}が{}に{}ダメージ！", pet.name, target_name, actual_dmg));
             let map = state.dungeon.as_mut().unwrap();
-            map.monsters[idx].hp = map.monsters[idx].hp.saturating_sub(dmg);
-            state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
             if map.monsters[idx].hp == 0 {
                 let killed_kind = map.monsters[idx].kind;
                 let pre = map.monsters[idx].max_hp;
@@ -1537,9 +1587,7 @@ fn apply_event_outcome(state: &mut RpgState, outcome: &EventOutcome) -> bool {
         state.hp = (state.hp + heal).min(state.max_hp);
     } else if outcome.hp_change < 0 {
         let damage = (-outcome.hp_change) as u32;
-        state.hp = state.hp.saturating_sub(damage);
-        state.hero_hurt_flash.trigger(3);
-        state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
+        apply_hero_damage(state, damage, false, true);
     } else if outcome.hp_change > 0 {
         state.hp = (state.hp + outcome.hp_change as u32).min(state.max_hp);
     }
@@ -1769,16 +1817,12 @@ fn cast_damage_skill(state: &mut RpgState, skill: SkillKind, idx: usize) {
     let is_weak = elem.is_some() && einfo.weakness == elem;
     if is_weak { damage = damage * 3 / 2; }
 
-    {
-        let m = &mut state.dungeon.as_mut().unwrap().monsters[idx];
-        m.hp = m.hp.saturating_sub(damage);
-        m.awake = true;
-    }
-    state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
+    // スキルに会心判定はない (crit roll は通常攻撃 attack_monster のみ)。
+    let actual_damage = apply_enemy_damage(state, idx, damage, false);
 
     let weak_str = if is_weak { " [弱点!]" } else { "" };
     let name = einfo.name;
-    state.add_log(&format!("{}！ {}に{}ダメージ{}", info.name, name, damage, weak_str));
+    state.add_log(&format!("{}！ {}に{}ダメージ{}", info.name, name, actual_damage, weak_str));
     if is_weak {
         note_weakness_discovery(state, kind);
     }
@@ -2335,6 +2379,51 @@ mod tests {
         assert_eq!(s.enemy_hit_count, before + 1, "ペットの攻撃もenemy_hit_countに反映されるはず");
     }
 
+    /// 回帰テスト (Codexレビュー指摘): ペットの攻撃は last_enemy_damage を
+    /// 更新しないため、ペット単独の一撃ではダメージポップアップが出ず、
+    /// プレイヤーの古いダメージ数値が居座ってしまっていた。
+    #[test]
+    fn pet_attack_sets_last_enemy_damage_popup() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        let px = map.player_x;
+        let py = map.player_y;
+        map.monsters.clear();
+        let mut monster_spot = None;
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            let nx = px as i32 + dir.dx();
+            let ny = py as i32 + dir.dy();
+            if !map.in_bounds(nx, ny) { continue; }
+            let (ux, uy) = (nx as usize, ny as usize);
+            if !map.cell(ux, uy).is_walkable() { continue; }
+            monster_spot = Some((ux, uy));
+            break;
+        }
+        let (mx, my) = monster_spot.expect("隣接できる歩行可能マスが見つからなかった");
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: mx, y: my, hp: 999, max_hp: 999,
+            awake: true, charging: false, affix: None,
+        });
+        s.pet = Some(Pet {
+            kind: EnemyKind::Slime,
+            name: "テストペット".to_string(),
+            x: px,
+            y: py,
+            hp: 20,
+            max_hp: 20,
+            level: 1,
+        });
+        s.last_enemy_damage = None;
+
+        pet_turn(&mut s);
+
+        let (dmg, life, is_crit) = s.last_enemy_damage.expect("ペットの一撃もポップアップされるはず");
+        assert!(dmg > 0);
+        assert!(life > 0);
+        assert!(!is_crit, "ペットの攻撃は会心にならない");
+    }
+
     #[test]
     fn monster_attack_triggers_hero_hurt_flash() {
         let mut s = RpgState::new();
@@ -2383,6 +2472,230 @@ mod tests {
         assert!(s.hero_hurt_flash.is_active());
         tick(&mut s, 10);
         assert!(!s.hero_hurt_flash.is_active());
+    }
+
+    #[test]
+    fn tick_decays_damage_popups_and_clears_at_zero() {
+        let mut s = RpgState::new();
+        s.last_hero_damage = Some((10, 3));
+        s.last_enemy_damage = Some((5, 3, true));
+        tick(&mut s, 2);
+        assert_eq!(s.last_hero_damage, Some((10, 1)));
+        assert_eq!(s.last_enemy_damage, Some((5, 1, true)));
+        tick(&mut s, 5);
+        assert!(s.last_hero_damage.is_none(), "残りtickが0になったらNoneに戻る");
+        assert!(s.last_enemy_damage.is_none());
+    }
+
+    #[test]
+    fn attack_monster_sets_last_enemy_damage_popup() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: 0, y: 0, hp: 999, max_hp: 999,
+            awake: true, charging: false, affix: None,
+        });
+        attack_monster(&mut s, 0);
+        let (dmg, life, _crit) = s.last_enemy_damage.expect("与ダメージポップアップがセットされるはず");
+        assert!(dmg > 0);
+        assert_eq!(life, 6);
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): とどめの一撃はオーバーキル分を
+    /// 含んだ生の計算ダメージのままポップアップに出ていたため、残りHPを
+    /// 超える数値が表示されていた。実際に減ったHP量に一致することを確認する。
+    #[test]
+    fn attack_monster_damage_popup_caps_at_remaining_hp_on_kill() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: 0, y: 0, hp: 1, max_hp: 999,
+            awake: true, charging: false, affix: None,
+        });
+        attack_monster(&mut s, 0);
+        let (dmg, _life, _crit) = s.last_enemy_damage.expect("与ダメージポップアップがセットされるはず");
+        assert_eq!(dmg, 1, "残りHP(1)を超えるオーバーキル分は表示しない");
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): ペットのとどめの一撃も同様にオーバー
+    /// キル分を含まず、実際に減ったHP量をポップアップに使うことを確認する。
+    #[test]
+    fn pet_attack_damage_popup_caps_at_remaining_hp_on_kill() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        let px = map.player_x;
+        let py = map.player_y;
+        map.monsters.clear();
+        let mut monster_spot = None;
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            let nx = px as i32 + dir.dx();
+            let ny = py as i32 + dir.dy();
+            if !map.in_bounds(nx, ny) { continue; }
+            let (ux, uy) = (nx as usize, ny as usize);
+            if !map.cell(ux, uy).is_walkable() { continue; }
+            monster_spot = Some((ux, uy));
+            break;
+        }
+        let (mx, my) = monster_spot.expect("隣接できる歩行可能マスが見つからなかった");
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: mx, y: my, hp: 1, max_hp: 999,
+            awake: true, charging: false, affix: None,
+        });
+        s.pet = Some(Pet {
+            kind: EnemyKind::Slime,
+            name: "テストペット".to_string(),
+            x: px,
+            y: py,
+            hp: 20,
+            max_hp: 20,
+            level: 99, // オーバーキルを確実に起こす高攻撃力
+        });
+
+        pet_turn(&mut s);
+
+        let (dmg, _life, _crit) = s.last_enemy_damage.expect("ペットの一撃もポップアップされるはず");
+        assert_eq!(dmg, 1, "残りHP(1)を超えるオーバーキル分は表示しない");
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): スキルのとどめの一撃も同様に
+    /// オーバーキル分を含まないことを確認する。
+    #[test]
+    fn cast_damage_skill_popup_caps_at_remaining_hp_on_kill() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: 0, y: 0, hp: 1, max_hp: 999,
+            awake: true, charging: false, affix: None,
+        });
+        cast_damage_skill(&mut s, SkillKind::Fire, 0);
+        let (dmg, _life, _crit) = s.last_enemy_damage.expect("スキルダメージもポップアップされるはず");
+        assert_eq!(dmg, 1, "残りHP(1)を超えるオーバーキル分は表示しない");
+    }
+
+    #[test]
+    fn attack_monster_crit_flags_last_enemy_damage_as_critical() {
+        // crit_roll < 10 (10%) を引くまで seed を変えて試行する。
+        for seed in 0..500u64 {
+            let mut s = RpgState::new();
+            s.rng_seed = seed;
+            enter_dungeon(&mut s, 1);
+            let map = s.dungeon.as_mut().unwrap();
+            map.monsters.clear();
+            map.monsters.push(Monster {
+                kind: EnemyKind::Slime, x: 0, y: 0, hp: 999, max_hp: 999,
+                awake: true, charging: false, affix: None,
+            });
+            let crit_before = s.crit_count;
+            attack_monster(&mut s, 0);
+            if s.crit_count != crit_before {
+                let (_, _, is_crit) = s.last_enemy_damage.expect("会心時もポップアップはセットされる");
+                assert!(is_crit, "会心の一撃はis_critical=trueでポップアップされるはず");
+                return;
+            }
+        }
+        panic!("500試行しても会心の一撃が発生しなかった");
+    }
+
+    #[test]
+    fn cast_damage_skill_sets_last_enemy_damage_popup() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: 0, y: 0, hp: 999, max_hp: 999,
+            awake: true, charging: false, affix: None,
+        });
+        cast_damage_skill(&mut s, SkillKind::Fire, 0);
+        let (dmg, life, is_crit) = s.last_enemy_damage.expect("スキルダメージもポップアップされるはず");
+        assert!(dmg > 0);
+        assert_eq!(life, 6);
+        assert!(!is_crit, "スキルに会心判定はない");
+    }
+
+    #[test]
+    fn monster_attack_sets_last_hero_damage_popup() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        let px = map.player_x;
+        let py = map.player_y;
+        let mut placed = false;
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            let nx = px as i32 + dir.dx();
+            let ny = py as i32 + dir.dy();
+            if !map.in_bounds(nx, ny) { continue; }
+            let (ux, uy) = (nx as usize, ny as usize);
+            if !map.cell(ux, uy).is_walkable() { continue; }
+            map.monsters.clear();
+            map.monsters.push(Monster {
+                kind: EnemyKind::Slime, x: ux, y: uy, hp: 999, max_hp: 999,
+                awake: true, charging: false, affix: None,
+            });
+            placed = true;
+            break;
+        }
+        assert!(placed, "隣接できる歩行可能マスが見つからなかった");
+        // charge 抽選 (25%) に外れるまで数回試す。
+        for _ in 0..20 {
+            monster_act(&mut s, 0);
+            if let Some((dmg, life)) = s.last_hero_damage {
+                assert!(dmg > 0);
+                assert_eq!(life, 6);
+                return;
+            }
+            // charge の場合は次のtickで解放される。解放時にもポップアップが立つ。
+            if s.dungeon.as_ref().unwrap().monsters[0].charging {
+                monster_act(&mut s, 0);
+                let (dmg, life) = s.last_hero_damage.expect("チャージ解放も被ダメージポップアップを出すはず");
+                assert!(dmg > 0);
+                assert_eq!(life, 6);
+                return;
+            }
+        }
+        panic!("20回試行しても被ダメージポップアップが一度もセットされなかった");
+    }
+
+    #[test]
+    fn starvation_sets_last_hero_damage_popup() {
+        let mut s = RpgState::new();
+        s.satiety = 0;
+        s.turn_count = 1; // 満腹度0の分岐に入る
+        tick_satiety(&mut s);
+        let (dmg, life) = s.last_hero_damage.expect("飢餓ダメージもポップアップされるはず");
+        assert!(dmg > 0);
+        assert_eq!(life, 6);
+    }
+
+    #[test]
+    fn event_damage_sets_last_hero_damage_popup() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let outcome = EventOutcome {
+            description: Vec::new(),
+            gold: 0,
+            hp_change: -7,
+            mp_change: 0,
+            item: None,
+            descend: false,
+            ascend: false,
+            return_to_town: false,
+            lore_id: None,
+            satiety_change: 0,
+            faith_change: 0,
+            spawn_pet: None,
+            spawn_hostile: None,
+            require_consume: None,
+        };
+        assert!(apply_event_outcome(&mut s, &outcome));
+        assert_eq!(s.last_hero_damage, Some((7, 6)));
     }
 
     #[test]
@@ -2435,6 +2748,63 @@ mod tests {
         // Second pray should fail
         let result = pray(&mut s);
         assert!(!result);
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): 呪いの `.max(1)` 下限保護によって
+    /// HPが1のまま動かない時、ダメージポップアップには生のdmgではなく
+    /// 実際に減った量(0)を反映すべき — 0なら出さない。
+    #[test]
+    fn pray_curse_at_one_hp_does_not_show_damage_popup() {
+        let mut s = RpgState::new();
+        let mut found = false;
+        for trial_seed in 0u64..500 {
+            s.rng_seed = trial_seed;
+            s.prayed_this_run = false;
+            s.hp = 1;
+            s.max_hp = 100; // dmg = 16 になるはずだが、1HPからは実質減れない
+            s.last_hero_damage = None;
+            s.log.clear();
+
+            pray(&mut s);
+
+            if s.log.iter().any(|l| l.contains("神は応えなかった")) {
+                found = true;
+                assert_eq!(s.hp, 1, "既に1HPなら呪いでも実際には減らない");
+                assert!(
+                    s.last_hero_damage.is_none(),
+                    "実際に減っていないのにダメージポップアップが出てはいけない"
+                );
+                break;
+            }
+        }
+        assert!(found, "呪いを引くseedが見つからなかった (500試行)");
+    }
+
+    /// 呪いのダメージが `.max(1)` の床に当たらない通常ケースでは、
+    /// ポップアップの数値が実際に減ったHP量と一致することを確認する。
+    #[test]
+    fn pray_curse_damage_popup_matches_actual_hp_lost_when_not_floored() {
+        let mut s = RpgState::new();
+        let mut found = false;
+        for trial_seed in 0u64..500 {
+            s.rng_seed = trial_seed;
+            s.prayed_this_run = false;
+            s.hp = 100;
+            s.max_hp = 100; // dmg = 16、1HP床には当たらない
+            s.last_hero_damage = None;
+            s.log.clear();
+
+            pray(&mut s);
+
+            if s.log.iter().any(|l| l.contains("神は応えなかった")) {
+                found = true;
+                let (dmg, _) = s.last_hero_damage.expect("実ダメージがあればポップアップも出るはず");
+                assert_eq!(dmg, 100 - s.hp, "ポップアップは実際に減ったHP量と一致すべき");
+                assert_eq!(dmg, 16);
+                break;
+            }
+        }
+        assert!(found, "呪いを引くseedが見つからなかった (500試行)");
     }
 
     #[test]

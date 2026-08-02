@@ -7,12 +7,15 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ratzilla::ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratzilla::ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
+use ratzilla::ratatui::symbols::Marker;
 use ratzilla::ratatui::text::{Line, Span};
+use ratzilla::ratatui::widgets::canvas::{Canvas, Circle, Points};
 use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
+use crate::canvas_fx;
 use crate::input::{is_narrow_layout, ClickState};
 use crate::theme;
 use crate::widgets::{Clickable, ClickableGrid, ClickableList, TabBar};
@@ -22,8 +25,8 @@ use super::dungeon_view;
 use super::logic::{available_quests, available_skills, return_bonus};
 use super::lore::{floor_theme, theme_name};
 use super::state::{
-    affix_info, element_name, item_info, skill_element, skill_info, Element, Overlay,
-    RpgState, Scene,
+    affix_info, element_name, item_info, skill_element, skill_info, DungeonMap, Element,
+    Overlay, RpgState, Scene,
 };
 
 pub fn render(
@@ -55,17 +58,7 @@ pub fn render(
 
 fn hp_bar(current: u32, max: u32, width: usize) -> (String, Color) {
     let ratio = if max > 0 { current as f64 / max as f64 } else { 0.0 };
-    let filled = (ratio * width as f64).round() as usize;
-    let empty = width.saturating_sub(filled);
-    let bar = "\u{2588}".repeat(filled) + &"\u{2591}".repeat(empty);
-    let color = if ratio > 0.5 {
-        Color::Green
-    } else if ratio > 0.25 {
-        Color::Yellow
-    } else {
-        Color::Red
-    };
-    (bar, color)
+    (theme::hp_bar_string(ratio, width), theme::hp_ratio_color(ratio))
 }
 
 /// 属性ごとの表示色（弱点表示で使用）。
@@ -74,6 +67,21 @@ fn element_color(e: Element) -> Color {
         Element::Fire => Color::LightRed,
         Element::Ice => Color::Cyan,
         Element::Thunder => Color::Yellow,
+    }
+}
+
+/// 階層に連動したアクセント色。深く潜るほど脅威度が上がっていく実感を
+/// ステータスバー/フロア表示のボーダーや見出しテキストに持たせる。
+/// 村 (floor 0) はCyan固定にする — 色分けの意味は「今どれだけ深く潜っ
+/// ているか」なので、潜っていない村では変化させない。
+fn floor_color(floor: u32) -> Color {
+    match floor {
+        0 => Color::Cyan,
+        1..=2 => Color::Green,
+        3..=4 => Color::Yellow,
+        5..=6 => Color::LightRed,
+        7..=8 => Color::Magenta,
+        _ => Color::Red,
     }
 }
 
@@ -197,6 +205,22 @@ fn render_status_bar(
             format!("{}/{}", state.hp, state.effective_max_hp()),
             Style::default().fg(hp_color),
         ),
+    ];
+
+    // 被弾直後の短い間だけ実ダメージ量を数値で浮かせる。バーの色変化だけでは
+    // 「どれだけ削られたか」までは伝わらないため。HP数値の直後という行の
+    // 前寄りの位置に置くのは、ステータスバーが wrap しない Paragraph な
+    // ため、後方の桁ほどナロー幅で切り捨てられるから。
+    if let Some((dmg, life)) = state.last_hero_damage {
+        if life > 0 {
+            spans.push(Span::styled(
+                format!(" -{}", dmg),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+
+    spans.extend([
         Span::styled(" MP", Style::default().fg(Color::Gray)),
         Span::styled(mp_bar_str, Style::default().fg(Color::Blue)),
         Span::styled(
@@ -209,7 +233,7 @@ fn render_status_bar(
             format!(" {}G", state.gold),
             Style::default().fg(Color::Yellow),
         ),
-    ];
+    ]);
 
     if state.buffs.shield_turns > 0 || state.buffs.berserk_turns > 0 || state.buffs.potion_turns > 0 {
         let mut s = String::from(" ");
@@ -219,26 +243,35 @@ fn render_status_bar(
         spans.push(Span::styled(s, Style::default().fg(Color::Magenta)));
     }
 
+    let floor_num = state.dungeon.as_ref().map(|d| d.floor_num).unwrap_or(0);
+    let accent = floor_color(floor_num);
+
+    // グローバル戻るボタン (main.rs, 左上 6 列) が row 0 に重なるため、タイトルは
+    // 中央寄せにして先頭が隠れないようにする。
     let title = if is_narrow { " Dungeon " } else { " Dungeon Dive " };
     let block = Block::default()
         .borders(borders)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(Span::styled(
-            title,
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ));
+        .border_style(Style::default().fg(accent))
+        .title(
+            Line::from(Span::styled(
+                title,
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Center),
+        );
     f.render_widget(Paragraph::new(vec![Line::from(spans)]).block(block), area);
 }
 
 fn render_floor_indicator(state: &RpgState, f: &mut Frame, area: Rect, borders: Borders) {
     if let Some(map) = &state.dungeon {
         let theme = floor_theme(map.floor_num);
-        let block = Block::default()
-            .borders(borders)
-            .border_style(Style::default().fg(Color::DarkGray));
 
         if map.is_overworld {
-            // Village indicator: just label + facility legend hint.
+            // 階層連動グラデーションは「今どれだけ深く潜っているか」を伝える
+            // ための演出なので、潜っていない村では固定の配色にする。
+            let block = Block::default()
+                .borders(borders)
+                .border_style(Style::default().fg(Color::DarkGray));
             let line = Line::from(vec![
                 Span::styled(
                     " 〈村〉 ",
@@ -256,6 +289,11 @@ fn render_floor_indicator(state: &RpgState, f: &mut Frame, area: Rect, borders: 
             f.render_widget(Paragraph::new(vec![line]).block(block), area);
             return;
         }
+
+        let accent = floor_color(map.floor_num);
+        let block = Block::default()
+            .borders(borders)
+            .border_style(Style::default().fg(accent));
 
         let bonus = return_bonus(map.floor_num, state.run_rooms_explored);
         let bonus_span = if bonus > 0 {
@@ -281,7 +319,7 @@ fn render_floor_indicator(state: &RpgState, f: &mut Frame, area: Rect, borders: 
         let line = Line::from(vec![
             Span::styled(
                 format!(" B{}F ", map.floor_num),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("〈{}〉", theme_name(theme)),
@@ -418,87 +456,114 @@ fn render_explore_panel(
         return;
     }
 
-    // Layout: info (flexible) → A/B buttons (1 row) → d-pad (3 rows).
+    // Layout: radar (optional) → info (flexible) → A/B buttons (1 row) → d-pad (3 rows).
     let dpad_h = 3_u16.min(inner.height.saturating_sub(3));
     let ab_h: u16 = if inner.height > dpad_h + 1 { 1 } else { 0 };
     let info_h = inner.height.saturating_sub(dpad_h + ab_h);
-    let info_area = Rect::new(inner.x, inner.y, inner.width, info_h);
+
+    let mut cl = ClickableList::new();
+    // Adjacent monster info
+    let px = map.player_x as i32;
+    let py = map.player_y as i32;
+    if let Some(m) = map.monsters.iter().find(|m| {
+        m.hp > 0 && (m.x as i32 - px).abs() + (m.y as i32 - py).abs() == 1
+    }) {
+        let (hpb, c) = hp_bar(m.hp, m.max_hp, 8);
+        // Elite mobs adopt the magenta highlight from the map view.
+        let name_color = if m.affix.is_some() { Color::Magenta } else { Color::Red };
+        cl.push(Line::from(vec![
+            Span::styled(
+                format!(" 敵: {}", m.display_name()),
+                Style::default().fg(name_color).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        cl.push(Line::from(vec![
+            Span::styled(" HP", Style::default().fg(Color::Gray)),
+            Span::styled(hpb, Style::default().fg(c)),
+            Span::styled(
+                format!(" {}/{}", m.hp, m.max_hp),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+        // 弱点図鑑: 発見済みなら属性を、未発見なら「?」を見せて
+        // 「まだ知らない情報がある」ことを示す。
+        let weak_span = if state.weakness_known(m.kind) {
+            match state.known_weakness(m.kind) {
+                Some(w) => Span::styled(
+                    element_name(w).to_string(),
+                    Style::default().fg(element_color(w)).add_modifier(Modifier::BOLD),
+                ),
+                None => Span::styled("なし".to_string(), Style::default().fg(Color::Gray)),
+            }
+        } else {
+            Span::styled("?".to_string(), Style::default().fg(Color::DarkGray))
+        };
+        cl.push(Line::from(vec![
+            Span::styled(" 弱点: ", Style::default().fg(Color::Gray)),
+            weak_span,
+        ]));
+        if m.charging {
+            cl.push(Line::from(Span::styled(
+                " ⚡力を溜めている！",
+                Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+            )));
+            cl.push(Line::from(Span::styled(
+                " 防御か回避を！",
+                Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+            )));
+        }
+    }
+
+    // 与ダメージポップアップ。トドメの一撃だと敵は既にリストから消えている
+    // (on_player_actionのretainが先に走る) ため、上の「隣接モンスター」
+    // ブロックの外に独立させて出す — そうしないと最後の一撃の数字だけ
+    // 表示されずに終わってしまう。
+    if let Some((dmg, life, crit)) = state.last_enemy_damage {
+        if life > 0 {
+            let label = if crit { format!(" -{} 会心!", dmg) } else { format!(" -{}", dmg) };
+            let color = if crit { Color::LightYellow } else { Color::Yellow };
+            cl.push(Line::from(Span::styled(
+                label,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )));
+        }
+    }
+
+    // Pet HP if any
+    if let Some(p) = &state.pet {
+        let (hpb, c) = hp_bar(p.hp, p.max_hp, 6);
+        cl.push(Line::from(vec![
+            Span::styled(
+                format!(" {}", p.name),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(" HP", Style::default().fg(Color::Gray)),
+            Span::styled(hpb, Style::default().fg(c)),
+            Span::styled(
+                format!(" {}/{}", p.hp, p.max_hp),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+    }
+
+    render_hp_warning(&mut cl, state);
+
+    // レーダー有効化の判定は、これから描画する info の内容 (cl) を同じ
+    // inner.width で wrap 計算した実測行数を使う。隣接モンスター名の長さ等で
+    // 必要行数が変わるため、固定の見積もり値だと折返しで見切れるケースが
+    // あった (Codexレビュー指摘)。
+    let required_info_rows = cl.visual_height(inner.width);
+    let radar_h = radar_height_for(map.is_overworld, info_h, inner.width, required_info_rows);
+    let radar_area = Rect::new(inner.x, inner.y, inner.width, radar_h);
+    let info_area = Rect::new(inner.x, inner.y + radar_h, inner.width, info_h - radar_h);
     let ab_area = Rect::new(inner.x, inner.y + info_h, inner.width, ab_h);
     let dpad_area = Rect::new(inner.x, inner.y + info_h + ab_h, inner.width, dpad_h);
 
+    if radar_h > 0 {
+        render_radar(map, f, radar_area);
+    }
+
     {
-        let mut cl = ClickableList::new();
-        // Adjacent monster info
-        let px = map.player_x as i32;
-        let py = map.player_y as i32;
-        if let Some(m) = map.monsters.iter().find(|m| {
-            m.hp > 0 && (m.x as i32 - px).abs() + (m.y as i32 - py).abs() == 1
-        }) {
-            let (hpb, c) = hp_bar(m.hp, m.max_hp, 8);
-            // Elite mobs adopt the magenta highlight from the map view.
-            let name_color = if m.affix.is_some() { Color::Magenta } else { Color::Red };
-            cl.push(Line::from(vec![
-                Span::styled(
-                    format!(" 敵: {}", m.display_name()),
-                    Style::default().fg(name_color).add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            cl.push(Line::from(vec![
-                Span::styled(" HP", Style::default().fg(Color::Gray)),
-                Span::styled(hpb, Style::default().fg(c)),
-                Span::styled(
-                    format!(" {}/{}", m.hp, m.max_hp),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
-            // 弱点図鑑: 発見済みなら属性を、未発見なら「?」を見せて
-            // 「まだ知らない情報がある」ことを示す。
-            let weak_span = if state.weakness_known(m.kind) {
-                match state.known_weakness(m.kind) {
-                    Some(w) => Span::styled(
-                        element_name(w).to_string(),
-                        Style::default().fg(element_color(w)).add_modifier(Modifier::BOLD),
-                    ),
-                    None => Span::styled("なし".to_string(), Style::default().fg(Color::Gray)),
-                }
-            } else {
-                Span::styled("?".to_string(), Style::default().fg(Color::DarkGray))
-            };
-            cl.push(Line::from(vec![
-                Span::styled(" 弱点: ", Style::default().fg(Color::Gray)),
-                weak_span,
-            ]));
-            if m.charging {
-                cl.push(Line::from(Span::styled(
-                    " ⚡力を溜めている！",
-                    Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
-                )));
-                cl.push(Line::from(Span::styled(
-                    " 防御か回避を！",
-                    Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
-                )));
-            }
-        }
-
-        // Pet HP if any
-        if let Some(p) = &state.pet {
-            let (hpb, c) = hp_bar(p.hp, p.max_hp, 6);
-            cl.push(Line::from(vec![
-                Span::styled(
-                    format!(" {}", p.name),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::styled(" HP", Style::default().fg(Color::Gray)),
-                Span::styled(hpb, Style::default().fg(c)),
-                Span::styled(
-                    format!(" {}/{}", p.hp, p.max_hp),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
-        }
-
-        render_hp_warning(&mut cl, state);
-
         let no_block = Block::default();
         let mut cs = click_state.borrow_mut();
         cl.render(f, info_area, no_block, &mut cs, true, 0);
@@ -508,6 +573,99 @@ fn render_explore_panel(
         render_ab_buttons(state, f, ab_area, click_state);
     }
     render_dpad(map, f, dpad_area, click_state);
+}
+
+/// 固定の索敵レーダー高さ (行数)。
+const RADAR_H: u16 = 7;
+
+/// 索敵レーダー — 隣接1体の情報だけでは伝わらない周辺の敵配置を常時見せる。
+/// `required_info_rows` (呼び出し側が実際に描画する info の内容を
+/// `ClickableList::visual_height` で実測した行数) がレーダーの下に収まる
+/// 高さがある時だけ確保する。固定の見積もり値ではなく実測値を使うのは、
+/// 隣接モンスター名の長さ次第で折返し行数が変わり、固定値だと見切れる
+/// ケースがあったため。村 (`is_overworld`) には索敵すべき脅威が無いため、
+/// 常に空の円になってしまうので出さない (フロア演出全般が村では変化しない
+/// 方針と揃える)。
+fn radar_height_for(is_overworld: bool, info_h: u16, width: u16, required_info_rows: u16) -> u16 {
+    if !is_overworld && width >= 9 && info_h >= RADAR_H + required_info_rows {
+        RADAR_H
+    } else {
+        0
+    }
+}
+
+// 部屋の中にいる時は compute_visibility が部屋全体 (10タイル超のことも
+// ある) を視界に入れるため、半径を欲張っておかないと部屋内の敵がレーダー
+// から漏れてしまう。
+const RADAR_DETECT_RADIUS_TILES: f64 = 11.0;
+const RADAR_SCALE: f64 = 9.0;
+
+/// 視界内 (お化け同様 `compute_visibility` の判定を流用) かつ awake な
+/// モンスターを、レーダー中心 (プレイヤー) からの Canvas 座標 `(x, y, color)`
+/// へ変換する。描画から独立させてあるのはユニットテストのため。
+fn radar_blips(
+    map: &DungeonMap,
+    visible: &std::collections::HashSet<(usize, usize)>,
+) -> Vec<(f64, f64, Color)> {
+    let px = map.player_x as f64;
+    let py = map.player_y as f64;
+    map.monsters
+        .iter()
+        .filter(|m| m.hp > 0 && m.awake && visible.contains(&(m.x, m.y)))
+        .filter_map(|m| {
+            let dx = m.x as f64 - px;
+            let dy = m.y as f64 - py;
+            if (dx * dx + dy * dy).sqrt() > RADAR_DETECT_RADIUS_TILES {
+                return None;
+            }
+            let color = if m.affix.is_some() {
+                Color::Magenta
+            } else if m.charging {
+                Color::LightRed
+            } else {
+                Color::Red
+            };
+            // 画面座標は y が下向きなので、Canvas の数学座標に合わせて反転する。
+            Some((
+                dx / RADAR_DETECT_RADIUS_TILES * RADAR_SCALE,
+                -dy / RADAR_DETECT_RADIUS_TILES * RADAR_SCALE,
+                color,
+            ))
+        })
+        .collect()
+}
+
+/// braille セル1つは 2(横)×4(縦) の疑似ピクセル。x_bounds/y_bounds を固定
+/// のまま横長の `area` にそのまま描くと、疑似ピクセル密度が横方向だけ
+/// 上がって円が横に伸びた楕円になる。等密度になる正方形 (幅 = 高さ*2 cell)
+/// を `area` から中央寄せで切り出し、円が常に円のまま見えるようにする。
+fn square_radar_area(area: Rect) -> Rect {
+    let square_w = (area.height.saturating_mul(2)).min(area.width);
+    let x_offset = (area.width - square_w) / 2;
+    Rect::new(area.x + x_offset, area.y, square_w, area.height)
+}
+
+/// 索敵レーダー — プレイヤーを中心に、視界内にいるモンスターを距離・方角で
+/// 表示する。隣接1体の情報だけでは伝わらない「周囲に何体いるか」を常時
+/// 見せて、探索の緊張感を底上げする。
+fn render_radar(map: &DungeonMap, f: &mut Frame, area: Rect) {
+    let visible = dungeon_view::compute_visibility(map);
+    let blips = radar_blips(map, &visible);
+
+    let canvas = Canvas::default()
+        .x_bounds([-10.0, 10.0])
+        .y_bounds([-10.0, 10.0])
+        .marker(Marker::Braille)
+        .paint(move |ctx| {
+            ctx.draw(&Circle { x: 0.0, y: 0.0, radius: RADAR_SCALE, color: Color::DarkGray });
+            let center = canvas_fx::filled_ellipse_points(0.0, 0.0, 0.6, 0.6, 0.4);
+            ctx.draw(&Points { coords: &center, color: Color::Cyan });
+            for &(bx, by, color) in &blips {
+                let pts = canvas_fx::filled_ellipse_points(bx, by, 0.9, 0.9, 0.45);
+                ctx.draw(&Points { coords: &pts, color });
+            }
+        });
+    f.render_widget(canvas, square_radar_area(area));
 }
 
 /// Two-button row: A (context-sensitive) and B (open menu).
@@ -549,12 +707,12 @@ fn render_ab_buttons(
         a_label,
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
     )))
-    .alignment(ratzilla::ratatui::layout::Alignment::Center);
+    .alignment(Alignment::Center);
     let b_para = Paragraph::new(Line::from(Span::styled(
         " [B] メニュー ",
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
     )))
-    .alignment(ratzilla::ratatui::layout::Alignment::Center);
+    .alignment(Alignment::Center);
 
     let mut cs = click_state.borrow_mut();
     Clickable::new(a_para, AB_A_BUTTON).render(f, a_area, &mut cs);
@@ -634,12 +792,12 @@ fn render_dpad(
 fn render_hp_warning(cl: &mut ClickableList, state: &RpgState) {
     let max_hp = state.effective_max_hp();
     let hp_ratio = if max_hp > 0 { state.hp as f64 / max_hp as f64 } else { 1.0 };
-    if hp_ratio <= 0.25 && hp_ratio > 0.0 {
+    if hp_ratio <= theme::HP_DANGER_RATIO && hp_ratio > 0.0 {
         cl.push(Line::from(Span::styled(
             " ※ 体力が危険！",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         )));
-    } else if hp_ratio <= 0.5 {
+    } else if hp_ratio <= theme::HP_CAUTION_RATIO {
         cl.push(Line::from(Span::styled(
             " ※ 傷が痛む…",
             Style::default().fg(Color::Yellow),
@@ -768,16 +926,37 @@ fn render_event_popup(
     cl.render(f, popup_area, clear_block, &mut cs, true, 0);
 }
 
+/// ログ本文のキーワードから種別を判定して色を返す。rpgのログは絵文字接頭辞
+/// を持たない自然文なので、abyssのlog_style (先頭記号判定) とは違い部分
+/// 一致で判定する。危険/警告を最優先で拾い、次いで成長関連、最後に成果。
+/// どれにも当たらない大半のログ (戦闘の通常ダメージ表記等) は灰色のまま —
+/// 全部を色分けすると逆に重要な行が埋もれる。
+fn log_style(msg: &str) -> Style {
+    const DANGER: &[&str] = &["力尽きた", "飢餓寸前", "飢えで体力が削れる", "神は応えなかった"];
+    const GAIN: &[&str] = &[
+        "を倒した", "をドロップ", "を落とした", "を授かった", "を受け取った",
+        "の加護", "の恵み", "が懐いた",
+    ];
+    const GROWTH: &[&str] = &["レベルアップ", "を習得", "会心の一撃"];
+
+    if DANGER.iter().any(|kw| msg.contains(kw)) {
+        Style::default().fg(Color::Red)
+    } else if GROWTH.iter().any(|kw| msg.contains(kw)) {
+        Style::default().fg(Color::Yellow)
+    } else if GAIN.iter().any(|kw| msg.contains(kw)) {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
+}
+
 fn render_log(state: &RpgState, f: &mut Frame, area: Rect, borders: Borders) {
     let max_lines = area.height.saturating_sub(2) as usize;
     let start = state.log.len().saturating_sub(max_lines);
     let lines: Vec<Line> = state.log[start..]
         .iter()
         .map(|msg| {
-            Line::from(Span::styled(
-                format!(" > {}", msg),
-                Style::default().fg(Color::DarkGray),
-            ))
+            Line::from(Span::styled(format!(" > {}", msg), log_style(msg)))
         })
         .collect();
     let block = Block::default()
@@ -823,23 +1002,27 @@ fn render_menu_tabs(
         return area;
     }
     let tab_area = Rect::new(area.x, area.y, area.width, 1);
-    let style_for = |o: Overlay| -> Style {
+    // 選択中タブは背景を塗って「押せるボタン」感を出す。地色は各パネルの
+    // ボーダー色 (render_inventory=Green / render_skill_menu=Blue /
+    // render_status=Cyan) と揃え、タブとその先のパネルが同じ色で繋がって
+    // 見えるようにする。
+    let style_for = |o: Overlay, base: Color| -> Style {
         if o == active {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default().fg(Color::Black).bg(base).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(base)
         }
     };
     let bar = TabBar::new(" │ ")
         .tab(
             "持ち物",
-            style_for(Overlay::Inventory),
+            style_for(Overlay::Inventory, Color::Green),
             MENU_TAB_INVENTORY,
         )
-        .tab("スキル", style_for(Overlay::SkillMenu), MENU_TAB_SKILL)
+        .tab("スキル", style_for(Overlay::SkillMenu, Color::Blue), MENU_TAB_SKILL)
         .tab(
             "ステータス",
-            style_for(Overlay::Status),
+            style_for(Overlay::Status, Color::Cyan),
             MENU_TAB_STATUS,
         );
     let mut cs = click_state.borrow_mut();
@@ -1497,11 +1680,177 @@ fn render_game_clear(
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Yellow))
-        .title(Span::styled(
-            " \u{2605} DUNGEON CLEAR \u{2605} ",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ));
+        .title(
+            Line::from(Span::styled(
+                " \u{2605} DUNGEON CLEAR \u{2605} ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ))
+            .alignment(Alignment::Center),
+        );
 
     let mut cs = click_state.borrow_mut();
     cl.render(f, area, block, &mut cs, false, 0);
+}
+
+// ── Tests ────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::games::rpg::dungeon_map::generate_map;
+    use crate::games::rpg::state::Monster;
+
+    fn adjacent_monster(map: &DungeonMap, awake: bool) -> Monster {
+        Monster {
+            kind: super::super::state::EnemyKind::Slime,
+            x: map.player_x + 1,
+            y: map.player_y,
+            hp: 5,
+            max_hp: 5,
+            awake,
+            charging: false,
+            affix: None,
+        }
+    }
+
+    #[test]
+    fn radar_height_for_reserves_the_actual_required_info_rows() {
+        // 7 (radar) + required_info_rows が info_h を超えるなら出さない。
+        assert_eq!(radar_height_for(false, 15, 20, 9), 0, "境界未満は0");
+        assert_eq!(radar_height_for(false, 16, 20, 9), 7, "境界ちょうどなら出る");
+        // 折返しで必要行数が増えた場合も同じ式で反映される (Codexレビュー指摘)。
+        assert_eq!(
+            radar_height_for(false, 16, 20, 12), 0,
+            "実測の必要行数が増えれば同じinfo_hでも出さなくなる"
+        );
+        assert_eq!(radar_height_for(false, 19, 20, 12), 7);
+    }
+
+    #[test]
+    fn radar_height_for_is_zero_in_overworld_or_narrow_width() {
+        assert_eq!(radar_height_for(true, 30, 20, 0), 0, "村では出さない");
+        assert_eq!(radar_height_for(false, 30, 8, 0), 0, "幅9未満では出さない");
+    }
+
+    #[test]
+    fn square_radar_area_centers_a_square_in_a_wide_rect() {
+        let area = Rect::new(0, 10, 48, 7);
+        let squared = square_radar_area(area);
+
+        assert_eq!(squared.height, 7, "高さはそのまま");
+        assert_eq!(squared.width, 14, "幅 = 高さ*2 に収まるはず (7*2)");
+        assert_eq!(squared.x, 17, "中央寄せ: (48-14)/2 = 17");
+        assert_eq!(squared.y, area.y);
+    }
+
+    #[test]
+    fn square_radar_area_is_noop_when_already_narrow_enough() {
+        let area = Rect::new(5, 0, 10, 7);
+        let squared = square_radar_area(area);
+
+        assert_eq!(squared, area, "幅が既に高さ*2以下なら切り詰めない");
+    }
+
+    #[test]
+    fn radar_blips_includes_awake_visible_monster_within_range() {
+        let mut seed = 42u64;
+        let map = generate_map(1, &mut seed);
+        let mut map = map;
+        map.monsters = vec![adjacent_monster(&map, true)];
+        let visible = dungeon_view::compute_visibility(&map);
+
+        let blips = radar_blips(&map, &visible);
+
+        assert_eq!(blips.len(), 1, "視界内・awakeな隣接モンスターはレーダーに映るはず");
+        assert_eq!(blips[0].2, Color::Red);
+    }
+
+    #[test]
+    fn radar_blips_excludes_sleeping_monster() {
+        let mut seed = 42u64;
+        let map = generate_map(1, &mut seed);
+        let mut map = map;
+        map.monsters = vec![adjacent_monster(&map, false)];
+        let visible = dungeon_view::compute_visibility(&map);
+
+        let blips = radar_blips(&map, &visible);
+
+        assert!(blips.is_empty(), "まだ気付いていない (awake=false) モンスターは映さない");
+    }
+
+    #[test]
+    fn radar_blips_excludes_monster_outside_visible_set() {
+        let mut seed = 42u64;
+        let map = generate_map(1, &mut seed);
+        let mut map = map;
+        let mut m = adjacent_monster(&map, true);
+        // 視界の外 (マップ端の遠方) に置き直す。
+        m.x = 0;
+        m.y = 0;
+        map.monsters = vec![m];
+        let visible = dungeon_view::compute_visibility(&map);
+
+        let blips = radar_blips(&map, &visible);
+
+        assert!(blips.is_empty(), "視界外のモンスターは検知半径内でも映さない");
+    }
+
+    #[test]
+    fn radar_blips_colors_elite_magenta_and_charging_light_red() {
+        let mut seed = 42u64;
+        let map = generate_map(1, &mut seed);
+        let mut map = map;
+        let mut elite = adjacent_monster(&map, true);
+        elite.affix = Some(super::super::state::EnemyAffix::Swift);
+        let mut charging = adjacent_monster(&map, true);
+        charging.y = map.player_y.wrapping_sub(1).min(map.height - 1);
+        charging.charging = true;
+        map.monsters = vec![elite, charging];
+        let visible = dungeon_view::compute_visibility(&map);
+
+        let blips = radar_blips(&map, &visible);
+
+        assert!(blips.iter().any(|b| b.2 == Color::Magenta), "affix持ちはマゼンタ");
+        assert!(blips.iter().any(|b| b.2 == Color::LightRed), "チャージ中は明赤");
+    }
+
+    #[test]
+    fn log_style_flags_death_and_danger_as_red() {
+        assert_eq!(log_style("力尽きた… 30G失った").fg, Some(Color::Red));
+        assert_eq!(log_style("飢餓寸前！何か食べないと…").fg, Some(Color::Red));
+        assert_eq!(log_style("…神は応えなかった。心に虚しさが残る…").fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn log_style_flags_kills_and_gains_as_green() {
+        assert_eq!(log_style("スライムを倒した！ EXP+5 +8G").fg, Some(Color::Green));
+        assert_eq!(log_style("薬草をドロップ！").fg, Some(Color::Green));
+        assert_eq!(log_style("薬草x3 / パンx2 / 50G を受け取った！").fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn log_style_flags_growth_as_yellow() {
+        assert_eq!(log_style("レベルアップ！ Lv.2").fg, Some(Color::Yellow));
+        assert_eq!(log_style("スキル「ヒール」を習得！").fg, Some(Color::Yellow));
+        assert_eq!(log_style("会心の一撃！ ゴブリンに12ダメージ").fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn log_style_defaults_to_gray_for_ordinary_lines() {
+        assert_eq!(log_style("ゴブリンに8ダメージ").fg, Some(Color::DarkGray));
+        assert_eq!(log_style("壁だ。進めない。").fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn floor_color_escalates_with_depth() {
+        // 村 (floor 0) は既存の見た目 (Cyan) を維持する。
+        assert_eq!(floor_color(0), Color::Cyan);
+        // 深く潜るほど色が変わっていく (段階が全て異なることだけ確認する —
+        // 具体的な配色はデザイン判断であってテストで固定すべき仕様ではない)。
+        let colors: Vec<Color> = (1..=super::super::state::MAX_FLOOR)
+            .map(floor_color)
+            .collect();
+        let unique: std::collections::HashSet<Color> = colors.iter().copied().collect();
+        assert!(unique.len() > 1, "階層が進むと色も変わるはず");
+    }
 }

@@ -57,16 +57,26 @@ pub fn compute_visibility(map: &DungeonMap) -> HashSet<(usize, usize)> {
 
 // ── Theme Colors ─────────────────────────────────────────────
 
+/// wall_color を白側に寄せて明るくした値を floor_dot_color として返す。
+/// 暗い RGB を直接置くと `dark_floor_color` (fog、Rgb(20,20,20)) との
+/// コントラストがほぼ無くなり、「今見えている床」と「記憶にあるだけの床」
+/// が区別できなくなるため、必ずこの関数経由で明るさを確保する。
+fn lighten_toward_white(r: u8, g: u8, b: u8, amount: f64) -> Color {
+    let mix = |c: u8| (c as f64 + (255.0 - c as f64) * amount).round() as u8;
+    Color::Rgb(mix(r), mix(g), mix(b))
+}
+
 fn theme_colors(theme: FloorTheme) -> (Color, Color) {
     // (wall_color, floor_dot_color)
-    match theme {
-        FloorTheme::Village => (Color::Rgb(140, 100, 60), Color::Rgb(60, 80, 50)),
-        FloorTheme::MossyRuins => (Color::Rgb(100, 130, 100), Color::Rgb(40, 55, 40)),
-        FloorTheme::Underground => (Color::Rgb(100, 100, 140), Color::Rgb(40, 40, 55)),
-        FloorTheme::AncientTemple => (Color::Rgb(150, 125, 80), Color::Rgb(55, 45, 30)),
-        FloorTheme::VolcanicDepths => (Color::Rgb(160, 70, 40), Color::Rgb(60, 30, 15)),
-        FloorTheme::DemonCastle => (Color::Rgb(120, 65, 150), Color::Rgb(50, 25, 60)),
-    }
+    let (r, g, b) = match theme {
+        FloorTheme::Village => (140, 100, 60),
+        FloorTheme::MossyRuins => (100, 130, 100),
+        FloorTheme::Underground => (100, 100, 140),
+        FloorTheme::AncientTemple => (150, 125, 80),
+        FloorTheme::VolcanicDepths => (160, 70, 40),
+        FloorTheme::DemonCastle => (120, 65, 150),
+    };
+    (Color::Rgb(r, g, b), lighten_toward_white(r, g, b, 0.55))
 }
 
 // ── 2D Map Rendering ─────────────────────────────────────────
@@ -82,7 +92,7 @@ pub fn render_map_2d(
     max_h: usize,
     pet: Option<&super::state::Pet>,
 ) -> Vec<Line<'static>> {
-    let (wall_color, _floor_color) = theme_colors(theme);
+    let (wall_color, floor_color) = theme_colors(theme);
     let fog_color = Color::Rgb(25, 25, 25);
     let dark_wall_color = Color::Rgb(35, 35, 35);
     let dark_floor_color = Color::Rgb(20, 20, 20);
@@ -161,7 +171,7 @@ pub fn render_map_2d(
                         buf[vy][vx] = ("\u{2588}\u{2588}".to_string(), fg(wall_color));
                     }
                     Tile::RoomFloor | Tile::Corridor => {
-                        let (ch, color) = cell_marker(cell);
+                        let (ch, color) = cell_marker(cell, floor_color);
                         buf[vy][vx] = (ch, fg(color));
                     }
                 }
@@ -175,7 +185,7 @@ pub fn render_map_2d(
                         if ch_is_floor(cell) {
                             buf[vy][vx] = ("\u{00b7} ".to_string(), fg(dark_floor_color));
                         } else {
-                            let (ch, _) = cell_marker(cell);
+                            let (ch, _) = cell_marker(cell, floor_color);
                             buf[vy][vx] = (ch, fg(dark_floor_color));
                         }
                     }
@@ -200,7 +210,11 @@ pub fn render_map_2d(
 }
 
 /// Map cell type to display string (2 chars wide) and color.
-fn cell_marker(cell: &super::state::MapCell) -> (String, Color) {
+///
+/// `floor_color` is the plain-floor tint for the current theme — used for
+/// every marker that's just "bare ground" (corridor, resolved event, and
+/// the un-sprung Trap, which must look identical to floor to stay hidden).
+fn cell_marker(cell: &super::state::MapCell, floor_color: Color) -> (String, Color) {
     // Overworld tiles never get marked done — they always render as their
     // facility glyph regardless of `event_done`.
     match cell.cell_type {
@@ -222,8 +236,8 @@ fn cell_marker(cell: &super::state::MapCell) -> (String, Color) {
             CellType::Spring => ("~ ".to_string(), Color::Cyan),
             CellType::Lore => ("\u{2726} ".to_string(), Color::Yellow),
             CellType::Npc => ("? ".to_string(), Color::Magenta),
-            CellType::Trap => ("\u{00b7} ".to_string(), Color::Reset),
-            CellType::Corridor => ("\u{00b7} ".to_string(), Color::Reset),
+            CellType::Trap => ("\u{00b7} ".to_string(), floor_color),
+            CellType::Corridor => ("\u{00b7} ".to_string(), floor_color),
             // Issue #90: distinct glyphs so the player can tell encounters apart.
             CellType::FallenAdventurer => ("\u{2020} ".to_string(), Color::Rgb(180, 180, 180)),
             CellType::FruitTree => ("\u{2663} ".to_string(), Color::Green),
@@ -239,13 +253,13 @@ fn cell_marker(cell: &super::state::MapCell) -> (String, Color) {
             | CellType::ShrineTile
             | CellType::ReceptionNpc
             | CellType::BlacksmithNpc
-            | CellType::VillagerNpc => ("\u{00b7} ".to_string(), Color::Reset),
+            | CellType::VillagerNpc => ("\u{00b7} ".to_string(), floor_color),
         }
     } else {
         match cell.cell_type {
             CellType::Entrance => ("\u{25c7} ".to_string(), Color::Green),
             CellType::Stairs => ("\u{25bd} ".to_string(), Color::Green),
-            _ => ("\u{00b7} ".to_string(), Color::Reset), // resolved event / corridor
+            _ => ("\u{00b7} ".to_string(), floor_color), // resolved event / corridor
         }
     }
 }
@@ -351,6 +365,64 @@ mod tests {
             charging_span.style.fg, idle_span.style.fg,
             "チャージ中の敵は色でも区別できる"
         );
+    }
+
+    #[test]
+    fn corridor_marker_uses_theme_floor_color() {
+        use crate::games::rpg::state::MapCell;
+        let cell = MapCell {
+            tile: Tile::Corridor,
+            cell_type: CellType::Corridor,
+            visited: true,
+            revealed: true,
+            event_done: false,
+            room_id: None,
+        };
+        let mossy_floor = theme_colors(FloorTheme::MossyRuins).1;
+        let volcanic_floor = theme_colors(FloorTheme::VolcanicDepths).1;
+        let (_, mossy) = cell_marker(&cell, mossy_floor);
+        let (_, volcanic) = cell_marker(&cell, volcanic_floor);
+        assert_eq!(mossy, mossy_floor);
+        assert_eq!(volcanic, volcanic_floor);
+        assert_ne!(mossy, volcanic, "テーマごとに床の色が変わるはず");
+    }
+
+    #[test]
+    fn theme_floor_dot_color_stays_bright_enough_to_read() {
+        // dark_floor_color (fog、Rgb(20,20,20)) と見分けが付くように、
+        // 各テーマの floor_dot は全チャンネルが十分明るくなければならない。
+        for theme in [
+            FloorTheme::Village,
+            FloorTheme::MossyRuins,
+            FloorTheme::Underground,
+            FloorTheme::AncientTemple,
+            FloorTheme::VolcanicDepths,
+            FloorTheme::DemonCastle,
+        ] {
+            let Color::Rgb(r, g, b) = theme_colors(theme).1 else {
+                panic!("floor_dot_color は Rgb であるべき");
+            };
+            assert!(
+                r > 150 && g > 150 && b > 150,
+                "{theme:?} の floor_dot_color が暗すぎる: ({r}, {g}, {b})"
+            );
+        }
+    }
+
+    #[test]
+    fn unsprung_trap_is_camouflaged_as_floor() {
+        use crate::games::rpg::state::MapCell;
+        let cell = MapCell {
+            tile: Tile::RoomFloor,
+            cell_type: CellType::Trap,
+            visited: true,
+            revealed: true,
+            event_done: false,
+            room_id: None,
+        };
+        let floor_color = theme_colors(FloorTheme::Underground).1;
+        let (_, color) = cell_marker(&cell, floor_color);
+        assert_eq!(color, floor_color, "未発動の罠は床と同じ色で偽装されるはず");
     }
 
     #[test]

@@ -34,6 +34,38 @@ pub const BAR_FULL: char = '█';
 /// HP バーの空セル。
 pub const BAR_EMPTY: char = '░';
 
+/// HP 比率 (0.0〜1.0 想定、範囲外はクランプ) から `width` セル幅のバー文字列を作る。
+pub fn hp_bar_string(ratio: f64, width: usize) -> String {
+    let ratio = ratio.clamp(0.0, 1.0);
+    let filled = ((ratio * width as f64).round() as usize).min(width);
+    let mut s = String::with_capacity(width);
+    for i in 0..width {
+        s.push(if i < filled { BAR_FULL } else { BAR_EMPTY });
+    }
+    s
+}
+
+/// この比率を上回る間は green、以下になると yellow 以下の警戒色に変わる。
+/// バー色 ([`hp_ratio_color`]) とテキスト警告 (各ゲームの `render_hp_warning`
+/// 相当) の両方がこの定数を参照することで、閾値がずれて「バーは黄色なのに
+/// 警告文が出ない」ような不整合を防ぐ。
+pub const HP_CAUTION_RATIO: f64 = 2.0 / 3.0;
+/// この比率以下で red (危険表示) になる。
+pub const HP_DANGER_RATIO: f64 = 1.0 / 3.0;
+
+/// HP 比率から警戒色を 3 段階 (green > 2/3 > yellow > 1/3 > red) で返す。
+/// ゲームをまたいで同じ閾値にすることで、プレイヤーが「黄色は危険」を
+/// 学習し直さずに済む。
+pub fn hp_ratio_color(ratio: f64) -> Color {
+    if ratio > HP_CAUTION_RATIO {
+        Color::Green
+    } else if ratio > HP_DANGER_RATIO {
+        Color::Yellow
+    } else {
+        Color::Red
+    }
+}
+
 /// クールダウン等の進行度バーの塗りセル。HP バーと形を変え、意味の違いを
 /// 視覚的に区別する。
 pub const PROGRESS_FULL: char = '▰';
@@ -87,5 +119,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn hp_bar_string_fills_proportionally_to_ratio() {
+        assert_eq!(hp_bar_string(1.0, 10), "██████████");
+        assert_eq!(hp_bar_string(0.0, 10), "░░░░░░░░░░");
+        assert_eq!(hp_bar_string(0.5, 10), "█████░░░░░");
+    }
+
+    #[test]
+    fn hp_bar_string_clamps_out_of_range_ratio() {
+        // effective_max_hp のような装備ボーナス込みの上限を下回った直後は
+        // hp > max になり得るため、ratio > 1.0 でも width を超えないこと
+        // (超えるとステータス行の後続要素を押し出してしまう) を保証する。
+        assert_eq!(hp_bar_string(1.5, 10), "██████████");
+        assert_eq!(hp_bar_string(-0.5, 10), "░░░░░░░░░░");
+    }
+
+    #[test]
+    fn hp_bar_string_zero_width_is_empty() {
+        assert_eq!(hp_bar_string(0.5, 0), "");
+    }
+
+    #[test]
+    fn hp_ratio_color_three_tiers_at_thresholds() {
+        assert_eq!(hp_ratio_color(1.0), Color::Green);
+        assert_eq!(hp_ratio_color(2.0 / 3.0 + 0.01), Color::Green);
+        assert_eq!(hp_ratio_color(2.0 / 3.0), Color::Yellow, "境界値ちょうどはgreenに含めない");
+        assert_eq!(hp_ratio_color(0.5), Color::Yellow);
+        assert_eq!(hp_ratio_color(1.0 / 3.0), Color::Red, "境界値ちょうどはyellowに含めない");
+        assert_eq!(hp_ratio_color(0.0), Color::Red);
     }
 }

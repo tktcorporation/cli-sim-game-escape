@@ -10,7 +10,7 @@ use cli_sim_game_escape::input::{
 };
 use cli_sim_game_escape::sound;
 use cli_sim_game_escape::theme;
-use cli_sim_game_escape::widgets::{Clickable, ClickableList, ScrollableTab};
+use cli_sim_game_escape::widgets::{line_visual_height, Clickable, ClickableList, ScrollableTab};
 use cli_sim_game_escape::time::{now_ms, GameTime};
 use cli_sim_game_escape::BACK_TO_MENU;
 
@@ -250,7 +250,7 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
     }
 
     match &mut *state {
-        AppState::Menu { scroll, selected } => {
+        AppState::Menu { scroll: _, selected } => {
             let direct = match event {
                 InputEvent::Key('1') | InputEvent::Click(_, MENU_SELECT_COOKIE) => {
                     Some(MenuPick::Game(GameChoice::Cookie))
@@ -298,17 +298,14 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 }
             } else {
                 match event {
-                    // Arrow up/k: move highlight up. Auto-scroll so the
-                    // selection always stays visible (keeps the UX usable
-                    // when the menu list is taller than the viewport).
+                    // Arrow up/k, down/j: move the highlight. `render_menu`
+                    // re-clamps `scroll` every frame using each card's actual
+                    // (wrap-aware, so variable-height) row count, so the
+                    // selection is guaranteed to stay visible without this
+                    // handler needing to duplicate that layout math.
                     InputEvent::Key('k') | InputEvent::Click(_, MENU_SCROLL_UP) => {
                         let before = *selected;
                         *selected = selected.saturating_sub(1);
-                        // 3 lines per game card → keep ~one card above
-                        let target = (*selected as u16) * 3;
-                        if *scroll > target {
-                            *scroll = target;
-                        }
                         if *selected != before {
                             sound::play(sound::CLICK);
                         }
@@ -316,9 +313,6 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     InputEvent::Key('j') | InputEvent::Click(_, MENU_SCROLL_DOWN) => {
                         let before = *selected;
                         *selected = (*selected + 1).min(MENU_LAST_INDEX);
-                        // No upper-bound auto-scroll here — render_menu
-                        // re-clamps `scroll` against the actual viewport.
-                        *scroll = scroll.saturating_add(0);
                         if *selected != before {
                             sound::play(sound::CLICK);
                         }
@@ -525,6 +519,12 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+/// 指定 `width` で wrap した時の visual 行数。`widgets::line_visual_height` に
+/// 委譲し、実際の render 時の wrap 計算と一致させる (drift しない)。
+fn wrapped_line_height(text: &str, width: u16) -> u16 {
+    line_visual_height(&Line::from(text), width)
+}
+
 fn render_menu(
     f: &mut ratzilla::ratatui::Frame,
     area: Rect,
@@ -588,9 +588,24 @@ fn render_menu(
         ("設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 
+    let menu_block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Green))
+        .title(" Games ");
+    // wrap=true で render するので、事前計算も同じ inner width で行う (行数は
+    // `ClickableList::visual_height` / `render` 内の wrap と一致させる必要がある)。
+    let inner = menu_block.inner(chunks[1]);
+
     let mut cl = ClickableList::new();
+    // 各カードは blank(1) + title(1) + desc(wrap後の可変行数) 行で構成される。
+    // ナロー幅では説明文がタイトルより長いことが多く、wrap 無しだと単語途中で
+    // 見切れていたため、カードの高さを可変にしてスクロール計算もそれに追従させる。
+    let mut cumulative_rows: u16 = 0;
+    let mut selected_card_top: u16 = 0;
+    let mut selected_card_bottom: u16 = 0;
     for (i, (name, desc, action_id, default_marker, accent)) in MENU_ENTRIES.iter().enumerate() {
         let is_selected = i as u8 == selected;
+        let card_top = cumulative_rows;
         // Highlighted card: solid yellow ▶ marker + bold yellow title.
         // Unselected: same shape but muted accent color, so the layout
         // doesn't shift when the cursor moves and each game keeps its hue.
@@ -610,6 +625,8 @@ fn render_menu(
             Style::default().fg(*accent)
         };
         cl.push(Line::from(""));
+        let title_text = format!(" {} {}", marker, name);
+        let title_rows = wrapped_line_height(&title_text, inner.width);
         cl.push_clickable(
             Line::from(vec![
                 Span::styled(format!(" {} ", marker), marker_style),
@@ -617,39 +634,32 @@ fn render_menu(
             ]),
             *action_id,
         );
+        let desc_text = format!("    {}", desc);
+        let desc_rows = wrapped_line_height(&desc_text, inner.width);
         cl.push_clickable(
-            Line::from(Span::styled(
-                format!("    {}", desc),
-                Style::default().fg(Color::DarkGray),
-            )),
+            Line::from(Span::styled(desc_text, Style::default().fg(Color::DarkGray))),
             *action_id,
         );
+
+        let card_height = 1 + title_rows + desc_rows;
+        cumulative_rows += card_height;
+        if is_selected {
+            selected_card_top = card_top;
+            selected_card_bottom = card_top + card_height;
+        }
     }
 
-    let menu_block = Block::default()
-        .borders(borders)
-        .border_style(Style::default().fg(Color::Green))
-        .title(" Games ");
-
-    // Clamp scroll to content height. With wrap=false each logical line is
-    // exactly one visual row, so visible_rows is the inner height.
-    let inner = menu_block.inner(chunks[1]);
-    let total_lines = cl.len() as u16;
     let visible_rows = inner.height;
-    let max_scroll = total_lines.saturating_sub(visible_rows);
+    let max_scroll = cumulative_rows.saturating_sub(visible_rows);
     if *scroll > max_scroll {
         *scroll = max_scroll;
     }
 
-    // Auto-scroll so the highlighted card stays visible. Each card spans
-    // 3 rows (blank / title / desc), with the title at row 3*selected + 1.
-    // We aim to keep the title row inside [scroll, scroll + visible_rows).
-    let card_top = (selected as u16) * 3;
-    let card_bottom = card_top + 3;
-    if card_top < *scroll {
-        *scroll = card_top;
-    } else if visible_rows > 0 && card_bottom > *scroll + visible_rows {
-        *scroll = card_bottom.saturating_sub(visible_rows);
+    // Auto-scroll so the highlighted card stays fully visible.
+    if selected_card_top < *scroll {
+        *scroll = selected_card_top;
+    } else if visible_rows > 0 && selected_card_bottom > *scroll + visible_rows {
+        *scroll = selected_card_bottom.saturating_sub(visible_rows);
     }
     if *scroll > max_scroll {
         *scroll = max_scroll;
@@ -660,7 +670,7 @@ fn render_menu(
 
     {
         let mut cs = click_state.borrow_mut();
-        cl.render(f, chunks[1], menu_block, &mut cs, false, scroll_value);
+        cl.render(f, chunks[1], menu_block, &mut cs, true, scroll_value);
     }
 
     // Scroll indicator overlays — registered last so they win over rows below.

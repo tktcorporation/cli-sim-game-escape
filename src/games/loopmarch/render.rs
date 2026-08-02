@@ -5,10 +5,13 @@ use std::rc::Rc;
 
 use ratzilla::ratatui::layout::{Alignment, Constraint, Direction as LayoutDir, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
+use ratzilla::ratatui::symbols::Marker;
 use ratzilla::ratatui::text::{Line, Span};
+use ratzilla::ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
 use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
+use crate::canvas_fx;
 use crate::input::{is_narrow_layout, ClickState};
 use crate::theme;
 use crate::widgets::{ClickableGrid, ClickableList, ScrollableTab};
@@ -47,9 +50,17 @@ fn render_camp(
         Borders::ALL
     };
 
+    // 魂の推移グラフは履歴が2件以上溜まってから初めて意味を持つ (1周だけでは
+    // 折れ線にならない) ので、それまでは無駄なスペースを取らないよう高さ0にする。
+    let graph_h: u16 = if state.soul_history.len() >= 2 { 6 } else { 0 };
     let chunks = Layout::default()
         .direction(LayoutDir::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(10), Constraint::Length(6)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(10),
+            Constraint::Length(graph_h),
+            Constraint::Length(6),
+        ])
         .split(area);
 
     let title = Paragraph::new(Line::from(Span::styled(
@@ -65,7 +76,46 @@ fn render_camp(
     f.render_widget(title, chunks[0]);
 
     render_camp_body(state, f, chunks[1], click_state, borders);
-    render_log(state, f, chunks[2], borders);
+    if graph_h > 0 {
+        render_soul_history_graph(state, f, chunks[2], borders);
+    }
+    render_log(state, f, chunks[3], borders);
+}
+
+/// ラップ完了ごとの魂の総量を折れ線で見せる。冒険を重ねるほど「ちゃんと
+/// 伸びているか」を、拠点強化のログを読み返さなくても一目で確認できる。
+fn render_soul_history_graph(state: &LoopMarchState, f: &mut Frame, area: Rect, borders: Borders) {
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::LightMagenta))
+        .title(" 魂の推移 ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width < 6 || inner.height < 2 {
+        return;
+    }
+
+    let history = &state.soul_history;
+    let max = *history.iter().max().unwrap_or(&1).max(&1) as f64;
+    let normalized: Vec<f64> = history.iter().map(|&v| v as f64 / max).collect();
+
+    let segments = canvas_fx::history_line_segments(
+        &normalized,
+        0.0,
+        inner.width as f64,
+        0.0,
+        inner.height as f64,
+    );
+    let canvas = Canvas::default()
+        .x_bounds([0.0, inner.width as f64])
+        .y_bounds([0.0, inner.height as f64])
+        .marker(Marker::Braille)
+        .paint(move |ctx| {
+            for &(x1, y1, x2, y2) in &segments {
+                ctx.draw(&CanvasLine { x1, y1, x2, y2, color: Color::LightMagenta });
+            }
+        });
+    f.render_widget(canvas, inner);
 }
 
 fn push_upgrade_row(
@@ -131,6 +181,7 @@ fn render_camp_body(
             state.camp.max_hp_cost_per_point()
         ),
     );
+    cl.push(Line::from(""));
     push_upgrade_row(
         &mut cl,
         " 攻撃力強化",
@@ -144,6 +195,7 @@ fn render_camp_body(
             state.camp.attack_cost_per_point()
         ),
     );
+    cl.push(Line::from(""));
 
     if state.camp.extra_card_level >= 1 {
         cl.push(Line::from(Span::styled(
@@ -189,6 +241,27 @@ fn render_camp_body(
         .render(f, area, &mut cs);
 }
 
+/// ログ文言からイベント種別を判定し、対応する基調色を返す。文言そのものを
+/// 手がかりにするのは、`add_log` 呼び出し側にタグ付けの仕組みが無く、
+/// 文言のパターンが唯一の種別判定材料のため。該当しない文言は`None`を返し、
+/// 呼び出し側の再帰度ベースの色 (直近=白/それ以外=灰) に委ねる。
+fn log_category_color(msg: &str) -> Option<Color> {
+    if msg.contains("を倒した") {
+        Some(Color::Green)
+    } else if msg.contains("周 完了！") {
+        Some(Color::Yellow)
+    } else if msg.contains("足りない")
+        || msg.contains("いっぱいだ")
+        || msg.contains("できない")
+        || msg.contains("異なる地形")
+        || msg.contains("習得済み")
+    {
+        Some(Color::LightRed)
+    } else {
+        None
+    }
+}
+
 fn render_log(state: &LoopMarchState, f: &mut Frame, area: Rect, borders: Borders) {
     let visible_height = area.height.saturating_sub(2) as usize;
     let log_lines: Vec<Line> = state
@@ -198,8 +271,14 @@ fn render_log(state: &LoopMarchState, f: &mut Frame, area: Rect, borders: Border
         .take(visible_height)
         .enumerate()
         .map(|(i, entry)| {
-            let color = if i == 0 { Color::White } else { Color::DarkGray };
-            Line::from(Span::styled(format!(" {entry}"), Style::default().fg(color)))
+            let is_latest = i == 0;
+            let color = log_category_color(entry)
+                .unwrap_or(if is_latest { Color::White } else { Color::DarkGray });
+            let mut style = Style::default().fg(color);
+            if is_latest {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            Line::from(Span::styled(format!(" {entry}"), style))
         })
         .collect();
 
@@ -245,7 +324,7 @@ pub fn compute_expedition_layout(area: Rect, is_narrow: bool) -> ExpeditionLayou
         let chunks = Layout::default()
             .direction(LayoutDir::Vertical)
             .constraints([
-                Constraint::Length(5),
+                Constraint::Length(6),
                 Constraint::Length(RING_H as u16 + 2),
                 Constraint::Min(8),
                 Constraint::Length(3),
@@ -263,7 +342,7 @@ pub fn compute_expedition_layout(area: Rect, is_narrow: bool) -> ExpeditionLayou
         // その下でリングと手札を左右に分ける。
         let top_chunks = Layout::default()
             .direction(LayoutDir::Vertical)
-            .constraints([Constraint::Length(5), Constraint::Min(20)])
+            .constraints([Constraint::Length(6), Constraint::Min(20)])
             .split(area);
         let body_chunks = Layout::default()
             .direction(LayoutDir::Horizontal)
@@ -310,17 +389,22 @@ fn render_expedition_narrow(
     render_log(state, f, layout.log, Borders::TOP);
 }
 
+/// ヘッダー枠色を勇者のHP危険度に連動させる (被弾フラッシュ中はそちらを
+/// 優先)。HPテキストの色と同じ計算を共有することで、枠と数字が同時に
+/// 警告色へ変わり危険度が伝わりやすくなる。
+fn header_border_color(state: &LoopMarchState) -> Color {
+    if state.hero_hurt_flash.is_active() {
+        theme::DAMAGE_FLASH.color
+    } else if state.hero.max_hp > 0 {
+        theme::hp_ratio_color(state.hero.hp.max(0) as f64 / state.hero.max_hp as f64)
+    } else {
+        Color::Red
+    }
+}
+
 fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: bool) {
     let defense = logic::mountain_synergy_defense(&state.path);
-    let hp_color = if state.hero_hurt_flash.is_active() {
-        theme::DAMAGE_FLASH.color
-    } else if state.hero.hp * 3 <= state.hero.max_hp {
-        Color::Red
-    } else if state.hero.hp * 3 <= state.hero.max_hp * 2 {
-        Color::Yellow
-    } else {
-        Color::Green
-    };
+    let hp_color = header_border_color(state);
     let borders = if is_narrow {
         Borders::TOP | Borders::BOTTOM
     } else {
@@ -403,11 +487,34 @@ fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: b
         ),
     ]);
 
-    let widget = Paragraph::new(vec![line1, line2, line3]).block(
+    // 直近の被ダメージ/与ダメージを数値で見せる。攻防の結果が「HPが減った」
+    // だけでは実感しづらいため (abyssの被弾/命中表示と同じ形)。
+    let mut line4_spans: Vec<Span> = Vec::new();
+    if let Some((dmg, life)) = state.last_hero_damage {
+        if life > 0 {
+            line4_spans.push(Span::styled(
+                format!(" -{dmg}"),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+    if let Some((dmg, life)) = state.last_enemy_damage {
+        if life > 0 {
+            line4_spans.push(Span::styled(
+                format!("  -{dmg} 命中"),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+    let line4 = Line::from(line4_spans);
+
+    // グローバル戻るボタン (main.rs, 左上 6 列) が row 0 に重なるため、タイトルは
+    // 中央寄せにして先頭が隠れないようにする。
+    let widget = Paragraph::new(vec![line1, line2, line3, line4]).block(
         Block::default()
             .borders(borders)
-            .border_style(Style::default().fg(Color::Yellow))
-            .title(" 周回討伐 "),
+            .border_style(Style::default().fg(hp_color))
+            .title(Line::from(" 周回討伐 ").alignment(Alignment::Center)),
     );
     f.render_widget(widget, area);
 }
@@ -454,13 +561,7 @@ fn hp_bar(hp: i32, max: i32, width: usize) -> String {
     if max <= 0 {
         return String::new();
     }
-    let filled = ((hp.max(0) as f32 / max as f32) * width as f32).round() as usize;
-    let filled = filled.min(width);
-    let mut s = String::with_capacity(width);
-    for i in 0..width {
-        s.push(if i < filled { theme::BAR_FULL } else { theme::BAR_EMPTY });
-    }
-    s
+    theme::hp_bar_string(hp.max(0) as f64 / max as f64, width)
 }
 
 fn monster_name(m: &Monster) -> &'static str {
@@ -574,6 +675,18 @@ fn tier_badge(tier: u32) -> char {
     }
 }
 
+/// リング枠色を周回数に応じて変化させる。敵強化(`DIFFICULTY_PER_LAP`)が
+/// 効いてくる周回帯に合わせて寒色から暖色へ進めることで、危険度の上昇も
+/// 暗示する。
+fn ring_border_color(lap: u32) -> Color {
+    match lap {
+        0..=2 => Color::Green,
+        3..=6 => Color::Cyan,
+        7..=11 => Color::LightMagenta,
+        _ => Color::Red,
+    }
+}
+
 fn render_ring(
     state: &LoopMarchState,
     f: &mut Frame,
@@ -597,7 +710,7 @@ fn render_ring(
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green))
+        .border_style(Style::default().fg(ring_border_color(state.lap)))
         .title(format!(" 道 (第{}周) ", state.lap + 1));
 
     let grid = ClickableGrid::new(RING_W, RING_H, PATH_CLICK_BASE, 2);
@@ -695,6 +808,90 @@ mod tests {
         assert_eq!(hp_bar(15, 30, 8), "████░░░░");
         // Negative HP clamps to empty.
         assert_eq!(hp_bar(-5, 30, 8), "░░░░░░░░");
+    }
+
+    #[test]
+    fn header_border_color_follows_hp_ratio_when_not_flashing() {
+        let mut state = LoopMarchState::new();
+        logic::start_or_resume_expedition(&mut state);
+        state.hero.hp = state.hero.max_hp;
+        assert_eq!(header_border_color(&state), theme::hp_ratio_color(1.0));
+
+        state.hero.hp = 1;
+        let ratio = 1.0 / state.hero.max_hp as f64;
+        assert_eq!(header_border_color(&state), theme::hp_ratio_color(ratio));
+    }
+
+    #[test]
+    fn header_border_color_prioritizes_hurt_flash_over_hp_ratio() {
+        let mut state = LoopMarchState::new();
+        logic::start_or_resume_expedition(&mut state);
+        state.hero.hp = state.hero.max_hp; // 満タンでもフラッシュ中は警告色を優先
+        state.hero_hurt_flash.trigger(3);
+        assert_eq!(header_border_color(&state), theme::DAMAGE_FLASH.color);
+    }
+
+    #[test]
+    fn ring_border_color_changes_across_lap_thresholds() {
+        let colors: Vec<Color> = [0, 3, 7, 12].iter().map(|&lap| ring_border_color(lap)).collect();
+        for i in 0..colors.len() {
+            for j in (i + 1)..colors.len() {
+                assert_ne!(
+                    colors[i], colors[j],
+                    "周回帯が変わると枠色も変わるはず (常に同じ色だと進行の実感が薄い)"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn log_category_color_classifies_kill_lap_and_warning_messages() {
+        assert_eq!(log_category_color("狼を倒した (最後の一撃-3)。木材+3"), Some(Color::Green));
+        assert_eq!(log_category_color("ゴーレムを倒した (最後の一撃-3)。石材+4"), Some(Color::Green));
+        assert_eq!(log_category_color("第1周 完了！ 木材+3 石材+0 魂+1"), Some(Color::Yellow));
+        assert_eq!(log_category_color("手札はいっぱいだ"), Some(Color::LightRed));
+        assert_eq!(log_category_color("資源が足りない (木材/石材が必要)"), Some(Color::LightRed));
+        assert_eq!(log_category_color("魂が足りない"), Some(Color::LightRed));
+        assert_eq!(log_category_color("そこには異なる地形がある"), Some(Color::LightRed));
+        assert_eq!(log_category_color("これ以上は強化できない"), Some(Color::LightRed));
+        assert_eq!(log_category_color("既に習得済み"), Some(Color::LightRed));
+        assert_eq!(log_category_color("森を配置した"), None, "その他の文言は種別無しとして扱うはず");
+    }
+
+    #[test]
+    fn render_log_bolds_latest_line_while_keeping_category_color() {
+        let mut state = LoopMarchState::new();
+        state.log = vec!["狼を倒した (最後の一撃-3)。木材+3".to_string()];
+        let area = Rect::new(0, 0, 40, 4);
+        let mut terminal = Terminal::new(TestBackend::new(40, 4)).unwrap();
+        let completed = terminal
+            .draw(|f| {
+                render_log(&state, f, area, Borders::ALL);
+            })
+            .unwrap();
+        let cell = completed.buffer.cell((1, 1)).unwrap();
+        assert_eq!(cell.fg, Color::Green, "討伐ログは種別色(緑)が基調になるはず");
+        assert!(cell.modifier.contains(Modifier::BOLD), "直近行は強調(BOLD)されるはず");
+    }
+
+    #[test]
+    fn render_header_shows_damage_numbers_when_present() {
+        let mut state = LoopMarchState::new();
+        logic::start_or_resume_expedition(&mut state);
+        state.last_hero_damage = Some((7, 3));
+        state.last_enemy_damage = Some((4, 3));
+        let area = Rect::new(0, 0, 40, 6);
+        let mut terminal = Terminal::new(TestBackend::new(40, 6)).unwrap();
+        let completed = terminal
+            .draw(|f| {
+                render_header(&state, f, area, false);
+            })
+            .unwrap();
+        let line: String = (0..40)
+            .map(|x| completed.buffer.cell((x, 4)).map(|c| c.symbol()).unwrap_or(" "))
+            .collect();
+        assert!(line.contains("-7"), "被ダメージ数値が表示されるはず: {line:?}");
+        assert!(line.contains("-4"), "与ダメージ数値が表示されるはず: {line:?}");
     }
 
     #[test]

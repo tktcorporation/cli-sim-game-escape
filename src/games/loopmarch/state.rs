@@ -237,6 +237,9 @@ pub struct LoopMarchState {
     pub soul: u32,
     pub camp: CampUpgrades,
     pub best_lap: u32,
+    /// ラップ完了ごとの魂の総量スナップショット (古い方が先頭)。拠点画面の
+    /// 推移グラフ表示専用で、ゲームロジックには使わない。
+    pub soul_history: Vec<u32>,
 
     // ── 演出 (遠征スコープ、死亡時にリセットされる) ──
     pub hero_hurt_flash: FlashTimer,
@@ -246,6 +249,16 @@ pub struct LoopMarchState {
     /// ないため、render 側は HP ではなくこのカウンタの差分でヒット演出を判定する
     /// (死亡時にリセットしなくても差分比較なので問題ない)。
     pub enemy_hit_count: u32,
+    /// エリートモンスターの出現回数の単調増加カウンタ。`enemy_hit_count` と同じ
+    /// 理由で、バッチ tick 内で出現→撃破が完結すると盤面上のエリート数の
+    /// スナップショット比較だけでは出現を検出できないため用意している。
+    pub elite_spawn_count: u32,
+    /// 直近の被ダメージ (ダメージ量, 残り表示tick数)。0になったら`logic::tick`
+    /// が`None`に戻す。ヘッダーに「-N」を一定時間だけ表示するための演出専用
+    /// データで、ダメージ計算そのものには使わない。
+    pub last_hero_damage: Option<(i32, u32)>,
+    /// 直近にモンスターへ与えたダメージ (ダメージ量, 残り表示tick数)。
+    pub last_enemy_damage: Option<(i32, u32)>,
 
     // ── UI / メタ ──
     pub log: Vec<String>,
@@ -285,9 +298,13 @@ impl LoopMarchState {
             soul: 0,
             camp,
             best_lap: 0,
+            soul_history: Vec::new(),
             hero_hurt_flash: FlashTimer::new(),
             enemy_hurt_flash: FlashTimer::new(),
             enemy_hit_count: 0,
+            elite_spawn_count: 0,
+            last_hero_damage: None,
+            last_enemy_damage: None,
             log: vec!["周回討伐へようこそ。まずは拠点で遠征に出よう。".into()],
             rng_state: 0x1234_5678,
             camp_scroll: Cell::new(0),

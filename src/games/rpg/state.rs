@@ -1137,6 +1137,14 @@ pub struct RpgState {
     /// ある — 一瞬のフラッシュが消えた後もHP表示の赤みだけは少し長く残り、
     /// 「今ダメージを受けた」という余韻を伝える。
     pub hero_hurt_flash: FlashTimer,
+    /// 直近の被ダメージ量と残りtick数。render.rs がステータスバー付近に
+    /// 「-12」のような数値を一瞬浮かせるために使う — フラッシュの色だけでは
+    /// 「削れている」ことは伝わっても具体的な量までは読み取れないため。
+    /// tick ごとに残りtickを減らし、0になったら None に戻す。
+    pub last_hero_damage: Option<(u32, u32)>,
+    /// 直近の与ダメージ量・残りtick数・会心の一撃だったか。隣接モンスター
+    /// パネルに同様のポップアップを出すための状態。
+    pub last_enemy_damage: Option<(u32, u32, bool)>,
     /// 被弾/与ダメージ/クリティカル/チャージ開始の単調増加カウンタ。
     /// 1ターンの行動解決の中で同じ種類のイベントが複数回起きることが
     /// あるため (Swift affix の連続行動、複数体の同時攻撃等)、演出トリガは
@@ -1218,6 +1226,8 @@ impl RpgState {
             learned_skills: vec![SkillKind::Fire],
             pending_skill_choice: None,
             hero_hurt_flash: FlashTimer::new(),
+            last_hero_damage: None,
+            last_enemy_damage: None,
             hero_hit_count: 0,
             enemy_hit_count: 0,
             crit_count: 0,
@@ -1377,6 +1387,8 @@ mod tests {
         assert!(s.dungeon.as_ref().unwrap().is_overworld);
         assert!(!s.met_reception);
         assert!(!s.met_blacksmith);
+        assert!(s.last_hero_damage.is_none());
+        assert!(s.last_enemy_damage.is_none());
     }
 
     #[test]

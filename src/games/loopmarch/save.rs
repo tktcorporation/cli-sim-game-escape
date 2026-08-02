@@ -44,6 +44,11 @@ struct GameSave {
     /// 乱数シード。保存しないとリロードのたびに固定シードへ戻り、
     /// 初期手札や湧き判定が毎回同じ列を再生してしまう。
     rng_state: u32,
+    /// 拠点画面の推移グラフ用の履歴。無くても soul/best_lap 等コアな
+    /// 進行データには影響しないため、旧セーブは `#[serde(default)]` の
+    /// 空Vecで読み込めればよい (バージョンは上げない)。
+    #[serde(default)]
+    soul_history: Vec<u32>,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -57,6 +62,7 @@ fn extract_save(state: &LoopMarchState) -> SaveData {
             attack_level: state.camp.attack_level,
             extra_card_level: state.camp.extra_card_level,
             rng_state: state.rng_state,
+            soul_history: state.soul_history.clone(),
         },
     }
 }
@@ -73,6 +79,7 @@ fn apply_save(state: &mut LoopMarchState, save: &GameSave) {
     // 0 は rng_next 側で固定値に補正されるだけなので、未保存(旧セーブ)の
     // 0 をそのまま許容してよい。
     state.rng_state = save.rng_state;
+    state.soul_history = save.soul_history.clone();
     // 拠点強化を反映した状態で、遠征前の勇者ステータスを作り直す。
     state.hero.max_hp = state.camp.hero_max_hp();
     state.hero.hp = state.hero.max_hp;
@@ -159,6 +166,7 @@ mod tests {
         original.camp.attack_level = 1;
         original.camp.extra_card_level = 1;
         original.rng_state = 999_999;
+        original.soul_history = vec![5, 12, 30];
 
         let save = extract_save(&original);
         let json = serde_json::to_string(&save).unwrap();
@@ -179,6 +187,21 @@ mod tests {
             restored.rng_state, 999_999,
             "rng_state を保存しないとリロードのたびに同じ乱数列を再生してしまう"
         );
+        assert_eq!(restored.soul_history, vec![5, 12, 30]);
+    }
+
+    #[test]
+    fn save_without_soul_history_field_loads_with_empty_history() {
+        // soul_history 追加前の旧セーブ (フィールド自体が無いJSON) を
+        // 読み込んでも panic せず、空Vecとして扱えることを保証する。
+        let json = r#"{"version":1,"game":{"soul":10,"best_lap":2,"max_hp_level":0,"attack_level":0,"extra_card_level":0,"rng_state":1}}"#;
+        let loaded: SaveData = serde_json::from_str(json).unwrap();
+
+        let mut restored = LoopMarchState::new();
+        apply_save(&mut restored, &loaded.game);
+
+        assert_eq!(restored.soul, 10);
+        assert!(restored.soul_history.is_empty());
     }
 
     #[test]
