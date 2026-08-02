@@ -14,6 +14,7 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
+use crate::theme;
 use crate::widgets::{Clickable, ClickableGrid, ClickableList, TabBar};
 
 use super::actions::*;
@@ -93,6 +94,41 @@ fn borders_for(area_width: u16) -> Borders {
     }
 }
 
+/// `render_main` の縦分割 Rect 群。演出 (`RpgEffects`) がどの領域にフラッシュを
+/// 掛けるかを決めるのにも使うため、`render_main` の内部でしか使わないローカル
+/// 変数ではなく公開関数として切り出してある (mod.rs の detect_transitions から
+/// 同じ計算を再利用する)。
+pub struct RpgLayout {
+    pub status_bar: Rect,
+    /// `in_dungeon` が false の時は高さ0 (呼び出し側は演出対象として使わない)。
+    pub floor_indicator: Rect,
+    pub scene_content: Rect,
+    pub log: Rect,
+}
+
+pub fn compute_layout(area: Rect, in_dungeon: bool, is_dungeon_explore: bool) -> RpgLayout {
+    let is_narrow = is_narrow_layout(area.width);
+    let log_h: u16 = if is_narrow && is_dungeon_explore { 2 } else { 4 };
+    let dbar_h: u16 = if in_dungeon { 1 } else { 0 };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(dbar_h),
+            Constraint::Min(6),
+            Constraint::Length(log_h),
+        ])
+        .split(area);
+
+    RpgLayout {
+        status_bar: chunks[0],
+        floor_indicator: chunks[1],
+        scene_content: chunks[2],
+        log: chunks[3],
+    }
+}
+
 // ── Main Screen ─────────────────────────────────────────────
 
 fn render_main(
@@ -103,36 +139,18 @@ fn render_main(
 ) {
     let borders = borders_for(area.width);
     let is_narrow = is_narrow_layout(area.width);
-    let log_h: u16 = if is_narrow && state.scene == Scene::DungeonExplore { 2 } else { 4 };
-
     let in_dungeon = state.dungeon.is_some();
-    let dbar_h: u16 = if in_dungeon { 1 } else { 0 };
+    let layout = compute_layout(area, in_dungeon, state.scene == Scene::DungeonExplore);
 
-    let constraints = vec![
-        Constraint::Length(3),
-        Constraint::Length(dbar_h),
-        Constraint::Min(6),
-        Constraint::Length(log_h),
-    ];
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(constraints)
-        .split(area);
-
-    let mut chunk_idx = 0;
-    render_status_bar(state, f, chunks[chunk_idx], borders, is_narrow);
-    chunk_idx += 1;
+    render_status_bar(state, f, layout.status_bar, borders, is_narrow);
 
     if in_dungeon {
-        render_floor_indicator(state, f, chunks[chunk_idx], borders);
-        chunk_idx += 1;
+        render_floor_indicator(state, f, layout.floor_indicator, borders);
     }
 
-    render_scene_content(state, f, chunks[chunk_idx], borders, click_state);
-    chunk_idx += 1;
+    render_scene_content(state, f, layout.scene_content, borders, click_state);
 
-    render_log(state, f, chunks[chunk_idx], borders);
+    render_log(state, f, layout.log, borders);
 }
 
 fn render_status_bar(
@@ -143,7 +161,14 @@ fn render_status_bar(
     is_narrow: bool,
 ) {
     let hp_w = if is_narrow { 6 } else { 10 };
-    let (hp_bar_str, hp_color) = hp_bar(state.hp, state.effective_max_hp(), hp_w);
+    let (hp_bar_str, hp_color_by_ratio) = hp_bar(state.hp, state.effective_max_hp(), hp_w);
+    // 被弾直後の数tickは残量に関わらずダメージ色を上書きし、「今食らった」ことを
+    // 数値の変化を目で追わなくても伝える。
+    let hp_color = if state.hero_hurt_flash.is_active() {
+        theme::DAMAGE_FLASH.color
+    } else {
+        hp_color_by_ratio
+    };
 
     let mp_w = if is_narrow { 4 } else { 6 };
     let mp_ratio = if state.max_mp > 0 { state.mp as f64 / state.max_mp as f64 } else { 0.0 };
@@ -170,7 +195,7 @@ fn render_status_bar(
         Span::styled(hp_bar_str, Style::default().fg(hp_color)),
         Span::styled(
             format!("{}/{}", state.hp, state.effective_max_hp()),
-            Style::default().fg(Color::White),
+            Style::default().fg(hp_color),
         ),
         Span::styled(" MP", Style::default().fg(Color::Gray)),
         Span::styled(mp_bar_str, Style::default().fg(Color::Blue)),
