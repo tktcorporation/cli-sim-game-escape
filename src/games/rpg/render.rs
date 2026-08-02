@@ -460,7 +460,100 @@ fn render_explore_panel(
     let dpad_h = 3_u16.min(inner.height.saturating_sub(3));
     let ab_h: u16 = if inner.height > dpad_h + 1 { 1 } else { 0 };
     let info_h = inner.height.saturating_sub(dpad_h + ab_h);
-    let radar_h = radar_height_for(map.is_overworld, info_h, inner.width);
+
+    let mut cl = ClickableList::new();
+    // Adjacent monster info
+    let px = map.player_x as i32;
+    let py = map.player_y as i32;
+    if let Some(m) = map.monsters.iter().find(|m| {
+        m.hp > 0 && (m.x as i32 - px).abs() + (m.y as i32 - py).abs() == 1
+    }) {
+        let (hpb, c) = hp_bar(m.hp, m.max_hp, 8);
+        // Elite mobs adopt the magenta highlight from the map view.
+        let name_color = if m.affix.is_some() { Color::Magenta } else { Color::Red };
+        cl.push(Line::from(vec![
+            Span::styled(
+                format!(" 敵: {}", m.display_name()),
+                Style::default().fg(name_color).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        cl.push(Line::from(vec![
+            Span::styled(" HP", Style::default().fg(Color::Gray)),
+            Span::styled(hpb, Style::default().fg(c)),
+            Span::styled(
+                format!(" {}/{}", m.hp, m.max_hp),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+        // 弱点図鑑: 発見済みなら属性を、未発見なら「?」を見せて
+        // 「まだ知らない情報がある」ことを示す。
+        let weak_span = if state.weakness_known(m.kind) {
+            match state.known_weakness(m.kind) {
+                Some(w) => Span::styled(
+                    element_name(w).to_string(),
+                    Style::default().fg(element_color(w)).add_modifier(Modifier::BOLD),
+                ),
+                None => Span::styled("なし".to_string(), Style::default().fg(Color::Gray)),
+            }
+        } else {
+            Span::styled("?".to_string(), Style::default().fg(Color::DarkGray))
+        };
+        cl.push(Line::from(vec![
+            Span::styled(" 弱点: ", Style::default().fg(Color::Gray)),
+            weak_span,
+        ]));
+        if m.charging {
+            cl.push(Line::from(Span::styled(
+                " ⚡力を溜めている！",
+                Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+            )));
+            cl.push(Line::from(Span::styled(
+                " 防御か回避を！",
+                Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+            )));
+        }
+    }
+
+    // 与ダメージポップアップ。トドメの一撃だと敵は既にリストから消えている
+    // (on_player_actionのretainが先に走る) ため、上の「隣接モンスター」
+    // ブロックの外に独立させて出す — そうしないと最後の一撃の数字だけ
+    // 表示されずに終わってしまう。
+    if let Some((dmg, life, crit)) = state.last_enemy_damage {
+        if life > 0 {
+            let label = if crit { format!(" -{} 会心!", dmg) } else { format!(" -{}", dmg) };
+            let color = if crit { Color::LightYellow } else { Color::Yellow };
+            cl.push(Line::from(Span::styled(
+                label,
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )));
+        }
+    }
+
+    // Pet HP if any
+    if let Some(p) = &state.pet {
+        let (hpb, c) = hp_bar(p.hp, p.max_hp, 6);
+        cl.push(Line::from(vec![
+            Span::styled(
+                format!(" {}", p.name),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(" HP", Style::default().fg(Color::Gray)),
+            Span::styled(hpb, Style::default().fg(c)),
+            Span::styled(
+                format!(" {}/{}", p.hp, p.max_hp),
+                Style::default().fg(Color::White),
+            ),
+        ]));
+    }
+
+    render_hp_warning(&mut cl, state);
+
+    // レーダー有効化の判定は、これから描画する info の内容 (cl) を同じ
+    // inner.width で wrap 計算した実測行数を使う。隣接モンスター名の長さ等で
+    // 必要行数が変わるため、固定の見積もり値だと折返しで見切れるケースが
+    // あった (Codexレビュー指摘)。
+    let required_info_rows = cl.visual_height(inner.width);
+    let radar_h = radar_height_for(map.is_overworld, info_h, inner.width, required_info_rows);
     let radar_area = Rect::new(inner.x, inner.y, inner.width, radar_h);
     let info_area = Rect::new(inner.x, inner.y + radar_h, inner.width, info_h - radar_h);
     let ab_area = Rect::new(inner.x, inner.y + info_h, inner.width, ab_h);
@@ -471,93 +564,6 @@ fn render_explore_panel(
     }
 
     {
-        let mut cl = ClickableList::new();
-        // Adjacent monster info
-        let px = map.player_x as i32;
-        let py = map.player_y as i32;
-        if let Some(m) = map.monsters.iter().find(|m| {
-            m.hp > 0 && (m.x as i32 - px).abs() + (m.y as i32 - py).abs() == 1
-        }) {
-            let (hpb, c) = hp_bar(m.hp, m.max_hp, 8);
-            // Elite mobs adopt the magenta highlight from the map view.
-            let name_color = if m.affix.is_some() { Color::Magenta } else { Color::Red };
-            cl.push(Line::from(vec![
-                Span::styled(
-                    format!(" 敵: {}", m.display_name()),
-                    Style::default().fg(name_color).add_modifier(Modifier::BOLD),
-                ),
-            ]));
-            cl.push(Line::from(vec![
-                Span::styled(" HP", Style::default().fg(Color::Gray)),
-                Span::styled(hpb, Style::default().fg(c)),
-                Span::styled(
-                    format!(" {}/{}", m.hp, m.max_hp),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
-            // 弱点図鑑: 発見済みなら属性を、未発見なら「?」を見せて
-            // 「まだ知らない情報がある」ことを示す。
-            let weak_span = if state.weakness_known(m.kind) {
-                match state.known_weakness(m.kind) {
-                    Some(w) => Span::styled(
-                        element_name(w).to_string(),
-                        Style::default().fg(element_color(w)).add_modifier(Modifier::BOLD),
-                    ),
-                    None => Span::styled("なし".to_string(), Style::default().fg(Color::Gray)),
-                }
-            } else {
-                Span::styled("?".to_string(), Style::default().fg(Color::DarkGray))
-            };
-            cl.push(Line::from(vec![
-                Span::styled(" 弱点: ", Style::default().fg(Color::Gray)),
-                weak_span,
-            ]));
-            if m.charging {
-                cl.push(Line::from(Span::styled(
-                    " ⚡力を溜めている！",
-                    Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
-                )));
-                cl.push(Line::from(Span::styled(
-                    " 防御か回避を！",
-                    Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
-                )));
-            }
-        }
-
-        // 与ダメージポップアップ。トドメの一撃だと敵は既にリストから消えている
-        // (on_player_actionのretainが先に走る) ため、上の「隣接モンスター」
-        // ブロックの外に独立させて出す — そうしないと最後の一撃の数字だけ
-        // 表示されずに終わってしまう。
-        if let Some((dmg, life, crit)) = state.last_enemy_damage {
-            if life > 0 {
-                let label = if crit { format!(" -{} 会心!", dmg) } else { format!(" -{}", dmg) };
-                let color = if crit { Color::LightYellow } else { Color::Yellow };
-                cl.push(Line::from(Span::styled(
-                    label,
-                    Style::default().fg(color).add_modifier(Modifier::BOLD),
-                )));
-            }
-        }
-
-        // Pet HP if any
-        if let Some(p) = &state.pet {
-            let (hpb, c) = hp_bar(p.hp, p.max_hp, 6);
-            cl.push(Line::from(vec![
-                Span::styled(
-                    format!(" {}", p.name),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::styled(" HP", Style::default().fg(Color::Gray)),
-                Span::styled(hpb, Style::default().fg(c)),
-                Span::styled(
-                    format!(" {}/{}", p.hp, p.max_hp),
-                    Style::default().fg(Color::White),
-                ),
-            ]));
-        }
-
-        render_hp_warning(&mut cl, state);
-
         let no_block = Block::default();
         let mut cs = click_state.borrow_mut();
         cl.render(f, info_area, no_block, &mut cs, true, 0);
@@ -571,18 +577,17 @@ fn render_explore_panel(
 
 /// 固定の索敵レーダー高さ (行数)。
 const RADAR_H: u16 = 7;
-/// info_area は wrap はしてもスクロールはしないので、最悪ケース (隣接する
-/// チャージ中モンスター 5行 + 与ダメージポップアップ 1行 + ペットHP 1行 +
-/// HP/満腹度警告 最大2行 = 9行) が収まらないと下の行が見切れる。
-const INFO_WORST_CASE_ROWS: u16 = 9;
 
 /// 索敵レーダー — 隣接1体の情報だけでは伝わらない周辺の敵配置を常時見せる。
-/// `info_area` (隣接モンスター・与ダメージポップアップ・ペットHP・HP/満腹度
-/// 警告) の最悪ケースがちゃんと収まる高さがある時だけ確保する。村
-/// (`is_overworld`) には索敵すべき脅威が無いため、常に空の円になって
-/// しまうので出さない (フロア演出全般が村では変化しない方針と揃える)。
-fn radar_height_for(is_overworld: bool, info_h: u16, width: u16) -> u16 {
-    if !is_overworld && info_h >= RADAR_H + INFO_WORST_CASE_ROWS && width >= 9 {
+/// `required_info_rows` (呼び出し側が実際に描画する info の内容を
+/// `ClickableList::visual_height` で実測した行数) がレーダーの下に収まる
+/// 高さがある時だけ確保する。固定の見積もり値ではなく実測値を使うのは、
+/// 隣接モンスター名の長さ次第で折返し行数が変わり、固定値だと見切れる
+/// ケースがあったため。村 (`is_overworld`) には索敵すべき脅威が無いため、
+/// 常に空の円になってしまうので出さない (フロア演出全般が村では変化しない
+/// 方針と揃える)。
+fn radar_height_for(is_overworld: bool, info_h: u16, width: u16, required_info_rows: u16) -> u16 {
+    if !is_overworld && width >= 9 && info_h >= RADAR_H + required_info_rows {
         RADAR_H
     } else {
         0
@@ -1709,16 +1714,22 @@ mod tests {
     }
 
     #[test]
-    fn radar_height_for_reserves_enough_info_rows_for_worst_case() {
-        // 7 (radar) + 9 (worst case info) = 16 未満ならレーダーを出さない。
-        assert_eq!(radar_height_for(false, 15, 20), 0, "境界未満は0");
-        assert_eq!(radar_height_for(false, 16, 20), 7, "境界ちょうどなら出る");
+    fn radar_height_for_reserves_the_actual_required_info_rows() {
+        // 7 (radar) + required_info_rows が info_h を超えるなら出さない。
+        assert_eq!(radar_height_for(false, 15, 20, 9), 0, "境界未満は0");
+        assert_eq!(radar_height_for(false, 16, 20, 9), 7, "境界ちょうどなら出る");
+        // 折返しで必要行数が増えた場合も同じ式で反映される (Codexレビュー指摘)。
+        assert_eq!(
+            radar_height_for(false, 16, 20, 12), 0,
+            "実測の必要行数が増えれば同じinfo_hでも出さなくなる"
+        );
+        assert_eq!(radar_height_for(false, 19, 20, 12), 7);
     }
 
     #[test]
     fn radar_height_for_is_zero_in_overworld_or_narrow_width() {
-        assert_eq!(radar_height_for(true, 30, 20), 0, "村では出さない");
-        assert_eq!(radar_height_for(false, 30, 8), 0, "幅9未満では出さない");
+        assert_eq!(radar_height_for(true, 30, 20, 0), 0, "村では出さない");
+        assert_eq!(radar_height_for(false, 30, 8, 0), 0, "幅9未満では出さない");
     }
 
     #[test]
