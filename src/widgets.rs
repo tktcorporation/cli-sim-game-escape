@@ -119,6 +119,21 @@ impl<'a> TabBar<'a> {
 
 // ── ClickableList ──────────────────────────────────────────────
 
+/// 単一行を `width` で wrap した時の visual 行数。`ClickableList::visual_height`
+/// の1行版で、`ClickableList` を経由しないレイアウト計算 (メニューカードの
+/// 事前高さ見積もりなど) からも呼べるよう独立した関数にしている。
+/// `ClickableList::register_targets` の wrap-aware パスもこれに委譲し、
+/// 「実際の描画に使う wrap 計算」の実装を1箇所に保つ。
+pub fn line_visual_height(line: &Line, width: u16) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    Paragraph::new(line.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .clamp(1, u16::MAX as usize) as u16
+}
+
 /// A builder that pairs rendered [`Line`]s with click actions.
 ///
 /// Instead of manually calculating row offsets for click targets, use this
@@ -253,10 +268,7 @@ impl<'a> ClickableList<'a> {
         let mut cumulative: u16 = 0;
         for line in &self.lines {
             visual_starts.push(cumulative);
-            let h = Paragraph::new(line.clone())
-                .wrap(Wrap { trim: false })
-                .line_count(inner_width)
-                .clamp(1, u16::MAX as usize) as u16;
+            let h = line_visual_height(line, inner_width);
             visual_heights.push(h);
             cumulative += h;
         }
@@ -912,12 +924,16 @@ mod tests {
     fn clickable_list_wrap_matches_real_wrap_for_indented_text_with_no_spaces() {
         // 先頭に半角スペースのインデントがあり、かつ内部にスペースを含まない長い
         // 文字列 (日本語の説明文で典型的) は、ratatui の実際のワードラップと
-        // 素朴な `line.width() / inner_width` 近似の行数がズレることがある
-        // (先頭行はインデント分だけ実際の残り幅が狭くなるため)。
+        // 素朴な `line.width() / inner_width` 近似の行数がズレることがある。
         // register_targets は `visual_height` と同じ `Paragraph::line_count` を
         // 使う必要があり、ズレると後続のクリック行が実際の描画位置から外れる。
-        let long_desc = "    ダンジョンを探索して帰還するローグライト風RPGダンジョンを探索して帰還する";
-        let inner_width = 20u16;
+        //
+        // 幅21で "    セーブデータの管理" (表示幅22) は、素朴な
+        // `div_ceil(22,21)` だと2行だが、実際の ratatui wrap は1行に収まる
+        // (この widthでこの文字列という組み合わせで実際に乖離することを
+        // `Paragraph::line_count` と比較して確認済み)。
+        let long_desc = "    セーブデータの管理";
+        let inner_width = 21u16;
 
         let mut cl = ClickableList::new();
         cl.push_clickable(Line::from("先頭タイトル"), 1);
@@ -929,12 +945,16 @@ mod tests {
         prefix.push(Line::from("先頭タイトル"));
         prefix.push(Line::from(long_desc));
         let expected_row = prefix.visual_height(inner_width);
+        assert_eq!(expected_row, 2, "実際は1行に収まる (素朴近似なら3になるはず)");
 
         let area = Rect::new(0, 0, inner_width, 20);
         let mut cs = ClickState::new();
         cl.register_targets(area, &mut cs, 0, 0, 0, inner_width);
 
+        // 素朴近似だと「次のタイトル」は row 3 にあると見積もられクリックが
+        // 外れる。実際の描画に合わせた row 2 でヒットすることを確認する。
         assert_eq!(cs.hit_test(0, expected_row), Some(3));
+        assert_eq!(cs.hit_test(0, 3), None, "素朴近似が見積もる行にはもう何も無い");
     }
 
     // ── register_targets_with_block tests ─────────────────────

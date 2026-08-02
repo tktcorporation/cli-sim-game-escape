@@ -10,7 +10,7 @@ use cli_sim_game_escape::input::{
 };
 use cli_sim_game_escape::sound;
 use cli_sim_game_escape::theme;
-use cli_sim_game_escape::widgets::{Clickable, ClickableList, ScrollableTab};
+use cli_sim_game_escape::widgets::{line_visual_height, Clickable, ClickableList, ScrollableTab};
 use cli_sim_game_escape::time::{now_ms, GameTime};
 use cli_sim_game_escape::BACK_TO_MENU;
 
@@ -18,7 +18,7 @@ use ratzilla::event::{KeyCode, MouseButton, MouseEventKind};
 use ratzilla::ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::text::{Line, Span};
-use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
 use ratzilla::ratatui::Terminal;
 use ratzilla::{DomBackend, WebRenderer};
 
@@ -525,17 +525,10 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
-/// 指定 `width` で wrap (`Wrap { trim: false }`) した時の visual 行数。
-/// `ClickableList::visual_height` と同じ `Paragraph::line_count` 経由の実装に
-/// 揃えており、実際の render 時の wrap と一致する (drift しない)。
+/// 指定 `width` で wrap した時の visual 行数。`widgets::line_visual_height` に
+/// 委譲し、実際の render 時の wrap 計算と一致させる (drift しない)。
 fn wrapped_line_height(text: &str, width: u16) -> u16 {
-    if width == 0 {
-        return 1;
-    }
-    Paragraph::new(text)
-        .wrap(Wrap { trim: false })
-        .line_count(width)
-        .max(1) as u16
+    line_visual_height(&Line::from(text), width)
 }
 
 fn render_menu(
@@ -638,6 +631,8 @@ fn render_menu(
             Style::default().fg(*accent)
         };
         cl.push(Line::from(""));
+        let title_text = format!(" {} {}", marker, name);
+        let title_rows = wrapped_line_height(&title_text, inner.width);
         cl.push_clickable(
             Line::from(vec![
                 Span::styled(format!(" {} ", marker), marker_style),
@@ -652,7 +647,7 @@ fn render_menu(
             *action_id,
         );
 
-        let card_height = 2 + desc_rows;
+        let card_height = 1 + title_rows + desc_rows;
         cumulative_rows += card_height;
         if is_selected {
             selected_card_top = card_top;

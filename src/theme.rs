@@ -46,7 +46,8 @@ pub fn hp_bar_string(ratio: f64, width: usize) -> String {
 }
 
 /// HP 比率から警戒色を 3 段階 (green > 2/3 > yellow > 1/3 > red) で返す。
-/// rpg/loopmarch で個別に持っていたしきい値 (それぞれ 1/2・1/4 と 1/3・2/3) を統一している。
+/// ゲームをまたいで同じ閾値にすることで、プレイヤーが「黄色は危険」を
+/// 学習し直さずに済む。
 pub fn hp_ratio_color(ratio: f64) -> Color {
     if ratio > 2.0 / 3.0 {
         Color::Green
@@ -110,5 +111,36 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn hp_bar_string_fills_proportionally_to_ratio() {
+        assert_eq!(hp_bar_string(1.0, 10), "██████████");
+        assert_eq!(hp_bar_string(0.0, 10), "░░░░░░░░░░");
+        assert_eq!(hp_bar_string(0.5, 10), "█████░░░░░");
+    }
+
+    #[test]
+    fn hp_bar_string_clamps_out_of_range_ratio() {
+        // effective_max_hp のような装備ボーナス込みの上限を下回った直後は
+        // hp > max になり得るため、ratio > 1.0 でも width を超えないこと
+        // (超えるとステータス行の後続要素を押し出してしまう) を保証する。
+        assert_eq!(hp_bar_string(1.5, 10), "██████████");
+        assert_eq!(hp_bar_string(-0.5, 10), "░░░░░░░░░░");
+    }
+
+    #[test]
+    fn hp_bar_string_zero_width_is_empty() {
+        assert_eq!(hp_bar_string(0.5, 0), "");
+    }
+
+    #[test]
+    fn hp_ratio_color_three_tiers_at_thresholds() {
+        assert_eq!(hp_ratio_color(1.0), Color::Green);
+        assert_eq!(hp_ratio_color(2.0 / 3.0 + 0.01), Color::Green);
+        assert_eq!(hp_ratio_color(2.0 / 3.0), Color::Yellow, "境界値ちょうどはgreenに含めない");
+        assert_eq!(hp_ratio_color(0.5), Color::Yellow);
+        assert_eq!(hp_ratio_color(1.0 / 3.0), Color::Red, "境界値ちょうどはyellowに含めない");
+        assert_eq!(hp_ratio_color(0.0), Color::Red);
     }
 }

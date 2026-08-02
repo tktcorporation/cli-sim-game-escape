@@ -32,36 +32,6 @@ pub fn filled_ellipse_points(cx: f64, cy: f64, rx: f64, ry: f64, step: f64) -> V
     points
 }
 
-/// 中心から放射状に伸びる線分の始点・終点 `(x1, y1, x2, y2)` を返す。
-/// クリティカルヒットの衝撃線・爆発演出などに使う。
-///
-/// `growth` (0.0〜1.0) で伸び具合を制御する — tick ごとに増やせば「一瞬で
-/// 広がって消える」演出になる。角度に固定のジッターを加えて、規則正しい
-/// 放射になりすぎないようにしている。
-pub fn radial_burst_lines(
-    cx: f64,
-    cy: f64,
-    count: usize,
-    max_len: f64,
-    growth: f64,
-) -> Vec<(f64, f64, f64, f64)> {
-    if count == 0 {
-        return Vec::new();
-    }
-    let growth = growth.clamp(0.0, 1.0);
-    (0..count)
-        .map(|i| {
-            let base_angle = 360.0 / count as f64 * i as f64;
-            let jitter = if i % 2 == 0 { -8.0 } else { 10.0 };
-            let angle: f64 = (base_angle + jitter).to_radians();
-            let len = max_len * growth * (0.7 + 0.3 * (i as f64 * 1.7).sin());
-            let ex = cx + angle.cos() * len;
-            let ey = cy + angle.sin() * len;
-            (cx, cy, ex, ey)
-        })
-        .collect()
-}
-
 /// 数値の推移 `values` (各要素は 0.0〜1.0 に正規化済み) を、連続する線分
 /// `(x1, y1, x2, y2)` の列にマッピングする。折れ線グラフを `Line` shape の
 /// 並びとして描く時に使う。
@@ -114,31 +84,6 @@ mod tests {
     fn filled_ellipse_points_empty_for_non_positive_radius() {
         assert!(filled_ellipse_points(0.0, 0.0, 0.0, 3.0, 0.5).is_empty());
         assert!(filled_ellipse_points(0.0, 0.0, 5.0, -1.0, 0.5).is_empty());
-    }
-
-    #[test]
-    fn radial_burst_lines_all_start_at_center() {
-        let lines = radial_burst_lines(1.0, 2.0, 6, 10.0, 1.0);
-        assert_eq!(lines.len(), 6);
-        for (x1, y1, ..) in lines {
-            assert_eq!((x1, y1), (1.0, 2.0));
-        }
-    }
-
-    #[test]
-    fn radial_burst_lines_grow_with_growth_factor() {
-        let half = radial_burst_lines(0.0, 0.0, 4, 10.0, 0.5);
-        let full = radial_burst_lines(0.0, 0.0, 4, 10.0, 1.0);
-        for ((_, _, hx, hy), (_, _, fx, fy)) in half.iter().zip(full.iter()) {
-            let half_len = (hx * hx + hy * hy).sqrt();
-            let full_len = (fx * fx + fy * fy).sqrt();
-            assert!(half_len < full_len);
-        }
-    }
-
-    #[test]
-    fn radial_burst_lines_zero_count_is_empty() {
-        assert!(radial_burst_lines(0.0, 0.0, 0, 10.0, 1.0).is_empty());
     }
 
     #[test]

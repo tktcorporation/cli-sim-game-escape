@@ -193,12 +193,16 @@ fn resolve_combat_tick(state: &mut LoopMarchState) {
 
     let defeated_reward = match state.path[pos].monster.as_mut() {
         Some(monster) => {
+            let hp_before_hit = monster.hp;
             monster.hp -= hero_atk;
             state.enemy_hurt_flash.trigger(3);
             state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
             state.last_enemy_damage = Some((hero_atk, DAMAGE_DISPLAY_TICKS));
             if monster.hp <= 0 {
-                Some((monster.terrain, monster.elite, monster.tier, monster.cluster_bonus))
+                // とどめの一撃はオーバーキル分を含むため、ログには実際に
+                // 削れた量 (残りHPを超えない分) だけを見せる。
+                let actual_damage = hero_atk.min(hp_before_hit);
+                Some((monster.terrain, monster.elite, monster.tier, monster.cluster_bonus, actual_damage))
             } else {
                 None
             }
@@ -206,9 +210,9 @@ fn resolve_combat_tick(state: &mut LoopMarchState) {
         None => return,
     };
 
-    if let Some((terrain, elite, tier, cluster_bonus)) = defeated_reward {
+    if let Some((terrain, elite, tier, cluster_bonus, final_hit)) = defeated_reward {
         state.path[pos].monster = None;
-        grant_kill_reward(state, terrain, elite, tier, cluster_bonus, hero_atk);
+        grant_kill_reward(state, terrain, elite, tier, cluster_bonus, final_hit);
         return; // 倒した瞬間は反撃を受けない
     }
 
@@ -233,8 +237,8 @@ fn resolve_combat_tick(state: &mut LoopMarchState) {
 /// 「その時に湧いた個体」の脅威度は変わっていないため、報酬だけをリスク無しに
 /// 釣り上げられてしまう抜け穴を防ぐ。
 ///
-/// `final_hit` は討伐時点の勇者の攻撃力 (=最後の一撃のダメージ)。報酬計算には
-/// 使わず、ログでの表示のみに使う。
+/// `final_hit` は最後の一撃で実際に削れたHP量 (オーバーキル分は含まない)。
+/// 報酬計算には使わず、ログでの表示のみに使う。
 fn grant_kill_reward(
     state: &mut LoopMarchState,
     terrain: Terrain,
@@ -1283,7 +1287,9 @@ mod tests {
     }
 
     #[test]
-    fn kill_log_includes_final_blow_damage() {
+    fn kill_log_includes_final_blow_damage_capped_to_remaining_hp() {
+        // 攻撃力(42) > 残りHP(5) のオーバーキルするケース。ログには実際に
+        // 削れた量 (5) だけを見せ、余った分 (37) は数字に含めない。
         let mut s = expedition_state();
         s.hero.position = 3;
         s.hero.attack = 42;
@@ -1300,7 +1306,30 @@ mod tests {
         tick(&mut s);
 
         let entry = s.log.last().expect("討伐ログが追加されているはず");
-        assert!(entry.contains("-42"), "最後の一撃のダメージ量が見えるはず: {entry:?}");
+        assert!(entry.contains("-5"), "オーバーキルせず実ダメージ量が見えるはず: {entry:?}");
+        assert!(!entry.contains("-42"), "攻撃力そのものは表示しない: {entry:?}");
+    }
+
+    #[test]
+    fn kill_log_shows_full_hit_when_no_overkill() {
+        // 攻撃力(3) <= 残りHP(5) のケース。実ダメージ = 攻撃力そのもの。
+        let mut s = expedition_state();
+        s.hero.position = 3;
+        s.hero.attack = 3;
+        s.path[3].monster = Some(Monster {
+            terrain: Terrain::Forest,
+            hp: 3,
+            max_hp: 5,
+            attack: 2,
+            elite: false,
+            tier: 0,
+            cluster_bonus: 0,
+        });
+
+        tick(&mut s);
+
+        let entry = s.log.last().expect("討伐ログが追加されているはず");
+        assert!(entry.contains("-3"), "オーバーキルが無ければ攻撃力そのものが出るはず: {entry:?}");
     }
 
     #[test]

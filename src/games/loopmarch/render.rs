@@ -390,8 +390,7 @@ fn render_expedition_narrow(
 }
 
 /// ヘッダー枠色を勇者のHP危険度に連動させる (被弾フラッシュ中はそちらを
-/// 優先)。固定色のままだと「常に同じ色」で進行の実感が薄いという指摘への
-/// 対応 — HPテキストの色と同じ計算を共有することで、枠と数字が同時に
+/// 優先)。HPテキストの色と同じ計算を共有することで、枠と数字が同時に
 /// 警告色へ変わり危険度が伝わりやすくなる。
 fn header_border_color(state: &LoopMarchState) -> Color {
     if state.hero_hurt_flash.is_active() {
@@ -489,7 +488,7 @@ fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: b
     ]);
 
     // 直近の被ダメージ/与ダメージを数値で見せる。攻防の結果が「HPが減った」
-    // だけでは実感しづらいという指摘への対応 (abyssの被弾/命中表示と同じ形)。
+    // だけでは実感しづらいため (abyssの被弾/命中表示と同じ形)。
     let mut line4_spans: Vec<Span> = Vec::new();
     if let Some((dmg, life)) = state.last_hero_damage {
         if life > 0 {
@@ -676,9 +675,9 @@ fn tier_badge(tier: u32) -> char {
     }
 }
 
-/// リング枠色を周回数に応じて変化させる。固定色のままだと周回を重ねている
-/// 実感が薄いという指摘への対応 — 敵強化(`DIFFICULTY_PER_LAP`)が効いてくる
-/// 周回帯に合わせて寒色から暖色へ進めることで、危険度の上昇も暗示する。
+/// リング枠色を周回数に応じて変化させる。敵強化(`DIFFICULTY_PER_LAP`)が
+/// 効いてくる周回帯に合わせて寒色から暖色へ進めることで、危険度の上昇も
+/// 暗示する。
 fn ring_border_color(lap: u32) -> Color {
     match lap {
         0..=2 => Color::Green,

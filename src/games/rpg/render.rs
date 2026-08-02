@@ -7,7 +7,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ratzilla::ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratzilla::ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::symbols::Marker;
 use ratzilla::ratatui::text::{Line, Span};
@@ -72,8 +72,8 @@ fn element_color(e: Element) -> Color {
 
 /// 階層に連動したアクセント色。深く潜るほど脅威度が上がっていく実感を
 /// ステータスバー/フロア表示のボーダーや見出しテキストに持たせる。
-/// 村 (floor 0) は元々のCyan固定の見た目を維持する — 色分けの意味は
-/// 「今どれだけ深く潜っているか」なので、潜っていない村では変化させない。
+/// 村 (floor 0) はCyan固定にする — 色分けの意味は「今どれだけ深く潜っ
+/// ているか」なので、潜っていない村では変化させない。
 fn floor_color(floor: u32) -> Color {
     match floor {
         0 => Color::Cyan,
@@ -205,6 +205,22 @@ fn render_status_bar(
             format!("{}/{}", state.hp, state.effective_max_hp()),
             Style::default().fg(hp_color),
         ),
+    ];
+
+    // 被弾直後の短い間だけ実ダメージ量を数値で浮かせる。バーの色変化だけでは
+    // 「どれだけ削られたか」までは伝わらないため。HP数値の直後という行の
+    // 前寄りの位置に置くのは、ステータスバーが wrap しない Paragraph な
+    // ため、後方の桁ほどナロー幅で切り捨てられるから。
+    if let Some((dmg, life)) = state.last_hero_damage {
+        if life > 0 {
+            spans.push(Span::styled(
+                format!(" -{}", dmg),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+
+    spans.extend([
         Span::styled(" MP", Style::default().fg(Color::Gray)),
         Span::styled(mp_bar_str, Style::default().fg(Color::Blue)),
         Span::styled(
@@ -217,7 +233,7 @@ fn render_status_bar(
             format!(" {}G", state.gold),
             Style::default().fg(Color::Yellow),
         ),
-    ];
+    ]);
 
     if state.buffs.shield_turns > 0 || state.buffs.berserk_turns > 0 || state.buffs.potion_turns > 0 {
         let mut s = String::from(" ");
@@ -225,17 +241,6 @@ fn render_status_bar(
         if state.buffs.berserk_turns > 0 { s.push_str("[狂]"); }
         if state.buffs.potion_turns > 0 { s.push_str("[力]"); }
         spans.push(Span::styled(s, Style::default().fg(Color::Magenta)));
-    }
-
-    // 被弾直後の短い間だけ実ダメージ量を数値で浮かせる。バーの色変化だけでは
-    // 「どれだけ削られたか」までは伝わらないため。
-    if let Some((dmg, life)) = state.last_hero_damage {
-        if life > 0 {
-            spans.push(Span::styled(
-                format!(" -{}", dmg),
-                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-            ));
-        }
     }
 
     let floor_num = state.dungeon.as_ref().map(|d| d.floor_num).unwrap_or(0);
@@ -252,7 +257,7 @@ fn render_status_bar(
                 title,
                 Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ))
-            .alignment(ratzilla::ratatui::layout::Alignment::Center),
+            .alignment(Alignment::Center),
         );
     f.render_widget(Paragraph::new(vec![Line::from(spans)]).block(block), area);
 }
@@ -262,9 +267,8 @@ fn render_floor_indicator(state: &RpgState, f: &mut Frame, area: Rect, borders: 
         let theme = floor_theme(map.floor_num);
 
         if map.is_overworld {
-            // Village indicator: unchanged from before — 階層連動グラデーション
-            // は「今どれだけ深く潜っているか」を伝えるための演出なので、
-            // 潜っていない村では従来通りの配色のままにする。
+            // 階層連動グラデーションは「今どれだけ深く潜っているか」を伝える
+            // ための演出なので、潜っていない村では固定の配色にする。
             let block = Block::default()
                 .borders(borders)
                 .border_style(Style::default().fg(Color::DarkGray));
@@ -457,8 +461,10 @@ fn render_explore_panel(
     let ab_h: u16 = if inner.height > dpad_h + 1 { 1 } else { 0 };
     let info_h = inner.height.saturating_sub(dpad_h + ab_h);
     // 索敵レーダー: 隣接1体の情報だけでは伝わらない周辺の敵配置を常時見せる。
-    // テキスト情報を圧迫しない余裕がある時だけ確保する。
-    let radar_h: u16 = if info_h >= 12 && inner.width >= 9 { 7 } else { 0 };
+    // テキスト情報を圧迫しない余裕がある時だけ確保する。村 (is_overworld)
+    // には索敵すべき脅威が無いため、常に空の円になってしまうので出さない
+    // (フロア演出全般が村では変化しない方針と揃える)。
+    let radar_h: u16 = if !map.is_overworld && info_h >= 12 && inner.width >= 9 { 7 } else { 0 };
     let radar_area = Rect::new(inner.x, inner.y, inner.width, radar_h);
     let info_area = Rect::new(inner.x, inner.y + radar_h, inner.width, info_h - radar_h);
     let ab_area = Rect::new(inner.x, inner.y + info_h, inner.width, ab_h);
@@ -670,12 +676,12 @@ fn render_ab_buttons(
         a_label,
         Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
     )))
-    .alignment(ratzilla::ratatui::layout::Alignment::Center);
+    .alignment(Alignment::Center);
     let b_para = Paragraph::new(Line::from(Span::styled(
         " [B] メニュー ",
         Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
     )))
-    .alignment(ratzilla::ratatui::layout::Alignment::Center);
+    .alignment(Alignment::Center);
 
     let mut cs = click_state.borrow_mut();
     Clickable::new(a_para, AB_A_BUTTON).render(f, a_area, &mut cs);
@@ -891,14 +897,14 @@ fn render_event_popup(
 
 /// ログ本文のキーワードから種別を判定して色を返す。rpgのログは絵文字接頭辞
 /// を持たない自然文なので、abyssのlog_style (先頭記号判定) とは違い部分
-/// 一致で判定する。危険/警告を最優先で拾い、次いで成果、最後に成長関連。
-/// どれにも当たらない大半のログ (戦闘の通常ダメージ表記等) は従来通り灰色
-/// のまま — 全部を色分けすると逆に重要な行が埋もれる。
+/// 一致で判定する。危険/警告を最優先で拾い、次いで成長関連、最後に成果。
+/// どれにも当たらない大半のログ (戦闘の通常ダメージ表記等) は灰色のまま —
+/// 全部を色分けすると逆に重要な行が埋もれる。
 fn log_style(msg: &str) -> Style {
     const DANGER: &[&str] = &["力尽きた", "飢餓寸前", "飢えで体力が削れる", "神は応えなかった"];
     const GAIN: &[&str] = &[
         "を倒した", "をドロップ", "を落とした", "を授かった", "を受け取った",
-        "を入手", "の加護", "の恵み", "が懐いた",
+        "の加護", "の恵み", "が懐いた",
     ];
     const GROWTH: &[&str] = &["レベルアップ", "を習得", "会心の一撃"];
 
@@ -1648,7 +1654,7 @@ fn render_game_clear(
                 " \u{2605} DUNGEON CLEAR \u{2605} ",
                 Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
             ))
-            .alignment(ratzilla::ratatui::layout::Alignment::Center),
+            .alignment(Alignment::Center),
         );
 
     let mut cs = click_state.borrow_mut();
