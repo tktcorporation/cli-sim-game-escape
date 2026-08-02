@@ -122,6 +122,38 @@ pub(super) fn rng_range(state: &mut RpgState, max: u32) -> u32 {
     ((state.rng_seed >> 33) % max as u64) as u32
 }
 
+// ── Hero damage ──────────────────────────────────────────────
+
+/// 勇者へのダメージを適用し、被弾演出 (`hero_hurt_flash`) とダメージ
+/// ポップアップ (`last_hero_damage`) を記録する、勇者被弾の唯一の適用経路。
+///
+/// ポップアップに出す量は必ず「実際に減ったHP量」(戻り値) にする —
+/// `raw_damage` をそのまま出すと、HPの下限 (0、または `floor_at_one` が
+/// 効かせる下限の1) で一部/全部吸収された時に、表示上は食らったのに
+/// HPが動いていないという矛盾が起きるため。
+///
+/// * `floor_at_one` — true なら HP を 1 未満に落とさない (呪いのように
+///   「痛いが死にはしない」効果用)。false なら通常通り 0 まで落ちる。
+/// * `count_hit` — false ならバッチ tick 内の連続ヒット検出用カウンタ
+///   (`hero_hit_count`) を増やさない (満腹度0中の毎ターン飢餓ダメージ等、
+///   1ヒットとして数えると画面フラッシュが毎ターン発生してしまう演出のため)。
+fn apply_hero_damage(state: &mut RpgState, raw_damage: u32, floor_at_one: bool, count_hit: bool) -> u32 {
+    let hp_before = state.hp;
+    state.hp = state.hp.saturating_sub(raw_damage);
+    if floor_at_one {
+        state.hp = state.hp.max(1);
+    }
+    let actual_damage = hp_before.saturating_sub(state.hp);
+    state.hero_hurt_flash.trigger(3);
+    if count_hit {
+        state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
+    }
+    if actual_damage > 0 {
+        state.last_hero_damage = Some((actual_damage, 6));
+    }
+    actual_damage
+}
+
 // ── Overworld (village) ─────────────────────────────────────
 
 /// Load the village map and switch to the overworld scene. Used at game
@@ -490,10 +522,7 @@ pub fn pray(state: &mut RpgState) -> bool {
     if roll < 10 {
         // Curse (low chance)
         let dmg = state.max_hp / 6;
-        state.hp = state.hp.saturating_sub(dmg).max(1);
-        state.hero_hurt_flash.trigger(3);
-        state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
-        state.last_hero_damage = Some((dmg, 6));
+        apply_hero_damage(state, dmg, true, true);
         state.add_log("…神は応えなかった。心に虚しさが残る…");
     } else if roll < blessing_thresh {
         // Major blessing
@@ -1065,14 +1094,12 @@ fn tick_satiety(state: &mut RpgState) {
     } else {
         // Starving — drain HP each turn
         let drain = (state.max_hp / 30).max(1);
-        state.hp = state.hp.saturating_sub(drain);
         // hit_count は増やさない: 飢餓は満腹度0の間ずっと毎ターン発生するため、
         // 一撃ごとに画面全体をフラッシュさせると毎ターンうるさくなる。
         // HPバーの色 (hero_hurt_flash) だけは反映して「削れている」ことを伝える。
-        state.hero_hurt_flash.trigger(3);
-        state.last_hero_damage = Some((drain, 6));
+        let actual_drain = apply_hero_damage(state, drain, false, false);
         if state.turn_count.is_multiple_of(5) {
-            state.add_log(&format!("飢えで体力が削れる… -{}HP", drain));
+            state.add_log(&format!("飢えで体力が削れる… -{}HP", actual_drain));
         }
     }
 }
@@ -1164,11 +1191,8 @@ fn monster_act(state: &mut RpgState, idx: usize) {
         // Release charged attack
         if adjacent_to_player {
             let damage = (eff_atk * 2).saturating_sub(state.total_def() / 2).max(1);
-            state.hp = state.hp.saturating_sub(damage);
-            state.hero_hurt_flash.trigger(3);
-            state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
-            state.last_hero_damage = Some((damage, 6));
-            state.add_log(&format!("{}の渾身の一撃！ {}ダメージ！", m_name, damage));
+            let actual = apply_hero_damage(state, damage, false, true);
+            state.add_log(&format!("{}の渾身の一撃！ {}ダメージ！", m_name, actual));
         } else {
             state.add_log(&format!("{}の渾身の一撃は空振り…", m_name));
         }
@@ -1192,11 +1216,8 @@ fn monster_act(state: &mut RpgState, idx: usize) {
         if m_affix == Some(EnemyAffix::Burning) {
             damage += 3;
         }
-        state.hp = state.hp.saturating_sub(damage);
-        state.hero_hurt_flash.trigger(3);
-        state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
-        state.last_hero_damage = Some((damage, 6));
-        state.add_log(&format!("{}の攻撃！ {}ダメージ！", m_name, damage));
+        let actual = apply_hero_damage(state, damage, false, true);
+        state.add_log(&format!("{}の攻撃！ {}ダメージ！", m_name, actual));
         return;
     }
 
@@ -1556,10 +1577,7 @@ fn apply_event_outcome(state: &mut RpgState, outcome: &EventOutcome) -> bool {
         state.hp = (state.hp + heal).min(state.max_hp);
     } else if outcome.hp_change < 0 {
         let damage = (-outcome.hp_change) as u32;
-        state.hp = state.hp.saturating_sub(damage);
-        state.hero_hurt_flash.trigger(3);
-        state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
-        state.last_hero_damage = Some((damage, 6));
+        apply_hero_damage(state, damage, false, true);
     } else if outcome.hp_change > 0 {
         state.hp = (state.hp + outcome.hp_change as u32).min(state.max_hp);
     }
@@ -2650,6 +2668,63 @@ mod tests {
         // Second pray should fail
         let result = pray(&mut s);
         assert!(!result);
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): 呪いの `.max(1)` 下限保護によって
+    /// HPが1のまま動かない時、ダメージポップアップには生のdmgではなく
+    /// 実際に減った量(0)を反映すべき — 0なら出さない。
+    #[test]
+    fn pray_curse_at_one_hp_does_not_show_damage_popup() {
+        let mut s = RpgState::new();
+        let mut found = false;
+        for trial_seed in 0u64..500 {
+            s.rng_seed = trial_seed;
+            s.prayed_this_run = false;
+            s.hp = 1;
+            s.max_hp = 100; // dmg = 16 になるはずだが、1HPからは実質減れない
+            s.last_hero_damage = None;
+            s.log.clear();
+
+            pray(&mut s);
+
+            if s.log.iter().any(|l| l.contains("神は応えなかった")) {
+                found = true;
+                assert_eq!(s.hp, 1, "既に1HPなら呪いでも実際には減らない");
+                assert!(
+                    s.last_hero_damage.is_none(),
+                    "実際に減っていないのにダメージポップアップが出てはいけない"
+                );
+                break;
+            }
+        }
+        assert!(found, "呪いを引くseedが見つからなかった (500試行)");
+    }
+
+    /// 呪いのダメージが `.max(1)` の床に当たらない通常ケースでは、
+    /// ポップアップの数値が実際に減ったHP量と一致することを確認する。
+    #[test]
+    fn pray_curse_damage_popup_matches_actual_hp_lost_when_not_floored() {
+        let mut s = RpgState::new();
+        let mut found = false;
+        for trial_seed in 0u64..500 {
+            s.rng_seed = trial_seed;
+            s.prayed_this_run = false;
+            s.hp = 100;
+            s.max_hp = 100; // dmg = 16、1HP床には当たらない
+            s.last_hero_damage = None;
+            s.log.clear();
+
+            pray(&mut s);
+
+            if s.log.iter().any(|l| l.contains("神は応えなかった")) {
+                found = true;
+                let (dmg, _) = s.last_hero_damage.expect("実ダメージがあればポップアップも出るはず");
+                assert_eq!(dmg, 100 - s.hp, "ポップアップは実際に減ったHP量と一致すべき");
+                assert_eq!(dmg, 16);
+                break;
+            }
+        }
+        assert!(found, "呪いを引くseedが見つからなかった (500試行)");
     }
 
     #[test]
