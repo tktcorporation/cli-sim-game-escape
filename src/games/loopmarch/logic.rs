@@ -5,6 +5,7 @@ use crate::effects::FlashTimer;
 use super::state::{
     CampUpgrades, LoopMarchState, Monster, Phase, PathSlot, Terrain, ATTACK_PER_LEVEL, HAND_MAX,
     HP_PER_LEVEL, MOVE_TICKS, PATH_LEN, REFILL_STONE_COST, REFILL_WOOD_COST, RING_H, RING_W,
+    TERRAIN_TIER_MAX,
 };
 
 /// 周回を重ねるごとの敵強化率 (1周あたり)。
@@ -98,27 +99,45 @@ pub fn mountain_synergy_defense(path: &[PathSlot]) -> i32 {
     pairs
 }
 
-/// `index` を含む森タイルの連続数 (ループの前後をたどって数える)。
-/// `render.rs` がシナジー成立(≥2)の視覚ヒントを出す判定にも使う。
-pub fn forest_cluster_size(path: &[PathSlot], index: usize) -> usize {
+/// `index` を含む、指定地形が連続しているタイル数 (ループの前後をたどって
+/// 数える)。`render.rs` がシナジー成立(≥2)の視覚ヒントを出す判定や、
+/// 森/墓地/草原それぞれのクラスターシナジー判定に使う。
+pub fn cluster_size(path: &[PathSlot], index: usize, terrain: Terrain) -> usize {
     let n = path.len();
-    if path[index].terrain != Some(Terrain::Forest) {
+    if path[index].terrain != Some(terrain) {
         return 0;
     }
     let mut size = 1;
     let mut i = (index + 1) % n;
-    while i != index && path[i].terrain == Some(Terrain::Forest) {
+    while i != index && path[i].terrain == Some(terrain) {
         size += 1;
         i = (i + 1) % n;
     }
     let mut i = (index + n - 1) % n;
-    while i != index && path[i].terrain == Some(Terrain::Forest) {
+    while i != index && path[i].terrain == Some(terrain) {
         size += 1;
         i = (i + n - 1) % n;
     }
-    // リング全周が森だと前方・後方の両ループが同じ他マスを踏破し、
+    // リング全周が同地形だと前方・後方の両ループが同じ他マスを踏破し、
     // 二重計上されて n を超える。ループ上に存在するタイル数を超えない。
     size.min(n)
+}
+
+/// `index` を含む森タイルの連続数。
+pub fn forest_cluster_size(path: &[PathSlot], index: usize) -> usize {
+    cluster_size(path, index, Terrain::Forest)
+}
+
+/// 地形強化tierによる報酬・敵性能の倍率 (tier0=1.0倍, tier1=1.5倍, tier2=2.0倍)。
+pub fn tier_multiplier(tier: u32) -> f64 {
+    1.0 + tier as f64 * 0.5
+}
+
+/// 墓地クラスターによる討伐報酬の追加分 (孤立=+0, 2隣接=+1, 3隣接=+2, 4隣接以上=+3)。
+/// 森のクラスターが「eliteの出現確率」という確率的な強化になっているのに対し、
+/// こちらは確定でスケールする加算量とすることで、地形ごとにシナジーの手触りを変えている。
+pub fn graveyard_cluster_bonus(cluster: usize) -> u32 {
+    cluster.saturating_sub(1).min(3) as u32
 }
 
 /// ゲーム全体を `n` tick 進める。
@@ -159,7 +178,7 @@ fn resolve_combat_tick(state: &mut LoopMarchState) {
             state.enemy_hurt_flash.trigger(3);
             state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
             if monster.hp <= 0 {
-                Some((monster.terrain, monster.elite))
+                Some((monster.terrain, monster.elite, monster.tier, monster.cluster_bonus))
             } else {
                 None
             }
@@ -167,9 +186,9 @@ fn resolve_combat_tick(state: &mut LoopMarchState) {
         None => return,
     };
 
-    if let Some((terrain, elite)) = defeated_reward {
+    if let Some((terrain, elite, tier, cluster_bonus)) = defeated_reward {
         state.path[pos].monster = None;
-        grant_kill_reward(state, terrain, elite);
+        grant_kill_reward(state, terrain, elite, tier, cluster_bonus);
         return; // 倒した瞬間は反撃を受けない
     }
 
@@ -187,20 +206,30 @@ fn resolve_combat_tick(state: &mut LoopMarchState) {
     }
 }
 
-fn grant_kill_reward(state: &mut LoopMarchState, terrain: Terrain, elite: bool) {
+/// `tier`/`cluster_bonus` は討伐したモンスター自身が湧いた瞬間に固定された
+/// 値 (`Monster::tier`/`Monster::cluster_bonus`) — 討伐時点のタイル/盤面を
+/// 読み直さない。生存中にタイルを強化したり隣接に地形を足したりしても、
+/// 「その時に湧いた個体」の脅威度は変わっていないため、報酬だけをリスク無しに
+/// 釣り上げられてしまう抜け穴を防ぐ。
+fn grant_kill_reward(state: &mut LoopMarchState, terrain: Terrain, elite: bool, tier: u32, cluster_bonus: u32) {
+    let mult = tier_multiplier(tier);
     match terrain {
         Terrain::Forest => {
-            let gained = if elite { 6 } else { 3 };
+            let base = if elite { 6 } else { 3 };
+            let gained = ((base as f64) * mult).round() as u32;
             state.wood += gained;
             state.add_log(format!("狼を倒した。木材+{gained}"));
         }
         Terrain::Mountain => {
-            state.stone += 4;
-            state.add_log("ゴーレムを倒した。石材+4");
+            let gained = (4.0 * mult).round() as u32;
+            state.stone += gained;
+            state.add_log(format!("ゴーレムを倒した。石材+{gained}"));
         }
         Terrain::Graveyard => {
-            state.soul += 2;
-            state.add_log("スケルトンを倒した。魂+2");
+            let base = 2 + cluster_bonus;
+            let gained = ((base as f64) * mult).round() as u32;
+            state.soul += gained;
+            state.add_log(format!("スケルトンを倒した。魂+{gained}"));
         }
         Terrain::Meadow => {}
     }
@@ -210,12 +239,43 @@ fn advance_hero(state: &mut LoopMarchState) {
     let n = state.path.len();
     state.hero.position = (state.hero.position + 1) % n;
     if state.hero.position == 0 {
+        log_lap_summary(state);
         state.lap += 1;
         if state.lap > state.best_lap {
             state.best_lap = state.lap;
         }
+        reset_lap_snapshot(state);
     }
     arrive_at_tile(state);
+}
+
+/// 直前に完了したラップで増減した資源をログに出す。ラップ開始時点との
+/// 差分を見せることで「今の1周でどれだけ稼げたか」を数字で振り返れるようにする。
+fn log_lap_summary(state: &mut LoopMarchState) {
+    let wood_delta = state.wood as i64 - state.lap_start_wood as i64;
+    let stone_delta = state.stone as i64 - state.lap_start_stone as i64;
+    let soul_delta = state.soul as i64 - state.lap_start_soul as i64;
+    state.add_log(format!(
+        "第{}周 完了！ 木材{} 石材{} 魂{}",
+        state.lap + 1,
+        signed(wood_delta),
+        signed(stone_delta),
+        signed(soul_delta),
+    ));
+}
+
+fn signed(delta: i64) -> String {
+    if delta >= 0 {
+        format!("+{delta}")
+    } else {
+        delta.to_string()
+    }
+}
+
+fn reset_lap_snapshot(state: &mut LoopMarchState) {
+    state.lap_start_wood = state.wood;
+    state.lap_start_stone = state.stone;
+    state.lap_start_soul = state.soul;
 }
 
 fn arrive_at_tile(state: &mut LoopMarchState) {
@@ -230,7 +290,18 @@ fn arrive_at_tile(state: &mut LoopMarchState) {
 
     match terrain {
         Terrain::Meadow => {
-            state.soul += 1;
+            // 他地形は `tier_multiplier` (1.0/1.5/2.0倍) で報酬を倍率スケール
+            // するが、草原の基礎収入は1と小さく倍率にすると tier1/tier2 が
+            // 丸めで同じ値(共に2)になり強化の意味が消える。草原だけは
+            // tierをそのまま加算 (1/2/3) して段階ごとの差を保っている。
+            state.soul += 1 + state.path[pos].tier;
+            // クラスターは森と同様、演出のみで理由を明示しない
+            // (発見の余地として残す)。安全地帯を繋げるほど回復量が増える。
+            let cluster = cluster_size(&state.path, pos, Terrain::Meadow);
+            if cluster >= 2 && state.hero.hp < state.hero.max_hp {
+                let heal = (cluster as i32 - 1).min(3);
+                state.hero.hp = (state.hero.hp + heal).min(state.hero.max_hp);
+            }
         }
         Terrain::Forest | Terrain::Mountain | Terrain::Graveyard => {
             let chance = terrain.spawn_chance_per_mille();
@@ -243,13 +314,25 @@ fn arrive_at_tile(state: &mut LoopMarchState) {
 
 fn spawn_monster(state: &mut LoopMarchState, pos: usize, terrain: Terrain) {
     let difficulty = 1.0 + state.lap as f64 * DIFFICULTY_PER_LAP;
+    let tier = state.path[pos].tier;
+    let tier_mult = tier_multiplier(tier);
     let elite = terrain == Terrain::Forest
         && forest_cluster_size(&state.path, pos) >= 2
         && rng_below(&mut state.rng_state, 1000) < 500;
+    // 討伐報酬のクラスターボーナスは湧いた瞬間の盤面で固定する。生存中に
+    // タイルの重ね置き/隣接タイルの追加が起きても、この個体自身の強さは
+    // 変わっていないため報酬もこの時点の値のまま変えない
+    // (grant_kill_reward 側のコメント参照)。
+    let cluster_bonus = if terrain == Terrain::Graveyard {
+        graveyard_cluster_bonus(cluster_size(&state.path, pos, Terrain::Graveyard))
+    } else {
+        0
+    };
 
     // 初期HP/攻撃力の勇者でも、初回の手札補充(木材3+石材3)成立前に
     // 死んでしまう確率が低くなるよう調整した値 (simulator.rs の
-    // 統計テストで検証)。
+    // 統計テストで検証)。地形強化tierは湧く頻度は変えず、湧いた1体の
+    // 強さと討伐報酬だけを底上げする (リスクとリターンを両方引き上げる)。
     let (base_hp, base_atk) = match (terrain, elite) {
         (Terrain::Forest, false) => (6, 1),
         (Terrain::Forest, true) => (10, 2),
@@ -257,8 +340,8 @@ fn spawn_monster(state: &mut LoopMarchState, pos: usize, terrain: Terrain) {
         (Terrain::Graveyard, _) => (4, 1),
         (Terrain::Meadow, _) => unreachable!("Meadow は arrive_at_tile で別処理される"),
     };
-    let hp = ((base_hp as f64) * difficulty).round().max(1.0) as i32;
-    let attack = ((base_atk as f64) * difficulty).round().max(1.0) as i32;
+    let hp = ((base_hp as f64) * difficulty * tier_mult).round().max(1.0) as i32;
+    let attack = ((base_atk as f64) * difficulty * tier_mult).round().max(1.0) as i32;
 
     state.path[pos].monster = Some(Monster {
         terrain,
@@ -266,6 +349,8 @@ fn spawn_monster(state: &mut LoopMarchState, pos: usize, terrain: Terrain) {
         max_hp: hp,
         attack,
         elite,
+        tier,
+        cluster_bonus,
     });
     if elite {
         state.add_log("森の奥で唸り声がした…気のせいだろうか");
@@ -301,6 +386,7 @@ fn handle_death(state: &mut LoopMarchState) {
     // 次の遠征に前回の残りフラッシュが漏れて見えないようリセットする。
     state.hero_hurt_flash = FlashTimer::new();
     state.enemy_hurt_flash = FlashTimer::new();
+    reset_lap_snapshot(state);
 }
 
 /// 拠点から遠征に出発 (または再開) する。
@@ -325,6 +411,7 @@ pub fn start_or_resume_expedition(state: &mut LoopMarchState) {
     state.hero = state.camp.fresh_hero();
     state.hero_hurt_flash = FlashTimer::new();
     state.enemy_hurt_flash = FlashTimer::new();
+    reset_lap_snapshot(state);
 
     state.hand = draw_starting_hand(state.camp.starting_hand_size(), &mut state.rng_state);
     state.selected_hand = None;
@@ -357,7 +444,10 @@ pub fn select_hand(state: &mut LoopMarchState, index: usize) {
     };
 }
 
-/// 選択中の手札カードを道の `path_index` に配置する。
+/// 選択中の手札カードを道の `path_index` に配置する。空きマスなら新規配置、
+/// 既に同じ地形が置かれているマスなら (`TERRAIN_TIER_MAX` まで) 重ね置きで
+/// 強化する — 盤面が埋まった後もカードを「使い道のある投資」にし続けるため、
+/// 空きマスが尽きても手札消費の判断が終わらないようにしている。
 pub fn place_selected(state: &mut LoopMarchState, path_index: usize) -> bool {
     if state.phase != Phase::Expedition || path_index >= state.path.len() {
         return false;
@@ -370,16 +460,33 @@ pub fn place_selected(state: &mut LoopMarchState, path_index: usize) -> bool {
         Some(t) => t,
         None => return false,
     };
-    if state.path[path_index].terrain.is_some() {
-        state.add_log("そこには既に地形がある");
-        return false;
-    }
 
-    state.path[path_index].terrain = Some(terrain);
-    state.hand[hand_index] = None;
-    state.selected_hand = None;
-    state.add_log(format!("{}を配置した", terrain.name()));
-    true
+    match state.path[path_index].terrain {
+        None => {
+            state.path[path_index].terrain = Some(terrain);
+            state.hand[hand_index] = None;
+            state.selected_hand = None;
+            state.add_log(format!("{}を配置した", terrain.name()));
+            true
+        }
+        Some(existing) if existing == terrain => {
+            if state.path[path_index].tier >= TERRAIN_TIER_MAX {
+                state.add_log("これ以上は強化できない");
+                false
+            } else {
+                state.path[path_index].tier += 1;
+                let level = state.path[path_index].tier + 1;
+                state.hand[hand_index] = None;
+                state.selected_hand = None;
+                state.add_log(format!("{}を強化した (Lv.{level})", terrain.name()));
+                true
+            }
+        }
+        Some(_) => {
+            state.add_log("そこには異なる地形がある");
+            false
+        }
+    }
 }
 
 /// 木材・石材を消費して手札にランダムな地形カードを1枚補充する。
@@ -552,7 +659,7 @@ mod tests {
         // 全マス森だと前方探索・後方探索が同じ他マスを両方踏破するため、
         // 単純合算では PATH_LEN を超えてしまう (2*PATH_LEN-1)。
         let path = vec![
-            PathSlot { terrain: Some(Terrain::Forest), monster: None };
+            PathSlot { terrain: Some(Terrain::Forest), monster: None, tier: 0 };
             PATH_LEN
         ];
         assert_eq!(forest_cluster_size(&path, 0), PATH_LEN);
@@ -562,6 +669,34 @@ mod tests {
     fn forest_cluster_size_non_forest_tile_is_zero() {
         let path = vec![PathSlot::default(); PATH_LEN];
         assert_eq!(forest_cluster_size(&path, 0), 0);
+    }
+
+    #[test]
+    fn cluster_size_works_for_graveyard_and_meadow_too() {
+        let mut path = vec![PathSlot::default(); PATH_LEN];
+        path[5].terrain = Some(Terrain::Graveyard);
+        path[6].terrain = Some(Terrain::Graveyard);
+        path[10].terrain = Some(Terrain::Meadow);
+        assert_eq!(cluster_size(&path, 5, Terrain::Graveyard), 2);
+        assert_eq!(cluster_size(&path, 10, Terrain::Meadow), 1);
+        // 隣接している地形が別種なら、その種別としてのクラスターには数えない。
+        assert_eq!(cluster_size(&path, 5, Terrain::Meadow), 0);
+    }
+
+    #[test]
+    fn tier_multiplier_scales_linearly_with_tier() {
+        assert_eq!(tier_multiplier(0), 1.0);
+        assert_eq!(tier_multiplier(1), 1.5);
+        assert_eq!(tier_multiplier(2), 2.0);
+    }
+
+    #[test]
+    fn graveyard_cluster_bonus_caps_at_three() {
+        assert_eq!(graveyard_cluster_bonus(1), 0, "孤立した墓地はボーナス無し");
+        assert_eq!(graveyard_cluster_bonus(2), 1);
+        assert_eq!(graveyard_cluster_bonus(3), 2);
+        assert_eq!(graveyard_cluster_bonus(4), 3);
+        assert_eq!(graveyard_cluster_bonus(10), 3, "4隣接以上は頭打ち");
     }
 
     // ── 湧き判定 (シナジーの end-to-end 検証) ──
@@ -622,6 +757,184 @@ mod tests {
         assert_eq!(s.soul, soul_before + 1);
     }
 
+    #[test]
+    fn arriving_at_tiered_meadow_grants_more_soul() {
+        let mut s = expedition_state();
+        s.path[0].terrain = Some(Terrain::Meadow);
+        s.path[0].tier = 2;
+        place_hero_just_before(&mut s, 0);
+        let soul_before = s.soul;
+        tick(&mut s);
+        assert_eq!(s.soul, soul_before + 1 + 2, "tier分だけ草原の魂収入が増えるはず");
+    }
+
+    #[test]
+    fn tiered_terrain_spawns_stronger_monster() {
+        // tierは湧く頻度ではなく、湧いた1体の強さ (HP/攻撃力) を上げる。
+        // spawn_chance_per_mille=1000のMeadowが存在しないため、確定湧きの
+        // Graveyard (700‰) は使わず、湧き判定を経由せず直接spawn_monsterの
+        // 出力を比較することで乱数の影響を排除する。
+        let mut s = expedition_state();
+        s.path[0].terrain = Some(Terrain::Mountain);
+        spawn_monster(&mut s, 0, Terrain::Mountain);
+        let base_hp = s.path[0].monster.as_ref().unwrap().hp;
+
+        let mut s2 = expedition_state();
+        s2.path[0].terrain = Some(Terrain::Mountain);
+        s2.path[0].tier = 2; // 2.0倍
+        spawn_monster(&mut s2, 0, Terrain::Mountain);
+        let spawned = s2.path[0].monster.as_ref().unwrap();
+        let tiered_hp = spawned.hp;
+
+        assert_eq!(tiered_hp, base_hp * 2, "tier2 (2.0倍) では湧くモンスターのHPも2倍になるはず");
+        assert_eq!(spawned.tier, 2, "湧いた瞬間のタイルtierがモンスター自身に固定されるはず");
+    }
+
+    #[test]
+    fn graveyard_cluster_bonus_is_frozen_onto_monster_at_spawn_time() {
+        let mut s = expedition_state();
+        s.path[0].terrain = Some(Terrain::Graveyard);
+        s.path[1].terrain = Some(Terrain::Graveyard); // クラスター成立 (2隣接)
+        spawn_monster(&mut s, 0, Terrain::Graveyard);
+        let spawned = s.path[0].monster.as_ref().unwrap();
+        assert_eq!(
+            spawned.cluster_bonus, 1,
+            "湧いた瞬間のクラスターボーナスがモンスター自身に固定されるはず"
+        );
+    }
+
+    #[test]
+    fn clustered_meadow_heals_hero_on_arrival() {
+        // 隣接する2枚の草原 (クラスター) に到達すると、魂だけでなく
+        // HP回復も発生する — 危険地帯を囲う「安全地帯」としての価値を持たせる。
+        let mut s = expedition_state();
+        s.path[0].terrain = Some(Terrain::Meadow);
+        s.path[1].terrain = Some(Terrain::Meadow);
+        s.hero.hp = 1;
+        s.hero.max_hp = 100;
+        place_hero_just_before(&mut s, 1);
+        tick(&mut s);
+        assert!(s.hero.hp > 1, "隣接草原クラスターへの到達でHPが回復するはず");
+    }
+
+    #[test]
+    fn isolated_meadow_does_not_heal() {
+        let mut s = expedition_state();
+        s.path[0].terrain = Some(Terrain::Meadow);
+        s.hero.hp = 1;
+        s.hero.max_hp = 100;
+        place_hero_just_before(&mut s, 0);
+        tick(&mut s);
+        assert_eq!(s.hero.hp, 1, "孤立した草原1枚では回復しないはず");
+    }
+
+    #[test]
+    fn meadow_heal_never_exceeds_max_hp() {
+        let mut s = expedition_state();
+        s.path[0].terrain = Some(Terrain::Meadow);
+        s.path[1].terrain = Some(Terrain::Meadow);
+        s.path[2].terrain = Some(Terrain::Meadow);
+        s.hero.hp = s.hero.max_hp; // 満タン
+        place_hero_just_before(&mut s, 1);
+        tick(&mut s);
+        assert_eq!(s.hero.hp, s.hero.max_hp, "満タンHPを超えて回復してはいけない");
+    }
+
+    #[test]
+    fn clustered_graveyard_grants_bonus_soul_on_kill() {
+        // 討伐報酬はモンスター自身に湧いた瞬間固定された `cluster_bonus`
+        // (spawn_monster が書き込む値) を使う — 生存中に隣接タイルを
+        // 増やしても、既に湧いている個体の報酬には影響しない
+        // (upgrading_tile_after_spawn_does_not_change_live_monster_reward
+        // で回帰確認している)。ここではその固定値そのものによる
+        // 報酬計算だけを単体で検証する。
+        let mut s = expedition_state();
+        s.hero.position = 3;
+        s.hero.attack = 100; // 即死させて報酬だけ検証
+        s.path[3].terrain = Some(Terrain::Graveyard);
+        s.path[3].monster = Some(Monster {
+            terrain: Terrain::Graveyard,
+            hp: 1,
+            max_hp: 1,
+            attack: 1,
+            elite: false,
+            tier: 0,
+            cluster_bonus: 1, // cluster=2相当の固定値
+        });
+        let soul_before = s.soul;
+        tick(&mut s);
+        assert_eq!(s.soul, soul_before + 3, "base(2) + cluster_bonus(1) = 3のはず");
+    }
+
+    #[test]
+    fn tiered_terrain_grants_scaled_kill_reward() {
+        // 討伐報酬はモンスター自身に湧いた瞬間固定された `tier` を使う —
+        // タイルの現在のtierではない (upgrading_tile_after_spawn_does_not_change_live_monster_reward
+        // で回帰確認している)。ここでは固定値による報酬計算だけを検証する。
+        let mut s = expedition_state();
+        s.hero.position = 3;
+        s.hero.attack = 100;
+        s.path[3].terrain = Some(Terrain::Forest);
+        s.path[3].monster = Some(Monster {
+            terrain: Terrain::Forest,
+            hp: 1,
+            max_hp: 1,
+            attack: 1,
+            elite: false,
+            tier: 2, // 倍率2.0倍
+            cluster_bonus: 0,
+        });
+        let wood_before = s.wood;
+        tick(&mut s);
+        // tier0のisolated forest討伐報酬は3。tier2 (2.0倍) なら6のはず。
+        assert_eq!(s.wood, wood_before + 6);
+    }
+
+    #[test]
+    fn upgrading_tile_after_spawn_does_not_change_live_monster_reward() {
+        // 生存中のモンスターがいるタイルを (異なる操作で) tier強化しても、
+        // 既に湧いている個体の討伐報酬は変わらないはず。変わってしまうと
+        // 「敵を強くせずに報酬だけ釣り上げる」抜け穴になる。
+        let mut s = expedition_state();
+        s.hero.position = 3;
+        s.hero.attack = 100;
+        s.path[3].terrain = Some(Terrain::Forest);
+        spawn_monster(&mut s, 3, Terrain::Forest); // tier0で湧く
+        assert_eq!(s.path[3].monster.as_ref().unwrap().tier, 0);
+
+        s.path[3].tier = 2; // 生存中にタイル側だけ強化 (このモンスターには影響しないはず)
+
+        let wood_before = s.wood;
+        tick(&mut s);
+        assert_eq!(
+            s.wood,
+            wood_before + 3,
+            "生存中のモンスターの報酬はtier0のまま (タイルの後強化が乗ってはいけない)"
+        );
+    }
+
+    #[test]
+    fn upgrading_adjacent_tile_after_spawn_does_not_change_live_monster_cluster_bonus() {
+        // 墓地版の同回帰テスト: 生存中のモンスターの隣に後から墓地タイルを
+        // 足してクラスターを成立させても、報酬には影響しないはず。
+        let mut s = expedition_state();
+        s.hero.position = 3;
+        s.hero.attack = 100;
+        s.path[3].terrain = Some(Terrain::Graveyard);
+        spawn_monster(&mut s, 3, Terrain::Graveyard); // 孤立状態 (cluster_bonus=0) で湧く
+        assert_eq!(s.path[3].monster.as_ref().unwrap().cluster_bonus, 0);
+
+        s.path[4].terrain = Some(Terrain::Graveyard); // 生存中に隣接タイルを追加
+
+        let soul_before = s.soul;
+        tick(&mut s);
+        assert_eq!(
+            s.soul,
+            soul_before + 2,
+            "生存中のモンスターの報酬は孤立扱いのまま (後からのクラスター成立が乗ってはいけない)"
+        );
+    }
+
     // ── 移動・戦闘 ──
 
     #[test]
@@ -643,6 +956,51 @@ mod tests {
     }
 
     #[test]
+    fn lap_completion_logs_resource_delta_summary() {
+        let mut s = expedition_state();
+        s.path[1].terrain = Some(Terrain::Meadow); // 周回中に確実に魂を1つ稼がせる
+        tick_n(&mut s, MOVE_TICKS * PATH_LEN as u32);
+        let summary = s.log.iter().find(|l| l.contains("第1周 完了！"));
+        assert!(summary.is_some(), "ラップ完了時に資源の増減サマリーが出るはず: {:?}", s.log);
+        assert!(
+            summary.unwrap().contains("魂+1"),
+            "この周で稼いだ魂の増分が見えるはず: {:?}",
+            summary
+        );
+    }
+
+    #[test]
+    fn lap_summary_resets_after_each_lap() {
+        let mut s = expedition_state();
+        s.path[1].terrain = Some(Terrain::Meadow);
+        tick_n(&mut s, MOVE_TICKS * PATH_LEN as u32); // 1周目完了
+        tick_n(&mut s, MOVE_TICKS * PATH_LEN as u32); // 2周目完了
+        let second_summary = s.log.iter().rev().find(|l| l.contains("第2周 完了！"));
+        assert!(second_summary.is_some(), "2周目のサマリーも出るはず: {:?}", s.log);
+        assert!(
+            second_summary.unwrap().contains("魂+1"),
+            "2周目単体の増分 (1周目からの累積ではない) が見えるはず: {:?}",
+            second_summary
+        );
+    }
+
+    #[test]
+    fn lap_summary_shows_negative_delta_when_resources_are_net_spent() {
+        let mut s = expedition_state();
+        s.wood = 10;
+        s.stone = 10;
+        reset_lap_snapshot(&mut s); // このラップの基準を10/10にする
+        assert!(refill_hand(&mut s), "補充costを賄えるだけの資源があるはず");
+        // 道は空のまま (資源獲得源が無い) なので、補充で消費した分だけ純減する。
+        tick_n(&mut s, MOVE_TICKS * PATH_LEN as u32);
+        let summary = s.log.iter().rev().find(|l| l.contains("第1周 完了！"));
+        assert!(summary.is_some(), "{:?}", s.log);
+        let summary = summary.unwrap();
+        assert!(summary.contains("木材-3"), "純減した資源はマイナス表記になるはず: {summary:?}");
+        assert!(summary.contains("石材-3"), "純減した資源はマイナス表記になるはず: {summary:?}");
+    }
+
+    #[test]
     fn combat_defeats_monster_and_grants_wood() {
         let mut s = expedition_state();
         s.hero.position = 3;
@@ -653,6 +1011,8 @@ mod tests {
             max_hp: 5,
             attack: 2,
             elite: false,
+            tier: 0,
+            cluster_bonus: 0,
         });
         let wood_before = s.wood;
         tick(&mut s);
@@ -671,6 +1031,8 @@ mod tests {
             max_hp: 5,
             attack: 2,
             elite: true,
+            tier: 0,
+            cluster_bonus: 0,
         });
         let wood_before = s.wood;
         tick(&mut s);
@@ -691,6 +1053,8 @@ mod tests {
             max_hp: 100,
             attack: 3,
             elite: false,
+            tier: 0,
+            cluster_bonus: 0,
         });
         let hp_before = s.hero.hp;
         tick(&mut s);
@@ -714,6 +1078,8 @@ mod tests {
             max_hp: 100,
             attack: 1,
             elite: false,
+            tier: 0,
+            cluster_bonus: 0,
         });
         let hp_before = s.hero.hp;
         tick(&mut s);
@@ -730,6 +1096,8 @@ mod tests {
             max_hp: 100,
             attack: 3,
             elite: false,
+            tier: 0,
+            cluster_bonus: 0,
         });
         assert!(!s.hero_hurt_flash.is_active());
         assert!(!s.enemy_hurt_flash.is_active());
@@ -751,6 +1119,8 @@ mod tests {
             max_hp: 1,
             attack: 3,
             elite: false,
+            tier: 0,
+            cluster_bonus: 0,
         });
 
         tick(&mut s);
@@ -786,6 +1156,8 @@ mod tests {
             max_hp: 100,
             attack: 50,
             elite: false,
+            tier: 0,
+            cluster_bonus: 0,
         });
 
         tick(&mut s);
@@ -815,6 +1187,8 @@ mod tests {
             max_hp: 100,
             attack: 50,
             elite: false,
+            tier: 0,
+            cluster_bonus: 0,
         });
 
         tick(&mut s);
@@ -839,6 +1213,8 @@ mod tests {
             max_hp: 100,
             attack: 50,
             elite: false,
+            tier: 0,
+            cluster_bonus: 0,
         });
 
         tick(&mut s);
@@ -926,6 +1302,30 @@ mod tests {
         s.hand[0] = Some(Terrain::Forest);
         s.selected_hand = Some(0);
         assert!(!place_selected(&mut s, 5));
+        assert_eq!(s.hand[0], Some(Terrain::Forest), "失敗時は手札が消費されない");
+    }
+
+    #[test]
+    fn place_selected_same_terrain_upgrades_tier_instead_of_failing() {
+        let mut s = expedition_state();
+        s.path[5].terrain = Some(Terrain::Forest);
+        s.hand[0] = Some(Terrain::Forest);
+        s.selected_hand = Some(0);
+        assert!(place_selected(&mut s, 5), "同じ地形の重ね置きは強化として成功するはず");
+        assert_eq!(s.path[5].tier, 1);
+        assert_eq!(s.hand[0], None, "強化でも手札は消費される");
+        assert_eq!(s.selected_hand, None);
+    }
+
+    #[test]
+    fn place_selected_upgrade_stops_at_tier_max() {
+        let mut s = expedition_state();
+        s.path[5].terrain = Some(Terrain::Forest);
+        s.path[5].tier = TERRAIN_TIER_MAX;
+        s.hand[0] = Some(Terrain::Forest);
+        s.selected_hand = Some(0);
+        assert!(!place_selected(&mut s, 5), "最大tierを超えて強化できてはいけない");
+        assert_eq!(s.path[5].tier, TERRAIN_TIER_MAX);
         assert_eq!(s.hand[0], Some(Terrain::Forest), "失敗時は手札が消費されない");
     }
 

@@ -125,7 +125,11 @@ fn render_camp_body(
         state.camp.max_hp_cost(),
         state.soul,
         CAMP_UPGRADE_MAX_HP,
-        format!("現在{}", state.camp.hero_max_hp()),
+        format!(
+            "現在{} (魂{:.1}/1HP)",
+            state.camp.hero_max_hp(),
+            state.camp.max_hp_cost_per_point()
+        ),
     );
     push_upgrade_row(
         &mut cl,
@@ -134,7 +138,11 @@ fn render_camp_body(
         state.camp.attack_cost(),
         state.soul,
         CAMP_UPGRADE_ATTACK,
-        format!("現在{}", state.camp.hero_attack()),
+        format!(
+            "現在{} (魂{:.1}/1ATK)",
+            state.camp.hero_attack(),
+            state.camp.attack_cost_per_point()
+        ),
     );
 
     if state.camp.extra_card_level >= 1 {
@@ -528,10 +536,41 @@ fn cell_visual_base(state: &LoopMarchState, path_index: usize) -> (String, Style
             } else {
                 Style::default().fg(Color::Green)
             };
-            (format!("{} ", Terrain::Forest.symbol()), style)
+            (format!("{}{}", Terrain::Forest.symbol(), tier_badge(slot.tier)), style)
         }
-        Some(t) => (format!("{} ", t.symbol()), Style::default().fg(t.color())),
+        Some(Terrain::Graveyard) => {
+            // 墓地も森と同じ「クラスターで見た目が変わる」発見要素を持つが、
+            // 効果は確率(elite)ではなく討伐報酬の確定加算 (WHYはあえて出さない)。
+            let clustered = logic::cluster_size(&state.path, path_index, Terrain::Graveyard) >= 2;
+            let style = if clustered {
+                Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Magenta)
+            };
+            (format!("{}{}", Terrain::Graveyard.symbol(), tier_badge(slot.tier)), style)
+        }
+        Some(Terrain::Meadow) => {
+            // 隣接草原クラスターは到達時のHP回復量が増える (安全地帯としての価値)。
+            let clustered = logic::cluster_size(&state.path, path_index, Terrain::Meadow) >= 2;
+            let style = if clustered {
+                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Green)
+            };
+            (format!("{}{}", Terrain::Meadow.symbol(), tier_badge(slot.tier)), style)
+        }
+        Some(t) => (format!("{}{}", t.symbol(), tier_badge(slot.tier)), Style::default().fg(t.color())),
         None => (". ".to_string(), Style::default().fg(Color::DarkGray)),
+    }
+}
+
+/// 地形強化tierを示すバッジ文字。セル幅 (記号+1文字) を維持したまま
+/// tierを視覚化するため、末尾の空白をこのバッジで置き換える。
+fn tier_badge(tier: u32) -> char {
+    match tier {
+        0 => ' ',
+        1 => '+',
+        _ => '*',
     }
 }
 
@@ -579,7 +618,7 @@ fn render_hand(
 ) {
     let mut cl = ClickableList::new();
     cl.push(Line::from(Span::styled(
-        " カードを選んで→道をタップで配置",
+        " カードを選んで→道をタップで配置 (同じ地形に重ねると強化)",
         Style::default().fg(Color::DarkGray),
     )));
     for (i, card) in state.hand.iter().enumerate() {
@@ -688,6 +727,8 @@ mod tests {
             max_hp: 15,
             attack: 1,
             elite: false,
+            tier: 0,
+            cluster_bonus: 0,
         };
         let hp_text = " HP30/30 ";
         let text = narrow_combat_text(Some(&monster), hp_text, 30);
@@ -705,6 +746,8 @@ mod tests {
             max_hp: 150,
             attack: 1,
             elite: true, // monster_name() = "強化された狼" (最長級の名前)
+            tier: 0,
+            cluster_bonus: 0,
         };
         let hp_text = " HP130/130 "; // 勇者のHPも3桁まで育った想定
         let text = narrow_combat_text(Some(&monster), hp_text, 30);
@@ -811,6 +854,47 @@ mod tests {
     }
 
     #[test]
+    fn cell_visual_highlights_clustered_graveyard_and_meadow_too() {
+        let mut state = LoopMarchState::new();
+        logic::start_or_resume_expedition(&mut state);
+
+        state.path[5].terrain = Some(Terrain::Graveyard);
+        let (_, isolated) = cell_visual(&state, 5);
+        state.path[6].terrain = Some(Terrain::Graveyard);
+        let (_, clustered) = cell_visual(&state, 5);
+        assert_ne!(isolated, clustered, "墓地もクラスター成立で見た目が変わるはず");
+
+        state.path[10].terrain = Some(Terrain::Meadow);
+        let (_, isolated) = cell_visual(&state, 10);
+        state.path[11].terrain = Some(Terrain::Meadow);
+        let (_, clustered) = cell_visual(&state, 10);
+        assert_ne!(isolated, clustered, "草原もクラスター成立で見た目が変わるはず");
+    }
+
+    #[test]
+    fn cell_visual_shows_tier_badge_for_upgraded_terrain() {
+        let mut state = LoopMarchState::new();
+        logic::start_or_resume_expedition(&mut state);
+        state.path[5].terrain = Some(Terrain::Mountain);
+        let (base_text, _) = cell_visual(&state, 5);
+
+        state.path[5].tier = 1;
+        let (tier1_text, _) = cell_visual(&state, 5);
+        state.path[5].tier = 2;
+        let (tier2_text, _) = cell_visual(&state, 5);
+
+        assert_ne!(base_text, tier1_text, "tier強化でセルの表示が変わるはず");
+        assert_ne!(tier1_text, tier2_text, "tierごとに見た目が変わるはず");
+        for text in [&base_text, &tier1_text, &tier2_text] {
+            assert_eq!(
+                display_width(text),
+                2,
+                "バッジを足してもセル幅(2)は崩れてはいけない: {text:?}"
+            );
+        }
+    }
+
+    #[test]
     fn cell_visual_shows_monster_glyph_over_terrain() {
         let mut state = LoopMarchState::new();
         logic::start_or_resume_expedition(&mut state);
@@ -821,6 +905,8 @@ mod tests {
             max_hp: 5,
             attack: 2,
             elite: false,
+            tier: 0,
+            cluster_bonus: 0,
         });
         let (text, _) = cell_visual(&state, 5);
         assert_eq!(text.trim(), "w");
@@ -841,6 +927,8 @@ mod tests {
             max_hp: 5,
             attack: 2,
             elite: false,
+            tier: 0,
+            cluster_bonus: 0,
         });
         let (text, _) = cell_visual(&state, 5);
         assert_eq!(

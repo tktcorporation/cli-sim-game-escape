@@ -463,6 +463,8 @@ mod tests {
             max_hp: 100,
             attack: 1,
             elite: false,
+            tier: 0,
+            cluster_bonus: 0,
         });
         let area = Rect::new(0, 0, 80, 30);
 
@@ -500,6 +502,8 @@ mod tests {
             max_hp: hero_atk,
             attack: 999, // 生きていれば致命的だが、倒した瞬間は反撃を受けない
             elite: false,
+            tier: 0,
+            cluster_bonus: 0,
         });
         let area = Rect::new(0, 0, 80, 30);
 
@@ -533,6 +537,8 @@ mod tests {
             max_hp: hero_atk,
             attack: 999,
             elite: false,
+            tier: 0,
+            cluster_bonus: 0,
         });
         let area = Rect::new(0, 0, 80, 30);
 
@@ -562,6 +568,8 @@ mod tests {
             max_hp: 100,
             attack: 999,
             elite: false,
+            tier: 0,
+            cluster_bonus: 0,
         });
 
         game.tick(1);

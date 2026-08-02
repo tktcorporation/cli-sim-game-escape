@@ -31,6 +31,11 @@ pub const ATTACK_PER_LEVEL: i32 = 1;
 pub const REFILL_WOOD_COST: u32 = 3;
 pub const REFILL_STONE_COST: u32 = 3;
 
+/// 地形強化の最大段階 (0 が初期配置、ここまで重ね置きで強化できる)。
+/// 盤面が埋まった後も「既存タイルに同じ地形を重ねて強化する」投資先を
+/// 用意することで、配置先が尽きても判断が続くようにしている。
+pub const TERRAIN_TIER_MAX: u32 = 2;
+
 /// 地形の種類。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Terrain {
@@ -108,6 +113,14 @@ pub struct Monster {
     pub attack: i32,
     /// シナジー条件を満たして強化された個体か。
     pub elite: bool,
+    /// 湧いた瞬間の地形強化tier。討伐報酬の倍率計算に使う。湧いた後に
+    /// タイルを強化してもこのモンスター自身の脅威度は変わらないため、
+    /// 討伐報酬もこの時点の値に固定し、生存中の強化で報酬だけを
+    /// 後から釣り上げられないようにする (リスクを伴わない報酬インフレ防止)。
+    pub tier: u32,
+    /// 湧いた瞬間の墓地クラスターボーナス (墓地以外は常に0)。tierと同じ理由で、
+    /// 生存中に隣接タイルへ墓地を追加しても既に湧いた個体の報酬には影響しない。
+    pub cluster_bonus: u32,
 }
 
 /// 道の1マス。
@@ -115,6 +128,9 @@ pub struct Monster {
 pub struct PathSlot {
     pub terrain: Option<Terrain>,
     pub monster: Option<Monster>,
+    /// 同じ地形を重ね置きした回数 (0..=TERRAIN_TIER_MAX)。湧くモンスターの
+    /// 強さと討伐報酬を底上げする、盤面が埋まった後も使える投資先。
+    pub tier: u32,
 }
 
 /// 拠点の恒久強化レベル。魂で購入し、勇者が死亡してもリセットされない。
@@ -143,6 +159,18 @@ impl CampUpgrades {
 
     pub fn hero_attack(&self) -> i32 {
         BASE_ATTACK + self.attack_level as i32 * ATTACK_PER_LEVEL
+    }
+
+    /// 次の1レベル購入で得られる1スタットポイントあたりの魂コスト。
+    /// 拠点画面で最大HP強化/攻撃力強化のどちらが今「割安」かを一目で
+    /// 比較できるようにするための指標 (Cookie Factoryの CPS/コスト比率と
+    /// 同じ考え方 — 戦略ゲームは情報を隠さず見せる)。
+    pub fn max_hp_cost_per_point(&self) -> f64 {
+        self.max_hp_cost() as f64 / HP_PER_LEVEL as f64
+    }
+
+    pub fn attack_cost_per_point(&self) -> f64 {
+        self.attack_cost() as f64 / ATTACK_PER_LEVEL as f64
     }
 
     pub fn starting_hand_size(&self) -> usize {
@@ -195,6 +223,12 @@ pub struct LoopMarchState {
     pub lap: u32,
     pub move_progress: u32,
     pub selected_hand: Option<usize>,
+    /// 直近のラップ開始時点の資源スナップショット。ラップ完了時にこことの
+    /// 差分を取ってサマリーログを出すためだけに使う (遠征開始 or ラップ
+    /// 境界の度に現在値へ更新される)。
+    pub lap_start_wood: u32,
+    pub lap_start_stone: u32,
+    pub lap_start_soul: u32,
     /// キーボード操作用の道カーソル (h/l で移動、space で配置)。
     /// タップ操作の座標クリックとは独立した、並行の配置手段。
     pub cursor: usize,
@@ -244,6 +278,9 @@ impl LoopMarchState {
             lap: 0,
             move_progress: 0,
             selected_hand: None,
+            lap_start_wood: 0,
+            lap_start_stone: 0,
+            lap_start_soul: 0,
             cursor: 0,
             soul: 0,
             camp,
