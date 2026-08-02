@@ -154,6 +154,24 @@ fn apply_hero_damage(state: &mut RpgState, raw_damage: u32, floor_at_one: bool, 
     actual_damage
 }
 
+/// モンスターへのダメージを適用し、ヒットカウンタ (`enemy_hit_count`) と
+/// ダメージポップアップ (`last_enemy_damage`) を記録する、モンスター被弾の
+/// 唯一の適用経路。ポップアップには必ず実際に減ったHP量 (戻り値) を使う —
+/// とどめの一撃は `raw_damage` にオーバーキル分を含むため、そのまま出すと
+/// 残りHPを超える数値が表示されてしまう。
+fn apply_enemy_damage(state: &mut RpgState, idx: usize, raw_damage: u32, is_crit: bool) -> u32 {
+    let hp_before = state.dungeon.as_ref().unwrap().monsters[idx].hp;
+    {
+        let m = &mut state.dungeon.as_mut().unwrap().monsters[idx];
+        m.hp = m.hp.saturating_sub(raw_damage);
+        m.awake = true;
+    }
+    let actual_damage = hp_before.min(raw_damage);
+    state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
+    state.last_enemy_damage = Some((actual_damage, 6, is_crit));
+    actual_damage
+}
+
 // ── Overworld (village) ─────────────────────────────────────
 
 /// Load the village map and switch to the overworld scene. Used at game
@@ -906,13 +924,7 @@ pub fn attack_monster(state: &mut RpgState, idx: usize) {
 
     let damage = base + bonus;
 
-    {
-        let m = &mut state.dungeon.as_mut().unwrap().monsters[idx];
-        m.hp = m.hp.saturating_sub(damage);
-        m.awake = true;
-    }
-    state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
-    state.last_enemy_damage = Some((damage, 6, is_crit));
+    let actual_damage = apply_enemy_damage(state, idx, damage, is_crit);
     if is_crit {
         state.crit_count = state.crit_count.wrapping_add(1);
     }
@@ -923,9 +935,9 @@ pub fn attack_monster(state: &mut RpgState, idx: usize) {
         _ => "",
     };
     if is_crit {
-        state.add_log(&format!("会心の一撃！ {}に{}ダメージ{}", m_name, damage, weak_str));
+        state.add_log(&format!("会心の一撃！ {}に{}ダメージ{}", m_name, actual_damage, weak_str));
     } else {
-        state.add_log(&format!("{}に{}ダメージ{}", m_name, damage, weak_str));
+        state.add_log(&format!("{}に{}ダメージ{}", m_name, actual_damage, weak_str));
     }
     if !weak_str.is_empty() {
         note_weakness_discovery(state, kind);
@@ -1316,11 +1328,9 @@ fn pet_turn(state: &mut RpgState) {
             let target_def = enemy_info(m.kind).def;
             let dmg = pet_atk.saturating_sub(target_def / 2).max(1);
             let target_name = enemy_info(m.kind).name;
-            state.add_log(&format!("{}が{}に{}ダメージ！", pet.name, target_name, dmg));
+            let actual_dmg = apply_enemy_damage(state, idx, dmg, false);
+            state.add_log(&format!("{}が{}に{}ダメージ！", pet.name, target_name, actual_dmg));
             let map = state.dungeon.as_mut().unwrap();
-            map.monsters[idx].hp = map.monsters[idx].hp.saturating_sub(dmg);
-            state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
-            state.last_enemy_damage = Some((dmg, 6, false));
             if map.monsters[idx].hp == 0 {
                 let killed_kind = map.monsters[idx].kind;
                 let pre = map.monsters[idx].max_hp;
@@ -1807,18 +1817,12 @@ fn cast_damage_skill(state: &mut RpgState, skill: SkillKind, idx: usize) {
     let is_weak = elem.is_some() && einfo.weakness == elem;
     if is_weak { damage = damage * 3 / 2; }
 
-    {
-        let m = &mut state.dungeon.as_mut().unwrap().monsters[idx];
-        m.hp = m.hp.saturating_sub(damage);
-        m.awake = true;
-    }
-    state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
     // スキルに会心判定はない (crit roll は通常攻撃 attack_monster のみ)。
-    state.last_enemy_damage = Some((damage, 6, false));
+    let actual_damage = apply_enemy_damage(state, idx, damage, false);
 
     let weak_str = if is_weak { " [弱点!]" } else { "" };
     let name = einfo.name;
-    state.add_log(&format!("{}！ {}に{}ダメージ{}", info.name, name, damage, weak_str));
+    state.add_log(&format!("{}！ {}に{}ダメージ{}", info.name, name, actual_damage, weak_str));
     if is_weak {
         note_weakness_discovery(state, kind);
     }
@@ -2497,6 +2501,82 @@ mod tests {
         let (dmg, life, _crit) = s.last_enemy_damage.expect("与ダメージポップアップがセットされるはず");
         assert!(dmg > 0);
         assert_eq!(life, 6);
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): とどめの一撃はオーバーキル分を
+    /// 含んだ生の計算ダメージのままポップアップに出ていたため、残りHPを
+    /// 超える数値が表示されていた。実際に減ったHP量に一致することを確認する。
+    #[test]
+    fn attack_monster_damage_popup_caps_at_remaining_hp_on_kill() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: 0, y: 0, hp: 1, max_hp: 999,
+            awake: true, charging: false, affix: None,
+        });
+        attack_monster(&mut s, 0);
+        let (dmg, _life, _crit) = s.last_enemy_damage.expect("与ダメージポップアップがセットされるはず");
+        assert_eq!(dmg, 1, "残りHP(1)を超えるオーバーキル分は表示しない");
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): ペットのとどめの一撃も同様にオーバー
+    /// キル分を含まず、実際に減ったHP量をポップアップに使うことを確認する。
+    #[test]
+    fn pet_attack_damage_popup_caps_at_remaining_hp_on_kill() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        let px = map.player_x;
+        let py = map.player_y;
+        map.monsters.clear();
+        let mut monster_spot = None;
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            let nx = px as i32 + dir.dx();
+            let ny = py as i32 + dir.dy();
+            if !map.in_bounds(nx, ny) { continue; }
+            let (ux, uy) = (nx as usize, ny as usize);
+            if !map.cell(ux, uy).is_walkable() { continue; }
+            monster_spot = Some((ux, uy));
+            break;
+        }
+        let (mx, my) = monster_spot.expect("隣接できる歩行可能マスが見つからなかった");
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: mx, y: my, hp: 1, max_hp: 999,
+            awake: true, charging: false, affix: None,
+        });
+        s.pet = Some(Pet {
+            kind: EnemyKind::Slime,
+            name: "テストペット".to_string(),
+            x: px,
+            y: py,
+            hp: 20,
+            max_hp: 20,
+            level: 99, // オーバーキルを確実に起こす高攻撃力
+        });
+
+        pet_turn(&mut s);
+
+        let (dmg, _life, _crit) = s.last_enemy_damage.expect("ペットの一撃もポップアップされるはず");
+        assert_eq!(dmg, 1, "残りHP(1)を超えるオーバーキル分は表示しない");
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): スキルのとどめの一撃も同様に
+    /// オーバーキル分を含まないことを確認する。
+    #[test]
+    fn cast_damage_skill_popup_caps_at_remaining_hp_on_kill() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: 0, y: 0, hp: 1, max_hp: 999,
+            awake: true, charging: false, affix: None,
+        });
+        cast_damage_skill(&mut s, SkillKind::Fire, 0);
+        let (dmg, _life, _crit) = s.last_enemy_damage.expect("スキルダメージもポップアップされるはず");
+        assert_eq!(dmg, 1, "残りHP(1)を超えるオーバーキル分は表示しない");
     }
 
     #[test]
