@@ -246,6 +246,12 @@ pub struct LoopMarchState {
     /// ないため、render 側は HP ではなくこのカウンタの差分でヒット演出を判定する
     /// (死亡時にリセットしなくても差分比較なので問題ない)。
     pub enemy_hit_count: u32,
+    /// 直近の被ダメージ (ダメージ量, 残り表示tick数)。0になったら`logic::tick`
+    /// が`None`に戻す。ヘッダーに「-N」を一定時間だけ表示するための演出専用
+    /// データで、ダメージ計算そのものには使わない。
+    pub last_hero_damage: Option<(i32, u32)>,
+    /// 直近にモンスターへ与えたダメージ (ダメージ量, 残り表示tick数)。
+    pub last_enemy_damage: Option<(i32, u32)>,
 
     // ── UI / メタ ──
     pub log: Vec<String>,
@@ -288,6 +294,8 @@ impl LoopMarchState {
             hero_hurt_flash: FlashTimer::new(),
             enemy_hurt_flash: FlashTimer::new(),
             enemy_hit_count: 0,
+            last_hero_damage: None,
+            last_enemy_damage: None,
             log: vec!["周回討伐へようこそ。まずは拠点で遠征に出よう。".into()],
             rng_state: 0x1234_5678,
             camp_scroll: Cell::new(0),

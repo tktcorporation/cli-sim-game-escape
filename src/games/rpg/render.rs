@@ -67,6 +67,21 @@ fn element_color(e: Element) -> Color {
     }
 }
 
+/// 階層に連動したアクセント色。深く潜るほど脅威度が上がっていく実感を
+/// ステータスバー/フロア表示のボーダーや見出しテキストに持たせる。
+/// 村 (floor 0) は元々のCyan固定の見た目を維持する — 色分けの意味は
+/// 「今どれだけ深く潜っているか」なので、潜っていない村では変化させない。
+fn floor_color(floor: u32) -> Color {
+    match floor {
+        0 => Color::Cyan,
+        1..=2 => Color::Green,
+        3..=4 => Color::Yellow,
+        5..=6 => Color::LightRed,
+        7..=8 => Color::Magenta,
+        _ => Color::Red,
+    }
+}
+
 fn satiety_color(s: u32, max: u32) -> Color {
     if max == 0 { return Color::Red; }
     let r = s as f64 / max as f64;
@@ -209,16 +224,30 @@ fn render_status_bar(
         spans.push(Span::styled(s, Style::default().fg(Color::Magenta)));
     }
 
+    // 被弾直後の短い間だけ実ダメージ量を数値で浮かせる。バーの色変化だけでは
+    // 「どれだけ削られたか」までは伝わらないため。
+    if let Some((dmg, life)) = state.last_hero_damage {
+        if life > 0 {
+            spans.push(Span::styled(
+                format!(" -{}", dmg),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
+    }
+
+    let floor_num = state.dungeon.as_ref().map(|d| d.floor_num).unwrap_or(0);
+    let accent = floor_color(floor_num);
+
     // グローバル戻るボタン (main.rs, 左上 6 列) が row 0 に重なるため、タイトルは
     // 中央寄せにして先頭が隠れないようにする。
     let title = if is_narrow { " Dungeon " } else { " Dungeon Dive " };
     let block = Block::default()
         .borders(borders)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(accent))
         .title(
             Line::from(Span::styled(
                 title,
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ))
             .alignment(ratzilla::ratatui::layout::Alignment::Center),
         );
@@ -228,12 +257,14 @@ fn render_status_bar(
 fn render_floor_indicator(state: &RpgState, f: &mut Frame, area: Rect, borders: Borders) {
     if let Some(map) = &state.dungeon {
         let theme = floor_theme(map.floor_num);
-        let block = Block::default()
-            .borders(borders)
-            .border_style(Style::default().fg(Color::DarkGray));
 
         if map.is_overworld {
-            // Village indicator: just label + facility legend hint.
+            // Village indicator: unchanged from before — 階層連動グラデーション
+            // は「今どれだけ深く潜っているか」を伝えるための演出なので、
+            // 潜っていない村では従来通りの配色のままにする。
+            let block = Block::default()
+                .borders(borders)
+                .border_style(Style::default().fg(Color::DarkGray));
             let line = Line::from(vec![
                 Span::styled(
                     " 〈村〉 ",
@@ -251,6 +282,11 @@ fn render_floor_indicator(state: &RpgState, f: &mut Frame, area: Rect, borders: 
             f.render_widget(Paragraph::new(vec![line]).block(block), area);
             return;
         }
+
+        let accent = floor_color(map.floor_num);
+        let block = Block::default()
+            .borders(borders)
+            .border_style(Style::default().fg(accent));
 
         let bonus = return_bonus(map.floor_num, state.run_rooms_explored);
         let bonus_span = if bonus > 0 {
@@ -276,7 +312,7 @@ fn render_floor_indicator(state: &RpgState, f: &mut Frame, area: Rect, borders: 
         let line = Line::from(vec![
             Span::styled(
                 format!(" B{}F ", map.floor_num),
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                Style::default().fg(accent).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!("〈{}〉", theme_name(theme)),
@@ -471,6 +507,21 @@ fn render_explore_panel(
                 cl.push(Line::from(Span::styled(
                     " 防御か回避を！",
                     Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+                )));
+            }
+        }
+
+        // 与ダメージポップアップ。トドメの一撃だと敵は既にリストから消えている
+        // (on_player_actionのretainが先に走る) ため、上の「隣接モンスター」
+        // ブロックの外に独立させて出す — そうしないと最後の一撃の数字だけ
+        // 表示されずに終わってしまう。
+        if let Some((dmg, life, crit)) = state.last_enemy_damage {
+            if life > 0 {
+                let label = if crit { format!(" -{} 会心!", dmg) } else { format!(" -{}", dmg) };
+                let color = if crit { Color::LightYellow } else { Color::Yellow };
+                cl.push(Line::from(Span::styled(
+                    label,
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
                 )));
             }
         }
@@ -763,16 +814,37 @@ fn render_event_popup(
     cl.render(f, popup_area, clear_block, &mut cs, true, 0);
 }
 
+/// ログ本文のキーワードから種別を判定して色を返す。rpgのログは絵文字接頭辞
+/// を持たない自然文なので、abyssのlog_style (先頭記号判定) とは違い部分
+/// 一致で判定する。危険/警告を最優先で拾い、次いで成果、最後に成長関連。
+/// どれにも当たらない大半のログ (戦闘の通常ダメージ表記等) は従来通り灰色
+/// のまま — 全部を色分けすると逆に重要な行が埋もれる。
+fn log_style(msg: &str) -> Style {
+    const DANGER: &[&str] = &["力尽きた", "飢餓寸前", "飢えで体力が削れる", "神は応えなかった"];
+    const GAIN: &[&str] = &[
+        "を倒した", "をドロップ", "を落とした", "を授かった", "を受け取った",
+        "を入手", "の加護", "の恵み", "が懐いた",
+    ];
+    const GROWTH: &[&str] = &["レベルアップ", "を習得", "会心の一撃"];
+
+    if DANGER.iter().any(|kw| msg.contains(kw)) {
+        Style::default().fg(Color::Red)
+    } else if GROWTH.iter().any(|kw| msg.contains(kw)) {
+        Style::default().fg(Color::Yellow)
+    } else if GAIN.iter().any(|kw| msg.contains(kw)) {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
+}
+
 fn render_log(state: &RpgState, f: &mut Frame, area: Rect, borders: Borders) {
     let max_lines = area.height.saturating_sub(2) as usize;
     let start = state.log.len().saturating_sub(max_lines);
     let lines: Vec<Line> = state.log[start..]
         .iter()
         .map(|msg| {
-            Line::from(Span::styled(
-                format!(" > {}", msg),
-                Style::default().fg(Color::DarkGray),
-            ))
+            Line::from(Span::styled(format!(" > {}", msg), log_style(msg)))
         })
         .collect();
     let block = Block::default()
@@ -818,23 +890,27 @@ fn render_menu_tabs(
         return area;
     }
     let tab_area = Rect::new(area.x, area.y, area.width, 1);
-    let style_for = |o: Overlay| -> Style {
+    // 選択中タブは背景を塗って「押せるボタン」感を出す。地色は各パネルの
+    // ボーダー色 (render_inventory=Green / render_skill_menu=Blue /
+    // render_status=Cyan) と揃え、タブとその先のパネルが同じ色で繋がって
+    // 見えるようにする。
+    let style_for = |o: Overlay, base: Color| -> Style {
         if o == active {
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            Style::default().fg(Color::Black).bg(base).add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::DarkGray)
+            Style::default().fg(base)
         }
     };
     let bar = TabBar::new(" │ ")
         .tab(
             "持ち物",
-            style_for(Overlay::Inventory),
+            style_for(Overlay::Inventory, Color::Green),
             MENU_TAB_INVENTORY,
         )
-        .tab("スキル", style_for(Overlay::SkillMenu), MENU_TAB_SKILL)
+        .tab("スキル", style_for(Overlay::SkillMenu, Color::Blue), MENU_TAB_SKILL)
         .tab(
             "ステータス",
-            style_for(Overlay::Status),
+            style_for(Overlay::Status, Color::Cyan),
             MENU_TAB_STATUS,
         );
     let mut cs = click_state.borrow_mut();
@@ -1502,4 +1578,51 @@ fn render_game_clear(
 
     let mut cs = click_state.borrow_mut();
     cl.render(f, area, block, &mut cs, false, 0);
+}
+
+// ── Tests ────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_style_flags_death_and_danger_as_red() {
+        assert_eq!(log_style("力尽きた… 30G失った").fg, Some(Color::Red));
+        assert_eq!(log_style("飢餓寸前！何か食べないと…").fg, Some(Color::Red));
+        assert_eq!(log_style("…神は応えなかった。心に虚しさが残る…").fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn log_style_flags_kills_and_gains_as_green() {
+        assert_eq!(log_style("スライムを倒した！ EXP+5 +8G").fg, Some(Color::Green));
+        assert_eq!(log_style("薬草をドロップ！").fg, Some(Color::Green));
+        assert_eq!(log_style("薬草x3 / パンx2 / 50G を受け取った！").fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn log_style_flags_growth_as_yellow() {
+        assert_eq!(log_style("レベルアップ！ Lv.2").fg, Some(Color::Yellow));
+        assert_eq!(log_style("スキル「ヒール」を習得！").fg, Some(Color::Yellow));
+        assert_eq!(log_style("会心の一撃！ ゴブリンに12ダメージ").fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn log_style_defaults_to_gray_for_ordinary_lines() {
+        assert_eq!(log_style("ゴブリンに8ダメージ").fg, Some(Color::DarkGray));
+        assert_eq!(log_style("壁だ。進めない。").fg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn floor_color_escalates_with_depth() {
+        // 村 (floor 0) は既存の見た目 (Cyan) を維持する。
+        assert_eq!(floor_color(0), Color::Cyan);
+        // 深く潜るほど色が変わっていく (段階が全て異なることだけ確認する —
+        // 具体的な配色はデザイン判断であってテストで固定すべき仕様ではない)。
+        let colors: Vec<Color> = (1..=super::super::state::MAX_FLOOR)
+            .map(floor_color)
+            .collect();
+        let unique: std::collections::HashSet<Color> = colors.iter().copied().collect();
+        assert!(unique.len() > 1, "階層が進むと色も変わるはず");
+    }
 }

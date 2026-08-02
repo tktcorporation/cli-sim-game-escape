@@ -151,6 +151,8 @@ pub fn tick_n(state: &mut LoopMarchState, n: u32) {
 pub fn tick(state: &mut LoopMarchState) {
     state.hero_hurt_flash.tick(1);
     state.enemy_hurt_flash.tick(1);
+    decay_damage_display(&mut state.last_hero_damage);
+    decay_damage_display(&mut state.last_enemy_damage);
     if state.phase != Phase::Expedition || state.hero.hp <= 0 {
         return;
     }
@@ -167,6 +169,23 @@ pub fn tick(state: &mut LoopMarchState) {
     }
 }
 
+/// 被ダメージ表示 (`last_hero_damage`/`last_enemy_damage`) の残りtickを
+/// 1減らし、尽きたら`None`に戻す。ヘッダーの「-N」表示専用のライフサイクルで、
+/// `hero_hurt_flash`/`enemy_hurt_flash` の点滅とは独立に管理する — 表示秒数の
+/// チューニングを演出側だけで完結させるため。
+fn decay_damage_display(display: &mut Option<(i32, u32)>) {
+    if let Some((_, life)) = display {
+        *life = life.saturating_sub(1);
+    }
+    if matches!(display, Some((_, 0))) {
+        *display = None;
+    }
+}
+
+/// 被ダメージ表示を何tick残すか。数値がすぐ消えるとダメージ量を読み取れない
+/// ため、被弾フラッシュ (3tick) より長めに表示を残す。
+const DAMAGE_DISPLAY_TICKS: u32 = 6;
+
 /// 勇者が現在マスのモンスターと1 tick分の攻防を行う。
 fn resolve_combat_tick(state: &mut LoopMarchState) {
     let pos = state.hero.position;
@@ -177,6 +196,7 @@ fn resolve_combat_tick(state: &mut LoopMarchState) {
             monster.hp -= hero_atk;
             state.enemy_hurt_flash.trigger(3);
             state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
+            state.last_enemy_damage = Some((hero_atk, DAMAGE_DISPLAY_TICKS));
             if monster.hp <= 0 {
                 Some((monster.terrain, monster.elite, monster.tier, monster.cluster_bonus))
             } else {
@@ -188,7 +208,7 @@ fn resolve_combat_tick(state: &mut LoopMarchState) {
 
     if let Some((terrain, elite, tier, cluster_bonus)) = defeated_reward {
         state.path[pos].monster = None;
-        grant_kill_reward(state, terrain, elite, tier, cluster_bonus);
+        grant_kill_reward(state, terrain, elite, tier, cluster_bonus, hero_atk);
         return; // 倒した瞬間は反撃を受けない
     }
 
@@ -200,6 +220,7 @@ fn resolve_combat_tick(state: &mut LoopMarchState) {
     let dmg = (monster_attack - defense).max(1);
     state.hero.hp -= dmg;
     state.hero_hurt_flash.trigger(3);
+    state.last_hero_damage = Some((dmg, DAMAGE_DISPLAY_TICKS));
     if state.hero.hp <= 0 {
         state.hero.hp = 0;
         handle_death(state);
@@ -211,25 +232,35 @@ fn resolve_combat_tick(state: &mut LoopMarchState) {
 /// 読み直さない。生存中にタイルを強化したり隣接に地形を足したりしても、
 /// 「その時に湧いた個体」の脅威度は変わっていないため、報酬だけをリスク無しに
 /// 釣り上げられてしまう抜け穴を防ぐ。
-fn grant_kill_reward(state: &mut LoopMarchState, terrain: Terrain, elite: bool, tier: u32, cluster_bonus: u32) {
+///
+/// `final_hit` は討伐時点の勇者の攻撃力 (=最後の一撃のダメージ)。報酬計算には
+/// 使わず、ログでの表示のみに使う。
+fn grant_kill_reward(
+    state: &mut LoopMarchState,
+    terrain: Terrain,
+    elite: bool,
+    tier: u32,
+    cluster_bonus: u32,
+    final_hit: i32,
+) {
     let mult = tier_multiplier(tier);
     match terrain {
         Terrain::Forest => {
             let base = if elite { 6 } else { 3 };
             let gained = ((base as f64) * mult).round() as u32;
             state.wood += gained;
-            state.add_log(format!("狼を倒した。木材+{gained}"));
+            state.add_log(format!("狼を倒した (最後の一撃-{final_hit})。木材+{gained}"));
         }
         Terrain::Mountain => {
             let gained = (4.0 * mult).round() as u32;
             state.stone += gained;
-            state.add_log(format!("ゴーレムを倒した。石材+{gained}"));
+            state.add_log(format!("ゴーレムを倒した (最後の一撃-{final_hit})。石材+{gained}"));
         }
         Terrain::Graveyard => {
             let base = 2 + cluster_bonus;
             let gained = ((base as f64) * mult).round() as u32;
             state.soul += gained;
-            state.add_log(format!("スケルトンを倒した。魂+{gained}"));
+            state.add_log(format!("スケルトンを倒した (最後の一撃-{final_hit})。魂+{gained}"));
         }
         Terrain::Meadow => {}
     }
@@ -386,6 +417,8 @@ fn handle_death(state: &mut LoopMarchState) {
     // 次の遠征に前回の残りフラッシュが漏れて見えないようリセットする。
     state.hero_hurt_flash = FlashTimer::new();
     state.enemy_hurt_flash = FlashTimer::new();
+    state.last_hero_damage = None;
+    state.last_enemy_damage = None;
     reset_lap_snapshot(state);
 }
 
@@ -411,6 +444,8 @@ pub fn start_or_resume_expedition(state: &mut LoopMarchState) {
     state.hero = state.camp.fresh_hero();
     state.hero_hurt_flash = FlashTimer::new();
     state.enemy_hurt_flash = FlashTimer::new();
+    state.last_hero_damage = None;
+    state.last_enemy_damage = None;
     reset_lap_snapshot(state);
 
     state.hand = draw_starting_hand(state.camp.starting_hand_size(), &mut state.rng_state);
@@ -1127,6 +1162,110 @@ mod tests {
 
         assert!(s.enemy_hurt_flash.is_active(), "撃破の一撃でもフラッシュは立つ");
         assert!(!s.hero_hurt_flash.is_active(), "倒した瞬間は反撃を受けないので勇者側は立たない");
+    }
+
+    #[test]
+    fn combat_tick_records_last_hero_and_enemy_damage_when_monster_survives() {
+        let mut s = expedition_state();
+        let pos = s.hero.position;
+        s.hero.attack = 7;
+        s.path[pos].monster = Some(Monster {
+            terrain: Terrain::Graveyard,
+            hp: 100,
+            max_hp: 100,
+            attack: 3,
+            elite: false,
+            tier: 0,
+            cluster_bonus: 0,
+        });
+        assert!(s.last_hero_damage.is_none());
+        assert!(s.last_enemy_damage.is_none());
+
+        tick(&mut s);
+
+        assert_eq!(s.last_enemy_damage, Some((7, DAMAGE_DISPLAY_TICKS)), "勇者の攻撃力そのものが表示ダメージになるはず");
+        let (hero_dmg, life) = s.last_hero_damage.expect("モンスターの反撃が記録されるはず");
+        assert_eq!(hero_dmg, 3, "岩山シナジー無しなら反撃ダメージは敵の攻撃力そのまま");
+        assert_eq!(life, DAMAGE_DISPLAY_TICKS);
+    }
+
+    #[test]
+    fn defeating_monster_records_enemy_damage_but_not_hero_damage() {
+        let mut s = expedition_state();
+        let pos = s.hero.position;
+        s.hero.attack = 100;
+        s.path[pos].monster = Some(Monster {
+            terrain: Terrain::Graveyard,
+            hp: 1,
+            max_hp: 1,
+            attack: 3,
+            elite: false,
+            tier: 0,
+            cluster_bonus: 0,
+        });
+
+        tick(&mut s);
+
+        assert_eq!(s.last_enemy_damage, Some((100, DAMAGE_DISPLAY_TICKS)));
+        assert!(s.last_hero_damage.is_none(), "倒した瞬間は反撃を受けないので記録されない");
+    }
+
+    #[test]
+    fn damage_display_decays_and_clears_after_ticks() {
+        let mut s = expedition_state();
+        s.last_hero_damage = Some((5, 2));
+        s.last_enemy_damage = Some((3, 1));
+
+        tick(&mut s);
+        assert_eq!(s.last_hero_damage, Some((5, 1)), "1tick経過で残りが減るはず");
+        assert!(s.last_enemy_damage.is_none(), "残り1tickだったので0になった時点で消えるはず");
+
+        tick(&mut s);
+        assert!(s.last_hero_damage.is_none());
+    }
+
+    #[test]
+    fn death_resets_damage_display() {
+        let mut s = expedition_state();
+        s.hero.attack = 0;
+        s.hero.hp = 1;
+        let pos = s.hero.position;
+        s.path[pos].monster = Some(Monster {
+            terrain: Terrain::Graveyard,
+            hp: 100,
+            max_hp: 100,
+            attack: 50,
+            elite: false,
+            tier: 0,
+            cluster_bonus: 0,
+        });
+
+        tick(&mut s);
+
+        assert_eq!(s.phase, Phase::Camp, "この tick で死亡しているはず");
+        assert!(s.last_hero_damage.is_none(), "死亡直後の演出データは持ち越さない");
+        assert!(s.last_enemy_damage.is_none());
+    }
+
+    #[test]
+    fn kill_log_includes_final_blow_damage() {
+        let mut s = expedition_state();
+        s.hero.position = 3;
+        s.hero.attack = 42;
+        s.path[3].monster = Some(Monster {
+            terrain: Terrain::Forest,
+            hp: 5,
+            max_hp: 5,
+            attack: 2,
+            elite: false,
+            tier: 0,
+            cluster_bonus: 0,
+        });
+
+        tick(&mut s);
+
+        let entry = s.log.last().expect("討伐ログが追加されているはず");
+        assert!(entry.contains("-42"), "最後の一撃のダメージ量が見えるはず: {entry:?}");
     }
 
     #[test]

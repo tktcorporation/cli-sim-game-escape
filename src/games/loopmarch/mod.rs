@@ -71,6 +71,26 @@ struct PrevSnapshot {
     run_active: bool,
     hero_hp: i32,
     enemy_hit_count: u32,
+    /// 盤面上の地形強化tierの合計。単調増加ではない (死亡でリセットされる) ため
+    /// 増加方向の差分だけを演出トリガに使う。
+    total_terrain_tier: u32,
+    /// 盤面に現在いるeliteモンスターの数。出現(増加)の瞬間だけ演出したい —
+    /// 撃破による減少側は他の演出 (enemy_hit) と役割が重なるため無視する。
+    elite_monster_count: u32,
+}
+
+/// 盤面上の地形強化tierの合計。`place_selected` の重ね置き強化を検知する
+/// ためだけの読み取り専用集計 (ロジック側には持たない — 表示演出専用の値)。
+fn total_terrain_tier(s: &state::LoopMarchState) -> u32 {
+    s.path.iter().map(|slot| slot.tier).sum()
+}
+
+/// 盤面に現在いるeliteモンスターの数。
+fn elite_monster_count(s: &state::LoopMarchState) -> u32 {
+    s.path
+        .iter()
+        .filter(|slot| slot.monster.as_ref().is_some_and(|m| m.elite))
+        .count() as u32
 }
 
 impl LoopMarchGame {
@@ -101,6 +121,8 @@ impl LoopMarchGame {
             run_active: s.run_active,
             hero_hp: s.hero.hp,
             enemy_hit_count: s.enemy_hit_count,
+            total_terrain_tier: total_terrain_tier(s),
+            elite_monster_count: elite_monster_count(s),
         }
     }
 
@@ -129,6 +151,14 @@ impl LoopMarchGame {
             if s.lap > prev.lap {
                 effects.push_lap_complete(layout.ring);
                 sound::play(sound::VICTORY);
+            }
+
+            if total_terrain_tier(s) > prev.total_terrain_tier {
+                effects.push_terrain_tier_up(layout.ring);
+            }
+
+            if elite_monster_count(s) > prev.elite_monster_count {
+                effects.push_elite_spawn(layout.ring);
             }
         }
 
@@ -551,6 +581,46 @@ mod tests {
         assert!(
             game.effects.borrow().is_running(),
             "render を挟まないバッチ内で出現から撃破まで完結しても、ヒット演出は失われないはず"
+        );
+    }
+
+    #[test]
+    fn detect_transitions_pushes_effect_on_terrain_tier_up() {
+        let mut game = LoopMarchGame::new();
+        logic::start_or_resume_expedition(&mut game.state);
+        game.state.path[3].terrain = Some(state::Terrain::Forest);
+        game.state.path[3].tier = 1;
+        let area = Rect::new(0, 0, 80, 30);
+
+        game.detect_transitions(area);
+
+        assert!(
+            game.effects.borrow().is_running(),
+            "地形の重ね置き強化 (tier上昇) で演出が積まれるはず"
+        );
+    }
+
+    #[test]
+    fn detect_transitions_pushes_effect_on_elite_monster_spawn() {
+        let mut game = LoopMarchGame::new();
+        logic::start_or_resume_expedition(&mut game.state);
+        let pos = game.state.hero.position;
+        game.state.path[pos].monster = Some(state::Monster {
+            terrain: state::Terrain::Forest,
+            hp: 10,
+            max_hp: 10,
+            attack: 2,
+            elite: true,
+            tier: 0,
+            cluster_bonus: 0,
+        });
+        let area = Rect::new(0, 0, 80, 30);
+
+        game.detect_transitions(area);
+
+        assert!(
+            game.effects.borrow().is_running(),
+            "eliteモンスターの出現で演出が積まれるはず"
         );
     }
 
