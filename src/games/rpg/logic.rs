@@ -23,6 +23,19 @@ use super::state::{
 
 pub fn tick(state: &mut RpgState, delta_ticks: u32) {
     state.hero_hurt_flash.tick(delta_ticks);
+
+    if let Some((_, ref mut life)) = state.last_hero_damage {
+        *life = life.saturating_sub(delta_ticks);
+    }
+    if let Some((_, ref mut life, _)) = state.last_enemy_damage {
+        *life = life.saturating_sub(delta_ticks);
+    }
+    if matches!(state.last_hero_damage, Some((_, 0))) {
+        state.last_hero_damage = None;
+    }
+    if matches!(state.last_enemy_damage, Some((_, 0, _))) {
+        state.last_enemy_damage = None;
+    }
 }
 
 // ── Cursor navigation (Issue: arrow + A/B unification) ───────
@@ -480,6 +493,7 @@ pub fn pray(state: &mut RpgState) -> bool {
         state.hp = state.hp.saturating_sub(dmg).max(1);
         state.hero_hurt_flash.trigger(3);
         state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
+        state.last_hero_damage = Some((dmg, 6));
         state.add_log("…神は応えなかった。心に虚しさが残る…");
     } else if roll < blessing_thresh {
         // Major blessing
@@ -869,6 +883,7 @@ pub fn attack_monster(state: &mut RpgState, idx: usize) {
         m.awake = true;
     }
     state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
+    state.last_enemy_damage = Some((damage, 6, is_crit));
     if is_crit {
         state.crit_count = state.crit_count.wrapping_add(1);
     }
@@ -1055,6 +1070,7 @@ fn tick_satiety(state: &mut RpgState) {
         // 一撃ごとに画面全体をフラッシュさせると毎ターンうるさくなる。
         // HPバーの色 (hero_hurt_flash) だけは反映して「削れている」ことを伝える。
         state.hero_hurt_flash.trigger(3);
+        state.last_hero_damage = Some((drain, 6));
         if state.turn_count.is_multiple_of(5) {
             state.add_log(&format!("飢えで体力が削れる… -{}HP", drain));
         }
@@ -1151,6 +1167,7 @@ fn monster_act(state: &mut RpgState, idx: usize) {
             state.hp = state.hp.saturating_sub(damage);
             state.hero_hurt_flash.trigger(3);
             state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
+            state.last_hero_damage = Some((damage, 6));
             state.add_log(&format!("{}の渾身の一撃！ {}ダメージ！", m_name, damage));
         } else {
             state.add_log(&format!("{}の渾身の一撃は空振り…", m_name));
@@ -1178,6 +1195,7 @@ fn monster_act(state: &mut RpgState, idx: usize) {
         state.hp = state.hp.saturating_sub(damage);
         state.hero_hurt_flash.trigger(3);
         state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
+        state.last_hero_damage = Some((damage, 6));
         state.add_log(&format!("{}の攻撃！ {}ダメージ！", m_name, damage));
         return;
     }
@@ -1540,6 +1558,7 @@ fn apply_event_outcome(state: &mut RpgState, outcome: &EventOutcome) -> bool {
         state.hp = state.hp.saturating_sub(damage);
         state.hero_hurt_flash.trigger(3);
         state.hero_hit_count = state.hero_hit_count.wrapping_add(1);
+        state.last_hero_damage = Some((damage, 6));
     } else if outcome.hp_change > 0 {
         state.hp = (state.hp + outcome.hp_change as u32).min(state.max_hp);
     }
@@ -1775,6 +1794,8 @@ fn cast_damage_skill(state: &mut RpgState, skill: SkillKind, idx: usize) {
         m.awake = true;
     }
     state.enemy_hit_count = state.enemy_hit_count.wrapping_add(1);
+    // スキルに会心判定はない (crit roll は通常攻撃 attack_monster のみ)。
+    state.last_enemy_damage = Some((damage, 6, false));
 
     let weak_str = if is_weak { " [弱点!]" } else { "" };
     let name = einfo.name;
@@ -2383,6 +2404,154 @@ mod tests {
         assert!(s.hero_hurt_flash.is_active());
         tick(&mut s, 10);
         assert!(!s.hero_hurt_flash.is_active());
+    }
+
+    #[test]
+    fn tick_decays_damage_popups_and_clears_at_zero() {
+        let mut s = RpgState::new();
+        s.last_hero_damage = Some((10, 3));
+        s.last_enemy_damage = Some((5, 3, true));
+        tick(&mut s, 2);
+        assert_eq!(s.last_hero_damage, Some((10, 1)));
+        assert_eq!(s.last_enemy_damage, Some((5, 1, true)));
+        tick(&mut s, 5);
+        assert!(s.last_hero_damage.is_none(), "残りtickが0になったらNoneに戻る");
+        assert!(s.last_enemy_damage.is_none());
+    }
+
+    #[test]
+    fn attack_monster_sets_last_enemy_damage_popup() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: 0, y: 0, hp: 999, max_hp: 999,
+            awake: true, charging: false, affix: None,
+        });
+        attack_monster(&mut s, 0);
+        let (dmg, life, _crit) = s.last_enemy_damage.expect("与ダメージポップアップがセットされるはず");
+        assert!(dmg > 0);
+        assert_eq!(life, 6);
+    }
+
+    #[test]
+    fn attack_monster_crit_flags_last_enemy_damage_as_critical() {
+        // crit_roll < 10 (10%) を引くまで seed を変えて試行する。
+        for seed in 0..500u64 {
+            let mut s = RpgState::new();
+            s.rng_seed = seed;
+            enter_dungeon(&mut s, 1);
+            let map = s.dungeon.as_mut().unwrap();
+            map.monsters.clear();
+            map.monsters.push(Monster {
+                kind: EnemyKind::Slime, x: 0, y: 0, hp: 999, max_hp: 999,
+                awake: true, charging: false, affix: None,
+            });
+            let crit_before = s.crit_count;
+            attack_monster(&mut s, 0);
+            if s.crit_count != crit_before {
+                let (_, _, is_crit) = s.last_enemy_damage.expect("会心時もポップアップはセットされる");
+                assert!(is_crit, "会心の一撃はis_critical=trueでポップアップされるはず");
+                return;
+            }
+        }
+        panic!("500試行しても会心の一撃が発生しなかった");
+    }
+
+    #[test]
+    fn cast_damage_skill_sets_last_enemy_damage_popup() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        map.monsters.clear();
+        map.monsters.push(Monster {
+            kind: EnemyKind::Slime, x: 0, y: 0, hp: 999, max_hp: 999,
+            awake: true, charging: false, affix: None,
+        });
+        cast_damage_skill(&mut s, SkillKind::Fire, 0);
+        let (dmg, life, is_crit) = s.last_enemy_damage.expect("スキルダメージもポップアップされるはず");
+        assert!(dmg > 0);
+        assert_eq!(life, 6);
+        assert!(!is_crit, "スキルに会心判定はない");
+    }
+
+    #[test]
+    fn monster_attack_sets_last_hero_damage_popup() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let map = s.dungeon.as_mut().unwrap();
+        let px = map.player_x;
+        let py = map.player_y;
+        let mut placed = false;
+        for &dir in &[Facing::North, Facing::East, Facing::South, Facing::West] {
+            let nx = px as i32 + dir.dx();
+            let ny = py as i32 + dir.dy();
+            if !map.in_bounds(nx, ny) { continue; }
+            let (ux, uy) = (nx as usize, ny as usize);
+            if !map.cell(ux, uy).is_walkable() { continue; }
+            map.monsters.clear();
+            map.monsters.push(Monster {
+                kind: EnemyKind::Slime, x: ux, y: uy, hp: 999, max_hp: 999,
+                awake: true, charging: false, affix: None,
+            });
+            placed = true;
+            break;
+        }
+        assert!(placed, "隣接できる歩行可能マスが見つからなかった");
+        // charge 抽選 (25%) に外れるまで数回試す。
+        for _ in 0..20 {
+            monster_act(&mut s, 0);
+            if let Some((dmg, life)) = s.last_hero_damage {
+                assert!(dmg > 0);
+                assert_eq!(life, 6);
+                return;
+            }
+            // charge の場合は次のtickで解放される。解放時にもポップアップが立つ。
+            if s.dungeon.as_ref().unwrap().monsters[0].charging {
+                monster_act(&mut s, 0);
+                let (dmg, life) = s.last_hero_damage.expect("チャージ解放も被ダメージポップアップを出すはず");
+                assert!(dmg > 0);
+                assert_eq!(life, 6);
+                return;
+            }
+        }
+        panic!("20回試行しても被ダメージポップアップが一度もセットされなかった");
+    }
+
+    #[test]
+    fn starvation_sets_last_hero_damage_popup() {
+        let mut s = RpgState::new();
+        s.satiety = 0;
+        s.turn_count = 1; // 満腹度0の分岐に入る
+        tick_satiety(&mut s);
+        let (dmg, life) = s.last_hero_damage.expect("飢餓ダメージもポップアップされるはず");
+        assert!(dmg > 0);
+        assert_eq!(life, 6);
+    }
+
+    #[test]
+    fn event_damage_sets_last_hero_damage_popup() {
+        let mut s = RpgState::new();
+        enter_dungeon(&mut s, 1);
+        let outcome = EventOutcome {
+            description: Vec::new(),
+            gold: 0,
+            hp_change: -7,
+            mp_change: 0,
+            item: None,
+            descend: false,
+            ascend: false,
+            return_to_town: false,
+            lore_id: None,
+            satiety_change: 0,
+            faith_change: 0,
+            spawn_pet: None,
+            spawn_hostile: None,
+            require_consume: None,
+        };
+        assert!(apply_event_outcome(&mut s, &outcome));
+        assert_eq!(s.last_hero_damage, Some((7, 6)));
     }
 
     #[test]
