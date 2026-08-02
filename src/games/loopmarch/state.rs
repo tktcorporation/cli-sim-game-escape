@@ -249,6 +249,10 @@ pub struct LoopMarchState {
     /// ないため、render 側は HP ではなくこのカウンタの差分でヒット演出を判定する
     /// (死亡時にリセットしなくても差分比較なので問題ない)。
     pub enemy_hit_count: u32,
+    /// エリートモンスターの出現回数の単調増加カウンタ。`enemy_hit_count` と同じ
+    /// 理由で、バッチ tick 内で出現→撃破が完結すると盤面上のエリート数の
+    /// スナップショット比較だけでは出現を検出できないため用意している。
+    pub elite_spawn_count: u32,
     /// 直近の被ダメージ (ダメージ量, 残り表示tick数)。0になったら`logic::tick`
     /// が`None`に戻す。ヘッダーに「-N」を一定時間だけ表示するための演出専用
     /// データで、ダメージ計算そのものには使わない。
@@ -298,6 +302,7 @@ impl LoopMarchState {
             hero_hurt_flash: FlashTimer::new(),
             enemy_hurt_flash: FlashTimer::new(),
             enemy_hit_count: 0,
+            elite_spawn_count: 0,
             last_hero_damage: None,
             last_enemy_damage: None,
             log: vec!["周回討伐へようこそ。まずは拠点で遠征に出よう。".into()],

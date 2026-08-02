@@ -397,6 +397,7 @@ fn spawn_monster(state: &mut LoopMarchState, pos: usize, terrain: Terrain) {
     });
     if elite {
         state.add_log("森の奥で唸り声がした…気のせいだろうか");
+        state.elite_spawn_count = state.elite_spawn_count.wrapping_add(1);
     }
 }
 

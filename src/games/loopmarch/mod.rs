@@ -74,23 +74,13 @@ struct PrevSnapshot {
     /// 盤面上の地形強化tierの合計。単調増加ではない (死亡でリセットされる) ため
     /// 増加方向の差分だけを演出トリガに使う。
     total_terrain_tier: u32,
-    /// 盤面に現在いるeliteモンスターの数。出現(増加)の瞬間だけ演出したい —
-    /// 撃破による減少側は他の演出 (enemy_hit) と役割が重なるため無視する。
-    elite_monster_count: u32,
+    elite_spawn_count: u32,
 }
 
 /// 盤面上の地形強化tierの合計。`place_selected` の重ね置き強化を検知する
 /// ためだけの読み取り専用集計 (ロジック側には持たない — 表示演出専用の値)。
 fn total_terrain_tier(s: &state::LoopMarchState) -> u32 {
     s.path.iter().map(|slot| slot.tier).sum()
-}
-
-/// 盤面に現在いるeliteモンスターの数。
-fn elite_monster_count(s: &state::LoopMarchState) -> u32 {
-    s.path
-        .iter()
-        .filter(|slot| slot.monster.as_ref().is_some_and(|m| m.elite))
-        .count() as u32
 }
 
 impl LoopMarchGame {
@@ -122,7 +112,7 @@ impl LoopMarchGame {
             hero_hp: s.hero.hp,
             enemy_hit_count: s.enemy_hit_count,
             total_terrain_tier: total_terrain_tier(s),
-            elite_monster_count: elite_monster_count(s),
+            elite_spawn_count: s.elite_spawn_count,
         }
     }
 
@@ -157,7 +147,7 @@ impl LoopMarchGame {
                 effects.push_terrain_tier_up(layout.ring);
             }
 
-            if elite_monster_count(s) > prev.elite_monster_count {
+            if s.elite_spawn_count != prev.elite_spawn_count {
                 effects.push_elite_spawn(layout.ring);
             }
         }
@@ -352,7 +342,11 @@ impl Game for LoopMarchGame {
         // 周回達成・モンスター湧き判定) に変わりうる永続データ。ブラウザの
         // タブを閉じる/リロードするタイミングは検知できないため、変化した
         // 瞬間にタイマーを待たず保存しておく。
-        let persistent_before = (self.state.soul, self.state.best_lap, self.state.rng_state);
+        // `lap` は `soul_history` への追記 (log_lap_summary) と1:1で増える
+        // ため、魂が変化しないラップ (討伐0体) でも履歴の新規点を確実に
+        // 保存できるよう、Vec自体ではなく軽量な `lap` を比較に使う。
+        let persistent_before =
+            (self.state.soul, self.state.best_lap, self.state.rng_state, self.state.lap);
 
         logic::tick_n(&mut self.state, delta_ticks);
 
@@ -360,8 +354,9 @@ impl Game for LoopMarchGame {
         // 「死んでも魂は残る」が核となる約束なので、その直後にリロード/
         // タブを閉じられても失われないようにする。
         let died_this_tick = was_run_active && !self.state.run_active;
-        let persistent_changed = (self.state.soul, self.state.best_lap, self.state.rng_state)
-            != persistent_before;
+        let persistent_changed =
+            (self.state.soul, self.state.best_lap, self.state.rng_state, self.state.lap)
+                != persistent_before;
 
         self.save_countdown = self.save_countdown.saturating_sub(delta_ticks);
         if self.save_countdown == 0 || died_this_tick || persistent_changed {
@@ -549,6 +544,52 @@ mod tests {
         );
     }
 
+    /// エリート出現の基本検知: `elite_spawn_count` が増えれば演出が積まれる。
+    #[test]
+    fn detect_transitions_pushes_elite_spawn_on_count_increase() {
+        let mut game = LoopMarchGame::new();
+        logic::start_or_resume_expedition(&mut game.state);
+        let area = Rect::new(0, 0, 80, 30);
+        game.detect_transitions(area);
+        assert!(!game.effects.borrow().is_running());
+
+        game.state.elite_spawn_count = game.state.elite_spawn_count.wrapping_add(1);
+        game.detect_transitions(area);
+        assert!(
+            game.effects.borrow().is_running(),
+            "elite_spawn_count の増加で演出が積まれるはず"
+        );
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): 盤面上のeliteモンスター数のスナップ
+    /// ショット比較 (`elite_monster_count`) では、バッチ tick 内で出現から
+    /// 撃破までが1回も render を挟まずに完結すると前後とも0体に見えて出現
+    /// 演出が発火しなかった。`enemy_hit_count` と同じ単調増加カウンタ
+    /// (`elite_spawn_count`) の差分で検知するようにしたので、盤面に
+    /// エリートが残っていなくても検出できることを確認する。
+    #[test]
+    fn detect_transitions_catches_elite_spawn_even_when_defeated_before_render() {
+        let mut game = LoopMarchGame::new();
+        logic::start_or_resume_expedition(&mut game.state);
+        let area = Rect::new(0, 0, 80, 30);
+        game.detect_transitions(area);
+
+        // 出現と同時にバッチ内で撃破された状況を模す: 盤面には何も残さず
+        // (盤面スナップショット的には「出現していない」のと区別が付かない
+        // 状態で)、spawn_monster が行うのと同じインクリメントだけ発生させる。
+        game.state.elite_spawn_count = game.state.elite_spawn_count.wrapping_add(1);
+        assert!(
+            game.state.path.iter().all(|slot| slot.monster.is_none()),
+            "盤面にはエリートは残っていない"
+        );
+
+        game.detect_transitions(area);
+        assert!(
+            game.effects.borrow().is_running(),
+            "盤面にエリートが残っていなくても、出現カウンタの差分で演出が積まれるはず"
+        );
+    }
+
     /// 回帰テスト (Codexレビュー指摘): 遅延フレームで複数 tick が一括消化される
     /// と、モンスターの出現から撃破までが1回も render (detect_transitions) を
     /// 挟まずに完結することがある。HP スナップショット比較だと前後とも
@@ -614,6 +655,10 @@ mod tests {
             tier: 0,
             cluster_bonus: 0,
         });
+        // 実際の spawn_monster は盤面への配置と同時に elite_spawn_count を
+        // 進める。検知は盤面のスナップショットではなくこのカウンタの差分で
+        // 行うため、テストでも同じ組み合わせを再現する。
+        game.state.elite_spawn_count = game.state.elite_spawn_count.wrapping_add(1);
         let area = Rect::new(0, 0, 80, 30);
 
         game.detect_transitions(area);
@@ -670,6 +715,40 @@ mod tests {
             game.save_countdown,
             save::AUTOSAVE_INTERVAL,
             "魂が増えた tick は即セーブ扱いになるべき"
+        );
+    }
+
+    /// 回帰テスト (Codexレビュー指摘): 討伐0体・魂+0でラップだけ完了した
+    /// tick では、soul/best_lap/rng_state はどれも変化しないため、
+    /// `soul_history` を比較対象に含めていないと即セーブ判定を素通りして
+    /// しまい、拠点画面の推移グラフの新規点がオートセーブまで失われる
+    /// (最悪 30 秒)。`lap` を比較対象に加えたことで検知できることを確認する。
+    #[test]
+    fn lap_completion_without_soul_gain_still_forces_immediate_save() {
+        let mut game = LoopMarchGame::new();
+        game.handle_input(&click(CAMP_START_OR_RESUME));
+        game.state.best_lap = 5; // 完了しても更新されないようにしておく
+        game.state.path[0].terrain = None; // 到達しても魂もrng_stateも動かない
+        game.state.hero.position = state::PATH_LEN - 1;
+        game.state.move_progress = state::MOVE_TICKS - 1;
+        let soul_before = game.state.soul;
+        let rng_before = game.state.rng_state;
+        let history_len_before = game.state.soul_history.len();
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+
+        game.tick(1); // position 0 へ到達 → ラップ完了
+
+        assert_eq!(game.state.lap, 1, "ラップが完了しているはず");
+        assert_eq!(game.state.soul, soul_before, "このtickでは魂は変化しない");
+        assert_eq!(game.state.rng_state, rng_before, "このtickではrng_stateも変化しない");
+        assert_eq!(
+            game.state.soul_history.len(), history_len_before + 1,
+            "推移グラフの新規点が記録されているはず"
+        );
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL,
+            "soul/best_lap/rng_stateが不変でも、ラップ完了(soul_history追記)は即セーブされるべき"
         );
     }
 
