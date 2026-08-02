@@ -5,10 +5,13 @@ use std::rc::Rc;
 
 use ratzilla::ratatui::layout::{Alignment, Constraint, Direction as LayoutDir, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
+use ratzilla::ratatui::symbols::Marker;
 use ratzilla::ratatui::text::{Line, Span};
+use ratzilla::ratatui::widgets::canvas::{Canvas, Line as CanvasLine};
 use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
+use crate::canvas_fx;
 use crate::input::{is_narrow_layout, ClickState};
 use crate::theme;
 use crate::widgets::{ClickableGrid, ClickableList, ScrollableTab};
@@ -47,9 +50,17 @@ fn render_camp(
         Borders::ALL
     };
 
+    // 魂の推移グラフは履歴が2件以上溜まってから初めて意味を持つ (1周だけでは
+    // 折れ線にならない) ので、それまでは無駄なスペースを取らないよう高さ0にする。
+    let graph_h: u16 = if state.soul_history.len() >= 2 { 6 } else { 0 };
     let chunks = Layout::default()
         .direction(LayoutDir::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(10), Constraint::Length(6)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(10),
+            Constraint::Length(graph_h),
+            Constraint::Length(6),
+        ])
         .split(area);
 
     let title = Paragraph::new(Line::from(Span::styled(
@@ -65,7 +76,46 @@ fn render_camp(
     f.render_widget(title, chunks[0]);
 
     render_camp_body(state, f, chunks[1], click_state, borders);
-    render_log(state, f, chunks[2], borders);
+    if graph_h > 0 {
+        render_soul_history_graph(state, f, chunks[2], borders);
+    }
+    render_log(state, f, chunks[3], borders);
+}
+
+/// ラップ完了ごとの魂の総量を折れ線で見せる。冒険を重ねるほど「ちゃんと
+/// 伸びているか」を、拠点強化のログを読み返さなくても一目で確認できる。
+fn render_soul_history_graph(state: &LoopMarchState, f: &mut Frame, area: Rect, borders: Borders) {
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::LightMagenta))
+        .title(" 魂の推移 ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width < 6 || inner.height < 2 {
+        return;
+    }
+
+    let history = &state.soul_history;
+    let max = *history.iter().max().unwrap_or(&1).max(&1) as f64;
+    let normalized: Vec<f64> = history.iter().map(|&v| v as f64 / max).collect();
+
+    let segments = canvas_fx::history_line_segments(
+        &normalized,
+        0.0,
+        inner.width as f64,
+        0.0,
+        inner.height as f64,
+    );
+    let canvas = Canvas::default()
+        .x_bounds([0.0, inner.width as f64])
+        .y_bounds([0.0, inner.height as f64])
+        .marker(Marker::Braille)
+        .paint(move |ctx| {
+            for &(x1, y1, x2, y2) in &segments {
+                ctx.draw(&CanvasLine { x1, y1, x2, y2, color: Color::LightMagenta });
+            }
+        });
+    f.render_widget(canvas, inner);
 }
 
 fn push_upgrade_row(

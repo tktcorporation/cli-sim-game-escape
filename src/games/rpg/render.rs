@@ -9,10 +9,13 @@ use std::rc::Rc;
 
 use ratzilla::ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
+use ratzilla::ratatui::symbols::Marker;
 use ratzilla::ratatui::text::{Line, Span};
+use ratzilla::ratatui::widgets::canvas::{Canvas, Circle, Points};
 use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
+use crate::canvas_fx;
 use crate::input::{is_narrow_layout, ClickState};
 use crate::theme;
 use crate::widgets::{Clickable, ClickableGrid, ClickableList, TabBar};
@@ -22,8 +25,8 @@ use super::dungeon_view;
 use super::logic::{available_quests, available_skills, return_bonus};
 use super::lore::{floor_theme, theme_name};
 use super::state::{
-    affix_info, element_name, item_info, skill_element, skill_info, Element, Overlay,
-    RpgState, Scene,
+    affix_info, element_name, item_info, skill_element, skill_info, DungeonMap, Element,
+    Overlay, RpgState, Scene,
 };
 
 pub fn render(
@@ -449,13 +452,21 @@ fn render_explore_panel(
         return;
     }
 
-    // Layout: info (flexible) → A/B buttons (1 row) → d-pad (3 rows).
+    // Layout: radar (optional) → info (flexible) → A/B buttons (1 row) → d-pad (3 rows).
     let dpad_h = 3_u16.min(inner.height.saturating_sub(3));
     let ab_h: u16 = if inner.height > dpad_h + 1 { 1 } else { 0 };
     let info_h = inner.height.saturating_sub(dpad_h + ab_h);
-    let info_area = Rect::new(inner.x, inner.y, inner.width, info_h);
+    // 索敵レーダー: 隣接1体の情報だけでは伝わらない周辺の敵配置を常時見せる。
+    // テキスト情報を圧迫しない余裕がある時だけ確保する。
+    let radar_h: u16 = if info_h >= 12 && inner.width >= 9 { 7 } else { 0 };
+    let radar_area = Rect::new(inner.x, inner.y, inner.width, radar_h);
+    let info_area = Rect::new(inner.x, inner.y + radar_h, inner.width, info_h - radar_h);
     let ab_area = Rect::new(inner.x, inner.y + info_h, inner.width, ab_h);
     let dpad_area = Rect::new(inner.x, inner.y + info_h + ab_h, inner.width, dpad_h);
+
+    if radar_h > 0 {
+        render_radar(map, f, radar_area);
+    }
 
     {
         let mut cl = ClickableList::new();
@@ -554,6 +565,70 @@ fn render_explore_panel(
         render_ab_buttons(state, f, ab_area, click_state);
     }
     render_dpad(map, f, dpad_area, click_state);
+}
+
+// 部屋の中にいる時は compute_visibility が部屋全体 (10タイル超のことも
+// ある) を視界に入れるため、半径を欲張っておかないと部屋内の敵がレーダー
+// から漏れてしまう。
+const RADAR_DETECT_RADIUS_TILES: f64 = 11.0;
+const RADAR_SCALE: f64 = 9.0;
+
+/// 視界内 (お化け同様 `compute_visibility` の判定を流用) かつ awake な
+/// モンスターを、レーダー中心 (プレイヤー) からの Canvas 座標 `(x, y, color)`
+/// へ変換する。描画から独立させてあるのはユニットテストのため。
+fn radar_blips(
+    map: &DungeonMap,
+    visible: &std::collections::HashSet<(usize, usize)>,
+) -> Vec<(f64, f64, Color)> {
+    let px = map.player_x as f64;
+    let py = map.player_y as f64;
+    map.monsters
+        .iter()
+        .filter(|m| m.hp > 0 && m.awake && visible.contains(&(m.x, m.y)))
+        .filter_map(|m| {
+            let dx = m.x as f64 - px;
+            let dy = m.y as f64 - py;
+            if (dx * dx + dy * dy).sqrt() > RADAR_DETECT_RADIUS_TILES {
+                return None;
+            }
+            let color = if m.affix.is_some() {
+                Color::Magenta
+            } else if m.charging {
+                Color::LightRed
+            } else {
+                Color::Red
+            };
+            // 画面座標は y が下向きなので、Canvas の数学座標に合わせて反転する。
+            Some((
+                dx / RADAR_DETECT_RADIUS_TILES * RADAR_SCALE,
+                -dy / RADAR_DETECT_RADIUS_TILES * RADAR_SCALE,
+                color,
+            ))
+        })
+        .collect()
+}
+
+/// 索敵レーダー — プレイヤーを中心に、視界内にいるモンスターを距離・方角で
+/// 表示する。隣接1体の情報だけでは伝わらない「周囲に何体いるか」を常時
+/// 見せて、探索の緊張感を底上げする。
+fn render_radar(map: &DungeonMap, f: &mut Frame, area: Rect) {
+    let visible = dungeon_view::compute_visibility(map);
+    let blips = radar_blips(map, &visible);
+
+    let canvas = Canvas::default()
+        .x_bounds([-10.0, 10.0])
+        .y_bounds([-10.0, 10.0])
+        .marker(Marker::Braille)
+        .paint(move |ctx| {
+            ctx.draw(&Circle { x: 0.0, y: 0.0, radius: RADAR_SCALE, color: Color::DarkGray });
+            let center = canvas_fx::filled_ellipse_points(0.0, 0.0, 0.6, 0.6, 0.4);
+            ctx.draw(&Points { coords: &center, color: Color::Cyan });
+            for &(bx, by, color) in &blips {
+                let pts = canvas_fx::filled_ellipse_points(bx, by, 0.9, 0.9, 0.45);
+                ctx.draw(&Points { coords: &pts, color });
+            }
+        });
+    f.render_widget(canvas, area);
 }
 
 /// Two-button row: A (context-sensitive) and B (open menu).
@@ -1585,6 +1660,84 @@ fn render_game_clear(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::games::rpg::dungeon_map::generate_map;
+    use crate::games::rpg::state::Monster;
+
+    fn adjacent_monster(map: &DungeonMap, awake: bool) -> Monster {
+        Monster {
+            kind: super::super::state::EnemyKind::Slime,
+            x: map.player_x + 1,
+            y: map.player_y,
+            hp: 5,
+            max_hp: 5,
+            awake,
+            charging: false,
+            affix: None,
+        }
+    }
+
+    #[test]
+    fn radar_blips_includes_awake_visible_monster_within_range() {
+        let mut seed = 42u64;
+        let map = generate_map(1, &mut seed);
+        let mut map = map;
+        map.monsters = vec![adjacent_monster(&map, true)];
+        let visible = dungeon_view::compute_visibility(&map);
+
+        let blips = radar_blips(&map, &visible);
+
+        assert_eq!(blips.len(), 1, "視界内・awakeな隣接モンスターはレーダーに映るはず");
+        assert_eq!(blips[0].2, Color::Red);
+    }
+
+    #[test]
+    fn radar_blips_excludes_sleeping_monster() {
+        let mut seed = 42u64;
+        let map = generate_map(1, &mut seed);
+        let mut map = map;
+        map.monsters = vec![adjacent_monster(&map, false)];
+        let visible = dungeon_view::compute_visibility(&map);
+
+        let blips = radar_blips(&map, &visible);
+
+        assert!(blips.is_empty(), "まだ気付いていない (awake=false) モンスターは映さない");
+    }
+
+    #[test]
+    fn radar_blips_excludes_monster_outside_visible_set() {
+        let mut seed = 42u64;
+        let map = generate_map(1, &mut seed);
+        let mut map = map;
+        let mut m = adjacent_monster(&map, true);
+        // 視界の外 (マップ端の遠方) に置き直す。
+        m.x = 0;
+        m.y = 0;
+        map.monsters = vec![m];
+        let visible = dungeon_view::compute_visibility(&map);
+
+        let blips = radar_blips(&map, &visible);
+
+        assert!(blips.is_empty(), "視界外のモンスターは検知半径内でも映さない");
+    }
+
+    #[test]
+    fn radar_blips_colors_elite_magenta_and_charging_light_red() {
+        let mut seed = 42u64;
+        let map = generate_map(1, &mut seed);
+        let mut map = map;
+        let mut elite = adjacent_monster(&map, true);
+        elite.affix = Some(super::super::state::EnemyAffix::Swift);
+        let mut charging = adjacent_monster(&map, true);
+        charging.y = map.player_y.wrapping_sub(1).min(map.height - 1);
+        charging.charging = true;
+        map.monsters = vec![elite, charging];
+        let visible = dungeon_view::compute_visibility(&map);
+
+        let blips = radar_blips(&map, &visible);
+
+        assert!(blips.iter().any(|b| b.2 == Color::Magenta), "affix持ちはマゼンタ");
+        assert!(blips.iter().any(|b| b.2 == Color::LightRed), "チャージ中は明赤");
+    }
 
     #[test]
     fn log_style_flags_death_and_danger_as_red() {

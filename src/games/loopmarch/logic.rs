@@ -282,6 +282,9 @@ fn advance_hero(state: &mut LoopMarchState) {
 
 /// 直前に完了したラップで増減した資源をログに出す。ラップ開始時点との
 /// 差分を見せることで「今の1周でどれだけ稼げたか」を数字で振り返れるようにする。
+/// 拠点画面の推移グラフに表示する履歴の最大件数。古いラップの分は捨てる。
+const SOUL_HISTORY_CAP: usize = 30;
+
 fn log_lap_summary(state: &mut LoopMarchState) {
     let wood_delta = state.wood as i64 - state.lap_start_wood as i64;
     let stone_delta = state.stone as i64 - state.lap_start_stone as i64;
@@ -293,6 +296,11 @@ fn log_lap_summary(state: &mut LoopMarchState) {
         signed(stone_delta),
         signed(soul_delta),
     ));
+
+    if state.soul_history.len() >= SOUL_HISTORY_CAP {
+        state.soul_history.remove(0);
+    }
+    state.soul_history.push(state.soul);
 }
 
 fn signed(delta: i64) -> String {
@@ -613,6 +621,33 @@ mod tests {
         let mut s = LoopMarchState::new();
         start_or_resume_expedition(&mut s);
         s
+    }
+
+    // ── 魂の推移履歴 ──
+
+    #[test]
+    fn completing_a_lap_appends_current_soul_to_history() {
+        let mut s = expedition_state();
+        s.soul = 7;
+        s.hero.position = PATH_LEN - 1;
+
+        advance_hero(&mut s);
+
+        assert_eq!(s.soul_history, vec![7]);
+    }
+
+    #[test]
+    fn soul_history_is_capped_and_drops_the_oldest_entry() {
+        let mut s = expedition_state();
+        s.soul_history = (0..SOUL_HISTORY_CAP as u32).collect();
+        s.soul = 999;
+        s.hero.position = PATH_LEN - 1;
+
+        advance_hero(&mut s);
+
+        assert_eq!(s.soul_history.len(), SOUL_HISTORY_CAP);
+        assert_eq!(s.soul_history.first(), Some(&1), "最古の要素 (0) が捨てられているはず");
+        assert_eq!(s.soul_history.last(), Some(&999));
     }
 
     // ── リング座標 ──

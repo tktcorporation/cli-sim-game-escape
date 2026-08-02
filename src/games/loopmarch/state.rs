@@ -237,6 +237,9 @@ pub struct LoopMarchState {
     pub soul: u32,
     pub camp: CampUpgrades,
     pub best_lap: u32,
+    /// ラップ完了ごとの魂の総量スナップショット (古い方が先頭)。拠点画面の
+    /// 推移グラフ表示専用で、ゲームロジックには使わない。
+    pub soul_history: Vec<u32>,
 
     // ── 演出 (遠征スコープ、死亡時にリセットされる) ──
     pub hero_hurt_flash: FlashTimer,
@@ -291,6 +294,7 @@ impl LoopMarchState {
             soul: 0,
             camp,
             best_lap: 0,
+            soul_history: Vec::new(),
             hero_hurt_flash: FlashTimer::new(),
             enemy_hurt_flash: FlashTimer::new(),
             enemy_hit_count: 0,
