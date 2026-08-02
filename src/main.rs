@@ -18,7 +18,7 @@ use ratzilla::event::{KeyCode, MouseButton, MouseEventKind};
 use ratzilla::ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::text::{Line, Span};
-use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
+use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratzilla::ratatui::Terminal;
 use ratzilla::{DomBackend, WebRenderer};
 
@@ -525,6 +525,19 @@ fn main() -> io::Result<()> {
     Ok(())
 }
 
+/// 指定 `width` で wrap (`Wrap { trim: false }`) した時の visual 行数。
+/// `ClickableList::visual_height` と同じ `Paragraph::line_count` 経由の実装に
+/// 揃えており、実際の render 時の wrap と一致する (drift しない)。
+fn wrapped_line_height(text: &str, width: u16) -> u16 {
+    if width == 0 {
+        return 1;
+    }
+    Paragraph::new(text)
+        .wrap(Wrap { trim: false })
+        .line_count(width)
+        .max(1) as u16
+}
+
 fn render_menu(
     f: &mut ratzilla::ratatui::Frame,
     area: Rect,
@@ -588,9 +601,24 @@ fn render_menu(
         ("設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 
+    let menu_block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Green))
+        .title(" Games ");
+    // wrap=true で render するので、事前計算も同じ inner width で行う (行数は
+    // `ClickableList::visual_height` / `render` 内の wrap と一致させる必要がある)。
+    let inner = menu_block.inner(chunks[1]);
+
     let mut cl = ClickableList::new();
+    // 各カードは blank(1) + title(1) + desc(wrap後の可変行数) 行で構成される。
+    // ナロー幅では説明文がタイトルより長いことが多く、wrap 無しだと単語途中で
+    // 見切れていたため、カードの高さを可変にしてスクロール計算もそれに追従させる。
+    let mut cumulative_rows: u16 = 0;
+    let mut selected_card_top: u16 = 0;
+    let mut selected_card_bottom: u16 = 0;
     for (i, (name, desc, action_id, default_marker, accent)) in MENU_ENTRIES.iter().enumerate() {
         let is_selected = i as u8 == selected;
+        let card_top = cumulative_rows;
         // Highlighted card: solid yellow ▶ marker + bold yellow title.
         // Unselected: same shape but muted accent color, so the layout
         // doesn't shift when the cursor moves and each game keeps its hue.
@@ -617,39 +645,32 @@ fn render_menu(
             ]),
             *action_id,
         );
+        let desc_text = format!("    {}", desc);
+        let desc_rows = wrapped_line_height(&desc_text, inner.width);
         cl.push_clickable(
-            Line::from(Span::styled(
-                format!("    {}", desc),
-                Style::default().fg(Color::DarkGray),
-            )),
+            Line::from(Span::styled(desc_text, Style::default().fg(Color::DarkGray))),
             *action_id,
         );
+
+        let card_height = 2 + desc_rows;
+        cumulative_rows += card_height;
+        if is_selected {
+            selected_card_top = card_top;
+            selected_card_bottom = card_top + card_height;
+        }
     }
 
-    let menu_block = Block::default()
-        .borders(borders)
-        .border_style(Style::default().fg(Color::Green))
-        .title(" Games ");
-
-    // Clamp scroll to content height. With wrap=false each logical line is
-    // exactly one visual row, so visible_rows is the inner height.
-    let inner = menu_block.inner(chunks[1]);
-    let total_lines = cl.len() as u16;
     let visible_rows = inner.height;
-    let max_scroll = total_lines.saturating_sub(visible_rows);
+    let max_scroll = cumulative_rows.saturating_sub(visible_rows);
     if *scroll > max_scroll {
         *scroll = max_scroll;
     }
 
-    // Auto-scroll so the highlighted card stays visible. Each card spans
-    // 3 rows (blank / title / desc), with the title at row 3*selected + 1.
-    // We aim to keep the title row inside [scroll, scroll + visible_rows).
-    let card_top = (selected as u16) * 3;
-    let card_bottom = card_top + 3;
-    if card_top < *scroll {
-        *scroll = card_top;
-    } else if visible_rows > 0 && card_bottom > *scroll + visible_rows {
-        *scroll = card_bottom.saturating_sub(visible_rows);
+    // Auto-scroll so the highlighted card stays fully visible.
+    if selected_card_top < *scroll {
+        *scroll = selected_card_top;
+    } else if visible_rows > 0 && selected_card_bottom > *scroll + visible_rows {
+        *scroll = selected_card_bottom.saturating_sub(visible_rows);
     }
     if *scroll > max_scroll {
         *scroll = max_scroll;
@@ -660,7 +681,7 @@ fn render_menu(
 
     {
         let mut cs = click_state.borrow_mut();
-        cl.render(f, chunks[1], menu_block, &mut cs, false, scroll_value);
+        cl.render(f, chunks[1], menu_block, &mut cs, true, scroll_value);
     }
 
     // Scroll indicator overlays — registered last so they win over rows below.

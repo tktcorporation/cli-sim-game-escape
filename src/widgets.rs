@@ -238,14 +238,25 @@ impl<'a> ClickableList<'a> {
         }
 
         // Wrap-aware path: compute the visual row offset for each logical line.
-        let w = inner_width as usize;
+        //
+        // `Paragraph::line_count` (via `visual_height`) is the source of truth for
+        // how ratatui's word-wrap actually breaks a line — a naive
+        // `line.width().div_ceil(inner_width)` estimate diverges from it for text
+        // with leading whitespace followed by an unbroken run with no further
+        // spaces to break on (e.g. an indented Japanese sentence), because the
+        // wrapper's first line has less room for the run than the naive estimate
+        // assumes. Each `Line` is independent for wrapping purposes (a `Line`
+        // boundary is always a hard break), so per-line `line_count` sums to the
+        // same total as wrapping the whole list at once.
         let mut visual_starts: Vec<u16> = Vec::with_capacity(self.lines.len());
         let mut visual_heights: Vec<u16> = Vec::with_capacity(self.lines.len());
         let mut cumulative: u16 = 0;
         for line in &self.lines {
             visual_starts.push(cumulative);
-            let lw = line.width();
-            let h = if lw <= w { 1 } else { lw.div_ceil(w) as u16 };
+            let h = Paragraph::new(line.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(inner_width)
+                .clamp(1, u16::MAX as usize) as u16;
             visual_heights.push(h);
             cumulative += h;
         }
@@ -895,6 +906,35 @@ mod tests {
         assert_eq!(cs.hit_test(5, 0), Some(10));
         // Line 1 at visual row 2, screen row = 2-1 = 1
         assert_eq!(cs.hit_test(5, 1), Some(11));
+    }
+
+    #[test]
+    fn clickable_list_wrap_matches_real_wrap_for_indented_text_with_no_spaces() {
+        // 先頭に半角スペースのインデントがあり、かつ内部にスペースを含まない長い
+        // 文字列 (日本語の説明文で典型的) は、ratatui の実際のワードラップと
+        // 素朴な `line.width() / inner_width` 近似の行数がズレることがある
+        // (先頭行はインデント分だけ実際の残り幅が狭くなるため)。
+        // register_targets は `visual_height` と同じ `Paragraph::line_count` を
+        // 使う必要があり、ズレると後続のクリック行が実際の描画位置から外れる。
+        let long_desc = "    ダンジョンを探索して帰還するローグライト風RPGダンジョンを探索して帰還する";
+        let inner_width = 20u16;
+
+        let mut cl = ClickableList::new();
+        cl.push_clickable(Line::from("先頭タイトル"), 1);
+        cl.push_clickable(Line::from(long_desc), 2);
+        cl.push_clickable(Line::from("次のタイトル"), 3);
+
+        // 権威ある行数計算 (`visual_height`) で「次のタイトル」の実描画行を求める。
+        let mut prefix = ClickableList::new();
+        prefix.push(Line::from("先頭タイトル"));
+        prefix.push(Line::from(long_desc));
+        let expected_row = prefix.visual_height(inner_width);
+
+        let area = Rect::new(0, 0, inner_width, 20);
+        let mut cs = ClickState::new();
+        cl.register_targets(area, &mut cs, 0, 0, 0, inner_width);
+
+        assert_eq!(cs.hit_test(0, expected_row), Some(3));
     }
 
     // ── register_targets_with_block tests ─────────────────────

@@ -34,6 +34,29 @@ pub const BAR_FULL: char = '█';
 /// HP バーの空セル。
 pub const BAR_EMPTY: char = '░';
 
+/// HP 比率 (0.0〜1.0 想定、範囲外はクランプ) から `width` セル幅のバー文字列を作る。
+pub fn hp_bar_string(ratio: f64, width: usize) -> String {
+    let ratio = ratio.clamp(0.0, 1.0);
+    let filled = ((ratio * width as f64).round() as usize).min(width);
+    let mut s = String::with_capacity(width);
+    for i in 0..width {
+        s.push(if i < filled { BAR_FULL } else { BAR_EMPTY });
+    }
+    s
+}
+
+/// HP 比率から警戒色を 3 段階 (green > 2/3 > yellow > 1/3 > red) で返す。
+/// rpg/loopmarch で個別に持っていたしきい値 (それぞれ 1/2・1/4 と 1/3・2/3) を統一している。
+pub fn hp_ratio_color(ratio: f64) -> Color {
+    if ratio > 2.0 / 3.0 {
+        Color::Green
+    } else if ratio > 1.0 / 3.0 {
+        Color::Yellow
+    } else {
+        Color::Red
+    }
+}
+
 /// クールダウン等の進行度バーの塗りセル。HP バーと形を変え、意味の違いを
 /// 視覚的に区別する。
 pub const PROGRESS_FULL: char = '▰';

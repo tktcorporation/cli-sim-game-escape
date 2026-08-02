@@ -55,17 +55,7 @@ pub fn render(
 
 fn hp_bar(current: u32, max: u32, width: usize) -> (String, Color) {
     let ratio = if max > 0 { current as f64 / max as f64 } else { 0.0 };
-    let filled = (ratio * width as f64).round() as usize;
-    let empty = width.saturating_sub(filled);
-    let bar = "\u{2588}".repeat(filled) + &"\u{2591}".repeat(empty);
-    let color = if ratio > 0.5 {
-        Color::Green
-    } else if ratio > 0.25 {
-        Color::Yellow
-    } else {
-        Color::Red
-    };
-    (bar, color)
+    (theme::hp_bar_string(ratio, width), theme::hp_ratio_color(ratio))
 }
 
 /// 属性ごとの表示色（弱点表示で使用）。
@@ -219,14 +209,19 @@ fn render_status_bar(
         spans.push(Span::styled(s, Style::default().fg(Color::Magenta)));
     }
 
+    // グローバル戻るボタン (main.rs, 左上 6 列) が row 0 に重なるため、タイトルは
+    // 中央寄せにして先頭が隠れないようにする。
     let title = if is_narrow { " Dungeon " } else { " Dungeon Dive " };
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Cyan))
-        .title(Span::styled(
-            title,
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        ));
+        .title(
+            Line::from(Span::styled(
+                title,
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ))
+            .alignment(ratzilla::ratatui::layout::Alignment::Center),
+        );
     f.render_widget(Paragraph::new(vec![Line::from(spans)]).block(block), area);
 }
 
@@ -1497,10 +1492,13 @@ fn render_game_clear(
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Yellow))
-        .title(Span::styled(
-            " \u{2605} DUNGEON CLEAR \u{2605} ",
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-        ));
+        .title(
+            Line::from(Span::styled(
+                " \u{2605} DUNGEON CLEAR \u{2605} ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ))
+            .alignment(ratzilla::ratatui::layout::Alignment::Center),
+        );
 
     let mut cs = click_state.borrow_mut();
     cl.render(f, area, block, &mut cs, false, 0);

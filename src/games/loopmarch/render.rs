@@ -314,12 +314,10 @@ fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: b
     let defense = logic::mountain_synergy_defense(&state.path);
     let hp_color = if state.hero_hurt_flash.is_active() {
         theme::DAMAGE_FLASH.color
-    } else if state.hero.hp * 3 <= state.hero.max_hp {
-        Color::Red
-    } else if state.hero.hp * 3 <= state.hero.max_hp * 2 {
-        Color::Yellow
+    } else if state.hero.max_hp > 0 {
+        theme::hp_ratio_color(state.hero.hp.max(0) as f64 / state.hero.max_hp as f64)
     } else {
-        Color::Green
+        Color::Red
     };
     let borders = if is_narrow {
         Borders::TOP | Borders::BOTTOM
@@ -403,11 +401,13 @@ fn render_header(state: &LoopMarchState, f: &mut Frame, area: Rect, is_narrow: b
         ),
     ]);
 
+    // グローバル戻るボタン (main.rs, 左上 6 列) が row 0 に重なるため、タイトルは
+    // 中央寄せにして先頭が隠れないようにする。
     let widget = Paragraph::new(vec![line1, line2, line3]).block(
         Block::default()
             .borders(borders)
             .border_style(Style::default().fg(Color::Yellow))
-            .title(" 周回討伐 "),
+            .title(Line::from(" 周回討伐 ").alignment(Alignment::Center)),
     );
     f.render_widget(widget, area);
 }
@@ -454,13 +454,7 @@ fn hp_bar(hp: i32, max: i32, width: usize) -> String {
     if max <= 0 {
         return String::new();
     }
-    let filled = ((hp.max(0) as f32 / max as f32) * width as f32).round() as usize;
-    let filled = filled.min(width);
-    let mut s = String::with_capacity(width);
-    for i in 0..width {
-        s.push(if i < filled { theme::BAR_FULL } else { theme::BAR_EMPTY });
-    }
-    s
+    theme::hp_bar_string(hp.max(0) as f64 / max as f64, width)
 }
 
 fn monster_name(m: &Monster) -> &'static str {
