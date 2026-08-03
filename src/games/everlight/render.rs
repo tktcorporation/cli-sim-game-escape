@@ -264,7 +264,17 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
     // (`halo_radius`) そのままのリングを常時描き、周回する光点で「回転して
     // いる」ことを視覚的に伝える。常時リングは常に現在の`lantern.x`を
     // 追従してよい (発火位置ではなく「今の判定範囲」を示すものなので)。
-    let halo_idle = state.loadout.weapon(WeaponKind::Halo).map(|w| {
+    //
+    // Aurora の `aurora_flash` のような「発火した瞬間だけ光る」演出は
+    // 意図的に持たせていない — 光輪のクールダウンは最短5tick (進化・
+    // 速射パッシブでさらに短縮可能) で、まとめtick処理での見逃しを防ぐ
+    // のに必要な最短表示時間 (5tick、AURORA_FLASH_TICKS参照) を常に
+    // 下回るか同じになる。そのタイマーで一瞬だけ光らせる設計にすると、
+    // 次の発火が前の発火の表示が消える前後に必ず来て実質常時点灯になり、
+    // かつ発火の度に灯の現在位置へワープする不自然な見た目になる。
+    // 発火頻度が高い光輪は、この常時リング+回転する光点だけで武器の
+    // 存在と強化 (半径の拡大) を伝えるのに十分な視覚フィードバックになる。
+    let halo_visual = state.loadout.weapon(WeaponKind::Halo).map(|w| {
         let radius = w.halo_radius();
         let cx = state.lantern.x;
         let cy = world_to_canvas_y(LANTERN_Y);
@@ -282,27 +292,6 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         (ring, sparks)
     });
 
-    // ダメージ判定した瞬間 (`halo_flash`) だけ、常時リングとは別に明るい
-    // パルスリングを重ねる。常時リングの色そのものを切り替える設計に
-    // しなかった理由は `halo_flash` のドキュメントコメント (state.rs)
-    // を参照。位置は現在の`lantern.x`ではなく`halo_flash_x`(発火時の
-    // スナップショット)を使う — 常時リングと違い、パルスは「あの時あの
-    // 位置で実際に判定した」ことを示す演出のため。
-    let halo_pulse_ring: Vec<(f64, f64)> = if state.halo_flash.is_active() {
-        state
-            .loadout
-            .weapon(WeaponKind::Halo)
-            .map(|w| {
-                let radius = w.halo_radius();
-                let cx = state.halo_flash_x;
-                let cy = world_to_canvas_y(LANTERN_Y);
-                canvas_fx::ring_points(cx, cy, radius, 0.2)
-            })
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
-
     let canvas = Canvas::default()
         .x_bounds([0.0, WORLD_W])
         .y_bounds([0.0, WORLD_H])
@@ -316,13 +305,10 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
                 // 同色で紛れるため、帯は暗めの Yellow にして区別できるようにする。
                 ctx.draw(&Points { coords: &aurora_band_pts, color: Color::Yellow });
             }
-            if let Some((ring, _)) = &halo_idle {
+            if let Some((ring, _)) = &halo_visual {
                 if !ring.is_empty() {
                     ctx.draw(&Points { coords: ring, color: Color::Magenta });
                 }
-            }
-            if !halo_pulse_ring.is_empty() {
-                ctx.draw(&Points { coords: &halo_pulse_ring, color: Color::LightMagenta });
             }
             for (pts, color) in &enemy_groups {
                 ctx.draw(&Points { coords: pts, color: *color });
@@ -330,7 +316,7 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
             if !hurt_points.is_empty() {
                 ctx.draw(&Points { coords: &hurt_points, color: Color::White });
             }
-            if let Some((_, sparks)) = &halo_idle {
+            if let Some((_, sparks)) = &halo_visual {
                 if !sparks.is_empty() {
                     ctx.draw(&Points { coords: sparks, color: Color::LightMagenta });
                 }
@@ -681,12 +667,10 @@ mod tests {
         logic::start_vigil(&mut state);
         state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Aurora));
         state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Halo));
-        // 実際の発火tickを計算して狙うと、各武器のクールダウン定数が変わる
-        // 度にこのテストの前提が壊れる。発火タイミングの計算をせず演出
-        // フラグを直接立てることで、薙ぎ払い帯・周回リングのパルス描画
-        // コードパスを確実に (かつバランス調整に影響されず) 通す。
+        // 極光の薙ぎ払い帯は`aurora_flash`が立っている間だけ描くコードパス
+        // なので、実際の発火tickを計算せずフラグを直接立てて確実に通す
+        // (光輪は常時描画なので装備するだけでコードパスを通る)。
         state.aurora_flash.trigger(1);
-        state.halo_flash.trigger(1);
         render_to_test_backend(&state, 40, 30);
         render_to_test_backend(&state, 100, 30);
     }

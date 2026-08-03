@@ -21,9 +21,8 @@ const PROJECTILE_SPEED: f64 = 9.0;
 const SPRAY_SPREAD_RAD: f64 = 1.3;
 const MAX_ENEMIES_ON_FIELD: usize = 200;
 const MAX_PROJECTILES_ON_FIELD: usize = 300;
-/// 極光の薙ぎ払い帯・光輪のパルスリングを表示する長さ (tick)。命中の
-/// 有無に関わらず「発火した」こと自体を見せるための演出用タイマーなので、
-/// 肉眼で追える長さにしている。
+/// 極光の薙ぎ払い帯を表示する長さ (tick)。命中の有無に関わらず「発火した」
+/// こと自体を見せるための演出用タイマーなので、肉眼で追える長さにしている。
 ///
 /// `GameTime::update` はフレーム落ち・バックグラウンドタブ復帰時に最大
 /// 500ms (10 ticks/sec換算で5tick) 分をまとめて処理してから1回だけ
@@ -33,8 +32,14 @@ const MAX_PROJECTILES_ON_FIELD: usize = 300;
 /// (バッチの先頭で発火→残り4tick分減衰→値が0以下)。5未満にすると
 /// この「発火したのに一度も表示されない」退行が起こり得るため、
 /// 5を下限として維持すること。
+///
+/// 光輪には同種のタイマーを使っていない — 光輪のクールダウンは最短5tick
+/// (進化・速射パッシブでさらに短縮可能) で、このタイマーの下限(5)を
+/// 常に下回るか同じになるため、フラッシュが実質常時アクティブになって
+/// しまい「一瞬光る」演出として機能しない。光輪は常時描画するリングと
+/// 回転する光点だけで武器の存在・強化 (半径の拡大) を伝えており、発火
+/// 頻度が高いためこれだけで十分な視覚フィードバックになっている。
 const AURORA_FLASH_TICKS: u32 = 5;
-const HALO_FLASH_TICKS: u32 = 5;
 
 const BOSS_ATTACK_PERIOD_TICKS: u64 = 90;
 const BOSS_TELEGRAPH_TICKS: u32 = 20;
@@ -75,7 +80,6 @@ pub fn tick_n(state: &mut EverlightState, n: u32) {
 pub fn tick(state: &mut EverlightState) {
     state.lantern_hurt_flash.tick(1);
     state.aurora_flash.tick(1);
-    state.halo_flash.tick(1);
     decay_damage_display(&mut state.last_light_damage);
     if state.log_display_ticks > 0 {
         state.log_display_ticks -= 1;
@@ -479,12 +483,7 @@ fn fire_halo(state: &mut EverlightState, damage_mult: f64) {
     if !state.halo_tick.is_multiple_of(interval) {
         return;
     }
-    // 判定した事実そのものをrender.rsに伝え、パルスリングを重ねさせる。
-    // 位置は現在の`state.lantern.x`ではなく、実際に判定に使うこの
-    // `lantern_x` をスナップショットする (`apply_aurora_hit`と同じ理由)。
     let lantern_x = state.lantern.x;
-    state.halo_flash.trigger(HALO_FLASH_TICKS);
-    state.halo_flash_x = lantern_x;
     let damage = ((halo.damage() as f64) * damage_mult).round() as i32;
     let radius = halo.halo_radius();
     for enemy in state.enemies.iter_mut() {
@@ -1106,22 +1105,6 @@ mod tests {
     }
 
     #[test]
-    fn halo_fire_triggers_flash_exactly_on_damage_ticks() {
-        let mut state = EverlightState::new();
-        start_vigil(&mut state);
-        state.loadout.weapons.clear();
-        state.loadout.weapons.push(OwnedWeapon { kind: WeaponKind::Halo, level: 1, cooldown_remaining: 0, evolved: false });
-        let interval = state.loadout.weapons[0].cooldown_ticks();
-
-        for t in 1..interval {
-            fire_halo(&mut state, 1.0);
-            assert!(!state.halo_flash.is_active(), "間隔に達する前はパルスが立たないはず (tick {t})");
-        }
-        fire_halo(&mut state, 1.0);
-        assert!(state.halo_flash.is_active(), "間隔に達した瞬間にパルスが立つはず");
-    }
-
-    #[test]
     fn aurora_flash_survives_a_worst_case_five_tick_catch_up_batch() {
         // GameTime::update はフレーム落ち・タブ復帰時に最大5tick (500ms分)
         // をまとめて処理してから1回だけrenderする (src/time.rs)。バッチの
@@ -1137,26 +1120,6 @@ mod tests {
 
         assert!(
             state.aurora_flash.is_active(),
-            "5tickまとめ処理の先頭で発火しても、バッチ終了時点でまだフラッシュが有効なはず"
-        );
-    }
-
-    #[test]
-    fn halo_flash_survives_a_worst_case_five_tick_catch_up_batch() {
-        let mut state = EverlightState::new();
-        start_vigil(&mut state);
-        state.loadout.weapons.clear();
-        state.loadout.weapons.push(OwnedWeapon { kind: WeaponKind::Halo, level: 1, cooldown_remaining: 0, evolved: false });
-        let interval = state.loadout.weapons[0].cooldown_ticks();
-
-        // 発火直前まで進めてから、発火がバッチの先頭tickに来る5tick
-        // バッチを与える。
-        tick_n(&mut state, interval - 1);
-        assert!(!state.halo_flash.is_active());
-        tick_n(&mut state, 5);
-
-        assert!(
-            state.halo_flash.is_active(),
             "5tickまとめ処理の先頭で発火しても、バッチ終了時点でまだフラッシュが有効なはず"
         );
     }
@@ -1181,28 +1144,6 @@ mod tests {
         assert_eq!(
             state.aurora_flash_x, fired_at_x,
             "aurora_flash_x は発火時点の位置を保持し続けるはず (現在位置に追従しない)"
-        );
-    }
-
-    #[test]
-    fn halo_flash_x_snapshots_firing_position_not_current_lantern_position() {
-        // render.rsはパルスリングを`halo_flash_x`から描く。もし代わりに
-        // `state.lantern.x`(現在位置)を使うと、まとめtick処理中に灯が
-        // 動いた後にまとめて1回だけrenderされた場合、実際に判定した
-        // 位置とは違う位置にパルスが表示されてしまう。
-        let mut state = EverlightState::new();
-        start_vigil(&mut state);
-        state.loadout.weapons.clear();
-        state.loadout.weapons.push(OwnedWeapon { kind: WeaponKind::Halo, level: 1, cooldown_remaining: 0, evolved: false });
-        let interval = state.loadout.weapons[0].cooldown_ticks();
-        tick_n(&mut state, interval);
-        let fired_at_x = state.halo_flash_x;
-        assert!(state.halo_flash.is_active());
-
-        state.lantern.x = fired_at_x + 30.0;
-        assert_eq!(
-            state.halo_flash_x, fired_at_x,
-            "halo_flash_x は発火時点の位置を保持し続けるはず (現在位置に追従しない)"
         );
     }
 
