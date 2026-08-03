@@ -23,9 +23,18 @@ const MAX_ENEMIES_ON_FIELD: usize = 200;
 const MAX_PROJECTILES_ON_FIELD: usize = 300;
 /// 極光の薙ぎ払い帯・光輪のパルスリングを表示する長さ (tick)。命中の
 /// 有無に関わらず「発火した」こと自体を見せるための演出用タイマーなので、
-/// 各武器のクールダウンより十分短く、かつ肉眼で追える長さにしている。
-const AURORA_FLASH_TICKS: u32 = 4;
-const HALO_FLASH_TICKS: u32 = 3;
+/// 肉眼で追える長さにしている。
+///
+/// `GameTime::update` はフレーム落ち・バックグラウンドタブ復帰時に最大
+/// 500ms (10 ticks/sec換算で5tick) 分をまとめて処理してから1回だけ
+/// renderする (`src/time.rs`)。このフラッシュはtickごとに1ずつ減衰する
+/// ため、まとめ処理された同一バッチの最初のtickで発火すると、以降の
+/// 最大4回の減衰でrenderが一度も観測しないまま0まで減ってしまう
+/// (バッチの先頭で発火→残り4tick分減衰→値が0以下)。5未満にすると
+/// この「発火したのに一度も表示されない」退行が起こり得るため、
+/// 5を下限として維持すること。
+const AURORA_FLASH_TICKS: u32 = 5;
+const HALO_FLASH_TICKS: u32 = 5;
 
 const BOSS_ATTACK_PERIOD_TICKS: u64 = 90;
 const BOSS_TELEGRAPH_TICKS: u32 = 20;
@@ -1102,6 +1111,46 @@ mod tests {
         }
         fire_halo(&mut state, 1.0);
         assert!(state.halo_flash.is_active(), "間隔に達した瞬間にパルスが立つはず");
+    }
+
+    #[test]
+    fn aurora_flash_survives_a_worst_case_five_tick_catch_up_batch() {
+        // GameTime::update はフレーム落ち・タブ復帰時に最大5tick (500ms分)
+        // をまとめて処理してから1回だけrenderする (src/time.rs)。バッチの
+        // 先頭tickで発火した場合、残り4tick分の減衰を経てもバッチ終了
+        // 時点でまだアクティブでなければ、render に一度も観測されないまま
+        // 消えてしまう (AURORA_FLASH_TICKS のコメント参照)。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon { kind: WeaponKind::Aurora, level: 1, cooldown_remaining: 0, evolved: false });
+
+        tick_n(&mut state, 5);
+
+        assert!(
+            state.aurora_flash.is_active(),
+            "5tickまとめ処理の先頭で発火しても、バッチ終了時点でまだフラッシュが有効なはず"
+        );
+    }
+
+    #[test]
+    fn halo_flash_survives_a_worst_case_five_tick_catch_up_batch() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon { kind: WeaponKind::Halo, level: 1, cooldown_remaining: 0, evolved: false });
+        let interval = state.loadout.weapons[0].cooldown_ticks();
+
+        // 発火直前まで進めてから、発火がバッチの先頭tickに来る5tick
+        // バッチを与える。
+        tick_n(&mut state, interval - 1);
+        assert!(!state.halo_flash.is_active());
+        tick_n(&mut state, 5);
+
+        assert!(
+            state.halo_flash.is_active(),
+            "5tickまとめ処理の先頭で発火しても、バッチ終了時点でまだフラッシュが有効なはず"
+        );
     }
 
     #[test]
