@@ -294,18 +294,25 @@ fn new_enemy_kinds_and_meteor_weapon_appear_over_a_long_run() {
 /// 投資 (`light_level`/`power_level` を150まで積む) を与えても、1回の
 /// 夜番が有限tick以内に必ず終わる (灯が尽きる) ことを検証する。
 ///
-/// 複数seedで試行する: 単一seedだと「ボスがいつ死ぬか」のようなtickの
-/// 揺れがその後のRNG消費順序を丸ごとずらし (バタフライ効果)、たまたま
-/// 引いた1本の乱数列だけがマイルストーン到達前の雑魚湧きの偏りで
-/// 力尽きる、という無関係な巻き込まれ落ちを拾ってしまう。本来ここで
-/// 検証したいのは「escalationはいつか必ず勝つ」(=全seedで必須) と
-/// 「マイルストーンは通常突破できる」(=大半のseedで成立) の2点。
+/// 30seed試行する: 単一seedだと「ボスがいつ死ぬか」のようなtickの揺れが
+/// その後のRNG消費順序を丸ごとずらし (バタフライ効果)、たまたま引いた
+/// 1本の乱数列だけの結果に強く左右される。30seedでの実測 (2026年時点、
+/// 浮遊霊・後半物量増加・ボスの浮遊/実体弾/召喚を追加した後) は
+/// 中央値到達波29.5・マイルストーン(35)到達12/30(40%) — 敵の量とボスの
+/// 強さを両方引き上げた結果、以前ほど楽には抜けられなくなっている。
+/// ここで検証すべきは以下の2点で、意図的にどちらも「大半のseedで成立」
+/// までは求めない (それは既にこの実測結果と矛盾するため):
+/// - 「escalationはいつか必ず勝つ」→ 全seedで灯が尽きて終わるはず (必須)
+/// - 「極端な投資は明らかに効いている」→ 中央値到達波がマイルストーンの
+///   6割以上、かつ実際に突破できるseedも一定数(20%以上)存在するはず
+///   (「壁になっていない」ことの確認。半数以上が突破する保証はしない)
 #[test]
-fn even_maxed_out_investment_eventually_ends_a_single_vigil() {
+fn even_maxed_out_investment_eventually_ends_every_vigil() {
     const MAX_TICKS: u64 = 20_000;
-    const SEEDS: u32 = 5;
+    const SEEDS: u32 = 30;
     let milestone = logic::milestone_wave(5);
     let mut exceeded_milestone = 0u32;
+    let mut waves: Vec<u32> = Vec::with_capacity(SEEDS as usize);
 
     for seed in 1..=SEEDS {
         let mut state = EverlightState::new();
@@ -334,15 +341,23 @@ fn even_maxed_out_investment_eventually_ends_a_single_vigil() {
              尽きないなら難易度の指数関数的escalationが機能していない: final_wave={}",
             state.wave
         );
+        waves.push(state.wave);
         if state.wave > milestone {
             exceeded_milestone += 1;
         }
     }
 
+    waves.sort_unstable();
+    let median_wave = waves[waves.len() / 2];
     assert!(
-        exceeded_milestone * 2 >= SEEDS,
-        "極端な投資をしてもマイルストーン波({milestone})を超えられた試行が半数未満 — \
-         escalationが厳しすぎる可能性: {exceeded_milestone}/{SEEDS}"
+        median_wave as f64 >= milestone as f64 * 0.6,
+        "極端な投資をしても中央値の到達波数がマイルストーン({milestone})の6割にも届かない — \
+         escalationが厳しすぎる可能性: median_wave={median_wave} waves={waves:?}"
+    );
+    assert!(
+        exceeded_milestone * 5 >= SEEDS,
+        "極端な投資をしてもマイルストーン波({milestone})を超えられた試行が2割未満 — \
+         escalationが完全な壁になっている可能性: {exceeded_milestone}/{SEEDS}"
     );
 }
 

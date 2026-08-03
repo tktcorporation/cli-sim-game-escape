@@ -1557,7 +1557,7 @@ fn resolve_boss_bullets(state: &mut EverlightState) {
     let shooter = state
         .enemies
         .iter()
-        .find(|e| matches!(e.kind, EnemyKind::Boss | EnemyKind::FullMoonBoss))
+        .find(|e| e.kind.fires_boss_bullets())
         .map(|e| (e.kind, e.x, e.y));
     let Some((kind, x, y)) = shooter else {
         return;
@@ -1570,8 +1570,11 @@ fn resolve_boss_bullets(state: &mut EverlightState) {
         return;
     }
     let (vx, vy) = aim_velocity(x, y, state.lantern.x, LANTERN_Y, BOSS_BULLET_SPEED);
+    // 発射自体はログに出さない (`resolve_caster_shots`/`resolve_wraith_shots`
+    // と同じ割り切り) — 命中は`move_and_resolve_enemy_bullets`が別途ログを
+    // 出すため、両方出すと1枠しかない`visible_log()`表示が発射→命中の
+    // 2行で埋まり、直前の他のログ (灯喰らいの命中/回避等) を早く流してしまう。
     state.enemy_bullets.push(EnemyBullet { x, y, vx, vy, damage: BOSS_BULLET_DAMAGE, source: kind });
-    state.add_log(format!("{}が灯めがけて撃ち放った！", kind.name()));
 }
 
 /// 影の魔女/大蛇が雑魚を呼び寄せる周期。`boss_bullet_period_ticks`と同じ
@@ -1587,12 +1590,16 @@ const BOSS_SUMMON_OFFSET: f64 = 4.0;
 /// 影の魔女/大蛇の召喚攻撃。羽虫2体をボスの左右へ湧かせる。単体の脅威
 /// (ボス本体・灯喰らい・実体弾) への対応で手一杯になっている間にも物量で
 /// 圧をかける — 「敵召喚して飛ばしてくる」という、灯喰らいの回避判断とは
-/// 別種の「手数を割かれる」プレッシャーを足す。
+/// 別種の「手数を割かれる」プレッシャーを足す。`SPAWN_Y` (湧き出し端) では
+/// なくボスの現在y座標に湧かせるのは意図的: ボスは`homes()`等で奥へ進み
+/// 続けるため、同じボスが長く生き残るほど後続の召喚は防衛線に近い位置で
+/// 発生するようになる — 「長引く戦いほど切迫する」という時間経過そのもの
+/// を脅威にする効果を狙っている。
 fn resolve_boss_summons(state: &mut EverlightState) {
     let summoner = state
         .enemies
         .iter()
-        .find(|e| matches!(e.kind, EnemyKind::ShadowWitch | EnemyKind::Serpent))
+        .find(|e| e.kind.summons_minions())
         .map(|e| (e.kind, e.x, e.y));
     let Some((kind, x, y)) = summoner else {
         return;

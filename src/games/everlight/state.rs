@@ -125,16 +125,14 @@ impl EnemyKind {
             EnemyKind::Swarmling => 3,
             EnemyKind::Elite => 55,
             // ボス級は「ふよふよ」揺れながら弾/召喚も飛ばしてくる分、単純な
-            // 接近ループより長く粘って脅威であり続けるべきなので、旧数値
-            // (320/280/300/420) から引き上げている。相対比は保ったまま
-            // (影の魔女<大蛇<魔王<満月の魔王)。ボスが長生きするほど
-            // 光弾の自動照準 (`pick_bolt_target`) がその間ずっとボスへ
-            // 固定され、その間に雑魚の群れが手薄になって防衛線を破られ
-            // やすくなる — 4割増しはシミュレーターの
-            // `even_maxed_out_investment_eventually_ends_a_single_vigil`
-            // でこの巻き込まれ落ちを誘発するほど強すぎたため、2割増しに
-            // 抑えている (同テストは1本のRNG列にこの手の揺れで巻き込まれ
-            // やすいため、複数seedの多数決に変更済み)。
+            // 接近ループより長く粘って脅威であり続けるべき。相対比は
+            // 影の魔女<大蛇<魔王<満月の魔王で揃える。ボスが長生きする
+            // ほど光弾の自動照準 (`pick_bolt_target`) がその間ずっと
+            // ボスへ固定され、その間に雑魚の群れが手薄になって防衛線を
+            // 破られやすくなる — HPを上げすぎると
+            // `simulator::even_maxed_out_investment_eventually_ends_every_vigil`
+            // が検証する「極端な投資は明らかに効く」という性質を壊すため、
+            // 実測しながら控えめな値に留めている。
             EnemyKind::Boss => 385,
             EnemyKind::Sniper => 18,
             EnemyKind::Shielded => 40,
@@ -263,6 +261,16 @@ impl EnemyKind {
     /// ボス級 (夜番のwave帯チェックポイントで単体湧きする個体) かどうか。
     pub fn is_boss(self) -> bool {
         matches!(self, EnemyKind::Boss | EnemyKind::ShadowWitch | EnemyKind::Serpent | EnemyKind::FullMoonBoss)
+    }
+
+    /// `logic::resolve_boss_bullets` の対象か (実体弾を撃つボス)。
+    pub fn fires_boss_bullets(self) -> bool {
+        matches!(self, EnemyKind::Boss | EnemyKind::FullMoonBoss)
+    }
+
+    /// `logic::resolve_boss_summons` の対象か (雑魚を召喚するボス)。
+    pub fn summons_minions(self) -> bool {
+        matches!(self, EnemyKind::ShadowWitch | EnemyKind::Serpent)
     }
 
     pub fn color(self) -> Color {
