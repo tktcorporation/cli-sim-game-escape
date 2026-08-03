@@ -65,6 +65,43 @@ pub fn history_line_segments(
         .collect()
 }
 
+/// 塗りつぶした軸並行矩形の内部座標を返す。`(x0,y0)`〜`(x1,y1)` の大小関係は
+/// 呼び出し側で正規化不要 (内部でmin/maxを取る)。
+pub fn filled_rect_points(x0: f64, y0: f64, x1: f64, y1: f64, step: f64) -> Vec<(f64, f64)> {
+    let mut points = Vec::new();
+    if step <= 0.0 {
+        return points;
+    }
+    let (min_x, max_x) = if x0 <= x1 { (x0, x1) } else { (x1, x0) };
+    let (min_y, max_y) = if y0 <= y1 { (y0, y1) } else { (y1, y0) };
+    let mut y = min_y;
+    while y <= max_y {
+        let mut x = min_x;
+        while x <= max_x {
+            points.push((x, y));
+            x += step;
+        }
+        y += step;
+    }
+    points
+}
+
+/// 円環 (アウトラインのみ、塗りつぶさない) の座標を、中心角 0〜2π を
+/// `step_rad` 間隔でサンプリングして返す。
+pub fn ring_points(cx: f64, cy: f64, radius: f64, step_rad: f64) -> Vec<(f64, f64)> {
+    let mut points = Vec::new();
+    if radius <= 0.0 || step_rad <= 0.0 {
+        return points;
+    }
+    let mut angle = 0.0;
+    while angle < std::f64::consts::TAU {
+        let (sin, cos) = angle.sin_cos();
+        points.push((cx + cos * radius, cy + sin * radius));
+        angle += step_rad;
+    }
+    points
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +148,33 @@ mod tests {
     fn history_line_segments_needs_at_least_two_points() {
         assert!(history_line_segments(&[0.5], 0.0, 10.0, 0.0, 10.0).is_empty());
         assert!(history_line_segments(&[], 0.0, 10.0, 0.0, 10.0).is_empty());
+    }
+
+    #[test]
+    fn filled_rect_points_covers_full_span_regardless_of_argument_order() {
+        let forward = filled_rect_points(0.0, 0.0, 4.0, 2.0, 1.0);
+        let reversed = filled_rect_points(4.0, 2.0, 0.0, 0.0, 1.0);
+        assert_eq!(forward.len(), reversed.len());
+        assert!(forward.iter().all(|&(x, y)| (0.0..=4.0).contains(&x) && (0.0..=2.0).contains(&y)));
+    }
+
+    #[test]
+    fn filled_rect_points_empty_for_non_positive_step() {
+        assert!(filled_rect_points(0.0, 0.0, 4.0, 2.0, 0.0).is_empty());
+    }
+
+    #[test]
+    fn ring_points_stays_on_circle() {
+        let pts = ring_points(1.0, 2.0, 5.0, 0.2);
+        assert!(!pts.is_empty());
+        for (x, y) in pts {
+            let dist = ((x - 1.0).powi(2) + (y - 2.0).powi(2)).sqrt();
+            assert!((dist - 5.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn ring_points_empty_for_non_positive_radius() {
+        assert!(ring_points(0.0, 0.0, 0.0, 0.2).is_empty());
     }
 }

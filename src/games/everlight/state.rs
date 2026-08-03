@@ -35,6 +35,9 @@ pub fn lane_center_x(lane: usize) -> f64 {
     lane_w * (lane as f64 + 0.5)
 }
 
+/// 1レーンの半幅。極光の命中判定幅・薙ぎ払い演出の帯幅で共用する。
+pub const LANE_HALF_WIDTH: f64 = WORLD_W / COLUMNS as f64 / 2.0;
+
 pub const LANTERN_BASE_LIGHT_MAX: i32 = 130;
 /// 灯が1tickに移動できる最大距離 (レーン移動のグライド速度)。
 pub const LANTERN_MOVE_UNITS_PER_TICK: f64 = 6.0;
@@ -390,6 +393,12 @@ pub struct Loadout {
 }
 
 impl Loadout {
+    /// render.rs (読み取り専用) から武器の現在値 (射程・幅など) を演出計算に
+    /// 使うための不変参照版。書き込みが要る側は `weapon_mut` を使う。
+    pub fn weapon(&self, kind: WeaponKind) -> Option<&OwnedWeapon> {
+        self.weapons.iter().find(|w| w.kind == kind)
+    }
+
     pub fn weapon_mut(&mut self, kind: WeaponKind) -> Option<&mut OwnedWeapon> {
         self.weapons.iter_mut().find(|w| w.kind == kind)
     }
@@ -595,6 +604,15 @@ pub struct EverlightState {
     pub light_hit_count: u32,
     pub last_light_damage: Option<(i32, u32)>,
     pub lantern_hurt_flash: FlashTimer,
+    /// 極光が発火した瞬間に立てる (命中の有無に関わらず)。render.rs はこれが
+    /// 有効な間だけレーンの薙ぎ払い帯を描く — 命中フラッシュ (`Enemy::hurt_flash`)
+    /// だけでは、敵がいないレーンを薙いでも何も表示されず「発火しているのに
+    /// 何も起きていないように見える」体感になってしまうため。
+    pub aurora_flash: FlashTimer,
+    /// 光輪がダメージ判定を行った瞬間に立てる (`fire_halo` の間隔ゲート通過時)。
+    /// render.rs は常時光輪の周回リングを描くが、これが有効な間はリング全体を
+    /// 明るくして「今まさに判定した」パルスを重ねる。
+    pub halo_flash: FlashTimer,
 
     // ── 永続 (灯が消えてもリロードしてもリセットされない) ──
     pub ember: u32,
@@ -653,6 +671,8 @@ impl EverlightState {
             light_hit_count: 0,
             last_light_damage: None,
             lantern_hurt_flash: FlashTimer::new(),
+            aurora_flash: FlashTimer::new(),
+            halo_flash: FlashTimer::new(),
             ember: 0,
             camp,
             best_wave: 0,

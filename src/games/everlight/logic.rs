@@ -12,15 +12,20 @@ use super::state::{
     BoonKind, BoonOption, CampUpgrades, Chest, Enemy, EnemyKind, EverlightState, Lantern,
     Loadout, OwnedPassive, OwnedWeapon, PassiveKind, Phase, Projectile, WeaponKind,
     BOSS_EVERY_N_WAVES, BREACH_Y, CHEST_BASE_CATCH_RADIUS, CHEST_FALL_SPEED, COLUMNS,
-    ELITE_BASE_INTERVAL_TICKS, EVOLUTION_PASSIVE_THRESHOLD, LANTERN_MOVE_UNITS_PER_TICK,
-    LANTERN_Y, MAX_LEVEL, MAX_WEAPON_SLOTS, SPAWN_Y, WAVE_DURATION_TICKS, WORLD_H, WORLD_W,
+    ELITE_BASE_INTERVAL_TICKS, EVOLUTION_PASSIVE_THRESHOLD, LANE_HALF_WIDTH,
+    LANTERN_MOVE_UNITS_PER_TICK, LANTERN_Y, MAX_LEVEL, MAX_WEAPON_SLOTS, SPAWN_Y,
+    WAVE_DURATION_TICKS, WORLD_H, WORLD_W,
 };
 
 const PROJECTILE_SPEED: f64 = 9.0;
 const SPRAY_SPREAD_RAD: f64 = 1.3;
 const MAX_ENEMIES_ON_FIELD: usize = 200;
 const MAX_PROJECTILES_ON_FIELD: usize = 300;
-const LANE_HALF_WIDTH: f64 = WORLD_W / COLUMNS as f64 / 2.0;
+/// 極光の薙ぎ払い帯・光輪のパルスリングを表示する長さ (tick)。命中の
+/// 有無に関わらず「発火した」こと自体を見せるための演出用タイマーなので、
+/// 各武器のクールダウンより十分短く、かつ肉眼で追える長さにしている。
+const AURORA_FLASH_TICKS: u32 = 4;
+const HALO_FLASH_TICKS: u32 = 3;
 
 const BOSS_ATTACK_PERIOD_TICKS: u64 = 90;
 const BOSS_TELEGRAPH_TICKS: u32 = 20;
@@ -60,6 +65,8 @@ pub fn tick_n(state: &mut EverlightState, n: u32) {
 
 pub fn tick(state: &mut EverlightState) {
     state.lantern_hurt_flash.tick(1);
+    state.aurora_flash.tick(1);
+    state.halo_flash.tick(1);
     decay_damage_display(&mut state.last_light_damage);
     if state.log_display_ticks > 0 {
         state.log_display_ticks -= 1;
@@ -429,6 +436,8 @@ fn fire_weapons(state: &mut EverlightState, damage_mult: f64) {
 /// 極光: 灯のレーンにいる全ての敵に即ダメージを与える (ヒットスキャン)。
 /// `width_mult` は進化 (`OwnedWeapon::aurora_width_mult`) で広がる判定幅。
 fn apply_aurora_hit(state: &mut EverlightState, lantern_x: f64, damage: i32, width_mult: f64) {
+    // 命中の有無に関わらず、発火した事実そのものをrender.rsに伝える。
+    state.aurora_flash.trigger(AURORA_FLASH_TICKS);
     let half_width = LANE_HALF_WIDTH * width_mult;
     for enemy in state.enemies.iter_mut() {
         if (enemy.x - lantern_x).abs() <= half_width {
@@ -456,6 +465,8 @@ fn fire_halo(state: &mut EverlightState, damage_mult: f64) {
     if !state.halo_tick.is_multiple_of(interval) {
         return;
     }
+    // 判定した事実そのものをrender.rsに伝え、常時表示のリングをパルスさせる。
+    state.halo_flash.trigger(HALO_FLASH_TICKS);
     let damage = ((halo.damage() as f64) * damage_mult).round() as i32;
     let radius = halo.halo_radius();
     let lantern_x = state.lantern.x;
@@ -1057,6 +1068,40 @@ mod tests {
             expected_interval,
             "光輪のダメージ間隔は速射パッシブのcooldown_multを反映するはず"
         );
+    }
+
+    #[test]
+    fn aurora_fire_triggers_flash_even_without_enemies_in_lane() {
+        // 極光は即着弾のヒットスキャンで実体弾を残さない。命中の有無に
+        // 関わらず発火自体をrender.rsへ伝えるフラグが無いと、敵がいない
+        // レーンを薙いだ時に武器の存在を確認する手段が一切無くなる
+        // (「武器を取っても強化しても何も起きていない」バグ報告の原因)。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon { kind: WeaponKind::Aurora, level: 1, cooldown_remaining: 0, evolved: false });
+        assert!(state.enemies.is_empty());
+        assert!(!state.aurora_flash.is_active());
+
+        fire_weapons(&mut state, 1.0);
+
+        assert!(state.aurora_flash.is_active(), "敵がいなくても発火した瞬間にフラッシュが立つはず");
+    }
+
+    #[test]
+    fn halo_fire_triggers_flash_exactly_on_damage_ticks() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon { kind: WeaponKind::Halo, level: 1, cooldown_remaining: 0, evolved: false });
+        let interval = state.loadout.weapons[0].cooldown_ticks();
+
+        for t in 1..interval {
+            fire_halo(&mut state, 1.0);
+            assert!(!state.halo_flash.is_active(), "間隔に達する前はパルスが立たないはず (tick {t})");
+        }
+        fire_halo(&mut state, 1.0);
+        assert!(state.halo_flash.is_active(), "間隔に達した瞬間にパルスが立つはず");
     }
 
     #[test]

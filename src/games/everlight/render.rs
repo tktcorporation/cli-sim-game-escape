@@ -27,7 +27,7 @@ use super::actions;
 use super::logic;
 use super::state::{
     BoonKind, CampUpgrades, EnemyKind, EverlightState, Phase, WeaponKind, BREACH_Y, COLUMNS,
-    LANTERN_Y, SPAWN_Y, WORLD_H, WORLD_W,
+    LANE_HALF_WIDTH, LANTERN_Y, SPAWN_Y, WORLD_H, WORLD_W,
 };
 
 pub fn render(state: &EverlightState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
@@ -235,6 +235,50 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         .boss_telegraph
         .map(|(x, _)| (x, world_to_canvas_y(SPAWN_Y), x, world_to_canvas_y(BREACH_Y)));
 
+    // 極光は即着弾のヒットスキャンで実体弾を撃たない (弾道が無い) ため、
+    // 命中の有無によらず発火した帯を一瞬描かないと「取っても強化しても
+    // 何も起きていないように見える」演出の空白になる。`aurora_flash` が
+    // 立っている間だけ、現在の判定幅 (`aurora_width_mult`) そのままの帯を描く。
+    let aurora_band_pts: Vec<(f64, f64)> = if state.aurora_flash.is_active() {
+        state
+            .loadout
+            .weapon(WeaponKind::Aurora)
+            .map(|w| {
+                let half_width = LANE_HALF_WIDTH * w.aurora_width_mult();
+                let x0 = state.lantern.x - half_width;
+                let x1 = state.lantern.x + half_width;
+                canvas_fx::filled_rect_points(x0, SPAWN_Y, x1, BREACH_Y, 3.0)
+                    .into_iter()
+                    .map(|(x, y)| (x, world_to_canvas_y(y)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    // 光輪は近接の常時判定武器で、Aurora同様に実体弾を撃たない。判定半径
+    // (`halo_radius`) そのままのリングを常時描き、周回する光点で「回転して
+    // いる」ことを視覚的に伝える。実際にダメージ判定した瞬間 (`halo_flash`)
+    // はリング全体を明るくしてパルスさせる。
+    let halo_visual = state.loadout.weapon(WeaponKind::Halo).map(|w| {
+        let radius = w.halo_radius();
+        let cx = state.lantern.x;
+        let cy = world_to_canvas_y(LANTERN_Y);
+        let ring = canvas_fx::ring_points(cx, cy, radius, 0.2);
+        const SPARK_COUNT: usize = 3;
+        let spin_angle = state.elapsed_ticks as f64 * 0.12;
+        let sparks: Vec<(f64, f64)> = (0..SPARK_COUNT)
+            .flat_map(|i| {
+                let a = spin_angle + i as f64 * std::f64::consts::TAU / SPARK_COUNT as f64;
+                let (sy, sx) = (cy + a.sin() * radius, cx + a.cos() * radius);
+                canvas_fx::filled_ellipse_points(sx, sy, 1.1, 1.1, 0.6)
+            })
+            .collect();
+        let ring_color = if state.halo_flash.is_active() { Color::LightMagenta } else { Color::Magenta };
+        (ring, sparks, ring_color)
+    });
+
     let canvas = Canvas::default()
         .x_bounds([0.0, WORLD_W])
         .y_bounds([0.0, WORLD_H])
@@ -243,11 +287,24 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
             if let Some((x1, y1, x2, y2)) = telegraph_line {
                 ctx.draw(&CanvasLine { x1, y1, x2, y2, color: Color::Red });
             }
+            if !aurora_band_pts.is_empty() {
+                ctx.draw(&Points { coords: &aurora_band_pts, color: WeaponKind::Aurora.color() });
+            }
+            if let Some((ring, _, ring_color)) = &halo_visual {
+                if !ring.is_empty() {
+                    ctx.draw(&Points { coords: ring, color: *ring_color });
+                }
+            }
             for (pts, color) in &enemy_groups {
                 ctx.draw(&Points { coords: pts, color: *color });
             }
             if !hurt_points.is_empty() {
                 ctx.draw(&Points { coords: &hurt_points, color: Color::White });
+            }
+            if let Some((_, sparks, _)) = &halo_visual {
+                if !sparks.is_empty() {
+                    ctx.draw(&Points { coords: sparks, color: Color::LightMagenta });
+                }
             }
             for (pts, color) in &projectile_groups {
                 ctx.draw(&Points { coords: pts, color: *color });
@@ -583,6 +640,21 @@ mod tests {
         let mut state = EverlightState::new();
         logic::start_vigil(&mut state);
         logic::tick_n(&mut state, 100);
+        render_to_test_backend(&state, 40, 30);
+        render_to_test_backend(&state, 100, 30);
+    }
+
+    #[test]
+    fn vigil_renders_without_panicking_with_aurora_and_halo_active() {
+        use super::super::state::OwnedWeapon;
+
+        let mut state = EverlightState::new();
+        logic::start_vigil(&mut state);
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Aurora));
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Halo));
+        // 両方が最低1回は発火し、薙ぎ払い帯・周回リングのパルス演出が
+        // 有効な状態で描画されるまで進める。
+        logic::tick_n(&mut state, 40);
         render_to_test_backend(&state, 40, 30);
         render_to_test_backend(&state, 100, 30);
     }
