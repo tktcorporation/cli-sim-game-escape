@@ -75,6 +75,12 @@ pub enum EnemyKind {
     /// 防衛線へ突っ込む — 一定距離まで直進するだけの他の敵と異なり、
     /// 終盤で急に反応を迫る「速度の変化」で新しい緊張を作る。
     Charger,
+    /// 詠唱者 (第9波〜)。`logic::CASTER_STOP_Y` (狙撃者よりずっと手前) で
+    /// 止まり、以降は接近せず実体弾 (`EnemyBullet`) を撃ってくる。
+    /// 狙撃者の遠隔攻撃 (`resolve_ranged_attacks`) は同じレーンにいるかの
+    /// 瞬間判定でしかなく「弾」を伴わない — こちらは実際に飛んでくる弾を
+    /// 見てから避けるという別種の駆け引きを持たせる。
+    Caster,
     /// 影の魔女 (第10波枠のボス)。灯のレーンと隣接レーンを同時に構える。
     ShadowWitch,
     /// 大蛇 (第15波枠以降のボス)。警告のレーンが構え中に横へ移動する。
@@ -97,6 +103,7 @@ impl EnemyKind {
             EnemyKind::SprayShielded => "散甲兵",
             EnemyKind::AuroraShielded => "極甲兵",
             EnemyKind::Charger => "突進者",
+            EnemyKind::Caster => "詠唱者",
             EnemyKind::ShadowWitch => "影の魔女",
             EnemyKind::Serpent => "大蛇",
             EnemyKind::FullMoonBoss => "満月の魔王",
@@ -116,6 +123,9 @@ impl EnemyKind {
             EnemyKind::SprayShielded => 42,
             EnemyKind::AuroraShielded => 46,
             EnemyKind::Charger => 16,
+            // 低HP: 弾幕を止めたければ最優先で処理してほしいという
+            // 「後方支援役は脆いが放置すると厄介」という役割を体現する。
+            EnemyKind::Caster => 11,
             EnemyKind::ShadowWitch => 280,
             EnemyKind::Serpent => 300,
             EnemyKind::FullMoonBoss => 420,
@@ -138,6 +148,7 @@ impl EnemyKind {
             // 突進前の基本速度。`logic::CHARGER_TRIGGER_Y` 到達後は
             // `logic::CHARGER_BOOST_MULT` が別途乗算される。
             EnemyKind::Charger => 1.3,
+            EnemyKind::Caster => 0.6,
             EnemyKind::ShadowWitch => 0.6,
             EnemyKind::Serpent => 0.65,
             EnemyKind::FullMoonBoss => 0.5,
@@ -158,6 +169,7 @@ impl EnemyKind {
             EnemyKind::SprayShielded => 9,
             EnemyKind::AuroraShielded => 10,
             EnemyKind::Charger => 7,
+            EnemyKind::Caster => 3,
             EnemyKind::ShadowWitch => 18,
             EnemyKind::Serpent => 20,
             EnemyKind::FullMoonBoss => 26,
@@ -177,6 +189,7 @@ impl EnemyKind {
             EnemyKind::SprayShielded => 7,
             EnemyKind::AuroraShielded => 8,
             EnemyKind::Charger => 5,
+            EnemyKind::Caster => 5,
             EnemyKind::ShadowWitch => 70,
             EnemyKind::Serpent => 75,
             EnemyKind::FullMoonBoss => 110,
@@ -197,6 +210,7 @@ impl EnemyKind {
             EnemyKind::SprayShielded => 3.4,
             EnemyKind::AuroraShielded => 3.6,
             EnemyKind::Charger => 2.3,
+            EnemyKind::Caster => 2.0,
             EnemyKind::ShadowWitch => 6.0,
             EnemyKind::Serpent => 6.2,
             EnemyKind::FullMoonBoss => 7.0,
@@ -239,6 +253,7 @@ impl EnemyKind {
             EnemyKind::SprayShielded => Color::Green,
             EnemyKind::AuroraShielded => Color::Yellow,
             EnemyKind::Charger => Color::Blue,
+            EnemyKind::Caster => Color::Cyan,
             EnemyKind::ShadowWitch => Color::Magenta,
             EnemyKind::Serpent => Color::Green,
             EnemyKind::FullMoonBoss => Color::White,
@@ -247,10 +262,8 @@ impl EnemyKind {
 
     /// この敵の装甲を貫ける武器。`Some` を返す種は、それ以外の武器から
     /// 受けるダメージを軽減する (`logic::effective_damage_against`)。
-    /// 単一定数に固定していた頃 (旧 `SHIELD_WEAK_TO`) は弱点武器が常に
-    /// 光弾だったため装甲系が増えても対応の幅が生まれなかった — 敵種ごとに
-    /// 持たせることで、装甲バリアントごとに使うべき武器を切り替える判断を
-    /// プレイヤーに要求する。
+    /// 敵種ごとに異なる弱点を持たせることで、装甲バリアントごとに使う
+    /// べき武器を切り替える判断をプレイヤーに要求する。
     pub fn weak_to(self) -> Option<WeaponKind> {
         match self {
             EnemyKind::Shielded => Some(WeaponKind::Bolt),
@@ -602,6 +615,20 @@ pub struct Projectile {
     pub hit_enemy_ids: Vec<u32>,
 }
 
+/// 詠唱者 (`EnemyKind::Caster`) が撃つ実体弾。プレイヤー側の `Projectile`
+/// と違い、貫通・武器種・当たった敵の履歴は不要 (灯に当たるか外れるかの
+/// 一発勝負) なので専用の軽量な構造体にしている。
+#[derive(Clone, Debug)]
+pub struct EnemyBullet {
+    pub x: f64,
+    pub y: f64,
+    pub vx: f64,
+    pub vy: f64,
+    pub damage: i32,
+}
+
+pub const ENEMY_BULLET_RADIUS: f64 = 1.8;
+
 #[derive(Clone, Debug)]
 pub struct Chest {
     pub x: f64,
@@ -776,6 +803,7 @@ pub struct EverlightState {
     pub lantern: Lantern,
     pub enemies: Vec<Enemy>,
     pub projectiles: Vec<Projectile>,
+    pub enemy_bullets: Vec<EnemyBullet>,
     pub chests: Vec<Chest>,
     pub loadout: Loadout,
     pub wave: u32,
@@ -886,6 +914,7 @@ impl EverlightState {
             lantern: Lantern::new(camp.light_max()),
             enemies: Vec::new(),
             projectiles: Vec::new(),
+            enemy_bullets: Vec::new(),
             chests: Vec::new(),
             loadout: Loadout::default(),
             wave: 1,

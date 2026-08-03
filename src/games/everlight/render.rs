@@ -27,7 +27,7 @@ use super::actions;
 use super::logic;
 use super::state::{
     BoonKind, CampUpgrades, EnemyKind, EverlightState, Phase, WeaponKind, BREACH_Y, COLUMNS,
-    LANE_HALF_WIDTH, LANTERN_Y, SPAWN_Y, WORLD_H, WORLD_W,
+    ENEMY_BULLET_RADIUS, LANE_HALF_WIDTH, LANTERN_Y, SPAWN_Y, WORLD_H, WORLD_W,
 };
 
 pub fn render(state: &EverlightState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
@@ -187,13 +187,14 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         0.8,
     );
 
-    const ENEMY_KINDS: [EnemyKind; 14] = [
+    const ENEMY_KINDS: [EnemyKind; 15] = [
         EnemyKind::Wisp,
         EnemyKind::Husk,
         EnemyKind::Swarmling,
         EnemyKind::Elite,
         EnemyKind::Boss,
         EnemyKind::Sniper,
+        EnemyKind::Caster,
         EnemyKind::Shielded,
         EnemyKind::Splitter,
         EnemyKind::SprayShielded,
@@ -243,6 +244,14 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         .chests
         .iter()
         .flat_map(|c| canvas_fx::filled_ellipse_points(c.x, world_to_canvas_y(c.y), 1.6, 1.6, 0.9))
+        .collect();
+
+    let enemy_bullet_pts: Vec<(f64, f64)> = state
+        .enemy_bullets
+        .iter()
+        .flat_map(|b| {
+            canvas_fx::filled_ellipse_points(b.x, world_to_canvas_y(b.y), ENEMY_BULLET_RADIUS, ENEMY_BULLET_RADIUS, 0.9)
+        })
         .collect();
 
     // 影の魔女/満月の魔王は2レーン同時に警告するので、線も複数本引く。
@@ -364,6 +373,9 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
             }
             if !chest_pts.is_empty() {
                 ctx.draw(&Points { coords: &chest_pts, color: Color::LightYellow });
+            }
+            if !enemy_bullet_pts.is_empty() {
+                ctx.draw(&Points { coords: &enemy_bullet_pts, color: Color::Cyan });
             }
             if !lantern_glow.is_empty() {
                 ctx.draw(&Points { coords: &lantern_glow, color: lantern_color });
@@ -772,6 +784,17 @@ mod tests {
         logic::start_vigil(&mut state);
         state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Meteor));
         state.meteor_flash.trigger(1);
+        render_to_test_backend(&state, 40, 30);
+        render_to_test_backend(&state, 100, 30);
+    }
+
+    #[test]
+    fn vigil_renders_without_panicking_with_a_caster_and_enemy_bullets() {
+        use super::super::state::EnemyBullet;
+
+        let mut state = EverlightState::new();
+        logic::start_vigil(&mut state);
+        state.enemy_bullets.push(EnemyBullet { x: state.lantern.x, y: 30.0, vx: 0.0, vy: 2.2, damage: 4 });
         render_to_test_backend(&state, 40, 30);
         render_to_test_backend(&state, 100, 30);
     }

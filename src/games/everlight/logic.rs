@@ -9,9 +9,9 @@ use ratzilla::ratatui::style::Color;
 use crate::effects::FlashTimer;
 
 use super::state::{
-    BoonKind, BoonOption, BossTelegraph, CampUpgrades, Chest, Enemy, EnemyKind, EverlightState,
-    Lantern, Loadout, OwnedPassive, OwnedWeapon, PassiveKind, Phase, Projectile, WeaponKind,
-    BOSS_EVERY_N_WAVES, BREACH_Y, CHEST_BASE_CATCH_RADIUS, CHEST_FALL_SPEED, COLUMNS,
+    BoonKind, BoonOption, BossTelegraph, CampUpgrades, Chest, Enemy, EnemyBullet, EnemyKind,
+    EverlightState, Lantern, Loadout, OwnedPassive, OwnedWeapon, PassiveKind, Phase, Projectile,
+    WeaponKind, BOSS_EVERY_N_WAVES, BREACH_Y, CHEST_BASE_CATCH_RADIUS, CHEST_FALL_SPEED, COLUMNS,
     ELITE_BASE_INTERVAL_TICKS, EVOLUTION_PASSIVE_THRESHOLD, LANE_HALF_WIDTH,
     LANTERN_MOVE_UNITS_PER_TICK, LANTERN_Y, MAX_LEVEL, SPAWN_Y,
     WAVE_DURATION_TICKS, WORLD_H, WORLD_W,
@@ -21,6 +21,7 @@ const PROJECTILE_SPEED: f64 = 9.0;
 const SPRAY_SPREAD_RAD: f64 = 1.3;
 const MAX_ENEMIES_ON_FIELD: usize = 200;
 const MAX_PROJECTILES_ON_FIELD: usize = 300;
+const MAX_ENEMY_BULLETS_ON_FIELD: usize = 300;
 /// 極光の薙ぎ払い帯を表示する長さ (tick)。命中の有無に関わらず「発火した」
 /// こと自体を見せるための演出用タイマーなので、肉眼で追える長さにしている。
 ///
@@ -112,6 +113,8 @@ pub fn tick(state: &mut EverlightState) {
     move_enemies(state);
     resolve_breaches(state);
     resolve_ranged_attacks(state);
+    resolve_caster_shots(state);
+    move_and_resolve_enemy_bullets(state);
 
     let damage_mult = effective_damage_mult(state);
     fire_weapons(state, damage_mult);
@@ -255,6 +258,7 @@ fn spawn_interval_ticks(wave: u32) -> u32 {
 /// wave帯の下限。単純に敵を差し替えるのではなく既存の枠に加える形で
 /// 出現テーブル (`regular_spawn_table`) へ合流させる。
 const SNIPER_MIN_WAVE: u32 = 6;
+const CASTER_MIN_WAVE: u32 = 9;
 const SHIELDED_MIN_WAVE: u32 = 11;
 const CHARGER_MIN_WAVE: u32 = 13;
 const SPLITTER_MIN_WAVE: u32 = 16;
@@ -289,6 +293,9 @@ fn regular_spawn_table(wave: u32) -> Vec<(EnemyKind, u32)> {
     let mut table = vec![(EnemyKind::Swarmling, 15u32), (EnemyKind::Husk, 30), (EnemyKind::Wisp, 55)];
     if wave >= SNIPER_MIN_WAVE {
         table.push((EnemyKind::Sniper, 15));
+    }
+    if wave >= CASTER_MIN_WAVE {
+        table.push((EnemyKind::Caster, 8));
     }
     if wave >= SHIELDED_MIN_WAVE {
         table.push((EnemyKind::Shielded, 10));
@@ -401,6 +408,12 @@ fn spawn_enemy_at_xy(state: &mut EverlightState, kind: EnemyKind, x: f64, y: f64
 /// y座標。ここまでは他の敵と同じく普通に近づいてくる。
 const SNIPER_STOP_Y: f64 = WORLD_H * 0.55;
 
+/// 詠唱者 (`EnemyKind::Caster`) が接近をやめる y座標。狙撃者よりずっと
+/// 手前 (湧き出し端に近い位置) で止まる — 「奥まで進んでから構える」
+/// 狙撃者とは違う、常に後方から撃ってくる後方支援役の立ち位置にする。
+const CASTER_STOP_Y: f64 = WORLD_H * 0.18;
+const _: () = assert!(CASTER_STOP_Y < SNIPER_STOP_Y);
+
 /// 突進者 (`EnemyKind::Charger`) がここを越えると `CHARGER_BOOST_MULT` で
 /// 急加速する。それまでは他の敵と同じ速度で直進する。
 const CHARGER_TRIGGER_Y: f64 = WORLD_H * 0.75;
@@ -411,8 +424,9 @@ fn move_enemies(state: &mut EverlightState) {
     let lantern_x = state.lantern.x;
     for enemy in state.enemies.iter_mut() {
         enemy.hurt_flash.tick(1);
-        let sniper_holding = enemy.kind == EnemyKind::Sniper && enemy.y >= SNIPER_STOP_Y;
-        if !sniper_holding {
+        let holding = (enemy.kind == EnemyKind::Sniper && enemy.y >= SNIPER_STOP_Y)
+            || (enemy.kind == EnemyKind::Caster && enemy.y >= CASTER_STOP_Y);
+        if !holding {
             let charge_boost =
                 if enemy.kind == EnemyKind::Charger && enemy.y >= CHARGER_TRIGGER_Y { CHARGER_BOOST_MULT } else { 1.0 };
             enemy.y += enemy.kind.base_speed() * diff * charge_boost;
@@ -466,6 +480,90 @@ fn resolve_ranged_attacks(state: &mut EverlightState) {
     state.lantern_hurt_flash.trigger(3);
     state.last_light_damage = Some((total_damage, 6));
     state.add_log(format!("狙撃者の一撃で灯が{total_damage}削れた"));
+}
+
+const CASTER_FIRE_INTERVAL_TICKS: u32 = 30;
+/// 狙撃者の一撃 (`SNIPER_DAMAGE`=6) より低め。弾は避けられる分、
+/// 避けそこねた時のダメージまで同じ重さにすると理不尽になる。
+const CASTER_BULLET_DAMAGE: i32 = 4;
+const CASTER_BULLET_SPEED: f64 = 2.2;
+
+/// 詠唱者の弾がどの方向へ飛ぶかを決める。この一手が体感を大きく左右する:
+///
+/// - 発射時の灯の位置を狙って直進させる (`aim_velocity` と同じ「2点を
+///   結ぶ向き×速度」) → 弾が見えた瞬間に別レーンへ逃げる予測回避の
+///   駆け引きになる
+/// - 詠唱者自身のレーンをまっすぐ縦に落とすだけ (`vx=0`) → 「このレーンに
+///   詠唱者がいる」という位置取りのパズルになる (現在の実装)
+///
+/// 今はシンプルな後者を選んでいるが、前者に変えると難易度も駆け引きの
+/// 質もかなり変わる。`caster_x`/`lantern_x` は狙い方を変える際に使う値
+/// として引数に残してある。
+fn aim_enemy_bullet(_caster_x: f64, _caster_y: f64, _lantern_x: f64) -> (f64, f64) {
+    (0.0, CASTER_BULLET_SPEED)
+}
+
+/// 詠唱者の実体弾攻撃。`CASTER_STOP_Y` で停止した個体が一定間隔で
+/// `EnemyBullet` を撃つ。狙撃者の `resolve_ranged_attacks` と違い命中は
+/// 撃った瞬間に確定せず、`move_and_resolve_enemy_bullets` が弾の移動と
+/// 併せて毎tick判定する — 弾が飛んでいる間はプレイヤーが灯を動かして
+/// 避けられる。
+fn resolve_caster_shots(state: &mut EverlightState) {
+    let lantern_x = state.lantern.x;
+    let mut new_bullets: Vec<EnemyBullet> = Vec::new();
+    for enemy in state.enemies.iter_mut() {
+        if enemy.kind != EnemyKind::Caster || enemy.y < CASTER_STOP_Y {
+            continue;
+        }
+        match enemy.ranged_charge {
+            None => enemy.ranged_charge = Some(CASTER_FIRE_INTERVAL_TICKS),
+            Some(t) if t <= 1 => {
+                enemy.ranged_charge = Some(CASTER_FIRE_INTERVAL_TICKS);
+                let (vx, vy) = aim_enemy_bullet(enemy.x, enemy.y, lantern_x);
+                new_bullets.push(EnemyBullet { x: enemy.x, y: enemy.y, vx, vy, damage: CASTER_BULLET_DAMAGE });
+            }
+            Some(t) => enemy.ranged_charge = Some(t - 1),
+        }
+    }
+    if state.enemy_bullets.len() + new_bullets.len() > MAX_ENEMY_BULLETS_ON_FIELD {
+        new_bullets.truncate(MAX_ENEMY_BULLETS_ON_FIELD.saturating_sub(state.enemy_bullets.len()));
+    }
+    state.enemy_bullets.extend(new_bullets);
+}
+
+/// 詠唱者の弾を移動させ、灯との衝突判定まで一緒に行う。判定は他の
+/// レーン系の当たり判定 (`resolve_ranged_attacks`/`resolve_breaches`) と
+/// 揃え、円形の当たり半径ではなく「灯のレーン×灯の高さ付近」の帯で見る
+/// — 弾自体の見た目上の大きさに関わらず、レーンを移動できていれば
+/// 確実に避けられるようにするため。
+fn move_and_resolve_enemy_bullets(state: &mut EverlightState) {
+    let lantern_x = state.lantern.x;
+    let mut total_damage = 0i32;
+    let mut hits = 0u32;
+    state.enemy_bullets.retain_mut(|b| {
+        b.x += b.vx;
+        b.y += b.vy;
+        let in_bounds = b.y > -10.0 && b.y < WORLD_H + 10.0 && b.x > -10.0 && b.x < WORLD_W + 10.0;
+        if !in_bounds {
+            return false;
+        }
+        let in_lantern_lane = (b.x - lantern_x).abs() <= LANE_HALF_WIDTH;
+        let reached_lantern_row = (b.y - LANTERN_Y).abs() <= 6.0;
+        if in_lantern_lane && reached_lantern_row {
+            total_damage += b.damage;
+            hits += 1;
+            return false;
+        }
+        true
+    });
+    if hits == 0 {
+        return;
+    }
+    state.light_hit_count += hits;
+    state.lantern.light -= total_damage;
+    state.lantern_hurt_flash.trigger(3);
+    state.last_light_damage = Some((total_damage, 6));
+    state.add_log(format!("詠唱者の弾で灯が{total_damage}削れた"));
 }
 
 /// 防衛線 (`BREACH_Y`) に達した敵を「漏れ」として処理し、灯を削って消す。
@@ -1350,6 +1448,7 @@ pub fn start_vigil(state: &mut EverlightState) {
     state.lantern = Lantern::new(light_max);
     state.enemies.clear();
     state.projectiles.clear();
+    state.enemy_bullets.clear();
     state.chests.clear();
     state.loadout = Loadout::default();
     state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Bolt));
@@ -2858,6 +2957,89 @@ mod tests {
         assert_eq!(state.lantern.light, light_before, "別レーンにいれば被弾しないはず");
     }
 
+    // ── 詠唱者 (Caster) と敵弾 ───────────────────────────────────────
+
+    #[test]
+    fn caster_stops_advancing_much_earlier_than_the_sniper() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Caster,
+            x: state.lantern.x,
+            y: CASTER_STOP_Y - 0.1,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        move_enemies(&mut state);
+        assert!(state.enemies[0].y >= CASTER_STOP_Y, "停止線を越えたら以後は静止するはず");
+        let y_after_stop = state.enemies[0].y;
+        move_enemies(&mut state);
+        assert_eq!(state.enemies[0].y, y_after_stop, "停止後はそれ以上進まないはず");
+    }
+
+    #[test]
+    fn caster_fires_a_bullet_after_charging() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Caster,
+            x: state.lantern.x,
+            y: CASTER_STOP_Y,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        assert!(state.enemy_bullets.is_empty());
+        for _ in 0..=CASTER_FIRE_INTERVAL_TICKS {
+            resolve_caster_shots(&mut state);
+        }
+        assert_eq!(state.enemy_bullets.len(), 1, "チャージが完了したら弾を1発撃つはず");
+    }
+
+    #[test]
+    fn enemy_bullet_damages_the_lantern_when_it_reaches_the_same_lane() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let lantern_x = state.lantern.x;
+        state.enemy_bullets.push(EnemyBullet { x: lantern_x, y: LANTERN_Y - 1.0, vx: 0.0, vy: 1.0, damage: 4 });
+        let light_before = state.lantern.light;
+        move_and_resolve_enemy_bullets(&mut state);
+        assert!(state.lantern.light < light_before, "同じレーンに届いた弾は灯を削るはず");
+        assert!(state.enemy_bullets.is_empty(), "命中した弾は消費されるはず");
+    }
+
+    #[test]
+    fn enemy_bullet_can_be_dodged_by_moving_out_of_its_lane_first() {
+        // 「弾を見てから避ける」という詠唱者の存在意義そのものの回帰テスト。
+        // 発射レーンから灯が離れていれば、弾が同じy帯へ届いても被弾しない。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemy_bullets.push(EnemyBullet { x: 0.0, y: LANTERN_Y - 1.0, vx: 0.0, vy: 1.0, damage: 4 });
+        set_lantern_target_lane(&mut state, COLUMNS - 1);
+        for _ in 0..40 {
+            move_lantern(&mut state);
+        }
+        let light_before = state.lantern.light;
+        move_and_resolve_enemy_bullets(&mut state);
+        assert_eq!(state.lantern.light, light_before, "灯が別レーンへ避けていれば被弾しないはず");
+    }
+
+    #[test]
+    fn enemy_bullet_leaving_the_field_is_removed_without_a_hit() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemy_bullets.push(EnemyBullet { x: state.lantern.x, y: WORLD_H + 15.0, vx: 0.0, vy: 1.0, damage: 4 });
+        let light_before = state.lantern.light;
+        move_and_resolve_enemy_bullets(&mut state);
+        assert_eq!(state.lantern.light, light_before);
+        assert!(state.enemy_bullets.is_empty(), "画面外へ出た弾は消えるはず");
+    }
+
     #[test]
     fn charger_accelerates_only_past_the_trigger_line() {
         let mut state = EverlightState::new();
@@ -2984,6 +3166,7 @@ mod tests {
         let early = regular_spawn_table(1);
         for kind in [
             EnemyKind::Sniper,
+            EnemyKind::Caster,
             EnemyKind::Shielded,
             EnemyKind::Charger,
             EnemyKind::Splitter,
@@ -2996,6 +3179,7 @@ mod tests {
         let late = regular_spawn_table(30);
         for kind in [
             EnemyKind::Sniper,
+            EnemyKind::Caster,
             EnemyKind::Shielded,
             EnemyKind::Charger,
             EnemyKind::Splitter,

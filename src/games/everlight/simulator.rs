@@ -75,6 +75,11 @@ fn long_run_never_panics_and_keeps_invariants() {
         );
         assert!(state.enemies.len() <= 200, "敵の数が上限を超えて増え続けている: {}", state.enemies.len());
         assert!(state.projectiles.len() <= 300, "弾の数が上限を超えて増え続けている: {}", state.projectiles.len());
+        assert!(
+            state.enemy_bullets.len() <= 300,
+            "詠唱者の弾の数が上限を超えて増え続けている: {}",
+            state.enemy_bullets.len()
+        );
         assert!(state.camp.max_unlocked_rank >= 1, "解放済みランクは1未満にならないはず");
         assert!(
             state.camp.selected_rank <= state.camp.max_unlocked_rank,
@@ -229,7 +234,7 @@ fn dawn_progression_report() {
     );
 }
 
-/// 追加した敵種 (突進者/散甲兵/極甲兵) と新武器 (流星) が、実際の自動
+/// 追加した敵種 (突進者/散甲兵/極甲兵/詠唱者) と新武器 (流星) が、実際の自動
 /// プレイの中で到達可能なことを検証する回帰テスト。wave gateの閾値や
 /// 武器スロット拡張のコストを調整した際、うっかり到達不能にしてしまう
 /// (閾値が高すぎる/拡張枠が高価すぎる) 退行をここで検知する。
@@ -249,7 +254,7 @@ fn new_enemy_kinds_and_meteor_weapon_appear_over_a_long_run() {
         }
     }
 
-    for kind in [EnemyKind::Charger, EnemyKind::SprayShielded, EnemyKind::AuroraShielded] {
+    for kind in [EnemyKind::Charger, EnemyKind::Caster, EnemyKind::SprayShielded, EnemyKind::AuroraShielded] {
         assert!(
             seen_enemy_kinds.contains(&kind),
             "{kind:?} が80000tickの自動プレイで一度も出現しなかった — wave gateが厳しすぎる可能性"
