@@ -187,7 +187,7 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         0.8,
     );
 
-    const ENEMY_KINDS: [EnemyKind; 15] = [
+    const ENEMY_KINDS: [EnemyKind; 16] = [
         EnemyKind::Wisp,
         EnemyKind::Husk,
         EnemyKind::Swarmling,
@@ -195,6 +195,7 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         EnemyKind::Boss,
         EnemyKind::Sniper,
         EnemyKind::Caster,
+        EnemyKind::Wraith,
         EnemyKind::Shielded,
         EnemyKind::Splitter,
         EnemyKind::SprayShielded,
@@ -794,7 +795,14 @@ mod tests {
 
         let mut state = EverlightState::new();
         logic::start_vigil(&mut state);
-        state.enemy_bullets.push(EnemyBullet { x: state.lantern.x, y: 30.0, vx: 0.0, vy: 2.2, damage: 4 });
+        state.enemy_bullets.push(EnemyBullet {
+            x: state.lantern.x,
+            y: 30.0,
+            vx: 0.0,
+            vy: 2.2,
+            damage: 4,
+            source: EnemyKind::Caster,
+        });
         render_to_test_backend(&state, 40, 30);
         render_to_test_backend(&state, 100, 30);
     }

@@ -81,6 +81,13 @@ pub enum EnemyKind {
     /// 瞬間判定でしかなく「弾」を伴わない — こちらは実際に飛んでくる弾を
     /// 見てから避けるという別種の駆け引きを持たせる。
     Caster,
+    /// 浮遊霊 (第14波〜)。突進者とは正反対の性質を持たせた高耐久の遠隔役 —
+    /// 一直線に迫ることも、詠唱者/狙撃者のように停止後は同じレーンに
+    /// 固定されることもなく、`logic::WRAITH_STOP_Y` 到達後も横方向へ
+    /// 揺れ続けながら (`logic::move_enemies` のsway処理) 実体弾を撃つ。
+    /// 弾の飛来レーンを「今どこにいるか」で常に見極めさせる分、他の
+    /// 遠隔役より打たれ強く設計している。
+    Wraith,
     /// 影の魔女 (第10波枠のボス)。灯のレーンと隣接レーンを同時に構える。
     ShadowWitch,
     /// 大蛇 (第15波枠以降のボス)。警告のレーンが構え中に横へ移動する。
@@ -104,6 +111,7 @@ impl EnemyKind {
             EnemyKind::AuroraShielded => "極甲兵",
             EnemyKind::Charger => "突進者",
             EnemyKind::Caster => "詠唱者",
+            EnemyKind::Wraith => "浮遊霊",
             EnemyKind::ShadowWitch => "影の魔女",
             EnemyKind::Serpent => "大蛇",
             EnemyKind::FullMoonBoss => "満月の魔王",
@@ -126,6 +134,10 @@ impl EnemyKind {
             // 低HP: 弾幕を止めたければ最優先で処理してほしいという
             // 「後方支援役は脆いが放置すると厄介」という役割を体現する。
             EnemyKind::Caster => 11,
+            // 装甲系 (40〜46) より高いが軽減は持たない — どの武器で
+            // 削っても素直にこの数値ぶん時間がかかる、単純に「打たれ強い」
+            // 遠隔役にするため。
+            EnemyKind::Wraith => 48,
             EnemyKind::ShadowWitch => 280,
             EnemyKind::Serpent => 300,
             EnemyKind::FullMoonBoss => 420,
@@ -149,6 +161,7 @@ impl EnemyKind {
             // `logic::CHARGER_BOOST_MULT` が別途乗算される。
             EnemyKind::Charger => 1.3,
             EnemyKind::Caster => 0.6,
+            EnemyKind::Wraith => 0.85,
             EnemyKind::ShadowWitch => 0.6,
             EnemyKind::Serpent => 0.65,
             EnemyKind::FullMoonBoss => 0.5,
@@ -170,6 +183,7 @@ impl EnemyKind {
             EnemyKind::AuroraShielded => 10,
             EnemyKind::Charger => 7,
             EnemyKind::Caster => 3,
+            EnemyKind::Wraith => 8,
             EnemyKind::ShadowWitch => 18,
             EnemyKind::Serpent => 20,
             EnemyKind::FullMoonBoss => 26,
@@ -190,6 +204,7 @@ impl EnemyKind {
             EnemyKind::AuroraShielded => 8,
             EnemyKind::Charger => 5,
             EnemyKind::Caster => 5,
+            EnemyKind::Wraith => 9,
             EnemyKind::ShadowWitch => 70,
             EnemyKind::Serpent => 75,
             EnemyKind::FullMoonBoss => 110,
@@ -211,6 +226,7 @@ impl EnemyKind {
             EnemyKind::AuroraShielded => 3.6,
             EnemyKind::Charger => 2.3,
             EnemyKind::Caster => 2.0,
+            EnemyKind::Wraith => 3.2,
             EnemyKind::ShadowWitch => 6.0,
             EnemyKind::Serpent => 6.2,
             EnemyKind::FullMoonBoss => 7.0,
@@ -257,6 +273,11 @@ impl EnemyKind {
             EnemyKind::AuroraShielded => Color::Yellow,
             EnemyKind::Charger => Color::Blue,
             EnemyKind::Caster => Color::Cyan,
+            // 名前付き色 (Light系含む) は他の敵種で使い切っているため
+            // Rgb直指定。既存のCyan(詠唱者)/Magenta系(精鬼・影の魔女)と
+            // 十分離れた紫がかったラベンダーにして、横揺れする本体だけでも
+            // 一目で「他と違う個体だ」と判別できるようにする。
+            EnemyKind::Wraith => Color::Rgb(178, 132, 255),
             EnemyKind::ShadowWitch => Color::Magenta,
             EnemyKind::Serpent => Color::Green,
             EnemyKind::FullMoonBoss => Color::White,
@@ -288,9 +309,10 @@ pub struct Enemy {
     pub hp: i32,
     pub max_hp: i32,
     pub hurt_flash: FlashTimer,
-    /// 狙撃者 (`EnemyKind::Sniper`) 専用: 次の遠隔攻撃着弾までの残りtick。
-    /// 他の敵種は常に `None` のまま使わない (敵種ごとに専用フィールドを
-    /// 増やすより、汎用の1フィールドに寄せて `Enemy` リテラルの増殖を防ぐ)。
+    /// 遠隔攻撃を持つ敵種 (狙撃者/詠唱者/浮遊霊) 共用: 次の攻撃までの
+    /// 残りtick。それ以外の敵種は常に `None` のまま使わない (敵種ごとに
+    /// 専用フィールドを増やすより、汎用の1フィールドに寄せて `Enemy`
+    /// リテラルの増殖を防ぐ)。
     pub ranged_charge: Option<u32>,
 }
 
@@ -628,6 +650,9 @@ pub struct EnemyBullet {
     pub vx: f64,
     pub vy: f64,
     pub damage: i32,
+    /// どの敵種が撃ったか。命中ログ (「◯◯の弾で灯が削れた」) を撃った側の
+    /// 名前で正しく出すために使う — `Projectile::source` と同じ理由付け。
+    pub source: EnemyKind,
 }
 
 pub const ENEMY_BULLET_RADIUS: f64 = 1.8;

@@ -254,7 +254,9 @@ fn new_enemy_kinds_and_meteor_weapon_appear_over_a_long_run() {
         }
     }
 
-    for kind in [EnemyKind::Charger, EnemyKind::Caster, EnemyKind::SprayShielded, EnemyKind::AuroraShielded] {
+    for kind in
+        [EnemyKind::Charger, EnemyKind::Caster, EnemyKind::SprayShielded, EnemyKind::AuroraShielded, EnemyKind::Wraith]
+    {
         assert!(
             seen_enemy_kinds.contains(&kind),
             "{kind:?} が80000tickの自動プレイで一度も出現しなかった — wave gateが厳しすぎる可能性"
