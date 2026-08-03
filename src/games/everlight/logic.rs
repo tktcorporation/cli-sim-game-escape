@@ -745,7 +745,7 @@ fn effective_damage_against(base_damage: i32, source: WeaponKind, target_kind: E
 // ── 武器の組み合わせシナジー ─────────────────────────────────────────
 //
 // 進化 (武器+対応する受動効果) とは別に、武器"同士"を同時装備すると
-// 発動する追加効果。効果自体は説明せず、`newly_completed_synergy_partner`
+// 発動する追加効果。効果自体は説明せず、`newly_completed_synergy_partners`
 // が新規成立の瞬間だけログで気配を残す (進化の色合わせヒントと同じ
 // 「点と点を線にする」設計)。
 
