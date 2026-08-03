@@ -1608,9 +1608,13 @@ fn resolve_boss_summons(state: &mut EverlightState) {
     if state.elapsed_ticks == 0 || !state.elapsed_ticks.is_multiple_of(period) {
         return;
     }
-    spawn_enemy_at_xy(state, EnemyKind::Swarmling, (x - BOSS_SUMMON_OFFSET).clamp(0.0, WORLD_W), y);
-    spawn_enemy_at_xy(state, EnemyKind::Swarmling, (x + BOSS_SUMMON_OFFSET).clamp(0.0, WORLD_W), y);
-    state.add_log(format!("{}が魔物を呼び寄せた！", kind.name()));
+    let left = spawn_enemy_at_xy(state, EnemyKind::Swarmling, (x - BOSS_SUMMON_OFFSET).clamp(0.0, WORLD_W), y);
+    let right = spawn_enemy_at_xy(state, EnemyKind::Swarmling, (x + BOSS_SUMMON_OFFSET).clamp(0.0, WORLD_W), y);
+    // 敵数上限 (`MAX_ENEMIES_ON_FIELD`) で両方とも湧けなかった時は、実際には
+    // 何も起きていないのに「呼び寄せた」と嘘をつくログを出さない。
+    if left || right {
+        state.add_log(format!("{}が魔物を呼び寄せた！", kind.name()));
+    }
 }
 
 // ── 拠点 (恒久強化) ────────────────────────────────────────────────

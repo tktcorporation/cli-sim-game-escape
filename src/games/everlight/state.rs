@@ -744,13 +744,6 @@ impl Lantern {
 
 // ── 拠点の恒久強化 ─────────────────────────────────────────────
 
-/// このレベルまでは`power_cost`が素の線形コストのまま (序盤の手触りを
-/// 変えない)。超えた分だけ`POWER_COST_GROWTH_PER_LEVEL`で指数関数的に
-/// 吊り上がる。
-const POWER_COST_RAMP_LEVEL: u32 = 15;
-/// `POWER_COST_RAMP_LEVEL`を超えた1レベルごとに乗算される係数。
-const POWER_COST_GROWTH_PER_LEVEL: f64 = 1.12;
-
 /// 拠点で積み上がる恒久進行。灯が消えても/リロードしてもリセットされない。
 /// 残光で購入する強化 (`light_level`/`power_level`/`extra_slot_level`/
 /// `extra_weapon_slot_level`) と、夜番を「Dawn」まで走り切ることで解放
@@ -793,6 +786,12 @@ impl CampUpgrades {
     pub const EXTRA_SLOT_COST: u32 = 60;
     /// 武器種が1種多い (5種) ぶん、受動効果スロット拡張より少し高い。
     pub const EXTRA_WEAPON_SLOT_COST: u32 = 90;
+    /// このレベルまでは`power_cost`が素の線形コストのまま (序盤の手触りを
+    /// 変えない)。超えた分だけ`POWER_COST_GROWTH_PER_LEVEL`で指数関数的に
+    /// 吊り上がる。
+    const POWER_COST_RAMP_LEVEL: u32 = 15;
+    /// `POWER_COST_RAMP_LEVEL`を超えた1レベルごとに乗算される係数。
+    const POWER_COST_GROWTH_PER_LEVEL: f64 = 1.12;
 
     /// `selected_rank` を範囲内に補正した値。保存データの破損や
     /// 手動編集で範囲外になっていても安全に読めるようにする。
@@ -811,14 +810,17 @@ impl CampUpgrades {
     /// 同じ考え方。%バフが恒久的に無制限へ積み上がる強化は、コスト自体も
     /// 際限なく安いままだと「損耗なしにいくらでも強くなれる」状態になり、
     /// 戦闘の緊張感を削ってしまう。序盤 (lv15未満) の手触りは変えず、
-    /// 深い投資だけを重くする。
+    /// 深い投資だけを重くする。`lv149`付近から`f64 as u32`がu32::MAXへ
+    /// 飽和するが (指数関数的増大の必然)、実プレイでの到達レベルからは
+    /// 桁違いに遠いため実害はない。パニックしないこと自体は
+    /// `power_cost_never_panics_even_at_extreme_levels` で保証している。
     pub fn power_cost(&self) -> u32 {
         let linear = 10 + self.power_level * 8;
-        let overflow = self.power_level.saturating_sub(POWER_COST_RAMP_LEVEL);
+        let overflow = self.power_level.saturating_sub(Self::POWER_COST_RAMP_LEVEL);
         if overflow == 0 {
             return linear;
         }
-        let escalation = POWER_COST_GROWTH_PER_LEVEL.powi(overflow as i32);
+        let escalation = Self::POWER_COST_GROWTH_PER_LEVEL.powi(overflow as i32);
         (linear as f64 * escalation).round() as u32
     }
 
@@ -1115,6 +1117,18 @@ mod tests {
             camp.power_cost(),
             linear_equivalent
         );
+    }
+
+    #[test]
+    fn power_cost_never_panics_even_at_extreme_levels() {
+        // 指数関数的escalationのため、lv149付近から`f64 as u32`が
+        // u32::MAXへ飽和するがパニックはしないはず (実プレイでの到達
+        // レベルからは桁違いに遠いので、飽和自体は実害にならない)。
+        for level in [148, 149, 150, 300, 1000] {
+            let camp = CampUpgrades { power_level: level, ..CampUpgrades::default() };
+            let cost = camp.power_cost();
+            assert!(cost > 0, "コストが0以下にはならないはず: level={level} cost={cost}");
+        }
     }
 
     #[test]
