@@ -1538,10 +1538,10 @@ fn resolve_boss_telegraph(state: &mut EverlightState) {
 /// 基準値・減り方にしている — 周期を揃えると「灯喰らいの構えと実体弾が
 /// 毎回同時に来る/毎回ズレて来る」の単調な繰り返しになるため、独立した
 /// 周期にして重なる時と重ならない時が入り混じるようにする。
-fn boss_bullet_period_ticks(rank: u32) -> u64 {
-    (BOSS_BULLET_PERIOD_TICKS as i64 - rank.saturating_sub(1) as i64 * 4).max(30) as u64
+fn boss_bullet_period_ticks(rank: u32) -> u32 {
+    (BOSS_BULLET_PERIOD_TICKS as i64 - rank.saturating_sub(1) as i64 * 4).max(24) as u32
 }
-const BOSS_BULLET_PERIOD_TICKS: u64 = 54;
+const BOSS_BULLET_PERIOD_TICKS: u64 = 44;
 /// 詠唱者(4)/浮遊霊(5)の弾よりさらに重い — ボス級の攻撃という位置付け。
 const BOSS_BULLET_DAMAGE: i32 = 8;
 /// 詠唱者/浮遊霊の弾 (2.0〜2.2、レーン固定で縦に落ちるだけ) より速く、
@@ -1552,37 +1552,55 @@ const BOSS_BULLET_SPEED: f64 = 2.6;
 /// 魔王/満月の魔王の実体弾攻撃。`resolve_boss_telegraph` (灯喰らい) とは
 /// 別の独立した攻撃系統 — 灯喰らいが「レーンへの警告→回避」の駆け引き
 /// なのに対し、こちらは発射時の灯位置を狙って直進する実弾という異なる
-/// 質の脅威を足す。
+/// 質の脅威を足す。狙撃者/詠唱者/浮遊霊と同じく `Enemy::ranged_charge`
+/// で個体ごとにcooldownを持たせる — `state.elapsed_ticks` 基準の一斉
+/// 判定だと、湧いた瞬間の位相によっては次の判定tickが来る前に防衛線へ
+/// 到達してしまい、一度も撃たずに退場する個体が発生し得るため、個体の
+/// 湧いた瞬間を基準にする。初回だけ `period/3` の短いcooldownにするのは、
+/// ホーミングで加速するボス (`wave_linear_difficulty` が高い高rank/高wave
+/// ほど速い) が通常の`period`より先に防衛線へ着いてしまい、一度も撃たずに
+/// 退場するケースを塞ぐため — 2発目以降は通常の`period`に戻る。
 fn resolve_boss_bullets(state: &mut EverlightState) {
-    let shooter = state
-        .enemies
-        .iter()
-        .find(|e| e.kind.fires_boss_bullets())
-        .map(|e| (e.kind, e.x, e.y));
-    let Some((kind, x, y)) = shooter else {
-        return;
-    };
     let period = boss_bullet_period_ticks(state.rank);
-    if state.elapsed_ticks == 0 || !state.elapsed_ticks.is_multiple_of(period) {
-        return;
+    let lantern_x = state.lantern.x;
+    let mut new_bullets: Vec<EnemyBullet> = Vec::new();
+    for enemy in state.enemies.iter_mut() {
+        if !enemy.kind.fires_boss_bullets() {
+            continue;
+        }
+        match enemy.ranged_charge {
+            None => enemy.ranged_charge = Some(period / 3),
+            Some(t) if t <= 1 => {
+                enemy.ranged_charge = Some(period);
+                let (vx, vy) = aim_velocity(enemy.x, enemy.y, lantern_x, LANTERN_Y, BOSS_BULLET_SPEED);
+                new_bullets.push(EnemyBullet {
+                    x: enemy.x,
+                    y: enemy.y,
+                    vx,
+                    vy,
+                    damage: BOSS_BULLET_DAMAGE,
+                    source: enemy.kind,
+                });
+            }
+            Some(t) => enemy.ranged_charge = Some(t - 1),
+        }
     }
-    if state.enemy_bullets.len() >= MAX_ENEMY_BULLETS_ON_FIELD {
-        return;
+    if state.enemy_bullets.len() + new_bullets.len() > MAX_ENEMY_BULLETS_ON_FIELD {
+        new_bullets.truncate(MAX_ENEMY_BULLETS_ON_FIELD.saturating_sub(state.enemy_bullets.len()));
     }
-    let (vx, vy) = aim_velocity(x, y, state.lantern.x, LANTERN_Y, BOSS_BULLET_SPEED);
     // 発射自体はログに出さない (`resolve_caster_shots`/`resolve_wraith_shots`
     // と同じ割り切り) — 命中は`move_and_resolve_enemy_bullets`が別途ログを
     // 出すため、両方出すと1枠しかない`visible_log()`表示が発射→命中の
     // 2行で埋まり、直前の他のログ (灯喰らいの命中/回避等) を早く流してしまう。
-    state.enemy_bullets.push(EnemyBullet { x, y, vx, vy, damage: BOSS_BULLET_DAMAGE, source: kind });
+    state.enemy_bullets.extend(new_bullets);
 }
 
 /// 影の魔女/大蛇が雑魚を呼び寄せる周期。`boss_bullet_period_ticks`と同じ
 /// 理由でボス系の他の攻撃周期とは独立させている。
-fn boss_summon_period_ticks(rank: u32) -> u64 {
-    (BOSS_SUMMON_PERIOD_TICKS as i64 - rank.saturating_sub(1) as i64 * 3).max(45) as u64
+fn boss_summon_period_ticks(rank: u32) -> u32 {
+    (BOSS_SUMMON_PERIOD_TICKS as i64 - rank.saturating_sub(1) as i64 * 5).max(30) as u32
 }
-const BOSS_SUMMON_PERIOD_TICKS: u64 = 80;
+const BOSS_SUMMON_PERIOD_TICKS: u64 = 60;
 /// 召喚した2体をボスの左右へ離す距離。`SPLIT_OFFSET`と同じ理由 (同座標に
 /// 重ねて湧かせない) だが値は独立させている。
 const BOSS_SUMMON_OFFSET: f64 = 4.0;
@@ -1594,26 +1612,33 @@ const BOSS_SUMMON_OFFSET: f64 = 4.0;
 /// なくボスの現在y座標に湧かせるのは意図的: ボスは`homes()`等で奥へ進み
 /// 続けるため、同じボスが長く生き残るほど後続の召喚は防衛線に近い位置で
 /// 発生するようになる — 「長引く戦いほど切迫する」という時間経過そのもの
-/// を脅威にする効果を狙っている。
+/// を脅威にする効果を狙っている。`resolve_boss_bullets`と同じく
+/// `Enemy::ranged_charge`で個体の湧いた瞬間を基準にcooldownを持たせ、
+/// 初回だけ`period/3`にして防衛線到達前に確実に1回は発動する猶予を作る。
 fn resolve_boss_summons(state: &mut EverlightState) {
-    let summoner = state
-        .enemies
-        .iter()
-        .find(|e| e.kind.summons_minions())
-        .map(|e| (e.kind, e.x, e.y));
-    let Some((kind, x, y)) = summoner else {
-        return;
-    };
     let period = boss_summon_period_ticks(state.rank);
-    if state.elapsed_ticks == 0 || !state.elapsed_ticks.is_multiple_of(period) {
-        return;
+    let mut triggers: Vec<(EnemyKind, f64, f64)> = Vec::new();
+    for enemy in state.enemies.iter_mut() {
+        if !enemy.kind.summons_minions() {
+            continue;
+        }
+        match enemy.ranged_charge {
+            None => enemy.ranged_charge = Some(period / 3),
+            Some(t) if t <= 1 => {
+                enemy.ranged_charge = Some(period);
+                triggers.push((enemy.kind, enemy.x, enemy.y));
+            }
+            Some(t) => enemy.ranged_charge = Some(t - 1),
+        }
     }
-    let left = spawn_enemy_at_xy(state, EnemyKind::Swarmling, (x - BOSS_SUMMON_OFFSET).clamp(0.0, WORLD_W), y);
-    let right = spawn_enemy_at_xy(state, EnemyKind::Swarmling, (x + BOSS_SUMMON_OFFSET).clamp(0.0, WORLD_W), y);
-    // 敵数上限 (`MAX_ENEMIES_ON_FIELD`) で両方とも湧けなかった時は、実際には
-    // 何も起きていないのに「呼び寄せた」と嘘をつくログを出さない。
-    if left || right {
-        state.add_log(format!("{}が魔物を呼び寄せた！", kind.name()));
+    for (kind, x, y) in triggers {
+        let left = spawn_enemy_at_xy(state, EnemyKind::Swarmling, (x - BOSS_SUMMON_OFFSET).clamp(0.0, WORLD_W), y);
+        let right = spawn_enemy_at_xy(state, EnemyKind::Swarmling, (x + BOSS_SUMMON_OFFSET).clamp(0.0, WORLD_W), y);
+        // 敵数上限 (`MAX_ENEMIES_ON_FIELD`) で両方とも湧けなかった時は、実際には
+        // 何も起きていないのに「呼び寄せた」と嘘をつくログを出さない。
+        if left || right {
+            state.add_log(format!("{}が魔物を呼び寄せた！", kind.name()));
+        }
     }
 }
 
@@ -3727,7 +3752,7 @@ mod tests {
         assert!(boss_bullet_period_ticks(2) < boss_bullet_period_ticks(1), "高ランクほど実体弾の間隔は短くなるはず");
         assert!(boss_summon_period_ticks(2) < boss_summon_period_ticks(1), "高ランクほど召喚の間隔は短くなるはず");
         assert_ne!(
-            boss_bullet_period_ticks(1),
+            boss_bullet_period_ticks(1) as u64,
             boss_attack_period_ticks(1),
             "実体弾は灯喰らいと同じ周期にならないはず (重なりっぱなしを避ける)"
         );
@@ -3753,10 +3778,12 @@ mod tests {
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
         });
-        state.elapsed_ticks = boss_bullet_period_ticks(state.rank);
         assert!(state.enemy_bullets.is_empty());
-        resolve_boss_bullets(&mut state);
-        assert_eq!(state.enemy_bullets.len(), 1, "周期に到達したら実体弾を1発撃つはず");
+        let first_charge = boss_bullet_period_ticks(state.rank) / 3;
+        for _ in 0..=first_charge {
+            resolve_boss_bullets(&mut state);
+        }
+        assert_eq!(state.enemy_bullets.len(), 1, "初回cooldownが尽きたら実体弾を1発撃つはず");
         let bullet = &state.enemy_bullets[0];
         assert_eq!(bullet.source, EnemyKind::Boss);
         assert!(bullet.vx > 0.0, "灯が右側にいるので右向きに直進するはず (vx={})", bullet.vx);
@@ -3776,9 +3803,11 @@ mod tests {
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
         });
-        state.elapsed_ticks = boss_summon_period_ticks(state.rank);
         assert_eq!(state.enemies.len(), 1);
-        resolve_boss_summons(&mut state);
+        let first_charge = boss_summon_period_ticks(state.rank) / 3;
+        for _ in 0..=first_charge {
+            resolve_boss_summons(&mut state);
+        }
         assert_eq!(state.enemies.len(), 3, "ボス本体+召喚された羽虫2体になるはず");
         assert_eq!(
             state.enemies.iter().filter(|e| e.kind == EnemyKind::Swarmling).count(),
@@ -3788,7 +3817,7 @@ mod tests {
     }
 
     #[test]
-    fn boss_bullets_and_summons_do_not_fire_off_period() {
+    fn boss_bullets_and_summons_do_not_fire_before_their_charge_completes() {
         let mut state = EverlightState::new();
         start_vigil(&mut state);
         state.enemies.push(Enemy {
@@ -3811,10 +3840,50 @@ mod tests {
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
         });
-        state.elapsed_ticks = boss_bullet_period_ticks(state.rank) + 1;
-        resolve_boss_bullets(&mut state);
-        resolve_boss_summons(&mut state);
-        assert!(state.enemy_bullets.is_empty(), "周期のtickでなければ実体弾は撃たないはず");
-        assert_eq!(state.enemies.len(), 2, "周期のtickでなければ召喚しないはず");
+        let bullet_first_charge = boss_bullet_period_ticks(state.rank) / 3;
+        let summon_first_charge = boss_summon_period_ticks(state.rank) / 3;
+        for _ in 0..bullet_first_charge.min(summon_first_charge) {
+            resolve_boss_bullets(&mut state);
+            resolve_boss_summons(&mut state);
+        }
+        assert!(state.enemy_bullets.is_empty(), "初回cooldownが尽きるまでは実体弾を撃たないはず");
+        assert_eq!(state.enemies.len(), 2, "初回cooldownが尽きるまでは召喚しないはず");
+    }
+
+    #[test]
+    fn a_fast_moving_boss_summons_at_least_once_before_reaching_the_breach() {
+        // 大蛇はrank2/wave20だと秒間2.88ワールド単位で進み、防衛線(140)へ
+        // 約49tickで到達する。個体の湧いた瞬間を基準にした初回cooldownを
+        // 短縮 (`period/3`) していないと、この速度域のボスは一度も召喚
+        // しないまま退場してしまう回帰テスト。
+        let mut state = EverlightState::new();
+        state.rank = 2;
+        state.wave = 20;
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Serpent,
+            x: state.lantern.x,
+            y: SPAWN_Y,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        let mut summoned = false;
+        for _ in 0..60 {
+            let enemies_before = state.enemies.len();
+            move_enemies(&mut state);
+            resolve_boss_summons(&mut state);
+            if state.enemies.len() > enemies_before {
+                summoned = true;
+                break;
+            }
+            state.elapsed_ticks += 1;
+            let breached = state.enemies.first().map(|e| e.y >= BREACH_Y).unwrap_or(true);
+            if breached {
+                break;
+            }
+        }
+        assert!(summoned, "防衛線へ到達する前に一度も召喚しなかった (回帰)");
     }
 }
