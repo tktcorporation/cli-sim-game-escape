@@ -35,7 +35,7 @@ pub fn lane_center_x(lane: usize) -> f64 {
     lane_w * (lane as f64 + 0.5)
 }
 
-pub const LANTERN_BASE_LIGHT_MAX: i32 = 130;
+pub const LANTERN_BASE_LIGHT_MAX: i32 = 95;
 /// 灯が1tickに移動できる最大距離 (レーン移動のグライド速度)。
 pub const LANTERN_MOVE_UNITS_PER_TICK: f64 = 6.0;
 
