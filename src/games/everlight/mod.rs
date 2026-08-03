@@ -111,6 +111,7 @@ impl EverlightGame {
                 '1' => self.buy_and_notify(logic::purchase_light),
                 '2' => self.buy_and_notify(logic::purchase_power),
                 '3' => self.buy_and_notify(logic::purchase_extra_slot),
+                '4' => self.buy_and_notify(logic::purchase_extra_weapon_slot),
                 ' ' => {
                     logic::start_vigil(&mut self.state);
                     sound::play(sound::SELECT);
@@ -162,6 +163,7 @@ impl EverlightGame {
                 CAMP_UPGRADE_LIGHT => self.buy_and_notify(logic::purchase_light),
                 CAMP_UPGRADE_POWER => self.buy_and_notify(logic::purchase_power),
                 CAMP_UPGRADE_EXTRA_SLOT => self.buy_and_notify(logic::purchase_extra_slot),
+                CAMP_UPGRADE_EXTRA_WEAPON_SLOT => self.buy_and_notify(logic::purchase_extra_weapon_slot),
                 CAMP_START_VIGIL => {
                     logic::start_vigil(&mut self.state);
                     sound::play(sound::SELECT);

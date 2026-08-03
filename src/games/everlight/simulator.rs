@@ -10,7 +10,7 @@
 #![cfg(test)]
 
 use super::logic;
-use super::state::{EverlightState, Phase, COLUMNS, MAX_LEVEL, WORLD_W};
+use super::state::{EnemyKind, EverlightState, Phase, WeaponKind, COLUMNS, MAX_LEVEL, WORLD_W};
 
 /// 拠点では買える強化を買い切り、解放済みの最大ランクを選んでから出陣し、
 /// 夜番中はレベルアップを常に1番目の選択肢で受け取り、5tickごとに最も
@@ -21,7 +21,11 @@ use super::state::{EverlightState, Phase, COLUMNS, MAX_LEVEL, WORLD_W};
 fn auto_play_tick(state: &mut EverlightState, tick_index: u64) {
     match state.phase {
         Phase::Camp => {
-            while logic::purchase_light(state) || logic::purchase_power(state) || logic::purchase_extra_slot(state) {}
+            while logic::purchase_light(state)
+                || logic::purchase_power(state)
+                || logic::purchase_extra_slot(state)
+                || logic::purchase_extra_weapon_slot(state)
+            {}
             logic::select_rank(state, state.camp.max_unlocked_rank);
             logic::start_vigil(state);
         }
@@ -71,6 +75,11 @@ fn long_run_never_panics_and_keeps_invariants() {
         );
         assert!(state.enemies.len() <= 200, "敵の数が上限を超えて増え続けている: {}", state.enemies.len());
         assert!(state.projectiles.len() <= 300, "弾の数が上限を超えて増え続けている: {}", state.projectiles.len());
+        assert!(
+            state.enemy_bullets.len() <= 300,
+            "詠唱者の弾の数が上限を超えて増え続けている: {}",
+            state.enemy_bullets.len()
+        );
         assert!(state.camp.max_unlocked_rank >= 1, "解放済みランクは1未満にならないはず");
         assert!(
             state.camp.selected_rank <= state.camp.max_unlocked_rank,
@@ -223,6 +232,35 @@ fn dawn_progression_report() {
         "[everlight/dawn] final_max_unlocked_rank={} dawn_count={} dawn_ticks={:?}",
         state.camp.max_unlocked_rank, state.dawn_count, dawn_ticks
     );
+}
+
+/// 追加した敵種 (突進者/散甲兵/極甲兵/詠唱者) と新武器 (流星) が、実際の自動
+/// プレイの中で到達可能なことを検証する回帰テスト。wave gateの閾値や
+/// 武器スロット拡張のコストを調整した際、うっかり到達不能にしてしまう
+/// (閾値が高すぎる/拡張枠が高価すぎる) 退行をここで検知する。
+#[test]
+fn new_enemy_kinds_and_meteor_weapon_appear_over_a_long_run() {
+    let mut state = EverlightState::new();
+    let mut seen_enemy_kinds = std::collections::HashSet::new();
+    let mut seen_meteor = false;
+
+    for i in 0..80_000u64 {
+        auto_play_tick(&mut state, i);
+        for e in &state.enemies {
+            seen_enemy_kinds.insert(e.kind);
+        }
+        if !seen_meteor && state.loadout.weapons.iter().any(|w| w.kind == WeaponKind::Meteor) {
+            seen_meteor = true;
+        }
+    }
+
+    for kind in [EnemyKind::Charger, EnemyKind::Caster, EnemyKind::SprayShielded, EnemyKind::AuroraShielded] {
+        assert!(
+            seen_enemy_kinds.contains(&kind),
+            "{kind:?} が80000tickの自動プレイで一度も出現しなかった — wave gateが厳しすぎる可能性"
+        );
+    }
+    assert!(seen_meteor, "流星が80000tickの自動プレイで一度も獲得されなかった — 武器スロット拡張が到達不能な可能性");
 }
 
 /// 拠点の恒久強化 (`light_level`/`power_level`) には上限が無いため、波の

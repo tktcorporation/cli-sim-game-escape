@@ -27,7 +27,7 @@ use super::actions;
 use super::logic;
 use super::state::{
     BoonKind, CampUpgrades, EnemyKind, EverlightState, Phase, WeaponKind, BREACH_Y, COLUMNS,
-    LANE_HALF_WIDTH, LANTERN_Y, SPAWN_Y, WORLD_H, WORLD_W,
+    ENEMY_BULLET_RADIUS, LANE_HALF_WIDTH, LANTERN_Y, SPAWN_Y, WORLD_H, WORLD_W,
 };
 
 pub fn render(state: &EverlightState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
@@ -187,15 +187,19 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         0.8,
     );
 
-    const ENEMY_KINDS: [EnemyKind; 11] = [
+    const ENEMY_KINDS: [EnemyKind; 15] = [
         EnemyKind::Wisp,
         EnemyKind::Husk,
         EnemyKind::Swarmling,
         EnemyKind::Elite,
         EnemyKind::Boss,
         EnemyKind::Sniper,
+        EnemyKind::Caster,
         EnemyKind::Shielded,
         EnemyKind::Splitter,
+        EnemyKind::SprayShielded,
+        EnemyKind::AuroraShielded,
+        EnemyKind::Charger,
         EnemyKind::ShadowWitch,
         EnemyKind::Serpent,
         EnemyKind::FullMoonBoss,
@@ -242,6 +246,14 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         .flat_map(|c| canvas_fx::filled_ellipse_points(c.x, world_to_canvas_y(c.y), 1.6, 1.6, 0.9))
         .collect();
 
+    let enemy_bullet_pts: Vec<(f64, f64)> = state
+        .enemy_bullets
+        .iter()
+        .flat_map(|b| {
+            canvas_fx::filled_ellipse_points(b.x, world_to_canvas_y(b.y), ENEMY_BULLET_RADIUS, ENEMY_BULLET_RADIUS, 0.9)
+        })
+        .collect();
+
     // 影の魔女/満月の魔王は2レーン同時に警告するので、線も複数本引く。
     let telegraph_lines: Vec<(f64, f64, f64, f64)> = state
         .boss_telegraph
@@ -269,6 +281,23 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
                     .into_iter()
                     .map(|(x, y)| (x, world_to_canvas_y(y)))
                     .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    // 流星もAurora同様、即着弾のヒットスキャンで実体弾を撃たない。着弾の
+    // 事実を見せるため、`meteor_flash` が立っている間だけ現在の判定半径
+    // (`meteor_radius`) そのままのリングを `meteor_flash_pos` (発火時の
+    // スナップショット位置) に描く。
+    let meteor_ring_pts: Vec<(f64, f64)> = if state.meteor_flash.is_active() {
+        state
+            .loadout
+            .weapon(WeaponKind::Meteor)
+            .map(|w| {
+                let (cx, cy) = state.meteor_flash_pos;
+                canvas_fx::ring_points(cx, world_to_canvas_y(cy), w.meteor_radius(), 0.3)
             })
             .unwrap_or_default()
     } else {
@@ -325,6 +354,9 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
                     ctx.draw(&Points { coords: ring, color: Color::Magenta });
                 }
             }
+            if !meteor_ring_pts.is_empty() {
+                ctx.draw(&Points { coords: &meteor_ring_pts, color: Color::LightRed });
+            }
             for (pts, color) in &enemy_groups {
                 ctx.draw(&Points { coords: pts, color: *color });
             }
@@ -341,6 +373,9 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
             }
             if !chest_pts.is_empty() {
                 ctx.draw(&Points { coords: &chest_pts, color: Color::LightYellow });
+            }
+            if !enemy_bullet_pts.is_empty() {
+                ctx.draw(&Points { coords: &enemy_bullet_pts, color: Color::Cyan });
             }
             if !lantern_glow.is_empty() {
                 ctx.draw(&Points { coords: &lantern_glow, color: lantern_color });
@@ -594,6 +629,23 @@ fn render_camp_body(
         );
     }
 
+    if state.camp.extra_weapon_slot_level >= 1 {
+        cl.push(Line::from(Span::styled(
+            " ✓ 武器スロット拡張 (5枠) 解放済み",
+            Style::default().fg(Color::Green),
+        )));
+    } else {
+        let affordable = state.ember >= CampUpgrades::EXTRA_WEAPON_SLOT_COST;
+        let color = if affordable { Color::LightCyan } else { Color::DarkGray };
+        cl.push_clickable(
+            Line::from(Span::styled(
+                format!(" 武器スロット拡張 (5枠目解放) — {}残光", CampUpgrades::EXTRA_WEAPON_SLOT_COST),
+                Style::default().fg(color),
+            )),
+            actions::CAMP_UPGRADE_EXTRA_WEAPON_SLOT,
+        );
+    }
+
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
         " 戦績",
@@ -720,6 +772,29 @@ mod tests {
         // なので、実際の発火tickを計算せずフラグを直接立てて確実に通す
         // (光輪は常時描画なので装備するだけでコードパスを通る)。
         state.aurora_flash.trigger(1);
+        render_to_test_backend(&state, 40, 30);
+        render_to_test_backend(&state, 100, 30);
+    }
+
+    #[test]
+    fn vigil_renders_without_panicking_with_meteor_flash_active() {
+        use super::super::state::OwnedWeapon;
+
+        let mut state = EverlightState::new();
+        logic::start_vigil(&mut state);
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Meteor));
+        state.meteor_flash.trigger(1);
+        render_to_test_backend(&state, 40, 30);
+        render_to_test_backend(&state, 100, 30);
+    }
+
+    #[test]
+    fn vigil_renders_without_panicking_with_a_caster_and_enemy_bullets() {
+        use super::super::state::EnemyBullet;
+
+        let mut state = EverlightState::new();
+        logic::start_vigil(&mut state);
+        state.enemy_bullets.push(EnemyBullet { x: state.lantern.x, y: 30.0, vx: 0.0, vy: 2.2, damage: 4 });
         render_to_test_backend(&state, 40, 30);
         render_to_test_backend(&state, 100, 30);
     }
