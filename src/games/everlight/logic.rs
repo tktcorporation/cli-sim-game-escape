@@ -159,10 +159,14 @@ fn spawn_interval_ticks(wave: u32) -> u32 {
 fn spawn_enemies(state: &mut EverlightState) {
     if state.wave.is_multiple_of(BOSS_EVERY_N_WAVES) && !state.boss_spawned_this_wave {
         let lane = rng_below(&mut state.rng_state, COLUMNS as u32) as usize;
-        let name = EnemyKind::Boss.name();
-        spawn_enemy_at(state, EnemyKind::Boss, lane);
-        state.boss_spawned_this_wave = true;
-        state.add_log(format!("{name}が現れた！"));
+        // 敵数上限で実際には湧けなかった時に `boss_spawned_this_wave` を
+        // 立ててしまうと、ログだけ「出現した」と嘘をつく上、そのウェーブ中
+        // 二度とボスの湧き抽選が行われなくなる。実際に湧いた時だけ確定させ、
+        // 上限で弾かれた場合は次tick以降に再抽選させる。
+        if spawn_enemy_at(state, EnemyKind::Boss, lane) {
+            state.boss_spawned_this_wave = true;
+            state.add_log(format!("{}が現れた！", EnemyKind::Boss.name()));
+        }
     }
 
     state.elite_progress += 1;
@@ -196,9 +200,10 @@ fn spawn_enemies(state: &mut EverlightState) {
     }
 }
 
-fn spawn_enemy_at(state: &mut EverlightState, kind: EnemyKind, lane: usize) {
+/// 敵を1体湧かせる。フィールドの敵数上限で弾かれた場合は `false` を返す。
+fn spawn_enemy_at(state: &mut EverlightState, kind: EnemyKind, lane: usize) -> bool {
     if state.enemies.len() >= MAX_ENEMIES_ON_FIELD {
-        return;
+        return false;
     }
     if kind == EnemyKind::Boss {
         state.boss_spawn_count += 1;
@@ -213,6 +218,7 @@ fn spawn_enemy_at(state: &mut EverlightState, kind: EnemyKind, lane: usize) {
         max_hp: hp,
         hurt_flash: FlashTimer::new(),
     });
+    true
 }
 
 fn move_enemies(state: &mut EverlightState) {
@@ -794,6 +800,11 @@ fn end_vigil(state: &mut EverlightState) {
     }
     state.phase = Phase::Camp;
     state.pending_boons = None;
+    // 灯が0になったのと同tickで宝箱を複数取っていた場合、開くはずだった
+    // モーダルのキューも一緒に破棄する (次の `start_vigil` でも改めて0に
+    // なるので実害は無いが、フィールドの意味が「今の夜番の残りモーダル数」
+    // である以上、夜番が終わった時点でここでも明示的に閉じておく)。
+    state.queued_boon_rolls = 0;
     let wave = state.wave;
     state.add_log(format!("夜番終了。第{wave}波まで守り抜いた"));
 }
@@ -838,6 +849,33 @@ mod tests {
         start_vigil(&mut state);
         tick_n(&mut state, 60);
         assert!(!state.enemies.is_empty(), "60tick(6秒)経てば敵が湧いているはず");
+    }
+
+    #[test]
+    fn boss_spawn_flag_is_not_set_when_enemy_cap_prevents_actual_spawn() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.wave = BOSS_EVERY_N_WAVES;
+        for _ in 0..MAX_ENEMIES_ON_FIELD {
+            state.enemies.push(Enemy {
+                kind: EnemyKind::Wisp,
+                x: 0.0,
+                y: 0.0,
+                hp: 1,
+                max_hp: 1,
+                hurt_flash: FlashTimer::new(),
+            });
+        }
+
+        spawn_enemies(&mut state);
+        assert!(
+            !state.boss_spawned_this_wave,
+            "上限で実際には湧けなかったのに『出現した』フラグが立ってはいけない"
+        );
+
+        state.enemies.clear();
+        spawn_enemies(&mut state);
+        assert!(state.boss_spawned_this_wave, "上限が解消されれば改めて出現するはず");
     }
 
     #[test]
@@ -944,6 +982,25 @@ mod tests {
     }
 
     #[test]
+    fn catching_three_chests_in_the_same_tick_queues_two_more_modals() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        for _ in 0..3 {
+            state.chests.push(Chest { x: state.lantern.x, y: LANTERN_Y });
+        }
+
+        resolve_chest_catch(&mut state);
+        assert_eq!(state.queued_boon_rolls, 2, "3個同時キャッチなら残り2個分がキューに積まれるはず");
+
+        for _ in 0..3 {
+            assert!(state.pending_boons.is_some());
+            assert!(choose_boon(&mut state, 0));
+        }
+        assert_eq!(state.queued_boon_rolls, 0);
+        assert!(state.pending_boons.is_none(), "3個すべて消化したらモーダルは閉じたまま");
+    }
+
+    #[test]
     fn choose_boon_levels_up_owned_weapon() {
         let mut state = EverlightState::new();
         start_vigil(&mut state);
@@ -1034,6 +1091,34 @@ mod tests {
         tick(&mut state);
         assert_eq!(state.phase, Phase::Camp);
         assert_eq!(state.lantern.light, 0);
+    }
+
+    #[test]
+    fn dying_the_same_tick_a_chest_is_caught_discards_the_modal_cleanly() {
+        // 灯が0になるのと同一tickで宝箱を取っていた場合、開いたモーダルは
+        // 表示される前に夜番終了で破棄される (死んだ後にレベルアップは
+        // 選べない、という意図した挙動)。ここではその破棄がpanicや
+        // 状態の食い違いを残さず綺麗に行われることを保証する。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.lantern.light = 1;
+        state.enemies.push(Enemy {
+            kind: EnemyKind::Boss,
+            x: state.lantern.x,
+            y: BREACH_Y,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+        });
+        for _ in 0..2 {
+            state.chests.push(Chest { x: state.lantern.x, y: LANTERN_Y });
+        }
+
+        tick(&mut state);
+
+        assert_eq!(state.phase, Phase::Camp);
+        assert!(state.pending_boons.is_none(), "夜番終了時にモーダルは残らないはず");
+        assert_eq!(state.queued_boon_rolls, 0, "キューも一緒に破棄されるはず");
     }
 
     #[test]

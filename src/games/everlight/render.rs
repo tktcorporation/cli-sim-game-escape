@@ -48,7 +48,7 @@ fn world_to_canvas_y(world_y: f64) -> f64 {
     WORLD_H - world_y
 }
 
-// ── 不寝番 (Vigil) 画面 ────────────────────────────────────────────
+// ── 夜番 (Vigil) 画面 ────────────────────────────────────────────
 
 struct VigilLayout {
     header: Rect,
@@ -309,7 +309,7 @@ fn render_side_panel(state: &EverlightState, f: &mut Frame, area: Rect) {
     if state.loadout.passives.is_empty() {
         lines.push(Line::from(" (なし)"));
     }
-    // パッシブの色はそれと組み合う武器と同じ色にしてある — 「なぜこの2つが
+    // 受動効果の色はそれと組み合う武器と同じ色にしてある — 「なぜこの2つが
     // 同じ色なんだろう」から進化レシピへ気付いてもらうための伏線。
     for p in &state.loadout.passives {
         lines.push(Line::from(Span::styled(

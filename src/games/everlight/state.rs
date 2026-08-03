@@ -305,7 +305,7 @@ impl OwnedWeapon {
     }
 }
 
-// ── 恒常強化 (受動効果) ───────────────────────────────────────────
+// ── 受動効果 ───────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PassiveKind {
@@ -538,16 +538,16 @@ impl CampUpgrades {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
-    /// 拠点: 恒久強化の購入 + 不寝番 (Vigil) の開始。
+    /// 拠点: 恒久強化の購入 + 夜番 (Vigil) の開始。
     Camp,
-    /// 不寝番中: 降り注ぐ魔物から灯を守る。
+    /// 夜番中: 降り注ぐ魔物から灯を守る。
     Vigil,
 }
 
 pub struct EverlightState {
     pub phase: Phase,
 
-    // ── 不寝番スコープ (灯が消える/拠点へ撤退する度にリセット) ──
+    // ── 夜番スコープ (灯が消える/拠点へ撤退する度にリセット) ──
     pub lantern: Lantern,
     pub enemies: Vec<Enemy>,
     pub projectiles: Vec<Projectile>,
