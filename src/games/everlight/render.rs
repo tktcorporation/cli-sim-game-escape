@@ -187,8 +187,19 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         0.8,
     );
 
-    const ENEMY_KINDS: [EnemyKind; 5] =
-        [EnemyKind::Wisp, EnemyKind::Husk, EnemyKind::Swarmling, EnemyKind::Elite, EnemyKind::Boss];
+    const ENEMY_KINDS: [EnemyKind; 11] = [
+        EnemyKind::Wisp,
+        EnemyKind::Husk,
+        EnemyKind::Swarmling,
+        EnemyKind::Elite,
+        EnemyKind::Boss,
+        EnemyKind::Sniper,
+        EnemyKind::Shielded,
+        EnemyKind::Splitter,
+        EnemyKind::ShadowWitch,
+        EnemyKind::Serpent,
+        EnemyKind::FullMoonBoss,
+    ];
     let mut enemy_groups: Vec<(Vec<(f64, f64)>, Color)> = Vec::new();
     for kind in ENEMY_KINDS {
         let pts: Vec<(f64, f64)> = state
@@ -231,16 +242,20 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         .flat_map(|c| canvas_fx::filled_ellipse_points(c.x, world_to_canvas_y(c.y), 1.6, 1.6, 0.9))
         .collect();
 
-    let telegraph_line = state
+    // 影の魔女/満月の魔王は2レーン同時に警告するので、線も複数本引く。
+    let telegraph_lines: Vec<(f64, f64, f64, f64)> = state
         .boss_telegraph
-        .map(|(x, _)| (x, world_to_canvas_y(SPAWN_Y), x, world_to_canvas_y(BREACH_Y)));
+        .iter()
+        .flat_map(|t| t.lane_xs.iter())
+        .map(|&x| (x, world_to_canvas_y(SPAWN_Y), x, world_to_canvas_y(BREACH_Y)))
+        .collect();
 
     let canvas = Canvas::default()
         .x_bounds([0.0, WORLD_W])
         .y_bounds([0.0, WORLD_H])
         .marker(Marker::Braille)
         .paint(move |ctx| {
-            if let Some((x1, y1, x2, y2)) = telegraph_line {
+            for &(x1, y1, x2, y2) in &telegraph_lines {
                 ctx.draw(&CanvasLine { x1, y1, x2, y2, color: Color::Red });
             }
             for (pts, color) in &enemy_groups {
@@ -446,6 +461,9 @@ fn render_camp_body(
     )));
     cl.push(Line::from(""));
 
+    push_rank_selector(&mut cl, state);
+    cl.push(Line::from(""));
+
     cl.push_clickable(
         Line::from(Span::styled(
             " ▶ 夜番へ出る",
@@ -526,6 +544,37 @@ fn render_camp_body(
         .wrap(true)
         .arrow_color(Color::Green)
         .render(f, area, &mut cs);
+}
+
+/// 挑戦ランクの選択行と、選択中ランクの目標 (最終波・最終ボス名) を
+/// 積む。「次に何を目指すか」を拠点画面で常に見えるようにする。
+fn push_rank_selector(cl: &mut ClickableList, state: &EverlightState) {
+    let selected = state.camp.effective_selected_rank();
+    let max_unlocked = state.camp.max_unlocked_rank.max(1);
+
+    cl.push(Line::from(Span::styled(
+        " 挑戦ランク",
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )));
+    cl.push(Line::from(format!(" 第{selected}夜  (解放済み: 第{max_unlocked}夜まで)")));
+
+    let down_color = if selected > 1 { Color::LightCyan } else { Color::DarkGray };
+    cl.push_clickable(
+        Line::from(Span::styled(" ◀ 前の夜へ", Style::default().fg(down_color))),
+        actions::CAMP_RANK_DOWN,
+    );
+    let up_color = if selected < max_unlocked { Color::LightCyan } else { Color::DarkGray };
+    cl.push_clickable(
+        Line::from(Span::styled(" ▶ 次の夜へ", Style::default().fg(up_color))),
+        actions::CAMP_RANK_UP,
+    );
+
+    let milestone = logic::milestone_wave(selected);
+    let boss_name = logic::boss_kind_for(milestone, selected).name();
+    cl.push(Line::from(Span::styled(
+        format!(" 目標: 第{milestone}波『{boss_name}』を討伐する"),
+        Style::default().fg(Color::LightGreen),
+    )));
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -9,8 +9,8 @@ use ratzilla::ratatui::style::Color;
 use crate::effects::FlashTimer;
 
 use super::state::{
-    BoonKind, BoonOption, CampUpgrades, Chest, Enemy, EnemyKind, EverlightState, Lantern,
-    Loadout, OwnedPassive, OwnedWeapon, PassiveKind, Phase, Projectile, WeaponKind,
+    BoonKind, BoonOption, BossTelegraph, CampUpgrades, Chest, Enemy, EnemyKind, EverlightState,
+    Lantern, Loadout, OwnedPassive, OwnedWeapon, PassiveKind, Phase, Projectile, WeaponKind,
     BOSS_EVERY_N_WAVES, BREACH_Y, CHEST_BASE_CATCH_RADIUS, CHEST_FALL_SPEED, COLUMNS,
     ELITE_BASE_INTERVAL_TICKS, EVOLUTION_PASSIVE_THRESHOLD, LANTERN_MOVE_UNITS_PER_TICK,
     LANTERN_Y, MAX_LEVEL, MAX_WEAPON_SLOTS, SPAWN_Y, WAVE_DURATION_TICKS, WORLD_H, WORLD_W,
@@ -81,6 +81,7 @@ pub fn tick(state: &mut EverlightState) {
         state.enemies.iter().map(|e| (e.id, (e.x, e.y))).collect();
     move_enemies(state);
     resolve_breaches(state);
+    resolve_ranged_attacks(state);
 
     let damage_mult = effective_damage_mult(state);
     fire_weapons(state, damage_mult);
@@ -114,8 +115,50 @@ pub fn wave_for(elapsed_ticks: u64) -> u32 {
     (elapsed_ticks / WAVE_DURATION_TICKS as u64) as u32 + 1
 }
 
-fn wave_difficulty(wave: u32) -> f64 {
-    1.0 + wave.saturating_sub(1) as f64 * 0.12
+/// ランク1の夜が終わる波数。ランクが上がるごとに5波ずつ延長される —
+/// 「夜が長くなる」ことそのものが上位ランクへ挑む手応えの一部になる。
+const FIRST_MILESTONE_WAVE: u32 = 15;
+const MILESTONE_WAVE_STEP: u32 = 5;
+
+pub fn milestone_wave(rank: u32) -> u32 {
+    FIRST_MILESTONE_WAVE + rank.saturating_sub(1) * MILESTONE_WAVE_STEP
+}
+
+/// 波とランクの両方から難易度倍率を出す。波内の伸びは既存のまま
+/// (+12%/波)、ランクはそれとは別に基礎値を底上げする — 同じ第5波でも
+/// ランク2の第5波はランク1より明確に手強くなる。
+fn wave_difficulty(wave: u32, rank: u32) -> f64 {
+    let base = 1.0 + wave.saturating_sub(1) as f64 * 0.12;
+    let rank_mult = 1.0 + rank.saturating_sub(1) as f64 * 0.35;
+    base * rank_mult
+}
+
+/// ランクが上がるほど討伐報酬 (残光) も伸びる — 高ランクは危険だが
+/// 実入りも良い、というリスク/リターンの牽引力。
+fn ember_reward_mult(rank: u32) -> f64 {
+    1.0 + rank.saturating_sub(1) as f64 * 0.25
+}
+
+/// この波に湧くボスの種類。第5波毎のチェックポイントのうち、そのランクの
+/// 夜の最終波 (`milestone_wave`) だけは特別な最終ボスになる — ランクの
+/// 偶奇で満月の魔王/大蛇を交互に割り当て、ランクが伸びても定義済みの
+/// 2種で終わりなく回せるようにする。それ以外のチェックポイントは
+/// 魔王/影の魔女を交互に回す (第10波は必ず影の魔女、等)。
+pub fn boss_kind_for(wave: u32, rank: u32) -> EnemyKind {
+    if wave == milestone_wave(rank) {
+        if rank.saturating_sub(1).is_multiple_of(2) {
+            EnemyKind::FullMoonBoss
+        } else {
+            EnemyKind::Serpent
+        }
+    } else {
+        let checkpoint_index = wave / BOSS_EVERY_N_WAVES;
+        if checkpoint_index.is_multiple_of(2) {
+            EnemyKind::ShadowWitch
+        } else {
+            EnemyKind::Boss
+        }
+    }
 }
 
 fn update_wave(state: &mut EverlightState) {
@@ -158,16 +201,56 @@ fn spawn_interval_ticks(wave: u32) -> u32 {
     reduced.max(6) as u32
 }
 
+/// 新しい敵種を「数値インフレ」ではなく「新しい状況」として導入する
+/// wave帯の下限。単純に敵を差し替えるのではなく既存の枠に加える形で
+/// 出現テーブル (`regular_spawn_table`) へ合流させる。
+const SNIPER_MIN_WAVE: u32 = 6;
+const SHIELDED_MIN_WAVE: u32 = 11;
+const SPLITTER_MIN_WAVE: u32 = 16;
+
+/// 通常湧き (精鋭・ボスを除く) の重み付き抽選テーブル。waveが進むほど
+/// 候補が増える — 数字が伸びるだけでなく対応すべき状況そのものが
+/// 増えていく体感を作る。
+fn regular_spawn_table(wave: u32) -> Vec<(EnemyKind, u32)> {
+    // 既存3種の重み (15/30/55) は元の確率をそのまま保つ — 新種は「既存の
+    // 枠を削って割り込む」のではなく「新しい選択肢が追加される」形で
+    // 合流させ、序盤 (wave帯未解禁) のバランスを変えない。
+    let mut table = vec![(EnemyKind::Swarmling, 15u32), (EnemyKind::Husk, 30), (EnemyKind::Wisp, 55)];
+    if wave >= SNIPER_MIN_WAVE {
+        table.push((EnemyKind::Sniper, 15));
+    }
+    if wave >= SHIELDED_MIN_WAVE {
+        table.push((EnemyKind::Shielded, 10));
+    }
+    if wave >= SPLITTER_MIN_WAVE {
+        table.push((EnemyKind::Splitter, 10));
+    }
+    table
+}
+
+fn pick_weighted(state: &mut EverlightState, table: &[(EnemyKind, u32)]) -> EnemyKind {
+    let total: u32 = table.iter().map(|&(_, w)| w).sum();
+    let mut roll = rng_below(&mut state.rng_state, total.max(1));
+    for &(kind, weight) in table {
+        if roll < weight {
+            return kind;
+        }
+        roll -= weight;
+    }
+    table.last().map(|&(k, _)| k).unwrap_or(EnemyKind::Wisp)
+}
+
 fn spawn_enemies(state: &mut EverlightState) {
     if state.wave.is_multiple_of(BOSS_EVERY_N_WAVES) && !state.boss_spawned_this_wave {
         let lane = rng_below(&mut state.rng_state, COLUMNS as u32) as usize;
+        let boss_kind = boss_kind_for(state.wave, state.rank);
         // 敵数上限で実際には湧けなかった時に `boss_spawned_this_wave` を
         // 立ててしまうと、ログだけ「出現した」と嘘をつく上、そのウェーブ中
         // 二度とボスの湧き抽選が行われなくなる。実際に湧いた時だけ確定させ、
         // 上限で弾かれた場合は次tick以降に再抽選させる。
-        if spawn_enemy_at(state, EnemyKind::Boss, lane) {
+        if spawn_enemy_at(state, boss_kind, lane) {
             state.boss_spawned_this_wave = true;
-            state.add_log(format!("{}が現れた！", EnemyKind::Boss.name()));
+            state.add_log(format!("{}が現れた！", boss_kind.name()));
         }
     }
 
@@ -185,53 +268,58 @@ fn spawn_enemies(state: &mut EverlightState) {
     let interval = spawn_interval_ticks(state.wave);
     if state.spawn_progress >= interval {
         state.spawn_progress = 0;
-        let roll = rng_below(&mut state.rng_state, 100);
-        if roll < 15 {
+        let table = regular_spawn_table(state.wave);
+        let picked = pick_weighted(state, &table);
+        if picked == EnemyKind::Swarmling {
             let base_lane = rng_below(&mut state.rng_state, COLUMNS as u32) as usize;
             for offset in 0..3usize {
                 let lane = (base_lane + offset).min(COLUMNS - 1);
                 spawn_enemy_at(state, EnemyKind::Swarmling, lane);
             }
-        } else if roll < 45 {
-            let lane = rng_below(&mut state.rng_state, COLUMNS as u32) as usize;
-            spawn_enemy_at(state, EnemyKind::Husk, lane);
         } else {
             let lane = rng_below(&mut state.rng_state, COLUMNS as u32) as usize;
-            spawn_enemy_at(state, EnemyKind::Wisp, lane);
+            spawn_enemy_at(state, picked, lane);
         }
     }
 }
 
-/// 敵を1体湧かせる。フィールドの敵数上限で弾かれた場合は `false` を返す。
+/// 敵を1体、湧き出し端 (`SPAWN_Y`) の指定レーンに湧かせる。フィールドの
+/// 敵数上限で弾かれた場合は `false` を返す。
 fn spawn_enemy_at(state: &mut EverlightState, kind: EnemyKind, lane: usize) -> bool {
+    spawn_enemy_at_xy(state, kind, super::state::lane_center_x(lane), SPAWN_Y)
+}
+
+/// 敵を1体、任意の座標に湧かせる。分裂体の子のように盤面の途中から
+/// 発生する敵は `SPAWN_Y` 固定の `spawn_enemy_at` では表現できないため、
+/// こちらを直接使う。
+fn spawn_enemy_at_xy(state: &mut EverlightState, kind: EnemyKind, x: f64, y: f64) -> bool {
     if state.enemies.len() >= MAX_ENEMIES_ON_FIELD {
         return false;
     }
-    if kind == EnemyKind::Boss {
+    if kind.is_boss() {
         state.boss_spawn_count += 1;
     }
-    let diff = wave_difficulty(state.wave);
+    let diff = wave_difficulty(state.wave, state.rank);
     let hp = (kind.base_hp() as f64 * diff).round() as i32;
     let id = state.next_enemy_id;
     state.next_enemy_id += 1;
-    state.enemies.push(Enemy {
-        id,
-        kind,
-        x: super::state::lane_center_x(lane),
-        y: SPAWN_Y,
-        hp,
-        max_hp: hp,
-        hurt_flash: FlashTimer::new(),
-    });
+    state.enemies.push(Enemy { id, kind, x, y, hp, max_hp: hp, hurt_flash: FlashTimer::new(), ranged_charge: None });
     true
 }
 
+/// 狙撃者 (`EnemyKind::Sniper`) が接近をやめて遠隔攻撃に専念し始める
+/// y座標。ここまでは他の敵と同じく普通に近づいてくる。
+const SNIPER_STOP_Y: f64 = WORLD_H * 0.55;
+
 fn move_enemies(state: &mut EverlightState) {
-    let diff = wave_difficulty(state.wave);
+    let diff = wave_difficulty(state.wave, state.rank);
     let lantern_x = state.lantern.x;
     for enemy in state.enemies.iter_mut() {
         enemy.hurt_flash.tick(1);
-        enemy.y += enemy.kind.base_speed() * diff;
+        let sniper_holding = enemy.kind == EnemyKind::Sniper && enemy.y >= SNIPER_STOP_Y;
+        if !sniper_holding {
+            enemy.y += enemy.kind.base_speed() * diff;
+        }
         if enemy.kind.homes() {
             // 灯へ寄ってくる敵をおとりにして1レーンへ集め、極光で薙ぐ、
             // という自力発見してほしいシナジー。誘引が弱すぎると気付かれ
@@ -241,6 +329,42 @@ fn move_enemies(state: &mut EverlightState) {
             enemy.x += step * dx.signum();
         }
     }
+}
+
+const SNIPER_CHARGE_TICKS: u32 = 24;
+const SNIPER_DAMAGE: i32 = 6;
+
+/// 狙撃者の遠隔攻撃。`SNIPER_STOP_Y` で停止した個体が、灯のレーンにいる
+/// 間だけ一定間隔で直接ダメージを飛ばす — 「漏れさえ避ければ安全」という
+/// 均衡を崩し、遠くにいる相手にも対応を迫る。
+fn resolve_ranged_attacks(state: &mut EverlightState) {
+    let lantern_x = state.lantern.x;
+    let mut total_damage = 0i32;
+    let mut hits = 0u32;
+    for enemy in state.enemies.iter_mut() {
+        if enemy.kind != EnemyKind::Sniper || enemy.y < SNIPER_STOP_Y {
+            continue;
+        }
+        match enemy.ranged_charge {
+            None => enemy.ranged_charge = Some(SNIPER_CHARGE_TICKS),
+            Some(t) if t <= 1 => {
+                enemy.ranged_charge = Some(SNIPER_CHARGE_TICKS);
+                if (enemy.x - lantern_x).abs() <= LANE_HALF_WIDTH {
+                    total_damage += SNIPER_DAMAGE;
+                    hits += 1;
+                }
+            }
+            Some(t) => enemy.ranged_charge = Some(t - 1),
+        }
+    }
+    if hits == 0 {
+        return;
+    }
+    state.light_hit_count += hits;
+    state.lantern.light -= total_damage;
+    state.lantern_hurt_flash.trigger(3);
+    state.last_light_damage = Some((total_damage, 6));
+    state.add_log(format!("狙撃者の一撃で灯が{total_damage}削れた"));
 }
 
 /// 防衛線 (`BREACH_Y`) に達した敵を「漏れ」として処理し、灯を削って消す。
@@ -302,22 +426,57 @@ fn drain_dead_enemies(state: &mut EverlightState) -> Vec<KillInfo> {
     kills
 }
 
+/// 分裂体 (`EnemyKind::Splitter`) が死ぬ位置から左右へ子を離す距離。
+const SPLIT_OFFSET: f64 = 2.0;
+
 fn apply_kills(state: &mut EverlightState, kills: Vec<KillInfo>) {
     if kills.is_empty() {
         return;
     }
+    let ember_mult = ember_reward_mult(state.rank);
+    let mut split_spawns: Vec<(f64, f64)> = Vec::new();
     for k in &kills {
-        state.ember += k.kind.ember_reward();
+        state.ember += ((k.kind.ember_reward() as f64) * ember_mult).round() as u32;
         state.kill_count += 1;
         if k.kind.drops_chest() {
             state.chests.push(Chest { x: k.x, y: k.y });
         }
+        if k.kind == EnemyKind::Splitter {
+            // 分裂体は撃破された位置から羽虫2体を残して散る。子は
+            // `EnemyKind::Swarmling` として湧かせるので、この分岐に
+            // 二度と入らない (=無限分裂しない) ことが型的に保証される。
+            split_spawns.push(((k.x - SPLIT_OFFSET).clamp(0.0, WORLD_W), k.y));
+            split_spawns.push(((k.x + SPLIT_OFFSET).clamp(0.0, WORLD_W), k.y));
+        }
+    }
+    for (x, y) in split_spawns {
+        spawn_enemy_at_xy(state, EnemyKind::Swarmling, x, y);
     }
     if kills.len() == 1 {
         state.add_log(format!("{}を討った", kills[0].kind.name()));
     } else {
         state.add_log(format!("{}体を討った", kills.len()));
     }
+    maybe_trigger_dawn(state, &kills);
+}
+
+/// この夜番でランクのマイルストーン波の最終ボスを初めて討った瞬間、
+/// 「Dawn」を確定する — `max_unlocked_rank` を即座に更新することで、
+/// 直後に灯が消えても/リロードされても達成が失われないようにする
+/// (呼び出し元の `mod.rs::tick()` が変化を検知して即座に保存する)。
+fn maybe_trigger_dawn(state: &mut EverlightState, kills: &[KillInfo]) {
+    if state.dawn_reached_this_vigil || state.wave != milestone_wave(state.rank) {
+        return;
+    }
+    let finale_kind =
+        if state.rank.saturating_sub(1).is_multiple_of(2) { EnemyKind::FullMoonBoss } else { EnemyKind::Serpent };
+    if !kills.iter().any(|k| k.kind == finale_kind) {
+        return;
+    }
+    state.dawn_reached_this_vigil = true;
+    state.camp.max_unlocked_rank = state.camp.max_unlocked_rank.max(state.rank + 1);
+    state.dawn_count += 1;
+    state.add_log(format!("夜明けが来た。挑めるランクが第{}夜まで広がった", state.camp.max_unlocked_rank));
 }
 
 // ── 発砲・弾 ────────────────────────────────────────────────────
@@ -349,7 +508,7 @@ fn aim_velocity(from_x: f64, from_y: f64, to_x: f64, to_y: f64, speed: f64) -> (
     (dx / dist * speed, dy / dist * speed)
 }
 
-fn make_projectile(x: f64, damage: i32, pierce: u32, vx: f64, vy: f64, color: Color) -> Projectile {
+fn make_projectile(x: f64, damage: i32, pierce: u32, vx: f64, vy: f64, color: Color, source: WeaponKind) -> Projectile {
     Projectile {
         x,
         y: LANTERN_Y,
@@ -359,7 +518,22 @@ fn make_projectile(x: f64, damage: i32, pierce: u32, vx: f64, vy: f64, color: Co
         pierce_remaining: pierce.saturating_sub(1),
         radius: 1.6,
         color,
+        source,
         hit_enemy_ids: Vec::new(),
+    }
+}
+
+/// 甲殻兵 (`EnemyKind::Shielded`) は `SHIELD_WEAK_TO` 以外の武器から受ける
+/// ダメージを軽減する。弱点武器の色 (`EnemyKind::Shielded::color`) と
+/// 揃えることでヒントにしている (進化レシピと同じ作法)。
+const SHIELD_WEAK_TO: WeaponKind = WeaponKind::Bolt;
+const SHIELD_DAMAGE_REDUCTION: f64 = 0.5;
+
+fn effective_damage_against(base_damage: i32, source: WeaponKind, target_kind: EnemyKind) -> i32 {
+    if target_kind == EnemyKind::Shielded && source != SHIELD_WEAK_TO {
+        ((base_damage as f64) * (1.0 - SHIELD_DAMAGE_REDUCTION)).round().max(1.0) as i32
+    } else {
+        base_damage
     }
 }
 
@@ -398,7 +572,7 @@ fn fire_weapons(state: &mut EverlightState, damage_mult: f64) {
                     Some((tx, ty)) => aim_velocity(lantern_x, LANTERN_Y, tx, ty, PROJECTILE_SPEED),
                     None => (0.0, -PROJECTILE_SPEED),
                 };
-                new_projectiles.push(make_projectile(lantern_x, damage, pierce, vx, vy, kind.color()));
+                new_projectiles.push(make_projectile(lantern_x, damage, pierce, vx, vy, kind.color(), kind));
             }
             WeaponKind::Spray => {
                 let count = state.loadout.weapons[i].projectile_count();
@@ -407,7 +581,7 @@ fn fire_weapons(state: &mut EverlightState, damage_mult: f64) {
                     let angle = -std::f64::consts::FRAC_PI_2 + (t - 0.5) * SPRAY_SPREAD_RAD;
                     let vx = angle.cos() * PROJECTILE_SPEED;
                     let vy = angle.sin() * PROJECTILE_SPEED;
-                    new_projectiles.push(make_projectile(lantern_x, damage, pierce, vx, vy, kind.color()));
+                    new_projectiles.push(make_projectile(lantern_x, damage, pierce, vx, vy, kind.color(), kind));
                 }
             }
             WeaponKind::Aurora => {
@@ -432,7 +606,7 @@ fn apply_aurora_hit(state: &mut EverlightState, lantern_x: f64, damage: i32, wid
     let half_width = LANE_HALF_WIDTH * width_mult;
     for enemy in state.enemies.iter_mut() {
         if (enemy.x - lantern_x).abs() <= half_width {
-            enemy.hp -= damage;
+            enemy.hp -= effective_damage_against(damage, WeaponKind::Aurora, enemy.kind);
             enemy.hurt_flash.trigger(4);
         }
     }
@@ -463,7 +637,7 @@ fn fire_halo(state: &mut EverlightState, damage_mult: f64) {
         let dx = enemy.x - lantern_x;
         let dy = enemy.y - LANTERN_Y;
         if dx * dx + dy * dy <= radius * radius {
-            enemy.hp -= damage;
+            enemy.hp -= effective_damage_against(damage, WeaponKind::Halo, enemy.kind);
             enemy.hurt_flash.trigger(3);
         }
     }
@@ -558,7 +732,7 @@ fn move_and_resolve_projectiles(state: &mut EverlightState, enemy_prev_positions
                 break;
             }
             let enemy = &mut state.enemies[idx];
-            enemy.hp -= proj.damage;
+            enemy.hp -= effective_damage_against(proj.damage, proj.source, enemy.kind);
             enemy.hurt_flash.trigger(3);
             proj.hit_enemy_ids.push(enemy.id);
             // 同じ敵への再命中だけは `hit_enemy_ids` で恒久的に除外する —
@@ -781,36 +955,93 @@ pub fn boon_option_text(state: &EverlightState, kind: BoonKind) -> (String, Stri
 
 // ── ボスの特殊攻撃「灯喰らい」───────────────────────────────────────
 
-fn resolve_boss_telegraph(state: &mut EverlightState) {
-    let boss_x = state.enemies.iter().find(|e| e.kind == EnemyKind::Boss).map(|e| e.x);
+/// 構え中にレーンが移動するボス (大蛇) の、レーンを1つ移す間隔。
+const SWEEP_STEP_TICKS: u32 = 4;
 
-    if let Some((x, ticks_left)) = state.boss_telegraph {
-        // 構え中に魔王を討ち取れば不発になる — 「間に合った」満足感のため。
-        if boss_x.is_none() {
-            state.boss_telegraph = None;
+/// ランクが上がるほどボスの攻撃周期は短くなる (=気を抜ける時間が減る)。
+fn boss_attack_period_ticks(rank: u32) -> u64 {
+    (BOSS_ATTACK_PERIOD_TICKS as i64 - rank.saturating_sub(1) as i64 * 6).max(40) as u64
+}
+
+/// ランクが上がるほど一撃のダメージも重くなる。
+fn boss_telegraph_damage(rank: u32) -> i32 {
+    BOSS_TELEGRAPH_DAMAGE + rank.saturating_sub(1) as i32 * 4
+}
+
+fn lane_index_of(x: f64) -> usize {
+    let lane_w = WORLD_W / COLUMNS as f64;
+    ((x / lane_w) as i64).clamp(0, COLUMNS as i64 - 1) as usize
+}
+
+/// `x` の隣のレーン中心座標 (右端なら左隣)。影の魔女/満月の魔王が同時に
+/// 警告する2レーン目を決めるのに使う。
+fn adjacent_lane_x(x: f64) -> f64 {
+    let lane = lane_index_of(x);
+    let other = if lane + 1 < COLUMNS { lane + 1 } else { lane.saturating_sub(1) };
+    super::state::lane_center_x(other)
+}
+
+/// ボスの種類ごとに構えのレーン構成を決める。影の魔女/満月の魔王は
+/// 隣接2レーンを同時に、大蛇は1レーンだが構え中に横へ移動する — 同じ
+/// 「レーンから逃げる」判断でも毎回違う読み合いになるようにする。
+fn new_boss_telegraph(kind: EnemyKind, boss_x: f64, rng_state: &mut u32) -> BossTelegraph {
+    match kind {
+        EnemyKind::ShadowWitch | EnemyKind::FullMoonBoss => {
+            BossTelegraph {
+                kind,
+                lane_xs: vec![boss_x, adjacent_lane_x(boss_x)],
+                ticks_left: BOSS_TELEGRAPH_TICKS,
+                sweep_direction: None,
+            }
+        }
+        EnemyKind::Serpent => {
+            let direction = if rng_below(rng_state, 2) == 0 { -1 } else { 1 };
+            BossTelegraph { kind, lane_xs: vec![boss_x], ticks_left: BOSS_TELEGRAPH_TICKS, sweep_direction: Some(direction) }
+        }
+        _ => BossTelegraph { kind, lane_xs: vec![boss_x], ticks_left: BOSS_TELEGRAPH_TICKS, sweep_direction: None },
+    }
+}
+
+fn resolve_boss_telegraph(state: &mut EverlightState) {
+    let boss = state.enemies.iter().find(|e| e.kind.is_boss()).map(|e| (e.kind, e.x));
+
+    if let Some(mut telegraph) = state.boss_telegraph.take() {
+        // 構え中にボスを討ち取れば不発になる — 「間に合った」満足感のため。
+        if boss.is_none() {
             return;
         }
-        if ticks_left <= 1 {
-            state.boss_telegraph = None;
-            if (state.lantern.x - x).abs() <= LANE_HALF_WIDTH {
-                state.lantern.light -= BOSS_TELEGRAPH_DAMAGE;
+        if telegraph.ticks_left <= 1 {
+            let hit = telegraph.lane_xs.iter().any(|&x| (state.lantern.x - x).abs() <= LANE_HALF_WIDTH);
+            if hit {
+                let damage = boss_telegraph_damage(state.rank);
+                state.lantern.light -= damage;
                 state.light_hit_count += 1;
                 state.lantern_hurt_flash.trigger(5);
-                state.last_light_damage = Some((BOSS_TELEGRAPH_DAMAGE, 8));
-                state.add_log("魔王の一撃で灯が大きく削れた！".to_string());
+                state.last_light_damage = Some((damage, 8));
+                state.add_log(format!("{}の一撃で灯が大きく削れた！", telegraph.kind.name()));
             } else {
-                state.add_log("魔王の一撃をかわした！".to_string());
+                state.add_log(format!("{}の一撃をかわした！", telegraph.kind.name()));
             }
-        } else {
-            state.boss_telegraph = Some((x, ticks_left - 1));
+            return;
         }
+        telegraph.ticks_left -= 1;
+        if let Some(direction) = telegraph.sweep_direction {
+            if telegraph.ticks_left.is_multiple_of(SWEEP_STEP_TICKS) {
+                let lane = lane_index_of(telegraph.lane_xs[0]);
+                let next_lane = (lane as i32 + direction).clamp(0, COLUMNS as i32 - 1) as usize;
+                telegraph.lane_xs[0] = super::state::lane_center_x(next_lane);
+            }
+        }
+        state.boss_telegraph = Some(telegraph);
         return;
     }
 
-    if let Some(x) = boss_x {
-        if state.elapsed_ticks > 0 && state.elapsed_ticks.is_multiple_of(BOSS_ATTACK_PERIOD_TICKS) {
-            state.boss_telegraph = Some((x, BOSS_TELEGRAPH_TICKS));
-            state.add_log("魔王が灯喰らいの構え！".to_string());
+    if let Some((kind, x)) = boss {
+        let period = boss_attack_period_ticks(state.rank);
+        if state.elapsed_ticks > 0 && state.elapsed_ticks.is_multiple_of(period) {
+            let telegraph = new_boss_telegraph(kind, x, &mut state.rng_state);
+            state.boss_telegraph = Some(telegraph);
+            state.add_log(format!("{}が灯喰らいの構え！", kind.name()));
         }
     }
 }
@@ -846,6 +1077,12 @@ pub fn purchase_extra_slot(state: &mut EverlightState) -> bool {
     true
 }
 
+/// 拠点で挑戦ランクを選ぶ。範囲外の指定は `max_unlocked_rank` 側へ
+/// クランプする (未解放のランクへは進めない)。
+pub fn select_rank(state: &mut EverlightState, rank: u32) {
+    state.camp.selected_rank = rank.clamp(1, state.camp.max_unlocked_rank.max(1));
+}
+
 pub fn start_vigil(state: &mut EverlightState) {
     let light_max = state.camp.light_max();
     state.phase = Phase::Vigil;
@@ -865,13 +1102,15 @@ pub fn start_vigil(state: &mut EverlightState) {
     state.pending_boons = None;
     state.queued_boon_rolls = 0;
     state.boss_telegraph = None;
+    state.rank = state.camp.effective_selected_rank();
+    state.dawn_reached_this_vigil = false;
     state.kill_count = 0;
     // breach_count はリセットしない: detect_transitions が前回renderとの
     // 差分で演出をトリガーする単調増加カウンタ (state.rsのコメント参照)。
     // ここで0に戻すと、前の夜番で漏れが発生していた場合に「減った」と
     // 誤検知され、拠点→次の夜番の遷移で無関係な漏れ演出が誤発火する。
     state.last_light_damage = None;
-    state.add_log("夜番開始。灯を守れ！".to_string());
+    state.add_log(format!("夜番開始 (第{}夜)。灯を守れ！", state.rank));
 }
 
 fn end_vigil(state: &mut EverlightState) {
@@ -942,6 +1181,7 @@ mod tests {
             hp: 999,
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
         resolve_breaches(&mut state);
         assert_eq!(state.breach_count, 1);
@@ -976,6 +1216,7 @@ mod tests {
                 hp: 1,
                 max_hp: 1,
                 hurt_flash: FlashTimer::new(),
+                ranged_charge: None,
             });
         }
 
@@ -1034,6 +1275,7 @@ mod tests {
             hp: 999_999,
             max_hp: 999_999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
 
         let expected_interval =
@@ -1071,6 +1313,7 @@ mod tests {
             hp: 999,
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
         let light_before = state.lantern.light;
         resolve_breaches(&mut state);
@@ -1091,8 +1334,9 @@ mod tests {
             hp: 1,
             max_hp: 7,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
-        state.projectiles.push(make_projectile(state.lantern.x, 10, 1, 0.0, -1.0, Color::White));
+        state.projectiles.push(make_projectile(state.lantern.x, 10, 1, 0.0, -1.0, Color::White, WeaponKind::Bolt));
         state.projectiles[0].y = LANTERN_Y - 5.0;
         let ember_before = state.ember;
         move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
@@ -1136,8 +1380,9 @@ mod tests {
             hp: 999,
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
-        state.projectiles.push(make_projectile(x, 10, 1, 0.0, -9.0, Color::White));
+        state.projectiles.push(make_projectile(x, 10, 1, 0.0, -9.0, Color::White, WeaponKind::Bolt));
         state.projectiles[0].y = 10.0;
 
         move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
@@ -1166,8 +1411,9 @@ mod tests {
             hp: 999,
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
-        let mut proj = make_projectile(x, 10, 2, 0.0, -9.0, Color::White);
+        let mut proj = make_projectile(x, 10, 2, 0.0, -9.0, Color::White, WeaponKind::Bolt);
         proj.y = 10.0;
         state.projectiles.push(proj);
 
@@ -1199,6 +1445,7 @@ mod tests {
             hp: 999,
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
         state.enemies.push(Enemy {
             id: 2,
@@ -1208,8 +1455,9 @@ mod tests {
             hp: 999,
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
-        let mut proj = make_projectile(x, 10, 2, 0.0, -9.0, Color::White);
+        let mut proj = make_projectile(x, 10, 2, 0.0, -9.0, Color::White, WeaponKind::Bolt);
         proj.y = 10.0;
         state.projectiles.push(proj);
 
@@ -1242,6 +1490,7 @@ mod tests {
             hp: 999,
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
         state.enemies.push(Enemy {
             id: 2,
@@ -1251,8 +1500,9 @@ mod tests {
             hp: 999,
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
-        let mut proj = make_projectile(x, 10, 1, 0.0, -9.0, Color::White); // pierce=1 → 命中は1発分のみ
+        let mut proj = make_projectile(x, 10, 1, 0.0, -9.0, Color::White, WeaponKind::Bolt); // pierce=1 → 命中は1発分のみ
         proj.y = 10.0;
         state.projectiles.push(proj);
 
@@ -1287,6 +1537,7 @@ mod tests {
             hp: 999,
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
         // 中心距離8.2・半径8.1(合算)の魔王。中心距離は雑魚より遠いが、
         // 境界進入は (8.2-8.1)=0.1 と雑魚より先。
@@ -1298,8 +1549,9 @@ mod tests {
             hp: 999,
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
-        let mut proj = make_projectile(x, 10, 1, 0.0, -9.0, Color::White); // pierce=1 → 命中は1発分のみ
+        let mut proj = make_projectile(x, 10, 1, 0.0, -9.0, Color::White, WeaponKind::Bolt); // pierce=1 → 命中は1発分のみ
         proj.y = 10.0;
         state.projectiles.push(proj);
 
@@ -1335,8 +1587,9 @@ mod tests {
             hp: 999,
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
-        let mut proj = make_projectile(x, 10, 1, 0.0, -9.0, Color::White);
+        let mut proj = make_projectile(x, 10, 1, 0.0, -9.0, Color::White, WeaponKind::Bolt);
         proj.y = 10.0;
         state.projectiles.push(proj);
 
@@ -1496,6 +1749,7 @@ mod tests {
             hp: 999,
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
         tick(&mut state);
         assert_eq!(state.phase, Phase::Camp);
@@ -1519,6 +1773,7 @@ mod tests {
             hp: 999,
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
         for _ in 0..2 {
             state.chests.push(Chest { x: state.lantern.x, y: LANTERN_Y });
@@ -1543,6 +1798,7 @@ mod tests {
             hp: 999,
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
         let light_before = same_lane.lantern.light;
         resolve_breaches(&mut same_lane);
@@ -1558,6 +1814,7 @@ mod tests {
             hp: 999,
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
         });
         let light_before = other_lane.lantern.light;
         resolve_breaches(&mut other_lane);
@@ -1698,5 +1955,292 @@ mod tests {
             ember_before + EMBER_WINDFALL_AMOUNT * 3,
             "灯が満タンの時は3枠とも効果のある残光獲得で埋まるはず"
         );
+    }
+
+    // ── ランク/夜のマイルストーン ─────────────────────────────────────
+
+    #[test]
+    fn milestone_wave_extends_by_five_per_rank() {
+        assert_eq!(milestone_wave(1), 15);
+        assert_eq!(milestone_wave(2), 20);
+        assert_eq!(milestone_wave(3), 25);
+    }
+
+    #[test]
+    fn boss_kind_for_alternates_regular_checkpoints_and_ends_each_rank_with_a_finale() {
+        // ランク1の夜: 第5波=魔王, 第10波=影の魔女, 第15波(最終)=満月の魔王。
+        assert_eq!(boss_kind_for(5, 1), EnemyKind::Boss);
+        assert_eq!(boss_kind_for(10, 1), EnemyKind::ShadowWitch);
+        assert_eq!(boss_kind_for(15, 1), EnemyKind::FullMoonBoss);
+        // ランク2の夜は最終が第20波なので、第15波はまだ通常チェックポイント。
+        assert_eq!(boss_kind_for(15, 2), EnemyKind::Boss);
+        assert_eq!(boss_kind_for(20, 2), EnemyKind::Serpent);
+    }
+
+    #[test]
+    fn wave_difficulty_scales_with_rank_independently_of_wave() {
+        let rank1 = wave_difficulty(5, 1);
+        let rank2 = wave_difficulty(5, 2);
+        assert!(rank2 > rank1, "同じ波でもランクが高いほど難易度は上がるはず");
+    }
+
+    #[test]
+    fn ember_reward_mult_increases_with_rank() {
+        assert_eq!(ember_reward_mult(1), 1.0);
+        assert!(ember_reward_mult(2) > 1.0, "高ランクほど討伐報酬も伸びるはず");
+    }
+
+    #[test]
+    fn select_rank_clamps_to_unlocked_range() {
+        let mut state = EverlightState::new();
+        state.camp.max_unlocked_rank = 2;
+        select_rank(&mut state, 5);
+        assert_eq!(state.camp.selected_rank, 2, "未解放のランクへは進めないはず");
+        select_rank(&mut state, 0);
+        assert_eq!(state.camp.selected_rank, 1, "ランクは1未満にはならないはず");
+    }
+
+    #[test]
+    fn defeating_the_finale_boss_at_the_milestone_wave_triggers_dawn() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.wave = milestone_wave(state.rank);
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::FullMoonBoss,
+            x: state.lantern.x,
+            y: 50.0,
+            hp: 0,
+            max_hp: 420,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        let max_before = state.camp.max_unlocked_rank;
+        let kills = drain_dead_enemies(&mut state);
+        apply_kills(&mut state, kills);
+
+        assert!(state.dawn_reached_this_vigil);
+        assert_eq!(state.camp.max_unlocked_rank, max_before + 1, "Dawnで次のランクが解放されるはず");
+        assert_eq!(state.dawn_count, 1);
+    }
+
+    #[test]
+    fn dawn_does_not_trigger_twice_in_the_same_vigil() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.wave = milestone_wave(state.rank);
+        state.dawn_reached_this_vigil = true;
+        let max_before = state.camp.max_unlocked_rank;
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::FullMoonBoss,
+            x: state.lantern.x,
+            y: 50.0,
+            hp: 0,
+            max_hp: 420,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        let kills = drain_dead_enemies(&mut state);
+        apply_kills(&mut state, kills);
+        assert_eq!(state.camp.max_unlocked_rank, max_before, "同じ夜番で二重にDawnが確定してはいけない");
+    }
+
+    #[test]
+    fn defeating_a_non_finale_boss_does_not_trigger_dawn() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.wave = 5; // ランク1の最終波(15)ではない通常チェックポイント。
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Boss,
+            x: state.lantern.x,
+            y: 50.0,
+            hp: 0,
+            max_hp: 320,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        let max_before = state.camp.max_unlocked_rank;
+        let kills = drain_dead_enemies(&mut state);
+        apply_kills(&mut state, kills);
+        assert_eq!(state.camp.max_unlocked_rank, max_before, "通常チェックポイントのボスではDawnしないはず");
+        assert!(!state.dawn_reached_this_vigil);
+    }
+
+    // ── 新しい敵種 ───────────────────────────────────────────────────
+
+    #[test]
+    fn shielded_enemy_takes_reduced_damage_from_non_weak_weapons() {
+        let full = effective_damage_against(10, WeaponKind::Aurora, EnemyKind::Shielded);
+        let weak = effective_damage_against(10, SHIELD_WEAK_TO, EnemyKind::Shielded);
+        assert!(full < 10, "弱点以外の武器はダメージが軽減されるはず");
+        assert_eq!(weak, 10, "弱点武器は軽減されないはず");
+    }
+
+    #[test]
+    fn shielded_damage_reduction_does_not_apply_to_other_enemies() {
+        assert_eq!(effective_damage_against(10, WeaponKind::Aurora, EnemyKind::Wisp), 10);
+    }
+
+    #[test]
+    fn sniper_stops_advancing_once_it_reaches_the_stop_line() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Sniper,
+            x: state.lantern.x,
+            y: SNIPER_STOP_Y - 0.1,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        move_enemies(&mut state);
+        assert!(state.enemies[0].y >= SNIPER_STOP_Y, "停止線を越えたら以後は静止するはず");
+        let y_after_stop = state.enemies[0].y;
+        move_enemies(&mut state);
+        assert_eq!(state.enemies[0].y, y_after_stop, "停止後はそれ以上進まないはず");
+    }
+
+    #[test]
+    fn sniper_charges_then_damages_lantern_when_sharing_its_lane() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let lane_x = state.lantern.x;
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Sniper,
+            x: lane_x,
+            y: SNIPER_STOP_Y,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        let light_before = state.lantern.light;
+        for _ in 0..=SNIPER_CHARGE_TICKS {
+            resolve_ranged_attacks(&mut state);
+        }
+        assert!(state.lantern.light < light_before, "同じレーンにいれば構え完了で被弾するはず");
+    }
+
+    #[test]
+    fn sniper_misses_when_lantern_is_in_a_different_lane() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Sniper,
+            x: 0.0,
+            y: SNIPER_STOP_Y,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        set_lantern_target_lane(&mut state, COLUMNS - 1);
+        for _ in 0..40 {
+            move_lantern(&mut state);
+        }
+        let light_before = state.lantern.light;
+        for _ in 0..=SNIPER_CHARGE_TICKS {
+            resolve_ranged_attacks(&mut state);
+        }
+        assert_eq!(state.lantern.light, light_before, "別レーンにいれば被弾しないはず");
+    }
+
+    #[test]
+    fn splitter_death_spawns_two_swarmlings_that_do_not_split_further() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Splitter,
+            x: state.lantern.x,
+            y: 50.0,
+            hp: 0,
+            max_hp: 14,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        let kills = drain_dead_enemies(&mut state);
+        apply_kills(&mut state, kills);
+        assert_eq!(state.enemies.len(), 2, "分裂体の死亡で子が2体湧くはず");
+        assert!(state.enemies.iter().all(|e| e.kind == EnemyKind::Swarmling), "子は羽虫として湧くはず");
+
+        // 子 (Swarmling) を倒しても、さらに分裂体の子は湧かない。
+        for e in state.enemies.iter_mut() {
+            e.hp = 0;
+        }
+        let kills = drain_dead_enemies(&mut state);
+        apply_kills(&mut state, kills);
+        assert!(state.enemies.is_empty(), "羽虫はさらに分裂しないはず");
+    }
+
+    // ── ボスの構え中攻撃 ───────────────────────────────────────────────
+
+    #[test]
+    fn shadow_witch_telegraph_threatens_two_lanes_simultaneously() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::ShadowWitch,
+            x: state.lantern.x,
+            y: 50.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        state.elapsed_ticks = boss_attack_period_ticks(state.rank);
+        resolve_boss_telegraph(&mut state);
+        let telegraph = state.boss_telegraph.as_ref().expect("影の魔女は構えを取るはず");
+        assert_eq!(telegraph.lane_xs.len(), 2, "影の魔女は2レーン同時に警告するはず");
+    }
+
+    #[test]
+    fn serpent_telegraph_lane_moves_while_warning() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Serpent,
+            x: state.lantern.x,
+            y: 50.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        state.elapsed_ticks = boss_attack_period_ticks(state.rank);
+        resolve_boss_telegraph(&mut state);
+        let start_x = state.boss_telegraph.as_ref().unwrap().lane_xs[0];
+        for _ in 0..SWEEP_STEP_TICKS {
+            resolve_boss_telegraph(&mut state);
+        }
+        let moved_x = state.boss_telegraph.as_ref().expect("構え中のはず").lane_xs[0];
+        assert_ne!(start_x, moved_x, "大蛇の警告レーンは構え中に移動するはず");
+    }
+
+    #[test]
+    fn regular_spawn_table_gates_new_enemy_kinds_by_wave() {
+        let early = regular_spawn_table(1);
+        assert!(!early.iter().any(|&(k, _)| k == EnemyKind::Sniper), "第1波では狙撃者はまだ出ないはず");
+        assert!(!early.iter().any(|&(k, _)| k == EnemyKind::Shielded), "第1波では甲殻兵はまだ出ないはず");
+        assert!(!early.iter().any(|&(k, _)| k == EnemyKind::Splitter), "第1波では分裂体はまだ出ないはず");
+
+        let late = regular_spawn_table(20);
+        assert!(late.iter().any(|&(k, _)| k == EnemyKind::Sniper), "第20波では狙撃者が出るはず");
+        assert!(late.iter().any(|&(k, _)| k == EnemyKind::Shielded), "第20波では甲殻兵が出るはず");
+        assert!(late.iter().any(|&(k, _)| k == EnemyKind::Splitter), "第20波では分裂体が出るはず");
+    }
+
+    #[test]
+    fn boss_telegraph_damage_and_period_scale_with_rank() {
+        assert!(boss_telegraph_damage(2) > boss_telegraph_damage(1), "高ランクほど一撃が重くなるはず");
+        assert!(boss_attack_period_ticks(2) < boss_attack_period_ticks(1), "高ランクほど攻撃間隔は短くなるはず");
     }
 }

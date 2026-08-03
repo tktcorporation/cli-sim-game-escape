@@ -56,6 +56,19 @@ pub enum EnemyKind {
     Swarmling,
     Elite,
     Boss,
+    /// 狙撃者 (第6波〜)。`SNIPER_STOP_Y` まで進むと停止し、以降は接近せず
+    /// 灯のレーンへ遠隔攻撃を構える (`logic::resolve_ranged_attacks`)。
+    Sniper,
+    /// 甲殻兵 (第11波〜)。`SHIELD_WEAK_TO` 以外の武器のダメージを軽減する。
+    Shielded,
+    /// 分裂体 (第16波〜)。撃破すると `Swarmling` 2体を残して散る。
+    Splitter,
+    /// 影の魔女 (第10波枠のボス)。灯のレーンと隣接レーンを同時に構える。
+    ShadowWitch,
+    /// 大蛇 (第15波枠以降のボス)。警告のレーンが構え中に横へ移動する。
+    Serpent,
+    /// 満月の魔王 (夜のマイルストーン最終ボス)。撃破すると Dawn を達成する。
+    FullMoonBoss,
 }
 
 impl EnemyKind {
@@ -66,6 +79,12 @@ impl EnemyKind {
             EnemyKind::Swarmling => "羽虫",
             EnemyKind::Elite => "精鬼",
             EnemyKind::Boss => "魔王",
+            EnemyKind::Sniper => "狙撃者",
+            EnemyKind::Shielded => "甲殻兵",
+            EnemyKind::Splitter => "分裂体",
+            EnemyKind::ShadowWitch => "影の魔女",
+            EnemyKind::Serpent => "大蛇",
+            EnemyKind::FullMoonBoss => "満月の魔王",
         }
     }
 
@@ -76,6 +95,12 @@ impl EnemyKind {
             EnemyKind::Swarmling => 3,
             EnemyKind::Elite => 55,
             EnemyKind::Boss => 320,
+            EnemyKind::Sniper => 18,
+            EnemyKind::Shielded => 40,
+            EnemyKind::Splitter => 14,
+            EnemyKind::ShadowWitch => 280,
+            EnemyKind::Serpent => 300,
+            EnemyKind::FullMoonBoss => 420,
         }
     }
 
@@ -87,6 +112,12 @@ impl EnemyKind {
             EnemyKind::Swarmling => 2.0,
             EnemyKind::Elite => 1.1,
             EnemyKind::Boss => 0.55,
+            EnemyKind::Sniper => 1.2,
+            EnemyKind::Shielded => 0.8,
+            EnemyKind::Splitter => 1.4,
+            EnemyKind::ShadowWitch => 0.6,
+            EnemyKind::Serpent => 0.65,
+            EnemyKind::FullMoonBoss => 0.5,
         }
     }
 
@@ -98,6 +129,12 @@ impl EnemyKind {
             EnemyKind::Swarmling => 1,
             EnemyKind::Elite => 11,
             EnemyKind::Boss => 22,
+            EnemyKind::Sniper => 4,
+            EnemyKind::Shielded => 8,
+            EnemyKind::Splitter => 3,
+            EnemyKind::ShadowWitch => 18,
+            EnemyKind::Serpent => 20,
+            EnemyKind::FullMoonBoss => 26,
         }
     }
 
@@ -108,6 +145,12 @@ impl EnemyKind {
             EnemyKind::Swarmling => 1,
             EnemyKind::Elite => 12,
             EnemyKind::Boss => 80,
+            EnemyKind::Sniper => 4,
+            EnemyKind::Shielded => 6,
+            EnemyKind::Splitter => 2,
+            EnemyKind::ShadowWitch => 70,
+            EnemyKind::Serpent => 75,
+            EnemyKind::FullMoonBoss => 110,
         }
     }
 
@@ -119,16 +162,34 @@ impl EnemyKind {
             EnemyKind::Swarmling => 1.6,
             EnemyKind::Elite => 3.8,
             EnemyKind::Boss => 6.5,
+            EnemyKind::Sniper => 2.4,
+            EnemyKind::Shielded => 3.4,
+            EnemyKind::Splitter => 2.0,
+            EnemyKind::ShadowWitch => 6.0,
+            EnemyKind::Serpent => 6.2,
+            EnemyKind::FullMoonBoss => 7.0,
         }
     }
 
     pub fn drops_chest(self) -> bool {
-        matches!(self, EnemyKind::Elite | EnemyKind::Boss)
+        matches!(
+            self,
+            EnemyKind::Elite
+                | EnemyKind::Boss
+                | EnemyKind::ShadowWitch
+                | EnemyKind::Serpent
+                | EnemyKind::FullMoonBoss
+        )
     }
 
     /// 灯のレーンへ少しずつ寄ってくるか。
     pub fn homes(self) -> bool {
-        matches!(self, EnemyKind::Husk | EnemyKind::Boss)
+        matches!(self, EnemyKind::Husk | EnemyKind::Boss | EnemyKind::ShadowWitch | EnemyKind::FullMoonBoss)
+    }
+
+    /// ボス級 (夜番のwave帯チェックポイントで単体湧きする個体) かどうか。
+    pub fn is_boss(self) -> bool {
+        matches!(self, EnemyKind::Boss | EnemyKind::ShadowWitch | EnemyKind::Serpent | EnemyKind::FullMoonBoss)
     }
 
     pub fn color(self) -> Color {
@@ -138,6 +199,14 @@ impl EnemyKind {
             EnemyKind::Swarmling => Color::LightYellow,
             EnemyKind::Elite => Color::LightMagenta,
             EnemyKind::Boss => Color::Red,
+            EnemyKind::Sniper => Color::LightRed,
+            // 光弾 (Bolt) と同じ色 — 弱点武器のヒントを、進化レシピと同じ
+            // 「色を揃える」作法で示す (`SHIELD_WEAK_TO` 参照)。
+            EnemyKind::Shielded => Color::LightCyan,
+            EnemyKind::Splitter => Color::LightGreen,
+            EnemyKind::ShadowWitch => Color::Magenta,
+            EnemyKind::Serpent => Color::Green,
+            EnemyKind::FullMoonBoss => Color::White,
         }
     }
 }
@@ -153,6 +222,10 @@ pub struct Enemy {
     pub hp: i32,
     pub max_hp: i32,
     pub hurt_flash: FlashTimer,
+    /// 狙撃者 (`EnemyKind::Sniper`) 専用: 次の遠隔攻撃着弾までの残りtick。
+    /// 他の敵種は常に `None` のまま使わない (敵種ごとに専用フィールドを
+    /// 増やすより、汎用の1フィールドに寄せて `Enemy` リテラルの増殖を防ぐ)。
+    pub ranged_charge: Option<u32>,
 }
 
 // ── 弾 ─────────────────────────────────────────────────────────
@@ -435,6 +508,10 @@ pub struct Projectile {
     pub pierce_remaining: u32,
     pub radius: f64,
     pub color: Color,
+    /// どの武器から発射されたか。`color` は描画のグループ分けが主目的
+    /// (`WeaponKind::color()` と1対1対応はしているが弱い結びつき) なので、
+    /// 甲殻兵の弱点判定など純粋にロジックで武器種を要る場面はこちらを見る。
+    pub source: WeaponKind,
     /// これまでに命中した敵のid一覧。合算当たり半径 (最大16.2、魔王×弾)
     /// が1tickの移動距離 (9) より大きいと、貫通弾が複数tickにわたって
     /// 同じ大型の敵の当たり判定内に留まり続けることがある。移動経路の
@@ -495,9 +572,11 @@ impl Lantern {
 
 // ── 拠点の恒久強化 ─────────────────────────────────────────────
 
-/// 拠点で残光 (Ember) を払って購入する恒久強化。灯が消えても/リロードしても
-/// リセットされない。
-#[derive(Clone, Debug, Default)]
+/// 拠点で積み上がる恒久進行。灯が消えても/リロードしてもリセットされない。
+/// 残光で購入する強化 (`light_level`/`power_level`/`extra_slot_level`) と、
+/// 夜番を「Dawn」まで走り切ることで解放される `max_unlocked_rank` の
+/// 2系統を持つ。
+#[derive(Clone, Debug)]
 pub struct CampUpgrades {
     pub light_level: u32,
     pub power_level: u32,
@@ -506,10 +585,28 @@ pub struct CampUpgrades {
     /// 拡張不要 — 受動効果は5種あるため、これを買わない限り1種は
     /// 必ず持てないままになる (5種全ての進化レシピを狙う動機になる)。
     pub extra_slot_level: u32,
+    /// 挑戦を許された最大の夜番ランク。常に1以上 (ランク1は最初から
+    /// 挑戦可能)。現在のランクの最終波 (`milestone_wave`) のボスを倒すと
+    /// `rank + 1` に更新される。
+    pub max_unlocked_rank: u32,
+    /// 拠点で選択中の挑戦ランク。1..=max_unlocked_rank にクランプする。
+    pub selected_rank: u32,
+}
+
+impl Default for CampUpgrades {
+    fn default() -> Self {
+        Self { light_level: 0, power_level: 0, extra_slot_level: 0, max_unlocked_rank: 1, selected_rank: 1 }
+    }
 }
 
 impl CampUpgrades {
     pub const EXTRA_SLOT_COST: u32 = 60;
+
+    /// `selected_rank` を範囲内に補正した値。保存データの破損や
+    /// 手動編集で範囲外になっていても安全に読めるようにする。
+    pub fn effective_selected_rank(&self) -> u32 {
+        self.selected_rank.clamp(1, self.max_unlocked_rank.max(1))
+    }
 
     pub fn light_cost(&self) -> u32 {
         8 + self.light_level * 6
@@ -544,6 +641,22 @@ impl CampUpgrades {
     }
 }
 
+// ── ボスの構え中攻撃 ───────────────────────────────────────────────
+
+/// ボスの構え中攻撃 (`logic::resolve_boss_telegraph`) の状態。`lane_xs` は
+/// 警告中のレーン中心x座標一覧 — 1個で足りるボスもいれば、影の魔女/
+/// 満月の魔王のように2レーン同時に警告するボスもいる。
+#[derive(Clone, Debug)]
+pub struct BossTelegraph {
+    /// ログ文言 ("〇〇の一撃で…") にボス名を出すために持つ。
+    pub kind: EnemyKind,
+    pub lane_xs: Vec<f64>,
+    pub ticks_left: u32,
+    /// 大蛇の特殊技: 構え中に `lane_xs[0]` が横へ移動する場合の方向
+    /// (+1/-1)。他のボスは常に `None`。
+    pub sweep_direction: Option<i32>,
+}
+
 // ── フェーズ ────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -575,7 +688,14 @@ pub struct EverlightState {
     /// 同一tickに複数の宝箱を取った時、現在のモーダルが閉じた後に
     /// 続けて開くべきレベルアップモーダルの残数。
     pub queued_boon_rolls: u32,
-    pub boss_telegraph: Option<(f64, u32)>,
+    pub boss_telegraph: Option<BossTelegraph>,
+    /// この夜番で挑んでいるランク。拠点の `camp.selected_rank` を
+    /// `start_vigil` 時点でコピーする (夜番中にランク選択を変えても
+    /// 進行中の夜番には影響しない)。
+    pub rank: u32,
+    /// 現在のランクのマイルストーン波 (`logic::milestone_wave`) を
+    /// この夜番で既に達成したか。
+    pub dawn_reached_this_vigil: bool,
 
     // ── 演出用の単調増加カウンタ・一時表示 ──
     //
@@ -591,6 +711,9 @@ pub struct EverlightState {
     pub breach_count: u32,
     pub chest_caught_count: u32,
     pub boss_spawn_count: u32,
+    /// Dawn (夜のマイルストーン達成) を迎えた回数。他の演出用カウンタと
+    /// 同じ理由で `start_vigil` でリセットしない。
+    pub dawn_count: u32,
     /// 灯がダメージを受けた回数 (漏れ・ボスの一撃どちらも含む)。
     pub light_hit_count: u32,
     pub last_light_damage: Option<(i32, u32)>,
@@ -645,11 +768,14 @@ impl EverlightState {
             pending_boons: None,
             queued_boon_rolls: 0,
             boss_telegraph: None,
+            rank: camp.effective_selected_rank(),
+            dawn_reached_this_vigil: false,
             rng_state: 0x9E37_79B9,
             kill_count: 0,
             breach_count: 0,
             chest_caught_count: 0,
             boss_spawn_count: 0,
+            dawn_count: 0,
             light_hit_count: 0,
             last_light_damage: None,
             lantern_hurt_flash: FlashTimer::new(),

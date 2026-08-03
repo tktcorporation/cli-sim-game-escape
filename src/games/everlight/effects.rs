@@ -62,6 +62,14 @@ impl EverlightEffects {
         self.host.push(effect, battlefield);
     }
 
+    /// Dawn (夜のマイルストーン最終ボス撃破) を達成した瞬間。他の演出より
+    /// 長く・画面全体に金色のsweepをかけて「大きな節目」だと分からせる。
+    pub fn push_dawn(&mut self, area: Rect) {
+        let preset = theme::ACHIEVEMENT_FLASH;
+        let effect = fx::sweep_in(Motion::UpToDown, 14, 4, preset.color, Duration::from_millis(900));
+        self.host.push(effect, area);
+    }
+
     /// 夜番が終わった瞬間 (灯が消えた/自ら撤退した)。
     pub fn push_vigil_end(&mut self, area: Rect) {
         let preset = theme::SETBACK_FLASH;

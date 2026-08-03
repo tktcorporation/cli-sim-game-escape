@@ -43,6 +43,10 @@ struct GameSave {
     power_level: u32,
     extra_slot_level: u32,
     rng_state: u32,
+    /// 挑戦を許された最大の夜番ランク。旧セーブ (フィールド無し) は
+    /// serdeのデフォルト(0)で読み込まれるが、`apply_save` 側で1未満を
+    /// 1へ補正する (ランク1は常に挑戦可能なため)。
+    max_unlocked_rank: u32,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -57,6 +61,7 @@ fn extract_save(state: &EverlightState) -> SaveData {
             power_level: state.camp.power_level,
             extra_slot_level: state.camp.extra_slot_level,
             rng_state: state.rng_state,
+            max_unlocked_rank: state.camp.max_unlocked_rank,
         },
     }
 }
@@ -70,6 +75,8 @@ fn apply_save(state: &mut EverlightState, save: &GameSave) {
         light_level: save.light_level,
         power_level: save.power_level,
         extra_slot_level: save.extra_slot_level,
+        max_unlocked_rank: save.max_unlocked_rank.max(1),
+        selected_rank: 1,
     };
     // 0 は rng_next 側で固定値に補正されるだけなので、未保存(旧セーブ)の
     // 0 をそのまま許容してよい。
@@ -155,6 +162,7 @@ mod tests {
         original.camp.light_level = 2;
         original.camp.power_level = 1;
         original.camp.extra_slot_level = 1;
+        original.camp.max_unlocked_rank = 3;
         original.rng_state = 999_999;
 
         let save = extract_save(&original);
@@ -171,6 +179,7 @@ mod tests {
         assert_eq!(restored.camp.light_level, 2);
         assert_eq!(restored.camp.power_level, 1);
         assert_eq!(restored.camp.extra_slot_level, 1);
+        assert_eq!(restored.camp.max_unlocked_rank, 3, "解放済みランクも保存/復元されるはず");
         assert_eq!(restored.lantern.light_max, restored.camp.light_max());
         assert_eq!(
             restored.rng_state, 999_999,
@@ -211,5 +220,9 @@ mod tests {
         assert_eq!(restored.ember, 10);
         assert_eq!(restored.best_wave, 2);
         assert_eq!(restored.camp.light_level, 0);
+        assert_eq!(
+            restored.camp.max_unlocked_rank, 1,
+            "旧セーブにmax_unlocked_rankが無くてもランク1は挑戦可能でなければならない"
+        );
     }
 }
