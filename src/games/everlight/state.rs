@@ -609,6 +609,12 @@ pub struct EverlightState {
     /// だけでは、敵がいないレーンを薙いでも何も表示されず「発火しているのに
     /// 何も起きていないように見える」体感になってしまうため。
     pub aurora_flash: FlashTimer,
+    /// `aurora_flash` を立てた瞬間の判定位置 (`apply_aurora_hit` に渡された
+    /// `lantern_x`) のスナップショット。render.rsは薙ぎ払い帯をこの位置から
+    /// 描く — もし代わりに現在の `lantern.x` を使うと、フレーム落ち後の
+    /// まとめtick処理で灯が複数レーン分動いた後にまとめて1回だけrender
+    /// された場合、実際に判定した位置とは違うレーンに帯が表示されてしまう。
+    pub aurora_flash_x: f64,
     /// 光輪がダメージ判定を行った瞬間に立てる (`fire_halo` の間隔ゲート通過時)。
     /// render.rs は常時光輪の周回リングを描くが、これが有効な間はリング全体を
     /// 明るくして「今まさに判定した」パルスを重ねる。
@@ -672,6 +678,7 @@ impl EverlightState {
             last_light_damage: None,
             lantern_hurt_flash: FlashTimer::new(),
             aurora_flash: FlashTimer::new(),
+            aurora_flash_x: lane_center_x(COLUMNS / 2),
             halo_flash: FlashTimer::new(),
             ember: 0,
             camp,

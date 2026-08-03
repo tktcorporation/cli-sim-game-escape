@@ -446,7 +446,12 @@ fn fire_weapons(state: &mut EverlightState, damage_mult: f64) {
 /// `width_mult` は進化 (`OwnedWeapon::aurora_width_mult`) で広がる判定幅。
 fn apply_aurora_hit(state: &mut EverlightState, lantern_x: f64, damage: i32, width_mult: f64) {
     // 命中の有無に関わらず、発火した事実そのものをrender.rsに伝える。
+    // 位置は現在の`state.lantern.x`ではなく、実際に判定に使ったこの
+    // `lantern_x` をスナップショットする — まとめtick処理中に灯が移動した
+    // 後にまとめて1回だけrenderされると、現在位置は実際に判定したレーンと
+    // ズレてしまうため。
     state.aurora_flash.trigger(AURORA_FLASH_TICKS);
+    state.aurora_flash_x = lantern_x;
     let half_width = LANE_HALF_WIDTH * width_mult;
     for enemy in state.enemies.iter_mut() {
         if (enemy.x - lantern_x).abs() <= half_width {
@@ -1150,6 +1155,29 @@ mod tests {
         assert!(
             state.halo_flash.is_active(),
             "5tickまとめ処理の先頭で発火しても、バッチ終了時点でまだフラッシュが有効なはず"
+        );
+    }
+
+    #[test]
+    fn aurora_flash_x_snapshots_firing_position_not_current_lantern_position() {
+        // render.rsは薙ぎ払い帯を`aurora_flash_x`から描く。もし代わりに
+        // `state.lantern.x`(現在位置)を使うと、まとめtick処理中に灯が
+        // 動いた後にまとめて1回だけrenderされた場合、実際に判定した
+        // レーンとは違う位置に帯が表示されてしまう (発火直後に灯だけを
+        // 動かして再現する)。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon { kind: WeaponKind::Aurora, level: 1, cooldown_remaining: 0, evolved: false });
+        let fired_at_x = state.lantern.x;
+
+        fire_weapons(&mut state, 1.0);
+        assert_eq!(state.aurora_flash_x, fired_at_x);
+
+        state.lantern.x = fired_at_x + 30.0;
+        assert_eq!(
+            state.aurora_flash_x, fired_at_x,
+            "aurora_flash_x は発火時点の位置を保持し続けるはず (現在位置に追従しない)"
         );
     }
 

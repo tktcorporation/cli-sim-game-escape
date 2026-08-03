@@ -239,14 +239,17 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
     // 命中の有無によらず発火した帯を一瞬描かないと「取っても強化しても
     // 何も起きていないように見える」演出の空白になる。`aurora_flash` が
     // 立っている間だけ、現在の判定幅 (`aurora_width_mult`) そのままの帯を描く。
+    // 帯の中心は現在の`state.lantern.x`ではなく`aurora_flash_x`(発火時に
+    // 実際に判定した位置のスナップショット)を使う — 現在位置だと、発火後に
+    // 灯が動いた分だけ実際に判定したレーンとズレて表示されてしまう。
     let aurora_band_pts: Vec<(f64, f64)> = if state.aurora_flash.is_active() {
         state
             .loadout
             .weapon(WeaponKind::Aurora)
             .map(|w| {
                 let half_width = LANE_HALF_WIDTH * w.aurora_width_mult();
-                let x0 = state.lantern.x - half_width;
-                let x1 = state.lantern.x + half_width;
+                let x0 = state.aurora_flash_x - half_width;
+                let x1 = state.aurora_flash_x + half_width;
                 canvas_fx::filled_rect_points(x0, SPAWN_Y, x1, BREACH_Y, 3.0)
                     .into_iter()
                     .map(|(x, y)| (x, world_to_canvas_y(y)))
