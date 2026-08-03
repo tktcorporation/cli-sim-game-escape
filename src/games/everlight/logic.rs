@@ -209,7 +209,10 @@ fn spawn_enemy_at(state: &mut EverlightState, kind: EnemyKind, lane: usize) -> b
     }
     let diff = wave_difficulty(state.wave);
     let hp = (kind.base_hp() as f64 * diff).round() as i32;
+    let id = state.next_enemy_id;
+    state.next_enemy_id += 1;
     state.enemies.push(Enemy {
+        id,
         kind,
         x: super::state::lane_center_x(lane),
         y: SPAWN_Y,
@@ -353,6 +356,7 @@ fn make_projectile(x: f64, damage: i32, pierce: u32, vx: f64, vy: f64, color: Co
         pierce_remaining: pierce.saturating_sub(1),
         radius: 1.6,
         color,
+        hit_enemy_ids: Vec::new(),
     }
 }
 
@@ -496,7 +500,7 @@ fn move_and_resolve_projectiles(state: &mut EverlightState) {
 
         let mut consumed = false;
         for enemy in state.enemies.iter_mut() {
-            if enemy.hp <= 0 {
+            if enemy.hp <= 0 || proj.hit_enemy_ids.contains(&enemy.id) {
                 continue;
             }
             let hit_dist = enemy.kind.radius() + proj.radius;
@@ -505,6 +509,7 @@ fn move_and_resolve_projectiles(state: &mut EverlightState) {
             }
             enemy.hp -= proj.damage;
             enemy.hurt_flash.trigger(3);
+            proj.hit_enemy_ids.push(enemy.id);
             if proj.pierce_remaining == 0 {
                 consumed = true;
             } else {
@@ -513,6 +518,10 @@ fn move_and_resolve_projectiles(state: &mut EverlightState) {
             // 貫通弾でも1tickにつき命中は1体まで — スタックした敵の
             // 束を一瞬で焼き払わないための意図的な制限 (残りの敵には
             // 次tickの移動後に改めて命中判定される)。
+            // なお同じ敵への命中は `hit_enemy_ids` で恒久的に除外する —
+            // 合算当たり半径 (最大16.2) が1tickの移動距離 (9) を超える
+            // 大型の敵 (魔王等) では、複数tickにわたって当たり判定内に
+            // 留まり続けることがあり、これが無いと貫通を1体に無駄遣いする。
             break;
         }
         if !consumed && is_in_bounds(&proj) {
@@ -613,10 +622,16 @@ fn roll_boon_options(state: &mut EverlightState) -> [BoonOption; 3] {
     // 常に効果のある回復/残光で埋め、モーダルが必ず3枠揃うようにする。
     // (かつて「威力」レベルアップで埋めていたが、既にLvMAXなら選んでも
     // 何も起きない「空洞の選択肢」になってしまっていた)
-    const FALLBACK: [BoonKind; 2] = [BoonKind::InstantHeal, BoonKind::EmberWindfall];
+    // 灯が満タンの時は InstantHeal 自体が空洞化する (回復量が0になる) ので
+    // 候補から外し、常に効果のある EmberWindfall だけで埋める。
+    let fallback: &[BoonKind] = if state.lantern.light < state.lantern.light_max {
+        &[BoonKind::InstantHeal, BoonKind::EmberWindfall]
+    } else {
+        &[BoonKind::EmberWindfall]
+    };
     let mut fallback_idx = 0usize;
     while chosen.len() < 3 {
-        chosen.push(BoonOption { kind: FALLBACK[fallback_idx % FALLBACK.len()] });
+        chosen.push(BoonOption { kind: fallback[fallback_idx % fallback.len()] });
         fallback_idx += 1;
     }
     [chosen[0], chosen[1], chosen[2]]
@@ -797,6 +812,7 @@ pub fn start_vigil(state: &mut EverlightState) {
     state.elapsed_ticks = 0;
     state.spawn_progress = 0;
     state.elite_progress = 0;
+    state.next_enemy_id = 0;
     state.boss_spawned_this_wave = false;
     state.halo_tick = 0;
     state.pending_boons = None;
@@ -872,6 +888,7 @@ mod tests {
         let mut state = EverlightState::new();
         start_vigil(&mut state);
         state.enemies.push(Enemy {
+            id: 1,
             kind: EnemyKind::Wisp,
             x: state.lantern.x,
             y: BREACH_Y,
@@ -905,6 +922,7 @@ mod tests {
         state.wave = BOSS_EVERY_N_WAVES;
         for _ in 0..MAX_ENEMIES_ON_FIELD {
             state.enemies.push(Enemy {
+                id: 2,
                 kind: EnemyKind::Wisp,
                 x: 0.0,
                 y: 0.0,
@@ -955,6 +973,7 @@ mod tests {
         let mut state = EverlightState::new();
         start_vigil(&mut state);
         state.enemies.push(Enemy {
+            id: 3,
             kind: EnemyKind::Wisp,
             x: state.lantern.x,
             y: BREACH_Y,
@@ -974,6 +993,7 @@ mod tests {
         let mut state = EverlightState::new();
         start_vigil(&mut state);
         state.enemies.push(Enemy {
+            id: 4,
             kind: EnemyKind::Wisp,
             x: state.lantern.x,
             y: LANTERN_Y - 5.0,
@@ -1000,6 +1020,7 @@ mod tests {
         start_vigil(&mut state);
         let x = state.lantern.x;
         state.enemies.push(Enemy {
+            id: 5,
             kind: EnemyKind::Wisp,
             x,
             y: 5.5, // 弾の始点(10.0)と終点(1.0)のちょうど中間
@@ -1016,6 +1037,39 @@ mod tests {
             state.enemies[0].hp,
             999 - 10,
             "始点・終点だけでなく移動経路全体で命中判定されるはず (すり抜け防止)"
+        );
+    }
+
+    #[test]
+    fn piercing_shot_does_not_repeatedly_hit_the_same_large_enemy_across_ticks() {
+        // 魔王 (半径6.5) + 弾 (半径1.6) の合算当たり半径8.1は、弾の
+        // 1tick移動距離9とほぼ同じ — 弾は複数tickにわたって魔王の当たり
+        // 判定内に留まり得る。スイープ判定は各tick独立なので、履歴が無いと
+        // 同じ魔王に毎tick命中し続けて貫通を無駄遣いしてしまう。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let x = state.lantern.x;
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Boss,
+            x,
+            y: 0.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+        });
+        let mut proj = make_projectile(x, 10, 2, 0.0, -9.0, Color::White);
+        proj.y = 10.0;
+        state.projectiles.push(proj);
+
+        move_and_resolve_projectiles(&mut state);
+        let hp_after_first_hit = state.enemies[0].hp;
+        assert_eq!(hp_after_first_hit, 999 - 10, "1回目は命中するはず");
+
+        move_and_resolve_projectiles(&mut state);
+        assert_eq!(
+            state.enemies[0].hp, hp_after_first_hit,
+            "同じ弾が同じ敵に連続してもう一度命中してはいけない"
         );
     }
 
@@ -1157,6 +1211,7 @@ mod tests {
         start_vigil(&mut state);
         state.lantern.light = 1;
         state.enemies.push(Enemy {
+            id: 6,
             kind: EnemyKind::Boss,
             x: state.lantern.x,
             y: BREACH_Y,
@@ -1179,6 +1234,7 @@ mod tests {
         start_vigil(&mut state);
         state.lantern.light = 1;
         state.enemies.push(Enemy {
+            id: 7,
             kind: EnemyKind::Boss,
             x: state.lantern.x,
             y: BREACH_Y,
@@ -1202,6 +1258,7 @@ mod tests {
         let mut same_lane = EverlightState::new();
         start_vigil(&mut same_lane);
         same_lane.enemies.push(Enemy {
+            id: 8,
             kind: EnemyKind::Husk,
             x: same_lane.lantern.x,
             y: BREACH_Y,
@@ -1216,6 +1273,7 @@ mod tests {
         let mut other_lane = EverlightState::new();
         start_vigil(&mut other_lane);
         other_lane.enemies.push(Enemy {
+            id: 9,
             kind: EnemyKind::Husk,
             x: (other_lane.lantern.x + WORLD_W / 2.0) % WORLD_W,
             y: BREACH_Y,
@@ -1328,6 +1386,39 @@ mod tests {
         assert!(
             state.lantern.light > light_before || state.ember > ember_before,
             "全て上限に達していても埋め草の選択肢は何かしら実際の効果を持つはず"
+        );
+    }
+
+    #[test]
+    fn fallback_boons_are_all_effective_when_light_is_already_full() {
+        // 装備・受動効果を全て上限まで積み、かつ灯が満タンの状態を作る。
+        // 灯が満タンだとInstantHealは回復量0の空洞な選択肢になるため、
+        // 埋め草からは除外され、常に効果のあるEmberWindfallだけで
+        // 3枠とも埋まるはず。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        for &kind in WeaponKind::all() {
+            let mut w = OwnedWeapon::new(kind);
+            w.level = MAX_LEVEL;
+            w.evolved = true;
+            state.loadout.weapons.push(w);
+        }
+        state.loadout.passives.clear();
+        for &kind in PassiveKind::all() {
+            state.loadout.passives.push(OwnedPassive { kind, level: MAX_LEVEL });
+        }
+        assert_eq!(state.lantern.light, state.lantern.light_max, "灯は満タンのままのはず");
+
+        let options = roll_boon_options(&mut state);
+        let ember_before = state.ember;
+        for opt in options {
+            apply_boon(&mut state, opt.kind);
+        }
+        assert_eq!(
+            state.ember,
+            ember_before + EMBER_WINDFALL_AMOUNT * 3,
+            "灯が満タンの時は3枠とも効果のある残光獲得で埋まるはず"
         );
     }
 }

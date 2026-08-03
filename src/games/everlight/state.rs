@@ -144,6 +144,9 @@ impl EnemyKind {
 
 #[derive(Clone, Debug)]
 pub struct Enemy {
+    /// 貫通弾が「同じ相手に何度も当たった」かを判定するための識別子。
+    /// (座標や添字は敵の削除・移動で使い回されるため識別には使えない)
+    pub id: u32,
     pub kind: EnemyKind,
     pub x: f64,
     pub y: f64,
@@ -432,6 +435,13 @@ pub struct Projectile {
     pub pierce_remaining: u32,
     pub radius: f64,
     pub color: Color,
+    /// これまでに命中した敵のid一覧。合算当たり半径 (最大16.2、魔王×弾)
+    /// が1tickの移動距離 (9) より大きいと、貫通弾が複数tickにわたって
+    /// 同じ大型の敵の当たり判定内に留まり続けることがある。移動経路の
+    /// スイープ判定 (`segment_hits_circle`) は各tick独立に判定するため、
+    /// この履歴が無いと同じ相手へ毎tick命中し続けて貫通を無駄に消費して
+    /// しまう。
+    pub hit_enemy_ids: Vec<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -557,6 +567,8 @@ pub struct EverlightState {
     pub elapsed_ticks: u64,
     pub spawn_progress: u32,
     pub elite_progress: u32,
+    /// 次に湧く敵へ割り当てるid。`Enemy::id` 参照。
+    pub next_enemy_id: u32,
     pub boss_spawned_this_wave: bool,
     pub halo_tick: u32,
     pub pending_boons: Option<[BoonOption; 3]>,
@@ -631,6 +643,7 @@ impl EverlightState {
             elapsed_ticks: 0,
             spawn_progress: 0,
             elite_progress: 0,
+            next_enemy_id: 0,
             boss_spawned_this_wave: false,
             halo_tick: 0,
             pending_boons: None,

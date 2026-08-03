@@ -218,7 +218,11 @@ impl EverlightGame {
         if self.state.boss_spawn_count != prev.boss_spawn_count {
             effects.push_boss_appear(area);
         }
-        if self.state.wave != prev.wave {
+        // `!=` だと、夜番終了後 `start_vigil` が wave を1へ戻した時にも
+        // 「波が変わった」と誤検知して無関係な進行演出が出てしまう
+        // (wave は breach_count 等と違って表示上リセットが必要なので、
+        // 値を単調にする代わりにここで増加方向のみを見る)。
+        if self.state.wave > prev.wave {
             effects.push_wave_advance(header);
         }
         if prev.phase == Phase::Vigil && self.state.phase == Phase::Camp {
@@ -357,6 +361,27 @@ mod tests {
         assert!(
             game.effects.borrow().is_running(),
             "light_hit_count の増加でdetect_transitionsが演出を積むはず"
+        );
+    }
+
+    #[test]
+    fn detect_transitions_does_not_flash_when_wave_decreases() {
+        // waveは夜番終了→start_vigilで1に戻る (breach_count等と違って
+        // HUD表示のためにリセットが必要)。`!=` で比較すると、この減少も
+        // 「波が変わった」と誤検知して無関係な進行演出が誤発火してしまう。
+        let mut game = EverlightGame::new();
+        logic::start_vigil(&mut game.state);
+        game.state.wave = 5;
+        // detect_transitions経由だと1→5の増加そのもので演出を積んでしまうため、
+        // 演出を発火させずにprevスナップショットだけ5に合わせる。
+        game.prev.set(PrevSnapshot::capture(&game.state));
+        let area = Rect::new(0, 0, 40, 30);
+
+        game.state.wave = 1; // 夜番の再スタート等でwaveが減った状況を模す
+        game.detect_transitions(area);
+        assert!(
+            !game.effects.borrow().is_running(),
+            "waveが減った時に進行演出が誤発火してはいけない"
         );
     }
 
