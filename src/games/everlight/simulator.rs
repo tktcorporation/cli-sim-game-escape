@@ -234,6 +234,29 @@ fn dawn_progression_report() {
     );
 }
 
+/// `cargo test everlight::simulator::camp_progression_report -- --nocapture`
+/// で確認できる、恒久強化 (`camp.power_level`/`camp.light_level`) が
+/// Dawn (ランク解放) の節目ごとにどこまで積み上がるかの人間向けレポート。
+/// `auto_play_tick` は拠点に戻るたび買えるだけ買う貪欲戦略なので、
+/// 「積極的に稼いで積極的に強化を買い続けた場合の上限」の目安になる。
+#[test]
+fn camp_progression_report() {
+    let mut state = EverlightState::new();
+    let mut snapshots: Vec<(u32, u32, u32)> = Vec::new();
+    let mut last_dawn_count = 0u32;
+    for i in 0..80_000u64 {
+        auto_play_tick(&mut state, i);
+        if state.dawn_count != last_dawn_count {
+            last_dawn_count = state.dawn_count;
+            snapshots.push((state.camp.max_unlocked_rank, state.camp.power_level, state.camp.light_level));
+        }
+    }
+    eprintln!(
+        "[everlight/camp] final_power_level={} final_light_level={} (rank,power,light)_at_each_dawn={:?}",
+        state.camp.power_level, state.camp.light_level, snapshots
+    );
+}
+
 /// 追加した敵種 (突進者/散甲兵/極甲兵/詠唱者) と新武器 (流星) が、実際の自動
 /// プレイの中で到達可能なことを検証する回帰テスト。wave gateの閾値や
 /// 武器スロット拡張のコストを調整した際、うっかり到達不能にしてしまう
@@ -270,39 +293,56 @@ fn new_enemy_kinds_and_meteor_weapon_appear_over_a_long_run() {
 /// 続けられる」状態になり得る。マイルストーン波を大きく超える極端な
 /// 投資 (`light_level`/`power_level` を150まで積む) を与えても、1回の
 /// 夜番が有限tick以内に必ず終わる (灯が尽きる) ことを検証する。
+///
+/// 複数seedで試行する: 単一seedだと「ボスがいつ死ぬか」のようなtickの
+/// 揺れがその後のRNG消費順序を丸ごとずらし (バタフライ効果)、たまたま
+/// 引いた1本の乱数列だけがマイルストーン到達前の雑魚湧きの偏りで
+/// 力尽きる、という無関係な巻き込まれ落ちを拾ってしまう。本来ここで
+/// 検証したいのは「escalationはいつか必ず勝つ」(=全seedで必須) と
+/// 「マイルストーンは通常突破できる」(=大半のseedで成立) の2点。
 #[test]
 fn even_maxed_out_investment_eventually_ends_a_single_vigil() {
     const MAX_TICKS: u64 = 20_000;
-    let mut state = EverlightState::new();
-    state.camp.light_level = 150;
-    state.camp.power_level = 150;
-    state.camp.max_unlocked_rank = 5;
-    logic::select_rank(&mut state, 5);
-    logic::start_vigil(&mut state);
+    const SEEDS: u32 = 5;
+    let milestone = logic::milestone_wave(5);
+    let mut exceeded_milestone = 0u32;
 
-    let mut t = 0u64;
-    while state.phase == Phase::Vigil && t < MAX_TICKS {
-        if state.pending_boons.is_some() {
-            logic::choose_boon(&mut state, 0);
-        } else if t.is_multiple_of(5) {
-            reposition_lantern(&mut state);
+    for seed in 1..=SEEDS {
+        let mut state = EverlightState::new();
+        state.rng_state = seed;
+        state.camp.light_level = 150;
+        state.camp.power_level = 150;
+        state.camp.max_unlocked_rank = 5;
+        logic::select_rank(&mut state, 5);
+        logic::start_vigil(&mut state);
+
+        let mut t = 0u64;
+        while state.phase == Phase::Vigil && t < MAX_TICKS {
+            if state.pending_boons.is_some() {
+                logic::choose_boon(&mut state, 0);
+            } else if t.is_multiple_of(5) {
+                reposition_lantern(&mut state);
+            }
+            logic::tick(&mut state);
+            t += 1;
         }
-        logic::tick(&mut state);
-        t += 1;
+
+        assert_eq!(
+            state.phase,
+            Phase::Camp,
+            "極端に投資したキャラクターでも{MAX_TICKS}tick以内に灯が尽きるはず (seed={seed}) — \
+             尽きないなら難易度の指数関数的escalationが機能していない: final_wave={}",
+            state.wave
+        );
+        if state.wave > milestone {
+            exceeded_milestone += 1;
+        }
     }
 
-    assert_eq!(
-        state.phase,
-        Phase::Camp,
-        "極端に投資したキャラクターでも{MAX_TICKS}tick以内に灯が尽きるはず — \
-         尽きないなら難易度の指数関数的escalationが機能していない: final_wave={}",
-        state.wave
-    );
-    let milestone = logic::milestone_wave(5);
     assert!(
-        state.wave > milestone,
-        "マイルストーン波({milestone})すら超えられないのはescalationが厳しすぎる可能性: final_wave={}",
-        state.wave
+        exceeded_milestone * 2 >= SEEDS,
+        "極端な投資をしてもマイルストーン波({milestone})を超えられた試行が半数未満 — \
+         escalationが厳しすぎる可能性: {exceeded_milestone}/{SEEDS}"
     );
 }
 

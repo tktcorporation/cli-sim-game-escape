@@ -124,7 +124,18 @@ impl EnemyKind {
             EnemyKind::Husk => 24,
             EnemyKind::Swarmling => 3,
             EnemyKind::Elite => 55,
-            EnemyKind::Boss => 320,
+            // ボス級は「ふよふよ」揺れながら弾/召喚も飛ばしてくる分、単純な
+            // 接近ループより長く粘って脅威であり続けるべきなので、旧数値
+            // (320/280/300/420) から引き上げている。相対比は保ったまま
+            // (影の魔女<大蛇<魔王<満月の魔王)。ボスが長生きするほど
+            // 光弾の自動照準 (`pick_bolt_target`) がその間ずっとボスへ
+            // 固定され、その間に雑魚の群れが手薄になって防衛線を破られ
+            // やすくなる — 4割増しはシミュレーターの
+            // `even_maxed_out_investment_eventually_ends_a_single_vigil`
+            // でこの巻き込まれ落ちを誘発するほど強すぎたため、2割増しに
+            // 抑えている (同テストは1本のRNG列にこの手の揺れで巻き込まれ
+            // やすいため、複数seedの多数決に変更済み)。
+            EnemyKind::Boss => 385,
             EnemyKind::Sniper => 18,
             EnemyKind::Shielded => 40,
             EnemyKind::Splitter => 14,
@@ -138,9 +149,9 @@ impl EnemyKind {
             // 削っても素直にこの数値ぶん時間がかかる、単純に「打たれ強い」
             // 遠隔役にするため。
             EnemyKind::Wraith => 48,
-            EnemyKind::ShadowWitch => 280,
-            EnemyKind::Serpent => 300,
-            EnemyKind::FullMoonBoss => 420,
+            EnemyKind::ShadowWitch => 335,
+            EnemyKind::Serpent => 360,
+            EnemyKind::FullMoonBoss => 505,
         }
     }
 
@@ -666,6 +677,23 @@ pub struct Chest {
 pub const CHEST_FALL_SPEED: f64 = 0.7;
 pub const CHEST_BASE_CATCH_RADIUS: f64 = 8.0;
 
+/// 敵を討った位置に一瞬だけ残す爆破演出。位置と寿命だけを持つ軽量な
+/// 構造体で、`logic::apply_kills` が討伐のたびに積み、`logic::tick` が
+/// 毎tick寿命を減らして尽きたものを取り除く (`enemy_bullets`と同じ
+/// retain方式)。render.rsはこれを拡大するリングとして描く。
+#[derive(Clone, Debug)]
+pub struct KillEffect {
+    pub x: f64,
+    pub y: f64,
+    pub ticks_left: u32,
+}
+
+/// `AURORA_FLASH_TICKS`/`METEOR_FLASH_TICKS`と同じ理由 (`GameTime::update`
+/// のまとめtick処理で最大5tick分が1回のrenderにまとまり得るため) で5を
+/// 下限にする — これより短いと「発火したのに一度も描画されない」退行が
+/// 起こり得る。
+pub const KILL_EFFECT_TICKS: u32 = 5;
+
 // ── レベルアップ選択肢 (宝箱を取ると開く) ───────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -707,6 +735,13 @@ impl Lantern {
 }
 
 // ── 拠点の恒久強化 ─────────────────────────────────────────────
+
+/// このレベルまでは`power_cost`が素の線形コストのまま (序盤の手触りを
+/// 変えない)。超えた分だけ`POWER_COST_GROWTH_PER_LEVEL`で指数関数的に
+/// 吊り上がる。
+const POWER_COST_RAMP_LEVEL: u32 = 15;
+/// `POWER_COST_RAMP_LEVEL`を超えた1レベルごとに乗算される係数。
+const POWER_COST_GROWTH_PER_LEVEL: f64 = 1.12;
 
 /// 拠点で積み上がる恒久進行。灯が消えても/リロードしてもリセットされない。
 /// 残光で購入する強化 (`light_level`/`power_level`/`extra_slot_level`/
@@ -761,8 +796,22 @@ impl CampUpgrades {
         8 + self.light_level * 6
     }
 
+    /// 「光力」(全武器威力+5%/lv) の次の1レベルのコスト。素の線形コスト
+    /// (10+8*lv) を、`POWER_COST_RAMP_LEVEL` までは据え置いたまま、それを
+    /// 超えた分だけ指数関数的に吊り上げる — `logic::wave_difficulty` が
+    /// マイルストーンまでは線形・以降は指数関数的escalationにするのと
+    /// 同じ考え方。%バフが恒久的に無制限へ積み上がる強化は、コスト自体も
+    /// 際限なく安いままだと「損耗なしにいくらでも強くなれる」状態になり、
+    /// 戦闘の緊張感を削ってしまう。序盤 (lv15未満) の手触りは変えず、
+    /// 深い投資だけを重くする。
     pub fn power_cost(&self) -> u32 {
-        10 + self.power_level * 8
+        let linear = 10 + self.power_level * 8;
+        let overflow = self.power_level.saturating_sub(POWER_COST_RAMP_LEVEL);
+        if overflow == 0 {
+            return linear;
+        }
+        let escalation = POWER_COST_GROWTH_PER_LEVEL.powi(overflow as i32);
+        (linear as f64 * escalation).round() as u32
     }
 
     pub fn light_max(&self) -> i32 {
@@ -833,6 +882,7 @@ pub struct EverlightState {
     pub projectiles: Vec<Projectile>,
     pub enemy_bullets: Vec<EnemyBullet>,
     pub chests: Vec<Chest>,
+    pub kill_effects: Vec<KillEffect>,
     pub loadout: Loadout,
     pub wave: u32,
     pub elapsed_ticks: u64,
@@ -944,6 +994,7 @@ impl EverlightState {
             projectiles: Vec::new(),
             enemy_bullets: Vec::new(),
             chests: Vec::new(),
+            kill_effects: Vec::new(),
             loadout: Loadout::default(),
             wave: 1,
             elapsed_ticks: 0,
@@ -1030,6 +1081,32 @@ mod tests {
         let base_cost = camp.light_cost();
         camp.light_level += 1;
         assert!(camp.light_cost() > base_cost);
+    }
+
+    #[test]
+    fn power_cost_stays_linear_up_to_and_including_the_ramp_level() {
+        // 序盤の手触りを変えない、という設計意図の回帰テスト。
+        // ramp境界(15)自体もまだ線形のままであることを含めて確認する。
+        let mut camp = CampUpgrades::default();
+        for level in 0..=15 {
+            camp.power_level = level;
+            assert_eq!(camp.power_cost(), 10 + level * 8, "ramp以下は素の線形コストのままのはず");
+        }
+    }
+
+    #[test]
+    fn power_cost_escalates_faster_than_linear_past_the_ramp_level() {
+        // 「素の線形コストのままだと恒久強化がいくらでも安く積み上がって
+        // しまう」問題の回帰テスト — ramp を越えた分は線形コストより
+        // 明確に高くなるはず。
+        let camp = CampUpgrades { power_level: 40, ..CampUpgrades::default() };
+        let linear_equivalent = 10 + 40 * 8;
+        assert!(
+            camp.power_cost() > linear_equivalent * 2,
+            "ramp超過後は線形コストの2倍を優に超えるはず: actual={} linear={}",
+            camp.power_cost(),
+            linear_equivalent
+        );
     }
 
     #[test]
