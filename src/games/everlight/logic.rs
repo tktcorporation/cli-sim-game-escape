@@ -13,7 +13,7 @@ use super::state::{
     Lantern, Loadout, OwnedPassive, OwnedWeapon, PassiveKind, Phase, Projectile, WeaponKind,
     BOSS_EVERY_N_WAVES, BREACH_Y, CHEST_BASE_CATCH_RADIUS, CHEST_FALL_SPEED, COLUMNS,
     ELITE_BASE_INTERVAL_TICKS, EVOLUTION_PASSIVE_THRESHOLD, LANE_HALF_WIDTH,
-    LANTERN_MOVE_UNITS_PER_TICK, LANTERN_Y, MAX_LEVEL, MAX_WEAPON_SLOTS, SPAWN_Y,
+    LANTERN_MOVE_UNITS_PER_TICK, LANTERN_Y, MAX_LEVEL, SPAWN_Y,
     WAVE_DURATION_TICKS, WORLD_H, WORLD_W,
 };
 
@@ -40,6 +40,9 @@ const MAX_PROJECTILES_ON_FIELD: usize = 300;
 /// 回転する光点だけで武器の存在・強化 (半径の拡大) を伝えており、発火
 /// 頻度が高いためこれだけで十分な視覚フィードバックになっている。
 const AURORA_FLASH_TICKS: u32 = 5;
+/// 流星の着弾フラッシュ表示tick数。`AURORA_FLASH_TICKS` と同じ
+/// まとめtick処理の見逃し対策のため、5を下限として維持すること。
+const METEOR_FLASH_TICKS: u32 = 5;
 
 const BOSS_ATTACK_PERIOD_TICKS: u64 = 90;
 const BOSS_TELEGRAPH_TICKS: u32 = 20;
@@ -80,6 +83,13 @@ pub fn tick_n(state: &mut EverlightState, n: u32) {
 pub fn tick(state: &mut EverlightState) {
     state.lantern_hurt_flash.tick(1);
     state.aurora_flash.tick(1);
+    state.meteor_flash.tick(1);
+    // 烙印は残りtickが尽きたら自動で外れる。死亡した敵のidも (討伐時に
+    // 明示削除するのではなく) 自然減衰に任せることで掃除漏れを防ぐ。
+    state.bolt_marks.retain(|_, ticks_left| {
+        *ticks_left = ticks_left.saturating_sub(1);
+        *ticks_left > 0
+    });
     decay_damage_display(&mut state.last_light_damage);
     if state.log_display_ticks > 0 {
         state.log_display_ticks -= 1;
@@ -246,7 +256,10 @@ fn spawn_interval_ticks(wave: u32) -> u32 {
 /// 出現テーブル (`regular_spawn_table`) へ合流させる。
 const SNIPER_MIN_WAVE: u32 = 6;
 const SHIELDED_MIN_WAVE: u32 = 11;
+const CHARGER_MIN_WAVE: u32 = 13;
 const SPLITTER_MIN_WAVE: u32 = 16;
+const SPRAY_SHIELDED_MIN_WAVE: u32 = 18;
+const AURORA_SHIELDED_MIN_WAVE: u32 = 24;
 
 /// 通常湧きの1回あたりの同時湧き数がこのwaveから増え始める。
 /// `spawn_interval_ticks` の間隔短縮は第21波前後で下限に達し頭打ちに
@@ -280,8 +293,17 @@ fn regular_spawn_table(wave: u32) -> Vec<(EnemyKind, u32)> {
     if wave >= SHIELDED_MIN_WAVE {
         table.push((EnemyKind::Shielded, 10));
     }
+    if wave >= CHARGER_MIN_WAVE {
+        table.push((EnemyKind::Charger, 8));
+    }
     if wave >= SPLITTER_MIN_WAVE {
         table.push((EnemyKind::Splitter, 10));
+    }
+    if wave >= SPRAY_SHIELDED_MIN_WAVE {
+        table.push((EnemyKind::SprayShielded, 8));
+    }
+    if wave >= AURORA_SHIELDED_MIN_WAVE {
+        table.push((EnemyKind::AuroraShielded, 8));
     }
     table
 }
@@ -379,6 +401,11 @@ fn spawn_enemy_at_xy(state: &mut EverlightState, kind: EnemyKind, x: f64, y: f64
 /// y座標。ここまでは他の敵と同じく普通に近づいてくる。
 const SNIPER_STOP_Y: f64 = WORLD_H * 0.55;
 
+/// 突進者 (`EnemyKind::Charger`) がここを越えると `CHARGER_BOOST_MULT` で
+/// 急加速する。それまでは他の敵と同じ速度で直進する。
+const CHARGER_TRIGGER_Y: f64 = WORLD_H * 0.75;
+const CHARGER_BOOST_MULT: f64 = 2.8;
+
 fn move_enemies(state: &mut EverlightState) {
     let diff = wave_linear_difficulty(state.wave, state.rank);
     let lantern_x = state.lantern.x;
@@ -386,7 +413,9 @@ fn move_enemies(state: &mut EverlightState) {
         enemy.hurt_flash.tick(1);
         let sniper_holding = enemy.kind == EnemyKind::Sniper && enemy.y >= SNIPER_STOP_Y;
         if !sniper_holding {
-            enemy.y += enemy.kind.base_speed() * diff;
+            let charge_boost =
+                if enemy.kind == EnemyKind::Charger && enemy.y >= CHARGER_TRIGGER_Y { CHARGER_BOOST_MULT } else { 1.0 };
+            enemy.y += enemy.kind.base_speed() * diff * charge_boost;
         }
         if enemy.kind.homes() {
             // 灯へ寄ってくる敵をおとりにして1レーンへ集め、極光で薙ぐ、
@@ -602,18 +631,54 @@ fn make_projectile(x: f64, damage: i32, pierce: u32, vx: f64, vy: f64, color: Co
     }
 }
 
-/// 甲殻兵 (`EnemyKind::Shielded`) は `SHIELD_WEAK_TO` 以外の武器から受ける
-/// ダメージを軽減する。弱点武器の色 (`EnemyKind::Shielded::color`) と
-/// 揃えることでヒントにしている (進化レシピと同じ作法)。
-const SHIELD_WEAK_TO: WeaponKind = WeaponKind::Bolt;
+/// 装甲系 (`EnemyKind::weak_to()` が `Some` を返す種) は、対応する弱点武器
+/// 以外から受けるダメージを軽減する。
 const SHIELD_DAMAGE_REDUCTION: f64 = 0.5;
 
 fn effective_damage_against(base_damage: i32, source: WeaponKind, target_kind: EnemyKind) -> i32 {
-    if target_kind == EnemyKind::Shielded && source != SHIELD_WEAK_TO {
-        ((base_damage as f64) * (1.0 - SHIELD_DAMAGE_REDUCTION)).round().max(1.0) as i32
-    } else {
-        base_damage
+    match target_kind.weak_to() {
+        Some(weak) if source != weak => {
+            ((base_damage as f64) * (1.0 - SHIELD_DAMAGE_REDUCTION)).round().max(1.0) as i32
+        }
+        _ => base_damage,
     }
+}
+
+// ── 武器の組み合わせシナジー ─────────────────────────────────────────
+//
+// 進化 (武器+対応する受動効果) とは別に、武器"同士"を同時装備すると
+// 発動する追加効果。効果自体は説明せず、`newly_completed_synergy_partner`
+// が新規成立の瞬間だけログで気配を残す (進化の色合わせヒントと同じ
+// 「点と点を線にする」設計)。
+
+/// 光弾+極光「烙印」: 光弾の命中が残す `bolt_marks` の持続tick。
+const MARK_DURATION_TICKS: u32 = 40;
+/// 烙印を消費した極光の命中に掛かるダメージ倍率。
+const MARK_BONUS_MULT: f64 = 1.5;
+/// 光輪+流星「増幅」: 光輪装備中に流星の着弾ダメージへ掛かる倍率。
+const METEOR_HALO_SYNERGY_MULT: f64 = 1.25;
+
+/// 同時装備で追加効果が発動する武器の組み合わせ一覧。
+const WEAPON_SYNERGY_PAIRS: [(WeaponKind, WeaponKind); 3] = [
+    (WeaponKind::Bolt, WeaponKind::Aurora),
+    (WeaponKind::Spray, WeaponKind::Halo),
+    (WeaponKind::Halo, WeaponKind::Meteor),
+];
+
+/// `acquired` を新たに手に入れたことでどれかのシナジーが今まさに揃った
+/// なら、その相方を返す。`state.loadout` はまだ `acquired` を含まない
+/// 時点で呼ぶこと (呼び出し元の `apply_boon` 参照)。
+fn newly_completed_synergy_partner(state: &EverlightState, acquired: WeaponKind) -> Option<WeaponKind> {
+    WEAPON_SYNERGY_PAIRS.iter().find_map(|&(a, b)| {
+        let partner = if a == acquired {
+            b
+        } else if b == acquired {
+            a
+        } else {
+            return None;
+        };
+        state.loadout.has(partner).then_some(partner)
+    })
 }
 
 fn fire_weapons(state: &mut EverlightState, damage_mult: f64) {
@@ -654,7 +719,11 @@ fn fire_weapons(state: &mut EverlightState, damage_mult: f64) {
                 new_projectiles.push(make_projectile(lantern_x, damage, pierce, vx, vy, kind.color(), kind));
             }
             WeaponKind::Spray => {
-                let count = state.loadout.weapons[i].projectile_count();
+                // シナジー「共鳴」: 光輪を同時装備していると1発増える。
+                let mut count = state.loadout.weapons[i].projectile_count();
+                if state.loadout.has(WeaponKind::Halo) {
+                    count += 1;
+                }
                 for p in 0..count {
                     let t = if count == 1 { 0.5 } else { p as f64 / (count - 1) as f64 };
                     let angle = -std::f64::consts::FRAC_PI_2 + (t - 0.5) * SPRAY_SPREAD_RAD;
@@ -666,6 +735,16 @@ fn fire_weapons(state: &mut EverlightState, damage_mult: f64) {
             WeaponKind::Aurora => {
                 let width_mult = state.loadout.weapons[i].aurora_width_mult();
                 apply_aurora_hit(state, lantern_x, damage, width_mult);
+            }
+            WeaponKind::Meteor => {
+                // シナジー「増幅」: 光輪を同時装備していると着弾ダメージが上がる。
+                let radius = state.loadout.weapons[i].meteor_radius();
+                let synergy_damage = if state.loadout.has(WeaponKind::Halo) {
+                    (damage as f64 * METEOR_HALO_SYNERGY_MULT).round() as i32
+                } else {
+                    damage
+                };
+                apply_meteor_hit(state, synergy_damage, radius);
             }
             WeaponKind::Halo => unreachable!("Halo は上のcontinueで除外済み"),
         }
@@ -692,7 +771,54 @@ fn apply_aurora_hit(state: &mut EverlightState, lantern_x: f64, damage: i32, wid
     let half_width = LANE_HALF_WIDTH * width_mult;
     for enemy in state.enemies.iter_mut() {
         if (enemy.x - lantern_x).abs() <= half_width {
-            enemy.hp -= effective_damage_against(damage, WeaponKind::Aurora, enemy.kind);
+            let mut dmg = effective_damage_against(damage, WeaponKind::Aurora, enemy.kind);
+            // シナジー「烙印」: 光弾が付けた印を極光が消費して追加ダメージ。
+            if state.bolt_marks.remove(&enemy.id).is_some() {
+                dmg = (dmg as f64 * MARK_BONUS_MULT).round() as i32;
+            }
+            enemy.hp -= dmg;
+            enemy.hurt_flash.trigger(4);
+        }
+    }
+    let kills = drain_dead_enemies(state);
+    apply_kills(state, kills);
+}
+
+/// 流星の着弾地点を選ぶ。敵を `lane_index_of` でレーンごとに集計し、
+/// 最も密集しているレーンのうち防衛線に最も近い個体の座標を返す —
+/// 光弾 (単体特化) や極光 (灯のレーン固定) では対応しにくい、灯から
+/// 離れた場所の横広がりの密集を焼き払う役割を持たせるため。
+fn pick_meteor_target(state: &EverlightState) -> Option<(f64, f64)> {
+    if state.enemies.is_empty() {
+        return None;
+    }
+    let mut lane_counts = [0u32; COLUMNS];
+    for enemy in &state.enemies {
+        lane_counts[lane_index_of(enemy.x)] += 1;
+    }
+    let (dense_lane, _) = lane_counts.iter().enumerate().max_by_key(|&(_, &c)| c)?;
+    state
+        .enemies
+        .iter()
+        .filter(|e| lane_index_of(e.x) == dense_lane)
+        .max_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|e| (e.x, e.y))
+}
+
+/// 流星: `pick_meteor_target` が選んだ地点を中心に範囲ダメージを与える
+/// 即着弾のヒットスキャン。対象がいなければ何もしない (クールダウンの
+/// 消費は呼び出し元の `fire_weapons` が既に行っている)。
+fn apply_meteor_hit(state: &mut EverlightState, damage: i32, radius: f64) {
+    let Some((cx, cy)) = pick_meteor_target(state) else {
+        return;
+    };
+    state.meteor_flash.trigger(METEOR_FLASH_TICKS);
+    state.meteor_flash_pos = (cx, cy);
+    for enemy in state.enemies.iter_mut() {
+        let dx = enemy.x - cx;
+        let dy = enemy.y - cy;
+        if dx * dx + dy * dy <= radius * radius {
+            enemy.hp -= effective_damage_against(damage, WeaponKind::Meteor, enemy.kind);
             enemy.hurt_flash.trigger(4);
         }
     }
@@ -821,6 +947,10 @@ fn move_and_resolve_projectiles(state: &mut EverlightState, enemy_prev_positions
             enemy.hp -= effective_damage_against(proj.damage, proj.source, enemy.kind);
             enemy.hurt_flash.trigger(3);
             proj.hit_enemy_ids.push(enemy.id);
+            let hit_enemy_id = enemy.id;
+            if proj.source == WeaponKind::Bolt && state.loadout.has(WeaponKind::Aurora) {
+                state.bolt_marks.insert(hit_enemy_id, MARK_DURATION_TICKS);
+            }
             // 同じ敵への再命中だけは `hit_enemy_ids` で恒久的に除外する —
             // 合算当たり半径 (最大16.2) が1tickの移動距離 (9) を超える
             // 大型の敵 (魔王等) では、複数tickにわたって当たり判定内に
@@ -899,7 +1029,7 @@ fn candidate_boons(state: &EverlightState) -> Vec<BoonOption> {
             {
                 v.push(BoonOption { kind: BoonKind::Evolve(kind) });
             }
-        } else if state.loadout.weapons.len() < MAX_WEAPON_SLOTS {
+        } else if state.loadout.weapons.len() < state.camp.max_weapon_slots() {
             v.push(BoonOption { kind: BoonKind::NewWeapon(kind) });
         }
     }
@@ -966,8 +1096,14 @@ pub fn choose_boon(state: &mut EverlightState, index: usize) -> bool {
 fn apply_boon(state: &mut EverlightState, kind: BoonKind) {
     match kind {
         BoonKind::NewWeapon(k) => {
+            let synergy_partner = newly_completed_synergy_partner(state, k);
             state.loadout.weapons.push(OwnedWeapon::new(k));
-            state.add_log(format!("『{}』を手に入れた", k.name()));
+            match synergy_partner {
+                Some(partner) => {
+                    state.add_log(format!("『{}』を手に入れた。『{}』と呼応している気がする", k.name(), partner.name()));
+                }
+                None => state.add_log(format!("『{}』を手に入れた", k.name())),
+            }
         }
         BoonKind::LevelWeapon(k) => {
             if let Some(w) = state.loadout.weapon_mut(k) {
@@ -1193,6 +1329,15 @@ pub fn purchase_extra_slot(state: &mut EverlightState) -> bool {
     true
 }
 
+pub fn purchase_extra_weapon_slot(state: &mut EverlightState) -> bool {
+    if state.camp.extra_weapon_slot_level >= 1 || state.ember < CampUpgrades::EXTRA_WEAPON_SLOT_COST {
+        return false;
+    }
+    state.ember -= CampUpgrades::EXTRA_WEAPON_SLOT_COST;
+    state.camp.extra_weapon_slot_level = 1;
+    true
+}
+
 /// 拠点で挑戦ランクを選ぶ。範囲外の指定は `max_unlocked_rank` 側へ
 /// クランプする (未解放のランクへは進めない)。
 pub fn select_rank(state: &mut EverlightState, rank: u32) {
@@ -1221,6 +1366,9 @@ pub fn start_vigil(state: &mut EverlightState) {
     state.rank = state.camp.effective_selected_rank();
     state.dawn_reached_this_vigil = false;
     state.milestone_boss_id = None;
+    // next_enemy_id をここで0へ戻すため、前の夜番の烙印がid再利用で
+    // 誤って新しい敵に適用されないようクリアする。
+    state.bolt_marks.clear();
     state.kill_count = 0;
     // breach_count はリセットしない: detect_transitions が前回renderとの
     // 差分で演出をトリガーする単調増加カウンタ (state.rsのコメント参照)。
@@ -1476,6 +1624,218 @@ mod tests {
         assert_eq!(
             state.aurora_flash_x, fired_at_x,
             "aurora_flash_x は発火時点の位置を保持し続けるはず (現在位置に追従しない)"
+        );
+    }
+
+    // ── 流星 (Meteor) ───────────────────────────────────────────────
+
+    fn push_enemy_at(state: &mut EverlightState, id: u32, x: f64, y: f64) {
+        state.enemies.push(Enemy {
+            id,
+            kind: EnemyKind::Wisp,
+            x,
+            y,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+    }
+
+    #[test]
+    fn meteor_targets_the_most_crowded_lane_nearest_the_breach() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let lane_center_x = super::super::state::lane_center_x;
+        // 疎なレーン (1体) と密なレーン (3体) を作る。密なレーンの中でも
+        // 最も防衛線に近い個体 (yが最大) が着弾中心になるはず。
+        push_enemy_at(&mut state, 1, lane_center_x(0), 20.0);
+        push_enemy_at(&mut state, 2, lane_center_x(5), 10.0);
+        push_enemy_at(&mut state, 3, lane_center_x(5), 40.0);
+        push_enemy_at(&mut state, 4, lane_center_x(5), 25.0);
+
+        let (x, y) = pick_meteor_target(&state).expect("敵がいれば着弾先が選ばれるはず");
+        assert_eq!(x, lane_center_x(5), "密集レーンが選ばれるはず");
+        assert_eq!(y, 40.0, "密集レーン内では防衛線に最も近い個体が中心になるはず");
+    }
+
+    #[test]
+    fn meteor_returns_no_target_without_enemies() {
+        let state = EverlightState::new();
+        assert!(pick_meteor_target(&state).is_none());
+    }
+
+    #[test]
+    fn meteor_hit_damages_enemies_within_radius_but_not_beyond() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let lane_center_x = super::super::state::lane_center_x;
+        push_enemy_at(&mut state, 1, lane_center_x(4), 50.0);
+        push_enemy_at(&mut state, 2, lane_center_x(4) + 3.0, 50.0);
+        push_enemy_at(&mut state, 3, lane_center_x(4) + 40.0, 50.0);
+
+        apply_meteor_hit(&mut state, 20, 6.0);
+
+        let hp_by_id: std::collections::HashMap<u32, i32> = state.enemies.iter().map(|e| (e.id, e.hp)).collect();
+        assert!(hp_by_id[&1] < 999, "着弾地点そのものの敵はダメージを受けるはず");
+        assert!(hp_by_id[&2] < 999, "半径内の敵はダメージを受けるはず");
+        assert_eq!(hp_by_id[&3], 999, "半径外の敵はダメージを受けないはず");
+    }
+
+    #[test]
+    fn meteor_fire_does_not_flash_without_a_target() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon { kind: WeaponKind::Meteor, level: 1, cooldown_remaining: 0, evolved: false });
+        assert!(state.enemies.is_empty());
+
+        fire_weapons(&mut state, 1.0);
+
+        assert!(
+            !state.meteor_flash.is_active(),
+            "対象がいなければ着弾しないので、極光と違ってフラッシュも立たないはず"
+        );
+    }
+
+    // ── 武器の組み合わせシナジー ───────────────────────────────────────
+
+    #[test]
+    fn bolt_mark_boosts_a_later_aurora_hit_only_when_both_are_equipped() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Bolt));
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Aurora));
+        let lantern_x = state.lantern.x;
+        push_enemy_at(&mut state, 1, lantern_x, 50.0);
+
+        // vy を「1tickでちょうど敵のy座標まで届く」値にして、スイープ
+        // 判定の距離計算に頼らず命中を確定させる。
+        state.projectiles.push(Projectile {
+            x: lantern_x,
+            y: LANTERN_Y,
+            vx: 0.0,
+            vy: 50.0 - LANTERN_Y,
+            damage: 10,
+            pierce_remaining: 0,
+            radius: 1.6,
+            color: WeaponKind::Bolt.color(),
+            source: WeaponKind::Bolt,
+            hit_enemy_ids: Vec::new(),
+        });
+        move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
+        assert!(state.bolt_marks.contains_key(&1), "光弾+極光を両方装備していれば命中で烙印が付くはず");
+
+        let hp_before = state.enemies[0].hp;
+        apply_aurora_hit(&mut state, lantern_x, 10, 1.0);
+        let marked_loss = hp_before - state.enemies[0].hp;
+        assert!(!state.bolt_marks.contains_key(&1), "烙印は極光の命中で消費されるはず");
+
+        // 比較対象: 烙印が無い状態での極光ダメージ (=素のeffective_damage_against)。
+        let unmarked_loss = 10;
+        assert!(marked_loss > unmarked_loss, "烙印を消費した極光は素のダメージより大きいはず");
+    }
+
+    #[test]
+    fn bolt_does_not_mark_without_aurora_equipped() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Bolt));
+        let lantern_x = state.lantern.x;
+        push_enemy_at(&mut state, 1, lantern_x, 50.0);
+
+        // vy を「1tickでちょうど敵のy座標まで届く」値にして、スイープ
+        // 判定の距離計算に頼らず命中を確定させる。
+        state.projectiles.push(Projectile {
+            x: lantern_x,
+            y: LANTERN_Y,
+            vx: 0.0,
+            vy: 50.0 - LANTERN_Y,
+            damage: 10,
+            pierce_remaining: 0,
+            radius: 1.6,
+            color: WeaponKind::Bolt.color(),
+            source: WeaponKind::Bolt,
+            hit_enemy_ids: Vec::new(),
+        });
+        move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
+        assert!(!state.bolt_marks.contains_key(&1), "極光を装備していなければ烙印は付かないはず");
+    }
+
+    #[test]
+    fn spray_gains_an_extra_projectile_when_halo_is_equipped() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Spray));
+        fire_weapons(&mut state, 1.0);
+        let count_without_halo = state.projectiles.len();
+
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Spray));
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Halo));
+        fire_weapons(&mut state, 1.0);
+        let count_with_halo = state.projectiles.len();
+
+        assert_eq!(count_with_halo, count_without_halo + 1, "光輪との共鳴で散光の弾数が1つ増えるはず");
+    }
+
+    #[test]
+    fn meteor_damage_increases_when_halo_is_equipped() {
+        // 流星の着弾地点 (y=50) は光輪の判定半径 (灯周囲、y=LANTERN_Y付近)
+        // の外なので、光輪自身の命中を混ぜずに増幅シナジーだけを検証できる。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Meteor));
+        let lantern_x = state.lantern.x;
+        push_enemy_at(&mut state, 1, lantern_x, 50.0);
+        fire_weapons(&mut state, 1.0);
+        let loss_without_halo = 999 - state.enemies[0].hp;
+
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Meteor));
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Halo));
+        let lantern_x = state.lantern.x;
+        push_enemy_at(&mut state, 1, lantern_x, 50.0);
+        fire_weapons(&mut state, 1.0);
+        let loss_with_halo = 999 - state.enemies[0].hp;
+
+        assert!(loss_with_halo > loss_without_halo, "光輪との増幅で流星のダメージが上がるはず");
+    }
+
+    #[test]
+    fn acquiring_a_synergy_partner_logs_a_discovery_hint() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Bolt));
+
+        apply_boon(&mut state, BoonKind::NewWeapon(WeaponKind::Aurora));
+
+        assert!(
+            state.log.last().is_some_and(|l| l.contains("呼応")),
+            "光弾を持っている状態で極光を手に入れたら、シナジー成立のヒントログが出るはず"
+        );
+    }
+
+    #[test]
+    fn acquiring_a_weapon_without_a_partner_does_not_log_a_hint() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+
+        apply_boon(&mut state, BoonKind::NewWeapon(WeaponKind::Bolt));
+
+        assert!(
+            state.log.last().is_some_and(|l| !l.contains("呼応")),
+            "相方をまだ持っていなければヒントログは出ないはず"
         );
     }
 
@@ -1893,6 +2253,18 @@ mod tests {
         assert!(!purchase_light(&mut state));
         assert!(!purchase_power(&mut state));
         assert!(!purchase_extra_slot(&mut state));
+        assert!(!purchase_extra_weapon_slot(&mut state));
+    }
+
+    #[test]
+    fn purchase_extra_weapon_slot_deducts_ember_and_is_one_time() {
+        let mut state = EverlightState::new();
+        state.ember = 1000;
+        let slots_before = state.camp.max_weapon_slots();
+        assert!(purchase_extra_weapon_slot(&mut state));
+        assert_eq!(state.camp.extra_weapon_slot_level, 1);
+        assert_eq!(state.camp.max_weapon_slots(), slots_before + 1, "拡張枠購入で武器スロットが1つ増えるはず");
+        assert!(!purchase_extra_weapon_slot(&mut state), "一度きりの解放なので2回目は買えないはず");
     }
 
     #[test]
@@ -2037,23 +2409,9 @@ mod tests {
     }
 
     #[test]
-    fn extra_slot_upgrade_unlocks_a_5th_passive_not_a_5th_weapon() {
-        // 武器種は WeaponKind::all() がちょうど4種なので、基本スロット数
-        // (MAX_WEAPON_SLOTS=4) だけで全種持てる — 拡張枠は無意味になる。
-        // 受動効果は5種あるため、拡張枠が意味を持つのはこちら側。
+    fn extra_slot_upgrade_unlocks_a_5th_passive() {
         let mut state = EverlightState::new();
         start_vigil(&mut state);
-        for &kind in WeaponKind::all() {
-            if state.loadout.weapon_mut(kind).is_none() {
-                state.loadout.weapons.push(OwnedWeapon::new(kind));
-            }
-        }
-        assert_eq!(state.loadout.weapons.len(), WeaponKind::all().len());
-        assert!(
-            !candidate_boons(&state).iter().any(|o| matches!(o.kind, BoonKind::NewWeapon(_))),
-            "武器は基本スロットだけで全種類持てるので、これ以上NewWeaponは出ないはず"
-        );
-
         for &kind in PassiveKind::all().iter().take(4) {
             state.loadout.passives.push(OwnedPassive::new(kind));
         }
@@ -2067,6 +2425,30 @@ mod tests {
         assert!(
             candidate_boons(&state).iter().any(|o| matches!(o.kind, BoonKind::NewPassive(_))),
             "拡張枠を買えば5種目の受動効果がNewPassiveとして出るはず"
+        );
+    }
+
+    #[test]
+    fn extra_weapon_slot_upgrade_unlocks_a_5th_weapon() {
+        // 流星の追加で WeaponKind::all() が5種になったため、基本スロット数
+        // (MAX_WEAPON_SLOTS=4) のままだと必ず1種は持てない — 受動効果と
+        // 同じ「拡張枠を買わない限り全種は揃わない」構図に揃えている。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        for &kind in WeaponKind::all().iter().take(4) {
+            state.loadout.weapons.push(OwnedWeapon::new(kind));
+        }
+        assert_eq!(state.loadout.weapons.len(), 4);
+        assert!(
+            !candidate_boons(&state).iter().any(|o| matches!(o.kind, BoonKind::NewWeapon(_))),
+            "拡張前は基本4枠が埋まっているのでNewWeaponは出ないはず"
+        );
+
+        state.camp.extra_weapon_slot_level = 1;
+        assert!(
+            candidate_boons(&state).iter().any(|o| matches!(o.kind, BoonKind::NewWeapon(_))),
+            "武器スロット拡張後は5種目の武器がNewWeaponとして出るはず"
         );
     }
 
@@ -2373,7 +2755,7 @@ mod tests {
     #[test]
     fn shielded_enemy_takes_reduced_damage_from_non_weak_weapons() {
         let full = effective_damage_against(10, WeaponKind::Aurora, EnemyKind::Shielded);
-        let weak = effective_damage_against(10, SHIELD_WEAK_TO, EnemyKind::Shielded);
+        let weak = effective_damage_against(10, WeaponKind::Bolt, EnemyKind::Shielded);
         assert!(full < 10, "弱点以外の武器はダメージが軽減されるはず");
         assert_eq!(weak, 10, "弱点武器は軽減されないはず");
     }
@@ -2381,6 +2763,31 @@ mod tests {
     #[test]
     fn shielded_damage_reduction_does_not_apply_to_other_enemies() {
         assert_eq!(effective_damage_against(10, WeaponKind::Aurora, EnemyKind::Wisp), 10);
+    }
+
+    #[test]
+    fn each_armored_variant_is_weak_to_a_different_weapon() {
+        // 装甲バリアントが増えても弱点が1種に収束しないことを保証する —
+        // 収束すると「弱点武器を切り替える判断」自体が消えてしまう。
+        let weak_points: Vec<WeaponKind> = [EnemyKind::Shielded, EnemyKind::SprayShielded, EnemyKind::AuroraShielded]
+            .iter()
+            .map(|k| k.weak_to().expect("装甲系は弱点武器を持つはず"))
+            .collect();
+        let unique: std::collections::HashSet<_> = weak_points.iter().collect();
+        assert_eq!(unique.len(), weak_points.len(), "装甲バリアントごとに弱点武器は異なるはず");
+    }
+
+    #[test]
+    fn spray_shielded_and_aurora_shielded_take_reduced_damage_from_non_weak_weapons() {
+        for (kind, weak) in [
+            (EnemyKind::SprayShielded, WeaponKind::Spray),
+            (EnemyKind::AuroraShielded, WeaponKind::Aurora),
+        ] {
+            let full = effective_damage_against(10, WeaponKind::Halo, kind);
+            let reduced = effective_damage_against(10, weak, kind);
+            assert!(full < 10, "{kind:?} は弱点以外の武器で軽減されるはず");
+            assert_eq!(reduced, 10, "{kind:?} は弱点武器 {weak:?} で軽減されないはず");
+        }
     }
 
     #[test]
@@ -2449,6 +2856,31 @@ mod tests {
             resolve_ranged_attacks(&mut state);
         }
         assert_eq!(state.lantern.light, light_before, "別レーンにいれば被弾しないはず");
+    }
+
+    #[test]
+    fn charger_accelerates_only_past_the_trigger_line() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Charger,
+            x: state.lantern.x,
+            y: CHARGER_TRIGGER_Y - 5.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        move_enemies(&mut state);
+        let step_before_trigger = state.enemies[0].y - (CHARGER_TRIGGER_Y - 5.0);
+
+        state.enemies[0].y = CHARGER_TRIGGER_Y;
+        let y_at_trigger = state.enemies[0].y;
+        move_enemies(&mut state);
+        let step_after_trigger = state.enemies[0].y - y_at_trigger;
+
+        assert!(step_after_trigger > step_before_trigger * 2.0, "トリガー到達後は大きく加速するはず");
     }
 
     #[test]
@@ -2550,14 +2982,28 @@ mod tests {
     #[test]
     fn regular_spawn_table_gates_new_enemy_kinds_by_wave() {
         let early = regular_spawn_table(1);
-        assert!(!early.iter().any(|&(k, _)| k == EnemyKind::Sniper), "第1波では狙撃者はまだ出ないはず");
-        assert!(!early.iter().any(|&(k, _)| k == EnemyKind::Shielded), "第1波では甲殻兵はまだ出ないはず");
-        assert!(!early.iter().any(|&(k, _)| k == EnemyKind::Splitter), "第1波では分裂体はまだ出ないはず");
+        for kind in [
+            EnemyKind::Sniper,
+            EnemyKind::Shielded,
+            EnemyKind::Charger,
+            EnemyKind::Splitter,
+            EnemyKind::SprayShielded,
+            EnemyKind::AuroraShielded,
+        ] {
+            assert!(!early.iter().any(|&(k, _)| k == kind), "第1波では{kind:?}はまだ出ないはず");
+        }
 
-        let late = regular_spawn_table(20);
-        assert!(late.iter().any(|&(k, _)| k == EnemyKind::Sniper), "第20波では狙撃者が出るはず");
-        assert!(late.iter().any(|&(k, _)| k == EnemyKind::Shielded), "第20波では甲殻兵が出るはず");
-        assert!(late.iter().any(|&(k, _)| k == EnemyKind::Splitter), "第20波では分裂体が出るはず");
+        let late = regular_spawn_table(30);
+        for kind in [
+            EnemyKind::Sniper,
+            EnemyKind::Shielded,
+            EnemyKind::Charger,
+            EnemyKind::Splitter,
+            EnemyKind::SprayShielded,
+            EnemyKind::AuroraShielded,
+        ] {
+            assert!(late.iter().any(|&(k, _)| k == kind), "第30波では{kind:?}が出るはず");
+        }
     }
 
     #[test]

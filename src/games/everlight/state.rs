@@ -62,10 +62,19 @@ pub enum EnemyKind {
     /// 狙撃者 (第6波〜)。`SNIPER_STOP_Y` まで進むと停止し、以降は接近せず
     /// 灯のレーンへ遠隔攻撃を構える (`logic::resolve_ranged_attacks`)。
     Sniper,
-    /// 甲殻兵 (第11波〜)。`SHIELD_WEAK_TO` 以外の武器のダメージを軽減する。
+    /// 甲殻兵 (第11波〜)。`weak_to()` 以外の武器のダメージを軽減する。
     Shielded,
     /// 分裂体 (第16波〜)。撃破すると `Swarmling` 2体を残して散る。
     Splitter,
+    /// 散甲兵 (第18波〜)。`Shielded` と同じ軽減の仕組みだが `weak_to()` が
+    /// 散光になる — 弱点武器を1種に固定せず、装備の使い分けを促す。
+    SprayShielded,
+    /// 極甲兵 (第24波〜)。`weak_to()` が極光になる装甲バリアント。
+    AuroraShielded,
+    /// 突進者 (第13波〜)。`logic::CHARGER_TRIGGER_Y` を越えると急加速して
+    /// 防衛線へ突っ込む — 一定距離まで直進するだけの他の敵と異なり、
+    /// 終盤で急に反応を迫る「速度の変化」で新しい緊張を作る。
+    Charger,
     /// 影の魔女 (第10波枠のボス)。灯のレーンと隣接レーンを同時に構える。
     ShadowWitch,
     /// 大蛇 (第15波枠以降のボス)。警告のレーンが構え中に横へ移動する。
@@ -85,6 +94,9 @@ impl EnemyKind {
             EnemyKind::Sniper => "狙撃者",
             EnemyKind::Shielded => "甲殻兵",
             EnemyKind::Splitter => "分裂体",
+            EnemyKind::SprayShielded => "散甲兵",
+            EnemyKind::AuroraShielded => "極甲兵",
+            EnemyKind::Charger => "突進者",
             EnemyKind::ShadowWitch => "影の魔女",
             EnemyKind::Serpent => "大蛇",
             EnemyKind::FullMoonBoss => "満月の魔王",
@@ -101,6 +113,9 @@ impl EnemyKind {
             EnemyKind::Sniper => 18,
             EnemyKind::Shielded => 40,
             EnemyKind::Splitter => 14,
+            EnemyKind::SprayShielded => 42,
+            EnemyKind::AuroraShielded => 46,
+            EnemyKind::Charger => 16,
             EnemyKind::ShadowWitch => 280,
             EnemyKind::Serpent => 300,
             EnemyKind::FullMoonBoss => 420,
@@ -118,6 +133,11 @@ impl EnemyKind {
             EnemyKind::Sniper => 1.2,
             EnemyKind::Shielded => 0.8,
             EnemyKind::Splitter => 1.4,
+            EnemyKind::SprayShielded => 0.85,
+            EnemyKind::AuroraShielded => 0.9,
+            // 突進前の基本速度。`logic::CHARGER_TRIGGER_Y` 到達後は
+            // `logic::CHARGER_BOOST_MULT` が別途乗算される。
+            EnemyKind::Charger => 1.3,
             EnemyKind::ShadowWitch => 0.6,
             EnemyKind::Serpent => 0.65,
             EnemyKind::FullMoonBoss => 0.5,
@@ -135,6 +155,9 @@ impl EnemyKind {
             EnemyKind::Sniper => 4,
             EnemyKind::Shielded => 8,
             EnemyKind::Splitter => 3,
+            EnemyKind::SprayShielded => 9,
+            EnemyKind::AuroraShielded => 10,
+            EnemyKind::Charger => 7,
             EnemyKind::ShadowWitch => 18,
             EnemyKind::Serpent => 20,
             EnemyKind::FullMoonBoss => 26,
@@ -151,6 +174,9 @@ impl EnemyKind {
             EnemyKind::Sniper => 4,
             EnemyKind::Shielded => 6,
             EnemyKind::Splitter => 2,
+            EnemyKind::SprayShielded => 7,
+            EnemyKind::AuroraShielded => 8,
+            EnemyKind::Charger => 5,
             EnemyKind::ShadowWitch => 70,
             EnemyKind::Serpent => 75,
             EnemyKind::FullMoonBoss => 110,
@@ -168,6 +194,9 @@ impl EnemyKind {
             EnemyKind::Sniper => 2.4,
             EnemyKind::Shielded => 3.4,
             EnemyKind::Splitter => 2.0,
+            EnemyKind::SprayShielded => 3.4,
+            EnemyKind::AuroraShielded => 3.6,
+            EnemyKind::Charger => 2.3,
             EnemyKind::ShadowWitch => 6.0,
             EnemyKind::Serpent => 6.2,
             EnemyKind::FullMoonBoss => 7.0,
@@ -203,13 +232,31 @@ impl EnemyKind {
             EnemyKind::Elite => Color::LightMagenta,
             EnemyKind::Boss => Color::Red,
             EnemyKind::Sniper => Color::LightRed,
-            // 光弾 (Bolt) と同じ色 — 弱点武器のヒントを、進化レシピと同じ
-            // 「色を揃える」作法で示す (`SHIELD_WEAK_TO` 参照)。
+            // 装甲系はいずれも `weak_to()` の武器と同じ色 — 弱点武器の
+            // ヒントを、進化レシピと同じ「色を揃える」作法で示す。
             EnemyKind::Shielded => Color::LightCyan,
             EnemyKind::Splitter => Color::LightGreen,
+            EnemyKind::SprayShielded => Color::Green,
+            EnemyKind::AuroraShielded => Color::Yellow,
+            EnemyKind::Charger => Color::Blue,
             EnemyKind::ShadowWitch => Color::Magenta,
             EnemyKind::Serpent => Color::Green,
             EnemyKind::FullMoonBoss => Color::White,
+        }
+    }
+
+    /// この敵の装甲を貫ける武器。`Some` を返す種は、それ以外の武器から
+    /// 受けるダメージを軽減する (`logic::effective_damage_against`)。
+    /// 単一定数に固定していた頃 (旧 `SHIELD_WEAK_TO`) は弱点武器が常に
+    /// 光弾だったため装甲系が増えても対応の幅が生まれなかった — 敵種ごとに
+    /// 持たせることで、装甲バリアントごとに使うべき武器を切り替える判断を
+    /// プレイヤーに要求する。
+    pub fn weak_to(self) -> Option<WeaponKind> {
+        match self {
+            EnemyKind::Shielded => Some(WeaponKind::Bolt),
+            EnemyKind::SprayShielded => Some(WeaponKind::Spray),
+            EnemyKind::AuroraShielded => Some(WeaponKind::Aurora),
+            _ => None,
         }
     }
 }
@@ -243,11 +290,14 @@ pub enum WeaponKind {
     Aurora,
     /// 光輪 — 灯の周囲を回る光の輪。近づく敵への継続ダメージ。
     Halo,
+    /// 流星 — 敵が最も密集している地点へ範囲着弾する。単体特化の光弾や
+    /// 縦一列の極光では対応しにくい、横に広がった密集への回答。
+    Meteor,
 }
 
 impl WeaponKind {
     pub fn all() -> &'static [WeaponKind] {
-        &[WeaponKind::Bolt, WeaponKind::Spray, WeaponKind::Aurora, WeaponKind::Halo]
+        &[WeaponKind::Bolt, WeaponKind::Spray, WeaponKind::Aurora, WeaponKind::Halo, WeaponKind::Meteor]
     }
 
     pub fn name(self) -> &'static str {
@@ -256,6 +306,7 @@ impl WeaponKind {
             WeaponKind::Spray => "散光",
             WeaponKind::Aurora => "極光",
             WeaponKind::Halo => "光輪",
+            WeaponKind::Meteor => "流星",
         }
     }
 
@@ -265,6 +316,7 @@ impl WeaponKind {
             WeaponKind::Spray => "扇状に複数発を散射",
             WeaponKind::Aurora => "灯のレーンを縦に薙ぐ",
             WeaponKind::Halo => "灯を周回する光の輪",
+            WeaponKind::Meteor => "密集地点へ範囲着弾する隕石",
         }
     }
 
@@ -274,6 +326,7 @@ impl WeaponKind {
             WeaponKind::Spray => Color::LightGreen,
             WeaponKind::Aurora => Color::LightYellow,
             WeaponKind::Halo => Color::LightMagenta,
+            WeaponKind::Meteor => Color::Gray,
         }
     }
 
@@ -287,6 +340,7 @@ impl WeaponKind {
             WeaponKind::Spray => PassiveKind::Power,
             WeaponKind::Aurora => PassiveKind::Radiance,
             WeaponKind::Halo => PassiveKind::Magnet,
+            WeaponKind::Meteor => PassiveKind::Haste,
         }
     }
 
@@ -296,6 +350,7 @@ impl WeaponKind {
             WeaponKind::Spray => "豪雨散光",
             WeaponKind::Aurora => "極光炉",
             WeaponKind::Halo => "重光輪",
+            WeaponKind::Meteor => "隕石雨",
         }
     }
 }
@@ -326,6 +381,7 @@ impl OwnedWeapon {
             WeaponKind::Spray => 5 + (l - 1) * 2,
             WeaponKind::Aurora => 14 + (l - 1) * 5,
             WeaponKind::Halo => 2 + (l - 1),
+            WeaponKind::Meteor => 22 + (l - 1) * 8,
         };
         if self.evolved {
             (base as f64 * 1.6).round() as i32
@@ -341,6 +397,7 @@ impl OwnedWeapon {
             WeaponKind::Spray => 14u32.saturating_sub(l - 1).max(9),
             WeaponKind::Aurora => 26u32.saturating_sub((l - 1) * 3).max(14),
             WeaponKind::Halo => 5,
+            WeaponKind::Meteor => 42u32.saturating_sub((l - 1) * 5).max(24),
         };
         if self.evolved {
             ((base as f64) * 0.75).round().max(3.0) as u32
@@ -380,6 +437,16 @@ impl OwnedWeapon {
             1.5
         } else {
             1.0
+        }
+    }
+
+    /// 流星の着弾ダメージ半径 (ワールド単位)。
+    pub fn meteor_radius(&self) -> f64 {
+        let base = 8.0 + (self.level as f64 - 1.0) * 1.5;
+        if self.evolved {
+            base * 1.4
+        } else {
+            base
         }
     }
 }
@@ -431,15 +498,15 @@ impl PassiveKind {
         }
     }
 
-    /// 進化の組み合わせ相手となる武器と同じ色を返す (`Haste` は相方無し)。
-    /// レシピ自体は説明しないが、色を揃えることで「気付ける」ヒントにする。
+    /// 進化の組み合わせ相手となる武器と同じ色を返す。レシピ自体は説明
+    /// しないが、色を揃えることで「気付ける」ヒントにする。
     pub fn color(self) -> Color {
         match self {
             PassiveKind::FireRate => WeaponKind::Bolt.color(),
             PassiveKind::Power => WeaponKind::Spray.color(),
             PassiveKind::Radiance => WeaponKind::Aurora.color(),
             PassiveKind::Magnet => WeaponKind::Halo.color(),
-            PassiveKind::Haste => Color::Gray,
+            PassiveKind::Haste => WeaponKind::Meteor.color(),
         }
     }
 }
@@ -474,6 +541,11 @@ impl Loadout {
 
     pub fn weapon_mut(&mut self, kind: WeaponKind) -> Option<&mut OwnedWeapon> {
         self.weapons.iter_mut().find(|w| w.kind == kind)
+    }
+
+    /// 武器の組み合わせシナジー (`logic::WEAPON_SYNERGY_PAIRS`) の判定に使う。
+    pub fn has(&self, kind: WeaponKind) -> bool {
+        self.weapon(kind).is_some()
     }
 
     pub fn passive_mut(&mut self, kind: PassiveKind) -> Option<&mut OwnedPassive> {
@@ -582,18 +654,22 @@ impl Lantern {
 // ── 拠点の恒久強化 ─────────────────────────────────────────────
 
 /// 拠点で積み上がる恒久進行。灯が消えても/リロードしてもリセットされない。
-/// 残光で購入する強化 (`light_level`/`power_level`/`extra_slot_level`) と、
-/// 夜番を「Dawn」まで走り切ることで解放される `max_unlocked_rank` の
-/// 2系統を持つ。
+/// 残光で購入する強化 (`light_level`/`power_level`/`extra_slot_level`/
+/// `extra_weapon_slot_level`) と、夜番を「Dawn」まで走り切ることで解放
+/// される `max_unlocked_rank` の2系統を持つ。
 #[derive(Clone, Debug)]
 pub struct CampUpgrades {
     pub light_level: u32,
     pub power_level: u32,
     /// 0 または 1 (一度きりの解放): 受動効果スロットを5枠目まで拡張する。
-    /// 武器は `WeaponKind::all()` がちょうど4種なので基本スロット数のまま
-    /// 拡張不要 — 受動効果は5種あるため、これを買わない限り1種は
-    /// 必ず持てないままになる (5種全ての進化レシピを狙う動機になる)。
+    /// 受動効果は5種あるため、これを買わない限り1種は必ず持てないままに
+    /// なる (5種全ての進化レシピを狙う動機になる)。
     pub extra_slot_level: u32,
+    /// 0 または 1 (一度きりの解放): 武器スロットを5枠目まで拡張する。
+    /// `WeaponKind::all()` が5種 (流星の追加で4→5) になったため、これを
+    /// 買わない限り必ず1種は持てない — `extra_slot_level` と同じ理由で、
+    /// 受動効果と同じ「全種を持つには拠点投資が要る」構図に揃えている。
+    pub extra_weapon_slot_level: u32,
     /// 挑戦を許された最大の夜番ランク。常に1以上 (ランク1は最初から
     /// 挑戦可能)。現在のランクの最終波 (`milestone_wave`) のボスを倒すと
     /// `rank + 1` に更新される。
@@ -604,12 +680,21 @@ pub struct CampUpgrades {
 
 impl Default for CampUpgrades {
     fn default() -> Self {
-        Self { light_level: 0, power_level: 0, extra_slot_level: 0, max_unlocked_rank: 1, selected_rank: 1 }
+        Self {
+            light_level: 0,
+            power_level: 0,
+            extra_slot_level: 0,
+            extra_weapon_slot_level: 0,
+            max_unlocked_rank: 1,
+            selected_rank: 1,
+        }
     }
 }
 
 impl CampUpgrades {
     pub const EXTRA_SLOT_COST: u32 = 60;
+    /// 武器種が1種多い (5種) ぶん、受動効果スロット拡張より少し高い。
+    pub const EXTRA_WEAPON_SLOT_COST: u32 = 90;
 
     /// `selected_rank` を範囲内に補正した値。保存データの破損や
     /// 手動編集で範囲外になっていても安全に読めるようにする。
@@ -636,6 +721,10 @@ impl CampUpgrades {
 
     pub fn max_passive_slots(&self) -> usize {
         MAX_PASSIVE_SLOTS + self.extra_slot_level.min(1) as usize
+    }
+
+    pub fn max_weapon_slots(&self) -> usize {
+        MAX_WEAPON_SLOTS + self.extra_weapon_slot_level.min(1) as usize
     }
 
     /// 次の1レベル購入で得られる1ポイントあたりの残光コスト。拠点画面で
@@ -747,6 +836,18 @@ pub struct EverlightState {
     /// まとめtick処理で灯が複数レーン分動いた後にまとめて1回だけrender
     /// された場合、実際に判定した位置とは違うレーンに帯が表示されてしまう。
     pub aurora_flash_x: f64,
+    /// 流星が着弾した瞬間に立てる。`aurora_flash`/`aurora_flash_x` と同じ
+    /// 理由 (即着弾のヒットスキャンには弾道が無く、発火した事実自体を
+    /// render.rs へ伝える手段が要る) で、着弾位置 (`meteor_flash_pos`) も
+    /// 併せてスナップショットする。
+    pub meteor_flash: FlashTimer,
+    pub meteor_flash_pos: (f64, f64),
+    /// 光弾+極光シナジー「烙印」用のマーク: 敵id → 残りtick。`Enemy` に
+    /// 専用フィールドを増やすと (`ranged_charge` と同じ理由で) 使わない
+    /// 敵種にも空値が付いて回るため、対象を敵id側に持たせている。
+    /// `next_enemy_id` は `start_vigil` で0にリセットされるので、idの
+    /// 使い回しによる誤爆を避けるため夜番開始時にもクリアすること。
+    pub bolt_marks: std::collections::HashMap<u32, u32>,
 
     // ── 永続 (灯が消えてもリロードしてもリセットされない) ──
     pub ember: u32,
@@ -811,6 +912,9 @@ impl EverlightState {
             lantern_hurt_flash: FlashTimer::new(),
             aurora_flash: FlashTimer::new(),
             aurora_flash_x: lane_center_x(COLUMNS / 2),
+            meteor_flash: FlashTimer::new(),
+            meteor_flash_pos: (lane_center_x(COLUMNS / 2), SPAWN_Y),
+            bolt_marks: std::collections::HashMap::new(),
             ember: 0,
             camp,
             best_wave: 0,

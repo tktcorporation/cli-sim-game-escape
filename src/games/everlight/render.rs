@@ -187,7 +187,7 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         0.8,
     );
 
-    const ENEMY_KINDS: [EnemyKind; 11] = [
+    const ENEMY_KINDS: [EnemyKind; 14] = [
         EnemyKind::Wisp,
         EnemyKind::Husk,
         EnemyKind::Swarmling,
@@ -196,6 +196,9 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         EnemyKind::Sniper,
         EnemyKind::Shielded,
         EnemyKind::Splitter,
+        EnemyKind::SprayShielded,
+        EnemyKind::AuroraShielded,
+        EnemyKind::Charger,
         EnemyKind::ShadowWitch,
         EnemyKind::Serpent,
         EnemyKind::FullMoonBoss,
@@ -275,6 +278,23 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         Vec::new()
     };
 
+    // 流星もAurora同様、即着弾のヒットスキャンで実体弾を撃たない。着弾の
+    // 事実を見せるため、`meteor_flash` が立っている間だけ現在の判定半径
+    // (`meteor_radius`) そのままのリングを `meteor_flash_pos` (発火時の
+    // スナップショット位置) に描く。
+    let meteor_ring_pts: Vec<(f64, f64)> = if state.meteor_flash.is_active() {
+        state
+            .loadout
+            .weapon(WeaponKind::Meteor)
+            .map(|w| {
+                let (cx, cy) = state.meteor_flash_pos;
+                canvas_fx::ring_points(cx, world_to_canvas_y(cy), w.meteor_radius(), 0.3)
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     // 光輪は近接の常時判定武器で、Aurora同様に実体弾を撃たない。判定半径
     // (`halo_radius`) そのままのリングを常時描き、周回する光点で「回転して
     // いる」ことを視覚的に伝える。常時リングは常に現在の`lantern.x`を
@@ -324,6 +344,9 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
                 if !ring.is_empty() {
                     ctx.draw(&Points { coords: ring, color: Color::Magenta });
                 }
+            }
+            if !meteor_ring_pts.is_empty() {
+                ctx.draw(&Points { coords: &meteor_ring_pts, color: Color::LightRed });
             }
             for (pts, color) in &enemy_groups {
                 ctx.draw(&Points { coords: pts, color: *color });
@@ -594,6 +617,23 @@ fn render_camp_body(
         );
     }
 
+    if state.camp.extra_weapon_slot_level >= 1 {
+        cl.push(Line::from(Span::styled(
+            " ✓ 武器スロット拡張 (5枠) 解放済み",
+            Style::default().fg(Color::Green),
+        )));
+    } else {
+        let affordable = state.ember >= CampUpgrades::EXTRA_WEAPON_SLOT_COST;
+        let color = if affordable { Color::LightCyan } else { Color::DarkGray };
+        cl.push_clickable(
+            Line::from(Span::styled(
+                format!(" 武器スロット拡張 (5枠目解放) — {}残光", CampUpgrades::EXTRA_WEAPON_SLOT_COST),
+                Style::default().fg(color),
+            )),
+            actions::CAMP_UPGRADE_EXTRA_WEAPON_SLOT,
+        );
+    }
+
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
         " 戦績",
@@ -720,6 +760,18 @@ mod tests {
         // なので、実際の発火tickを計算せずフラグを直接立てて確実に通す
         // (光輪は常時描画なので装備するだけでコードパスを通る)。
         state.aurora_flash.trigger(1);
+        render_to_test_backend(&state, 40, 30);
+        render_to_test_backend(&state, 100, 30);
+    }
+
+    #[test]
+    fn vigil_renders_without_panicking_with_meteor_flash_active() {
+        use super::super::state::OwnedWeapon;
+
+        let mut state = EverlightState::new();
+        logic::start_vigil(&mut state);
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Meteor));
+        state.meteor_flash.trigger(1);
         render_to_test_backend(&state, 40, 30);
         render_to_test_backend(&state, 100, 30);
     }
