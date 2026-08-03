@@ -246,8 +246,11 @@ impl EnemyKind {
             EnemyKind::Elite => Color::LightMagenta,
             EnemyKind::Boss => Color::Red,
             EnemyKind::Sniper => Color::LightRed,
-            // 装甲系はいずれも `weak_to()` の武器と同じ色 — 弱点武器の
-            // ヒントを、進化レシピと同じ「色を揃える」作法で示す。
+            // 装甲系はいずれも `weak_to()` の武器と同系色 — 弱点武器の
+            // ヒントを、進化レシピと同じ「色を揃える」作法で示す。甲殻兵は
+            // 光弾と完全に同じ色にできるが、散甲兵/極甲兵はそれぞれ
+            // Splitter(LightGreen)/Swarmling(LightYellow)と衝突するため、
+            // 同系統の別トーンに留めている。
             EnemyKind::Shielded => Color::LightCyan,
             EnemyKind::Splitter => Color::LightGreen,
             EnemyKind::SprayShielded => Color::Green,

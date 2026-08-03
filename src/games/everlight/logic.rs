@@ -763,20 +763,26 @@ const WEAPON_SYNERGY_PAIRS: [(WeaponKind, WeaponKind); 3] = [
     (WeaponKind::Halo, WeaponKind::Meteor),
 ];
 
-/// `acquired` を新たに手に入れたことでどれかのシナジーが今まさに揃った
-/// なら、その相方を返す。`state.loadout` はまだ `acquired` を含まない
-/// 時点で呼ぶこと (呼び出し元の `apply_boon` 参照)。
-fn newly_completed_synergy_partner(state: &EverlightState, acquired: WeaponKind) -> Option<WeaponKind> {
-    WEAPON_SYNERGY_PAIRS.iter().find_map(|&(a, b)| {
-        let partner = if a == acquired {
-            b
-        } else if b == acquired {
-            a
-        } else {
-            return None;
-        };
-        state.loadout.has(partner).then_some(partner)
-    })
+/// `acquired` を新たに手に入れたことで今まさに揃ったシナジーの相方を
+/// 全て返す。`WeaponKind::Halo` のように複数の組み合わせに属する武器も
+/// あるため、最初の1件で打ち切らず全て集める — でなければ、揃った
+/// 複数のシナジーのうち1つしか発見ログに気配が残らなくなる。
+/// `state.loadout` はまだ `acquired` を含まない時点で呼ぶこと
+/// (呼び出し元の `apply_boon` 参照)。
+fn newly_completed_synergy_partners(state: &EverlightState, acquired: WeaponKind) -> Vec<WeaponKind> {
+    WEAPON_SYNERGY_PAIRS
+        .iter()
+        .filter_map(|&(a, b)| {
+            let partner = if a == acquired {
+                b
+            } else if b == acquired {
+                a
+            } else {
+                return None;
+            };
+            state.loadout.has(partner).then_some(partner)
+        })
+        .collect()
 }
 
 fn fire_weapons(state: &mut EverlightState, damage_mult: f64) {
@@ -1194,13 +1200,17 @@ pub fn choose_boon(state: &mut EverlightState, index: usize) -> bool {
 fn apply_boon(state: &mut EverlightState, kind: BoonKind) {
     match kind {
         BoonKind::NewWeapon(k) => {
-            let synergy_partner = newly_completed_synergy_partner(state, k);
+            let synergy_partners = newly_completed_synergy_partners(state, k);
             state.loadout.weapons.push(OwnedWeapon::new(k));
-            match synergy_partner {
-                Some(partner) => {
-                    state.add_log(format!("『{}』を手に入れた。『{}』と呼応している気がする", k.name(), partner.name()));
-                }
-                None => state.add_log(format!("『{}』を手に入れた", k.name())),
+            if synergy_partners.is_empty() {
+                state.add_log(format!("『{}』を手に入れた", k.name()));
+            } else {
+                let partner_names: Vec<&str> = synergy_partners.iter().map(|p| p.name()).collect();
+                state.add_log(format!(
+                    "『{}』を手に入れた。『{}』と呼応している気がする",
+                    k.name(),
+                    partner_names.join("』『")
+                ));
             }
         }
         BoonKind::LevelWeapon(k) => {
@@ -1922,6 +1932,25 @@ mod tests {
             state.log.last().is_some_and(|l| l.contains("呼応")),
             "光弾を持っている状態で極光を手に入れたら、シナジー成立のヒントログが出るはず"
         );
+    }
+
+    #[test]
+    fn acquiring_a_weapon_completing_two_synergies_at_once_mentions_both_partners() {
+        // 光輪は「散光+光輪」「光輪+流星」の2組に属する。両方を先に持って
+        // いる状態で光輪を手に入れると、両方のシナジーが同時に成立する
+        // — `newly_completed_synergy_partners` が最初の1件で打ち切ると
+        // 片方の発見ログが欠落してしまう回帰テスト。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Spray));
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Meteor));
+
+        apply_boon(&mut state, BoonKind::NewWeapon(WeaponKind::Halo));
+
+        let log = state.log.last().cloned().unwrap_or_default();
+        assert!(log.contains(WeaponKind::Spray.name()), "散光との共鳴も気配として出るはず: {log}");
+        assert!(log.contains(WeaponKind::Meteor.name()), "流星との増幅も気配として出るはず: {log}");
     }
 
     #[test]
