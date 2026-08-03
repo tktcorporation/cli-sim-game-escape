@@ -81,8 +81,7 @@ pub fn tick(state: &mut EverlightState) {
 
     let damage_mult = effective_damage_mult(state);
     fire_weapons(state, damage_mult);
-    move_projectiles(state);
-    resolve_projectile_hits(state);
+    move_and_resolve_projectiles(state);
 
     move_chests(state);
     resolve_chest_catch(state);
@@ -460,43 +459,61 @@ fn fire_halo(state: &mut EverlightState, damage_mult: f64) {
     apply_kills(state, kills);
 }
 
-fn move_projectiles(state: &mut EverlightState) {
-    for p in state.projectiles.iter_mut() {
-        p.x += p.vx;
-        p.y += p.vy;
-    }
-}
-
 fn is_in_bounds(p: &Projectile) -> bool {
     p.y > -10.0 && p.y < WORLD_H + 10.0 && p.x > -10.0 && p.x < WORLD_W + 10.0
 }
 
-fn resolve_projectile_hits(state: &mut EverlightState) {
+/// 線分 `start→end` が、中心 `center` 半径 `radius` の円と交わるか。
+/// 弾は9ワールド単位/tick、最小の合算当たり半径は3.2しかないため、
+/// 移動後の終点だけで判定すると閉じるスピードの速い相手をすり抜ける
+/// (両者が接近しながらすれ違うと、始点でも終点でも半径内に入らないまま
+/// 通り過ぎてしまう)。移動した経路全体を線分として判定することで防ぐ。
+fn segment_hits_circle(start: (f64, f64), end: (f64, f64), center: (f64, f64), radius: f64) -> bool {
+    let (dx, dy) = (end.0 - start.0, end.1 - start.1);
+    let len_sq = dx * dx + dy * dy;
+    let (px, py) = if len_sq < 1e-9 {
+        start
+    } else {
+        let t = (((center.0 - start.0) * dx + (center.1 - start.1) * dy) / len_sq).clamp(0.0, 1.0);
+        (start.0 + t * dx, start.1 + t * dy)
+    };
+    let (ddx, ddy) = (center.0 - px, center.1 - py);
+    ddx * ddx + ddy * ddy <= radius * radius
+}
+
+/// 弾を移動させ、その移動経路上での命中判定まで一度に行う。
+/// (移動前位置が無いと `segment_hits_circle` によるすり抜け対策ができない
+/// ため、移動と命中判定は分離せずここで一体にしている)
+fn move_and_resolve_projectiles(state: &mut EverlightState) {
     let projectiles = std::mem::take(&mut state.projectiles);
     let mut surviving = Vec::with_capacity(projectiles.len());
 
     for mut proj in projectiles {
+        let start = (proj.x, proj.y);
+        proj.x += proj.vx;
+        proj.y += proj.vy;
+        let end = (proj.x, proj.y);
+
         let mut consumed = false;
         for enemy in state.enemies.iter_mut() {
             if enemy.hp <= 0 {
                 continue;
             }
-            let dx = enemy.x - proj.x;
-            let dy = enemy.y - proj.y;
             let hit_dist = enemy.kind.radius() + proj.radius;
-            if dx * dx + dy * dy <= hit_dist * hit_dist {
-                enemy.hp -= proj.damage;
-                enemy.hurt_flash.trigger(3);
-                if proj.pierce_remaining == 0 {
-                    consumed = true;
-                } else {
-                    proj.pierce_remaining -= 1;
-                }
-                // 貫通弾でも1tickにつき命中は1体まで — スタックした敵の
-                // 束を一瞬で焼き払わないための意図的な制限 (残りの敵には
-                // 次tickの移動後に改めて命中判定される)。
-                break;
+            if !segment_hits_circle(start, end, (enemy.x, enemy.y), hit_dist) {
+                continue;
             }
+            enemy.hp -= proj.damage;
+            enemy.hurt_flash.trigger(3);
+            if proj.pierce_remaining == 0 {
+                consumed = true;
+            } else {
+                proj.pierce_remaining -= 1;
+            }
+            // 貫通弾でも1tickにつき命中は1体まで — スタックした敵の
+            // 束を一瞬で焼き払わないための意図的な制限 (残りの敵には
+            // 次tickの移動後に改めて命中判定される)。
+            break;
         }
         if !consumed && is_in_bounds(&proj) {
             surviving.push(proj);
@@ -786,7 +803,10 @@ pub fn start_vigil(state: &mut EverlightState) {
     state.queued_boon_rolls = 0;
     state.boss_telegraph = None;
     state.kill_count = 0;
-    state.breach_count = 0;
+    // breach_count はリセットしない: detect_transitions が前回renderとの
+    // 差分で演出をトリガーする単調増加カウンタ (state.rsのコメント参照)。
+    // ここで0に戻すと、前の夜番で漏れが発生していた場合に「減った」と
+    // 誤検知され、拠点→次の夜番の遷移で無関係な漏れ演出が誤発火する。
     state.last_light_damage = None;
     state.add_log("夜番開始。灯を守れ！".to_string());
 }
@@ -841,6 +861,33 @@ mod tests {
         assert_eq!(state.loadout.weapons.len(), 1);
         assert_eq!(state.loadout.weapons[0].kind, WeaponKind::Bolt);
         assert_eq!(state.lantern.light, state.lantern.light_max);
+    }
+
+    #[test]
+    fn breach_count_survives_start_vigil_so_effect_diffing_stays_correct() {
+        // breach_count は detect_transitions (mod.rs) が前回renderとの差分で
+        // 演出をトリガーする単調増加カウンタ。ここでリセットされると、
+        // 前の夜番で漏れが発生していた場合に「値が減った」と誤検知され、
+        // 拠点→次の夜番の遷移で無関係な漏れ演出が誤発火してしまう。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemies.push(Enemy {
+            kind: EnemyKind::Wisp,
+            x: state.lantern.x,
+            y: BREACH_Y,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+        });
+        resolve_breaches(&mut state);
+        assert_eq!(state.breach_count, 1);
+
+        retreat_to_camp(&mut state);
+        start_vigil(&mut state);
+        assert_eq!(
+            state.breach_count, 1,
+            "breach_countはstart_vigilでリセットされてはいけない (演出の誤発火防止)"
+        );
     }
 
     #[test]
@@ -937,10 +984,39 @@ mod tests {
         state.projectiles.push(make_projectile(state.lantern.x, 10, 1, 0.0, -1.0, Color::White));
         state.projectiles[0].y = LANTERN_Y - 5.0;
         let ember_before = state.ember;
-        resolve_projectile_hits(&mut state);
+        move_and_resolve_projectiles(&mut state);
         assert!(state.enemies.is_empty());
         assert!(state.ember > ember_before);
         assert_eq!(state.kill_count, 1);
+    }
+
+    #[test]
+    fn fast_projectile_does_not_tunnel_through_an_enemy_mid_tick() {
+        // 弾は9ワールド単位/tick動くが、最小の合算当たり半径は3.2しかない。
+        // 敵をちょうど移動経路の中間に置くと、始点・終点どちらの距離判定
+        // でも半径内に入らない (=旧・終点のみの判定だと見逃す) が、
+        // 経路全体を見る判定なら確実に命中するはず。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let x = state.lantern.x;
+        state.enemies.push(Enemy {
+            kind: EnemyKind::Wisp,
+            x,
+            y: 5.5, // 弾の始点(10.0)と終点(1.0)のちょうど中間
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+        });
+        state.projectiles.push(make_projectile(x, 10, 1, 0.0, -9.0, Color::White));
+        state.projectiles[0].y = 10.0;
+
+        move_and_resolve_projectiles(&mut state);
+
+        assert_eq!(
+            state.enemies[0].hp,
+            999 - 10,
+            "始点・終点だけでなく移動経路全体で命中判定されるはず (すり抜け防止)"
+        );
     }
 
     #[test]

@@ -157,6 +157,18 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         ClickableGrid::new(COLUMNS, 1, actions::LANE_CLICK_BASE, cell_w)
             .with_cell_height(inner.height)
             .register_targets(area, &block, &mut cs, 0);
+
+        // inner.width が COLUMNS (9) で割り切れない時、床除算した cell_w
+        // では右端に余りぶんの列が残り、どのレーンのクリック領域にも
+        // 属さずタップが無反応になる。最終レーンの領域を、余りぶんも
+        // 含めて右端まで確実に覆うよう見えない当たり判定を重ねる
+        // (後から登録した方が優先されるルールを利用する)。
+        let covered = cell_w * COLUMNS as u16;
+        if covered < inner.width {
+            let remainder_area = Rect::new(inner.x + covered, inner.y, inner.width - covered, inner.height);
+            let last_lane_action = actions::LANE_CLICK_BASE + COLUMNS as u16 - 1;
+            Clickable::new(Block::default(), last_lane_action).render(f, remainder_area, &mut cs);
+        }
     }
 
     // ── ワールド座標 → Canvas 描画データを事前に組み立てる (paintクロージャに move する) ──
@@ -605,5 +617,30 @@ mod tests {
         // 戦場内のどこかは必ずレーンのクリックターゲットとしてヒットするはず。
         let hit = cs.borrow().hit_test(20, 15);
         assert!(hit.is_some());
+    }
+
+    #[test]
+    fn tap_in_remainder_column_still_hits_the_last_lane() {
+        // 40幅はCOLUMNS(9)で割り切れない (40/9=4余り4)。床除算した
+        // cell_wだけで登録すると右端4列がどのレーンにも属さずタップ
+        // 無反応になっていた (すり抜けバグの回帰テスト)。
+        let mut state = EverlightState::new();
+        logic::start_vigil(&mut state);
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = 40;
+        cs.borrow_mut().terminal_rows = 30;
+        let mut terminal = Terminal::new(TestBackend::new(40, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                render(&state, f, f.area(), &cs);
+            })
+            .unwrap();
+        // 戦場右端ぎりぎり (x=39) は余り列に入るはず。
+        let hit = cs.borrow().hit_test(39, 15);
+        assert_eq!(
+            hit,
+            Some(actions::LANE_CLICK_BASE + COLUMNS as u16 - 1),
+            "右端の余り列も最終レーンのタップとして扱われるはず"
+        );
     }
 }

@@ -571,6 +571,10 @@ pub struct EverlightState {
     // render呼び出しに複数tickがまとまった時 (例: 宝箱を取って即座に
     // 別の宝箱を取った) に演出の発火を取りこぼす。単調増加させ、render側は
     // 値そのものではなく差分の有無で発火を判定する (loopmarchと同じ設計)。
+    // これらは `start_vigil` でリセットしてはいけない — リセットすると
+    // 「減った」ことが誤って新規発生と検知され、無関係な演出が誤発火する。
+    /// 例外: これだけはHUD表示 (「撃破 N」) 専用で演出のトリガーには
+    /// 使っていないため、他と違って `start_vigil` でリセットしてよい。
     pub kill_count: u32,
     pub breach_count: u32,
     pub chest_caught_count: u32,
