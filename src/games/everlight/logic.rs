@@ -332,6 +332,10 @@ fn move_enemies(state: &mut EverlightState) {
 }
 
 const SNIPER_CHARGE_TICKS: u32 = 24;
+/// `EnemyKind::contact_damage` (漏れダメージ) と同じく、waveやrankでは
+/// スケールさせない固定値。狙撃者の脅威はダメージ量ではなくレーンを
+/// 塞ぐ位置取りの強制にあるため、ここを吊り上げるとレーン拘束という
+/// 本来の役割より単なる被弾量インフレになってしまう。
 const SNIPER_DAMAGE: i32 = 6;
 
 /// 狙撃者の遠隔攻撃。`SNIPER_STOP_Y` で停止した個体が、灯のレーンにいる
@@ -468,8 +472,12 @@ fn maybe_trigger_dawn(state: &mut EverlightState, kills: &[KillInfo]) {
     if state.dawn_reached_this_vigil || state.wave != milestone_wave(state.rank) {
         return;
     }
-    let finale_kind =
-        if state.rank.saturating_sub(1).is_multiple_of(2) { EnemyKind::FullMoonBoss } else { EnemyKind::Serpent };
+    // 最終ボスの判定は `boss_kind_for` に一本化する。ここで独自に
+    // ランクの偶奇からFullMoonBoss/Serpentを再計算すると、ボスの
+    // ローテーションを変更した時に片方だけ直し忘れてDawn判定が
+    // ズレる恐れがある (waveが既にmilestone_waveと一致している以上、
+    // `boss_kind_for` の戻り値は必ず最終ボス側の分岐になる)。
+    let finale_kind = boss_kind_for(state.wave, state.rank);
     if !kills.iter().any(|k| k.kind == finale_kind) {
         return;
     }
