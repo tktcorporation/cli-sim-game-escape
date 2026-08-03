@@ -144,13 +144,24 @@ pub fn milestone_wave(rank: u32) -> u32 {
     FIRST_MILESTONE_WAVE + rank.saturating_sub(1) * MILESTONE_WAVE_STEP
 }
 
-/// 波とランクの両方から難易度倍率を出す。波内の伸びは既存のまま
-/// (+12%/波)、ランクはそれとは別に基礎値を底上げする — 同じ第5波でも
-/// ランク2の第5波はランク1より明確に手強くなる。
+/// そのランクの夜の最終波 (`milestone_wave`) を越えて指数関数側の
+/// escalationが始まった後、1波ごとに乗算される係数。
+const POST_MILESTONE_GROWTH_PER_WAVE: f64 = 1.09;
+
+/// 波とランクの両方から難易度倍率を出す。`milestone_wave` までは緩やかな
+/// 線形 (+12%/波) で伸ばし、そこを越えて夜番を続けた場合だけ指数関数的に
+/// 跳ね上げる — 拠点の恒久強化 (`power_level` 等) は上限なく積み上げ
+/// られるため、線形のままだと「十分強化すればマイルストーンの先も
+/// いつまでも進める」状態になってしまう。ランクはそれとは別に基礎値を
+/// 底上げする — 同じ第5波でもランク2の第5波はランク1より明確に手強い。
 fn wave_difficulty(wave: u32, rank: u32) -> f64 {
-    let base = 1.0 + wave.saturating_sub(1) as f64 * 0.12;
+    let ramp_wave = milestone_wave(rank);
+    let linear_wave = wave.min(ramp_wave);
+    let base = 1.0 + linear_wave.saturating_sub(1) as f64 * 0.12;
+    let overflow_waves = wave.saturating_sub(ramp_wave);
+    let escalation = POST_MILESTONE_GROWTH_PER_WAVE.powi(overflow_waves as i32);
     let rank_mult = 1.0 + rank.saturating_sub(1) as f64 * 0.35;
-    base * rank_mult
+    base * escalation * rank_mult
 }
 
 /// ランクが上がるほど討伐報酬 (残光) も伸びる — 高ランクは危険だが
@@ -228,6 +239,21 @@ const SNIPER_MIN_WAVE: u32 = 6;
 const SHIELDED_MIN_WAVE: u32 = 11;
 const SPLITTER_MIN_WAVE: u32 = 16;
 
+/// 通常湧きの1回あたりの同時湧き数がこのwaveから増え始める。
+/// `spawn_interval_ticks` の間隔短縮は第21波前後で下限に達し頭打ちに
+/// なるため、それ以降も物量そのものが伸び続けるようこちらで補う。
+const SWARM_RAMP_WAVE: u32 = 10;
+const SWARM_WAVE_STEP: u32 = 5;
+const SWARM_MAX_BATCH: u32 = 6;
+
+/// 通常湧き1回で同時に湧く敵の数。waveが進むほど「間隔を詰める」だけ
+/// でなく「一度に出てくる数」自体も増やし、後半にかけて画面が
+/// 賑やかになっていく体感を作る。
+fn regular_spawn_batch_size(wave: u32) -> u32 {
+    let extra = wave.saturating_sub(SWARM_RAMP_WAVE) / SWARM_WAVE_STEP;
+    (1 + extra).min(SWARM_MAX_BATCH)
+}
+
 /// 通常湧き (精鋭・ボスを除く) の重み付き抽選テーブル。waveが進むほど
 /// 候補が増える — 数字が伸びるだけでなく対応すべき状況そのものが
 /// 増えていく体感を作る。
@@ -301,14 +327,13 @@ fn spawn_enemies(state: &mut EverlightState) {
         state.spawn_progress = 0;
         let table = regular_spawn_table(state.wave);
         let picked = pick_weighted(state, &table);
-        if picked == EnemyKind::Swarmling {
-            let base_lane = rng_below(&mut state.rng_state, COLUMNS as u32) as usize;
-            for offset in 0..3usize {
-                let lane = (base_lane + offset).min(COLUMNS - 1);
-                spawn_enemy_at(state, EnemyKind::Swarmling, lane);
-            }
-        } else {
-            let lane = rng_below(&mut state.rng_state, COLUMNS as u32) as usize;
+        // 羽虫は元々3体一斉湧きの群れ敵なので、wave由来のbatchがそれを
+        // 下回っても3体を下限として保証する。
+        let swarmling_floor = if picked == EnemyKind::Swarmling { 3 } else { 1 };
+        let batch = regular_spawn_batch_size(state.wave).max(swarmling_floor);
+        let base_lane = rng_below(&mut state.rng_state, COLUMNS as u32) as usize;
+        for offset in 0..batch as usize {
+            let lane = (base_lane + offset) % COLUMNS;
             spawn_enemy_at(state, picked, lane);
         }
     }
@@ -2126,6 +2151,41 @@ mod tests {
     }
 
     #[test]
+    fn wave_difficulty_stays_linear_up_to_the_milestone_wave() {
+        // マイルストーンまでは、隣り合う波の"差分"(比ではなく差)が一定に
+        // なるはず — 等差 (線形) 成長のままである証拠。指数関数の場合は
+        // 差分ではなく比が一定になるので、差分の一定性は線形であることの
+        // 直接的な確認になる。
+        let rank = 1;
+        let milestone = milestone_wave(rank);
+        let diff_early = wave_difficulty(3, rank) - wave_difficulty(2, rank);
+        let diff_late = wave_difficulty(milestone, rank) - wave_difficulty(milestone - 1, rank);
+        assert!(
+            (diff_early - diff_late).abs() < 1e-9,
+            "マイルストーンまでは波ごとの差分が一定のはず: diff_early={diff_early} diff_late={diff_late}"
+        );
+    }
+
+    #[test]
+    fn wave_difficulty_escalates_exponentially_past_the_milestone_wave() {
+        // マイルストーンを越えた後は、隣り合う波の"比"が毎波
+        // `POST_MILESTONE_GROWTH_PER_WAVE` で一定になるはず — 恒久強化を
+        // 積み続けてもいつまでも先へ進めてしまわないようにする指数関数側の
+        // escalation本体を直接検証する。
+        let rank = 1;
+        let milestone = milestone_wave(rank);
+        for waves_past_milestone in 0..10u32 {
+            let cur = wave_difficulty(milestone + waves_past_milestone, rank);
+            let next = wave_difficulty(milestone + waves_past_milestone + 1, rank);
+            let ratio = next / cur;
+            assert!(
+                (ratio - POST_MILESTONE_GROWTH_PER_WAVE).abs() < 1e-9,
+                "マイルストーンの{waves_past_milestone}波先での増分比が指数関数の想定と違う: ratio={ratio}"
+            );
+        }
+    }
+
+    #[test]
     fn ember_reward_mult_increases_with_rank() {
         assert_eq!(ember_reward_mult(1), 1.0);
         assert!(ember_reward_mult(2) > 1.0, "高ランクほど討伐報酬も伸びるはず");
@@ -2445,6 +2505,21 @@ mod tests {
         assert!(late.iter().any(|&(k, _)| k == EnemyKind::Sniper), "第20波では狙撃者が出るはず");
         assert!(late.iter().any(|&(k, _)| k == EnemyKind::Shielded), "第20波では甲殻兵が出るはず");
         assert!(late.iter().any(|&(k, _)| k == EnemyKind::Splitter), "第20波では分裂体が出るはず");
+    }
+
+    #[test]
+    fn regular_spawn_batch_size_grows_with_wave_then_caps() {
+        assert_eq!(regular_spawn_batch_size(1), 1, "序盤は同時湧き数が1のままのはず");
+        assert_eq!(regular_spawn_batch_size(SWARM_RAMP_WAVE), 1, "物量が増え始める波でもまだ1のはず");
+        assert!(
+            regular_spawn_batch_size(SWARM_RAMP_WAVE + SWARM_WAVE_STEP) > 1,
+            "物量が増え始める波を過ぎたら同時湧き数が増えるはず"
+        );
+        assert_eq!(
+            regular_spawn_batch_size(1000),
+            SWARM_MAX_BATCH,
+            "同時湧き数は上限で頭打ちになるはず (敵数上限や処理負荷の暴走を防ぐため)"
+        );
     }
 
     #[test]
