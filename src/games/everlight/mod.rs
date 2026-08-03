@@ -188,6 +188,9 @@ impl EverlightGame {
     fn buy_and_notify(&mut self, purchase: impl FnOnce(&mut state::EverlightState) -> bool) -> bool {
         if purchase(&mut self.state) {
             sound::play(sound::PURCHASE);
+            // 次の定期autosaveを待つと、直後にリロードされた場合に
+            // 恒久強化の購入が消えてしまうため即座に保存する。
+            self.flush_save();
         } else {
             sound::play(sound::ERROR);
         }
@@ -233,9 +236,10 @@ impl EverlightGame {
         self.prev.set(PrevSnapshot::capture(&self.state));
     }
 
-    fn flush_save(&self) {
+    fn flush_save(&mut self) {
         #[cfg(target_arch = "wasm32")]
         save::save_game(&self.state);
+        self.save_countdown = save::AUTOSAVE_INTERVAL;
     }
 }
 
@@ -252,12 +256,16 @@ impl Game for EverlightGame {
     }
 
     fn tick(&mut self, delta_ticks: u32) {
+        let was_vigil = self.state.phase == Phase::Vigil;
         logic::tick_n(&mut self.state, delta_ticks);
 
-        if self.save_countdown > delta_ticks {
+        if was_vigil && self.state.phase == Phase::Camp {
+            // 夜番終了でember/自己ベストが確定した直後 — 次の定期autosave
+            // (最大30秒後) を待つとリロードで記録が失われうるため即座に保存する。
+            self.flush_save();
+        } else if self.save_countdown > delta_ticks {
             self.save_countdown -= delta_ticks;
         } else {
-            self.save_countdown = save::AUTOSAVE_INTERVAL;
             self.flush_save();
         }
     }
@@ -312,6 +320,42 @@ mod tests {
         game.tick(5);
         assert_eq!(game.state.elapsed_ticks, 5);
         assert_eq!(game.save_countdown, before - 5);
+    }
+
+    #[test]
+    fn purchase_flushes_save_immediately_instead_of_waiting_for_autosave() {
+        // 定期autosave (最大30秒後) を待つ間にリロードされると恒久強化の
+        // 購入が失われるため、購入成功時は即座に保存されるはず。
+        // `flush_save` は必ず `save_countdown` をリセットするので、遠い
+        // 値に設定してから購入し、リセットされたことでflushを検証する。
+        let mut game = EverlightGame::new();
+        game.state.ember = 999_999;
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+        assert!(game.buy_and_notify(logic::purchase_light));
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL,
+            "購入成功時にflush_saveが呼ばれてsave_countdownがリセットされるはず"
+        );
+    }
+
+    #[test]
+    fn vigil_end_flushes_save_immediately_instead_of_waiting_for_autosave() {
+        // 夜番終了でember/自己ベストが確定した直後にリロードされても
+        // 記録が失われないよう、定期autosaveを待たず即座に保存されるはず。
+        let mut game = EverlightGame::new();
+        logic::start_vigil(&mut game.state);
+        game.state.lantern.light = 0;
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+
+        game.tick(1);
+
+        assert_eq!(game.state.phase, Phase::Camp, "灯が尽きて夜番が終了しているはず");
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL,
+            "夜番終了時にflush_saveが呼ばれてsave_countdownがリセットされるはず"
+        );
     }
 
     #[test]

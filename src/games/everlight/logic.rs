@@ -76,12 +76,16 @@ pub fn tick(state: &mut EverlightState) {
     update_wave(state);
     move_lantern(state);
     spawn_enemies(state);
+    // 敵自身もこのtickで動くため、命中判定 (move_and_resolve_projectiles)
+    // では移動前の位置を敵ごとの相対運動の基準として使う。
+    let enemy_prev_positions: std::collections::HashMap<u32, (f64, f64)> =
+        state.enemies.iter().map(|e| (e.id, (e.x, e.y))).collect();
     move_enemies(state);
     resolve_breaches(state);
 
     let damage_mult = effective_damage_mult(state);
     fire_weapons(state, damage_mult);
-    move_and_resolve_projectiles(state);
+    move_and_resolve_projectiles(state, &enemy_prev_positions);
 
     move_chests(state);
     resolve_chest_catch(state);
@@ -488,7 +492,14 @@ fn segment_hits_circle(start: (f64, f64), end: (f64, f64), center: (f64, f64), r
 /// 弾を移動させ、その移動経路上での命中判定まで一度に行う。
 /// (移動前位置が無いと `segment_hits_circle` によるすり抜け対策ができない
 /// ため、移動と命中判定は分離せずここで一体にしている)
-fn move_and_resolve_projectiles(state: &mut EverlightState) {
+///
+/// `enemy_prev_positions` はこのtickで敵が動く前の位置 (id→(x,y))。敵も
+/// 高waveでは1tickに数ワールド単位動くため、弾の経路だけを敵の移動後
+/// (静止した) 位置に対してスイープすると、両者が同tick中にすれ違う
+/// ケースを見逃す。弾と敵それぞれの始点・終点から相対運動の線分を作り、
+/// それを原点中心の円と交わるか判定することで、両者の移動をまとめて
+/// 考慮する。
+fn move_and_resolve_projectiles(state: &mut EverlightState, enemy_prev_positions: &std::collections::HashMap<u32, (f64, f64)>) {
     let projectiles = std::mem::take(&mut state.projectiles);
     let mut surviving = Vec::with_capacity(projectiles.len());
 
@@ -507,7 +518,10 @@ fn move_and_resolve_projectiles(state: &mut EverlightState) {
                 continue;
             }
             let hit_dist = enemy.kind.radius() + proj.radius;
-            if !segment_hits_circle(start, end, (enemy.x, enemy.y), hit_dist) {
+            let enemy_prev = enemy_prev_positions.get(&enemy.id).copied().unwrap_or((enemy.x, enemy.y));
+            let rel_start = (start.0 - enemy_prev.0, start.1 - enemy_prev.1);
+            let rel_end = (end.0 - enemy.x, end.1 - enemy.y);
+            if !segment_hits_circle(rel_start, rel_end, (0.0, 0.0), hit_dist) {
                 continue;
             }
             enemy.hp -= proj.damage;
@@ -1008,7 +1022,7 @@ mod tests {
         state.projectiles.push(make_projectile(state.lantern.x, 10, 1, 0.0, -1.0, Color::White));
         state.projectiles[0].y = LANTERN_Y - 5.0;
         let ember_before = state.ember;
-        move_and_resolve_projectiles(&mut state);
+        move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
         assert!(state.enemies.is_empty());
         assert!(state.ember > ember_before);
         assert_eq!(state.kill_count, 1);
@@ -1035,7 +1049,7 @@ mod tests {
         state.projectiles.push(make_projectile(x, 10, 1, 0.0, -9.0, Color::White));
         state.projectiles[0].y = 10.0;
 
-        move_and_resolve_projectiles(&mut state);
+        move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
 
         assert_eq!(
             state.enemies[0].hp,
@@ -1066,11 +1080,11 @@ mod tests {
         proj.y = 10.0;
         state.projectiles.push(proj);
 
-        move_and_resolve_projectiles(&mut state);
+        move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
         let hp_after_first_hit = state.enemies[0].hp;
         assert_eq!(hp_after_first_hit, 999 - 10, "1回目は命中するはず");
 
-        move_and_resolve_projectiles(&mut state);
+        move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
         assert_eq!(
             state.enemies[0].hp, hp_after_first_hit,
             "同じ弾が同じ敵に連続してもう一度命中してはいけない"
@@ -1108,13 +1122,48 @@ mod tests {
         proj.y = 10.0;
         state.projectiles.push(proj);
 
-        move_and_resolve_projectiles(&mut state);
+        move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
 
         assert_eq!(state.enemies[0].hp, 999 - 10, "1体目は同tick内で命中するはず");
         assert_eq!(
             state.enemies[1].hp,
             999 - 10,
             "残りの貫通が生きているなら2体目にも同tick内で命中するはず"
+        );
+    }
+
+    #[test]
+    fn fast_enemy_movement_is_swept_against_projectile_movement() {
+        // 高waveのSwarmlingのように敵自身が1tickで大きく動くと、弾の経路を
+        // 敵の「移動後」の1点だけに対してスイープしても、両者が同tick中に
+        // すれ違うケースを見逃す。敵がy=9.9→13.58 (差3.68) へ動く間に弾が
+        // y=10→1へ動く場合、移動後の敵位置(13.58)は弾の経路(y∈[1,10])から
+        // 3.58離れていて合算当たり半径3.2の外に出てしまうが、実際には
+        // 両者の経路はすれ違う瞬間に交差している。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let x = state.lantern.x;
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Swarmling,
+            x,
+            y: 13.58,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+        });
+        let mut proj = make_projectile(x, 10, 1, 0.0, -9.0, Color::White);
+        proj.y = 10.0;
+        state.projectiles.push(proj);
+
+        let mut enemy_prev_positions = std::collections::HashMap::new();
+        enemy_prev_positions.insert(1u32, (x, 9.9));
+        move_and_resolve_projectiles(&mut state, &enemy_prev_positions);
+
+        assert_eq!(
+            state.enemies[0].hp,
+            999 - 10,
+            "敵自身の移動も合わせてスイープすれば、すれ違いざまの命中を検知できるはず"
         );
     }
 
