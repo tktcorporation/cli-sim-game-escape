@@ -2,6 +2,7 @@
 
 pub mod abyss;
 pub mod cookie;
+pub mod everlight;
 pub mod factory;
 pub mod godfield;
 pub mod loopmarch;
@@ -48,6 +49,7 @@ pub enum GameChoice {
     Godfield,
     Metropolis,
     LoopMarch,
+    Everlight,
 }
 
 /// Top-level application state.
@@ -85,5 +87,6 @@ pub fn create_game(choice: &GameChoice) -> Box<dyn Game> {
         GameChoice::Godfield => Box::new(godfield::GodFieldGame::new()),
         GameChoice::Metropolis => Box::new(metropolis::MetropolisGame::new()),
         GameChoice::LoopMarch => Box::new(loopmarch::LoopMarchGame::new()),
+        GameChoice::Everlight => Box::new(everlight::EverlightGame::new()),
     }
 }
