@@ -277,6 +277,12 @@ impl Game for EverlightGame {
     }
 
     fn on_leave(&mut self) {
+        // qキーやグローバル戻るボタンでの離脱はこのインスタンスを破棄する
+        // (main.rsがAppStateを丸ごと差し替える) ため、夜番中に離脱すると
+        // end_vigilを経ないまま自己ベストが確定せず終わる — 獲得ember
+        // は保存されるのに記録だけ静かに消える非対称を防ぐため、離脱時も
+        // 撤退と同じ扱いで確定させてから保存する (Camp中なら no-op)。
+        logic::retreat_to_camp(&mut self.state);
         self.flush_save();
     }
 
@@ -395,6 +401,27 @@ mod tests {
             game.save_countdown,
             save::AUTOSAVE_INTERVAL,
             "撤退クリック時にflush_saveが呼ばれてsave_countdownがリセットされるはず"
+        );
+    }
+
+    #[test]
+    fn leaving_during_an_active_vigil_banks_the_current_run_before_saving() {
+        // qキーやグローバル戻るボタンでの離脱はこのインスタンスを破棄する
+        // ため、夜番中に離脱すると end_vigil を経ないまま自己ベストが
+        // 確定しない — 獲得emberは保存されるのに記録だけ静かに消える
+        // 非対称を防ぐ回帰テスト。
+        let mut game = EverlightGame::new();
+        logic::start_vigil(&mut game.state);
+        game.state.wave = 5;
+        game.state.elapsed_ticks = 1234;
+
+        game.on_leave();
+
+        assert_eq!(game.state.phase, Phase::Camp, "離脱時は撤退と同じ扱いで拠点へ戻るはず");
+        assert_eq!(game.state.best_wave, 5, "離脱前のwaveが自己ベストとして確定するはず");
+        assert_eq!(
+            game.state.best_survival_ticks, 1234,
+            "離脱前の生存時間が自己ベストとして確定するはず"
         );
     }
 

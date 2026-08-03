@@ -476,24 +476,39 @@ fn is_in_bounds(p: &Projectile) -> bool {
 }
 
 /// 線分 `start→end` が、中心 `center` 半径 `radius` の円と交わる最も早い
-/// 時刻 `t∈[0,1]` を返す (交わらなければ `None`)。
+/// 時刻 `t∈[0,1]` (=境界に最初に触れる時刻) を返す (交わらなければ `None`)。
 /// 弾は9ワールド単位/tick、最小の合算当たり半径は3.2しかないため、
 /// 移動後の終点だけで判定すると閉じるスピードの速い相手をすり抜ける
 /// (両者が接近しながらすれ違うと、始点でも終点でも半径内に入らないまま
 /// 通り過ぎてしまう)。移動した経路全体を線分として判定することで防ぐ。
+///
 /// `t` を返すのは、貫通弾が同tick中に複数の敵と交差した際、スポーン順
-/// ではなく実際に弾が通過する順で命中を解決するため。
+/// ではなく実際に弾が通過する順で命中を解決するため — 中心への最接近
+/// 時刻ではなく、線分と円の方程式を解いた実際の境界進入時刻でなければ、
+/// 半径の異なる敵同士 (魔王等の大型と雑魚) で順序を誤る。
 fn segment_hits_circle_at(start: (f64, f64), end: (f64, f64), center: (f64, f64), radius: f64) -> Option<f64> {
     let (dx, dy) = (end.0 - start.0, end.1 - start.1);
-    let len_sq = dx * dx + dy * dy;
-    let (t, px, py) = if len_sq < 1e-9 {
-        (0.0, start.0, start.1)
-    } else {
-        let t = (((center.0 - start.0) * dx + (center.1 - start.1) * dy) / len_sq).clamp(0.0, 1.0);
-        (t, start.0 + t * dx, start.1 + t * dy)
-    };
-    let (ddx, ddy) = (center.0 - px, center.1 - py);
-    (ddx * ddx + ddy * ddy <= radius * radius).then_some(t)
+    let (fx, fy) = (start.0 - center.0, start.1 - center.1);
+    let a = dx * dx + dy * dy;
+    if a < 1e-9 {
+        // 始点=終点 (実質移動なし) — 始点が既に円内にあるかだけを見る。
+        return (fx * fx + fy * fy <= radius * radius).then_some(0.0);
+    }
+    let b = 2.0 * (fx * dx + fy * dy);
+    let c = fx * fx + fy * fy - radius * radius;
+    let disc = b * b - 4.0 * a * c;
+    if disc < 0.0 {
+        return None;
+    }
+    let sqrt_disc = disc.sqrt();
+    let t_enter = (-b - sqrt_disc) / (2.0 * a);
+    let t_exit = (-b + sqrt_disc) / (2.0 * a);
+    if t_exit < 0.0 || t_enter > 1.0 {
+        return None;
+    }
+    // t_enter が0未満なら始点が既に円内にある — その場合はこのtick中の
+    // 最速命中時刻として t=0 を返す。
+    Some(t_enter.clamp(0.0, 1.0))
 }
 
 /// 弾を移動させ、その移動経路上での命中判定まで一度に行う。
@@ -1087,6 +1102,24 @@ mod tests {
     }
 
     #[test]
+    fn segment_hits_circle_at_returns_true_entry_time_not_closest_approach() {
+        // 半径の異なる2つの円が同じ直線上にある場合、「境界に最初に触れる
+        // 時刻」は中心までの距離の近さだけでは決まらない。半径の大きい円
+        // ほど境界は中心より手前にあるため、中心距離が遠くても先に境界へ
+        // 入りうる。9ユニットのセグメント上で、中心距離5・半径3.2の円は
+        // 1.8で境界に入るが、中心距離9・半径8.1の円はより早い0.9で入る。
+        let start = (0.0, 0.0);
+        let end = (9.0, 0.0);
+
+        let small = segment_hits_circle_at(start, end, (5.0, 0.0), 3.2).expect("小さい円に命中するはず");
+        let large = segment_hits_circle_at(start, end, (9.0, 0.0), 8.1).expect("大きい円に命中するはず");
+
+        assert!((small - 1.8 / 9.0).abs() < 1e-9, "小さい円への進入時刻は (5-3.2)/9 のはず: got {small}");
+        assert!((large - 0.9 / 9.0).abs() < 1e-9, "大きい円への進入時刻は (9-8.1)/9 のはず: got {large}");
+        assert!(large < small, "中心までの距離は遠くても、半径が大きい円の方が先に境界へ入るはず");
+    }
+
+    #[test]
     fn fast_projectile_does_not_tunnel_through_an_enemy_mid_tick() {
         // 弾は9ワールド単位/tick動くが、最小の合算当たり半径は3.2しかない。
         // 敵をちょうど移動経路の中間に置くと、始点・終点どちらの距離判定
@@ -1233,6 +1266,53 @@ mod tests {
         assert_eq!(
             state.enemies[0].hp, 999,
             "配列の先頭でも進路上遠い敵(y=3)には届かないはず (貫通1発分は近い敵で使い切る)"
+        );
+    }
+
+    #[test]
+    fn piercing_shot_prioritizes_by_boundary_entry_not_center_distance() {
+        // 中心までの距離が近い雑魚より、中心までの距離は遠くても半径が
+        // 巨大な魔王の方が境界へは先に触れることがある。中心距離だけで
+        // 順序を決めると、この魔王より先に (本来は届かないはずの) 雑魚へ
+        // 貫通1発分を浪費してしまう。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let x = state.lantern.x;
+        // 中心距離4・半径3.8(合算)の雑魚。境界進入は (4-3.8)=0.2。
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Wisp,
+            x,
+            y: 6.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+        });
+        // 中心距離8.2・半径8.1(合算)の魔王。中心距離は雑魚より遠いが、
+        // 境界進入は (8.2-8.1)=0.1 と雑魚より先。
+        state.enemies.push(Enemy {
+            id: 2,
+            kind: EnemyKind::Boss,
+            x,
+            y: 1.8,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+        });
+        let mut proj = make_projectile(x, 10, 1, 0.0, -9.0, Color::White); // pierce=1 → 命中は1発分のみ
+        proj.y = 10.0;
+        state.projectiles.push(proj);
+
+        move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
+
+        assert_eq!(
+            state.enemies[1].hp,
+            999 - 10,
+            "中心距離は遠くても、境界へ先に触れる魔王に命中するはず"
+        );
+        assert_eq!(
+            state.enemies[0].hp, 999,
+            "中心距離が近いだけの雑魚には、貫通1発分が魔王で尽きて届かないはず"
         );
     }
 
