@@ -36,9 +36,10 @@ pub const MENU_SCROLL_DOWN: u16 = 9;
 // 次番から採る。scope が異なる衝突は無害 (ClickScope で分離される) だが、
 // 追加者が採番に迷わないよう連続させている。
 pub const MENU_SELECT_LOOPMARCH: u16 = 16;
+pub const MENU_SELECT_EVERLIGHT: u16 = 19;
 
-/// Last valid index of the main menu cards (7 games + settings → 0..=7).
-const MENU_LAST_INDEX: u8 = 7;
+/// Last valid index of the main menu cards (8 games + settings → 0..=8).
+const MENU_LAST_INDEX: u8 = 8;
 
 /// Cursor → menu action, used for the A button on the main menu.
 enum MenuPick {
@@ -55,6 +56,7 @@ fn menu_pick_for(idx: u8) -> MenuPick {
         4 => MenuPick::Game(GameChoice::Godfield),
         5 => MenuPick::Game(GameChoice::Metropolis),
         6 => MenuPick::Game(GameChoice::LoopMarch),
+        7 => MenuPick::Game(GameChoice::Everlight),
         _ => MenuPick::Settings,
     }
 }
@@ -68,6 +70,7 @@ const SETTINGS_CONFIRM_NO: u16 = 14;
 const SETTINGS_RESET_LOOPMARCH: u16 = 15;
 const SETTINGS_SCROLL_UP: u16 = 17;
 const SETTINGS_SCROLL_DOWN: u16 = 18;
+const SETTINGS_RESET_EVERLIGHT: u16 = 20;
 /// 1クリック/1行キー入力あたりのスクロール量。
 const SETTINGS_SCROLL_STEP: i32 = 3;
 
@@ -273,6 +276,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 InputEvent::Key('7') | InputEvent::Click(_, MENU_SELECT_LOOPMARCH) => {
                     Some(MenuPick::Game(GameChoice::LoopMarch))
                 }
+                InputEvent::Key('8') | InputEvent::Click(_, MENU_SELECT_EVERLIGHT) => {
+                    Some(MenuPick::Game(GameChoice::Everlight))
+                }
                 InputEvent::Key('0') | InputEvent::Click(_, MENU_SELECT_SETTINGS) => {
                     Some(MenuPick::Settings)
                 }
@@ -354,6 +360,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     InputEvent::Key('4') | InputEvent::Click(_, SETTINGS_RESET_LOOPMARCH) => {
                         *confirm_reset = Some(GameChoice::LoopMarch);
                     }
+                    InputEvent::Key('5') | InputEvent::Click(_, SETTINGS_RESET_EVERLIGHT) => {
+                        *confirm_reset = Some(GameChoice::Everlight);
+                    }
                     InputEvent::Key('k') | InputEvent::Click(_, SETTINGS_SCROLL_UP) => {
                         adjust_scroll(scroll, -SETTINGS_SCROLL_STEP);
                     }
@@ -398,6 +407,7 @@ fn perform_reset(game: &GameChoice) {
         GameChoice::Abyss => games::abyss::save::delete_save(),
         GameChoice::Metropolis => games::metropolis::save::delete_save(),
         GameChoice::LoopMarch => games::loopmarch::save::delete_save(),
+        GameChoice::Everlight => games::everlight::save::delete_save(),
         _ => {}
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -585,6 +595,7 @@ fn render_menu(
         ("神の戦場 (God Field)", "4人で戦うターン制カードバトルロイヤル", MENU_SELECT_GODFIELD, '▶', theme::accent(&GameChoice::Godfield)),
         ("Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶', theme::accent(&GameChoice::Metropolis)),
         ("周回討伐", "地形を配置し勇者が自動周回するローグライト", MENU_SELECT_LOOPMARCH, '▶', theme::accent(&GameChoice::LoopMarch)),
+        ("常夜灯", "降り注ぐ魔物から灯を守る縦画面バレットヘヴン", MENU_SELECT_EVERLIGHT, '▶', theme::accent(&GameChoice::Everlight)),
         ("設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 
@@ -845,6 +856,18 @@ fn render_settings_main(
     );
 
     cl.push(Line::from(""));
+
+    // 常夜灯
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
+            Span::styled("常夜灯", Style::default().fg(Color::White)),
+            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
+        ]),
+        SETTINGS_RESET_EVERLIGHT,
+    );
+
+    cl.push(Line::from(""));
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
         " ※ Tiny Factory / Dungeon Dive / God Field は",
@@ -878,6 +901,7 @@ fn render_confirm_dialog(
         GameChoice::Abyss => "深淵潜行",
         GameChoice::Metropolis => "Idle Metropolis",
         GameChoice::LoopMarch => "周回討伐",
+        GameChoice::Everlight => "常夜灯",
         _ => "Unknown",
     };
 
