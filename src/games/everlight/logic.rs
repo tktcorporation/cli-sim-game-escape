@@ -1548,6 +1548,15 @@ const BOSS_BULLET_DAMAGE: i32 = 8;
 /// かつ発射時の灯位置へ直進する (`aim_velocity`)。狙われた瞬間に見えた
 /// 位置から逃げる、より短い判断時間を要求する別種の脅威にする。
 const BOSS_BULLET_SPEED: f64 = 2.6;
+/// 発射位置から灯のy座標までこの距離未満しか無い場合は撃たない。詠唱者/
+/// 浮遊霊は`CASTER_STOP_Y`/`WRAITH_STOP_Y`で停止するため灯からずっと
+/// 遠く、弾が複数tickかけて飛ぶことが構造的に保証されるが、ボス級は
+/// 停止せず防衛線際まで進み続けるため、近すぎる位置で撃つと
+/// `move_and_resolve_enemy_bullets`が同tick内で移動と命中判定まで終えて
+/// しまい、`GameTime::update`の最大5tickまとめ処理と重なった場合は
+/// 一度も描画されないまま被弾する (見てから避けられない)。
+/// `BOSS_BULLET_SPEED`で最低10tick以上飛ぶ距離を確保している。
+const BOSS_BULLET_MIN_TRAVEL: f64 = 30.0;
 
 /// 魔王/満月の魔王の実体弾攻撃。`resolve_boss_telegraph` (灯喰らい) とは
 /// 別の独立した攻撃系統 — 灯喰らいが「レーンへの警告→回避」の駆け引き
@@ -1572,15 +1581,21 @@ fn resolve_boss_bullets(state: &mut EverlightState) {
             None => enemy.ranged_charge = Some(period / 3),
             Some(t) if t <= 1 => {
                 enemy.ranged_charge = Some(period);
-                let (vx, vy) = aim_velocity(enemy.x, enemy.y, lantern_x, LANTERN_Y, BOSS_BULLET_SPEED);
-                new_bullets.push(EnemyBullet {
-                    x: enemy.x,
-                    y: enemy.y,
-                    vx,
-                    vy,
-                    damage: BOSS_BULLET_DAMAGE,
-                    source: enemy.kind,
-                });
+                // 防衛線際まで進んでしまった個体は、撃っても避ける猶予が
+                // 無いまま被弾させてしまうため発射自体を見送る (cooldownは
+                // 通常通りリセットするので、以降その個体はもう撃たなくなる —
+                // ボスは`homes()`等で前進し続けるだけで後退はしないため)。
+                if LANTERN_Y - enemy.y >= BOSS_BULLET_MIN_TRAVEL {
+                    let (vx, vy) = aim_velocity(enemy.x, enemy.y, lantern_x, LANTERN_Y, BOSS_BULLET_SPEED);
+                    new_bullets.push(EnemyBullet {
+                        x: enemy.x,
+                        y: enemy.y,
+                        vx,
+                        vy,
+                        damage: BOSS_BULLET_DAMAGE,
+                        source: enemy.kind,
+                    });
+                }
             }
             Some(t) => enemy.ranged_charge = Some(t - 1),
         }
@@ -3787,6 +3802,39 @@ mod tests {
         let bullet = &state.enemy_bullets[0];
         assert_eq!(bullet.source, EnemyKind::Boss);
         assert!(bullet.vx > 0.0, "灯が右側にいるので右向きに直進するはず (vx={})", bullet.vx);
+    }
+
+    #[test]
+    fn boss_does_not_fire_a_bullet_when_too_close_to_the_lantern_to_dodge() {
+        // 防衛線際まで進んだボスが撃つと、`GameTime::update`の最大5tick
+        // まとめ処理と重なった場合に同tick内で着弾してしまい、一度も
+        // 見えないまま被弾する。`BOSS_BULLET_MIN_TRAVEL`未満の距離では
+        // 発射自体を見送ることを確認する回帰テスト。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Boss,
+            x: state.lantern.x,
+            y: LANTERN_Y - BOSS_BULLET_MIN_TRAVEL + 1.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        let first_charge = boss_bullet_period_ticks(state.rank) / 3;
+        for _ in 0..=first_charge {
+            resolve_boss_bullets(&mut state);
+        }
+        assert!(
+            state.enemy_bullets.is_empty(),
+            "防衛線に近すぎる位置からは避ける猶予が無いため撃たないはず"
+        );
+        assert_eq!(
+            state.enemies[0].ranged_charge,
+            Some(boss_bullet_period_ticks(state.rank)),
+            "発射を見送ってもcooldownは通常通りリセットされるはず"
+        );
     }
 
     #[test]
