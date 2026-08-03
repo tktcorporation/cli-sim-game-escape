@@ -27,7 +27,7 @@ use super::actions;
 use super::logic;
 use super::state::{
     BoonKind, CampUpgrades, EnemyKind, EverlightState, Phase, WeaponKind, BREACH_Y, COLUMNS,
-    LANTERN_Y, SPAWN_Y, WORLD_H, WORLD_W,
+    LANE_HALF_WIDTH, LANTERN_Y, SPAWN_Y, WORLD_H, WORLD_W,
 };
 
 pub fn render(state: &EverlightState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
@@ -250,6 +250,63 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         .map(|&x| (x, world_to_canvas_y(SPAWN_Y), x, world_to_canvas_y(BREACH_Y)))
         .collect();
 
+    // 極光は即着弾のヒットスキャンで実体弾を撃たない (弾道が無い) ため、
+    // 命中の有無によらず発火した帯を一瞬描かないと「取っても強化しても
+    // 何も起きていないように見える」演出の空白になる。`aurora_flash` が
+    // 立っている間だけ、現在の判定幅 (`aurora_width_mult`) そのままの帯を描く。
+    // 帯の中心は現在の`state.lantern.x`ではなく`aurora_flash_x`(発火時に
+    // 実際に判定した位置のスナップショット)を使う — 現在位置だと、発火後に
+    // 灯が動いた分だけ実際に判定したレーンとズレて表示されてしまう。
+    let aurora_band_pts: Vec<(f64, f64)> = if state.aurora_flash.is_active() {
+        state
+            .loadout
+            .weapon(WeaponKind::Aurora)
+            .map(|w| {
+                let half_width = LANE_HALF_WIDTH * w.aurora_width_mult();
+                let x0 = state.aurora_flash_x - half_width;
+                let x1 = state.aurora_flash_x + half_width;
+                canvas_fx::filled_rect_points(x0, SPAWN_Y, x1, BREACH_Y, 3.0)
+                    .into_iter()
+                    .map(|(x, y)| (x, world_to_canvas_y(y)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    // 光輪は近接の常時判定武器で、Aurora同様に実体弾を撃たない。判定半径
+    // (`halo_radius`) そのままのリングを常時描き、周回する光点で「回転して
+    // いる」ことを視覚的に伝える。常時リングは常に現在の`lantern.x`を
+    // 追従してよい (発火位置ではなく「今の判定範囲」を示すものなので)。
+    //
+    // Aurora の `aurora_flash` のような「発火した瞬間だけ光る」演出は
+    // 意図的に持たせていない — 光輪のクールダウンは最短5tick (進化・
+    // 速射パッシブでさらに短縮可能) で、まとめtick処理での見逃しを防ぐ
+    // のに必要な最短表示時間 (5tick、AURORA_FLASH_TICKS参照) を常に
+    // 下回るか同じになる。そのタイマーで一瞬だけ光らせる設計にすると、
+    // 次の発火が前の発火の表示が消える前後に必ず来て実質常時点灯になり、
+    // かつ発火の度に灯の現在位置へワープする不自然な見た目になる。
+    // 発火頻度が高い光輪は、この常時リング+回転する光点だけで武器の
+    // 存在と強化 (半径の拡大) を伝えるのに十分な視覚フィードバックになる。
+    let halo_visual = state.loadout.weapon(WeaponKind::Halo).map(|w| {
+        let radius = w.halo_radius();
+        let cx = state.lantern.x;
+        let cy = world_to_canvas_y(LANTERN_Y);
+        let ring = canvas_fx::ring_points(cx, cy, radius, 0.2);
+        const SPARK_COUNT: usize = 3;
+        let spin_angle = state.elapsed_ticks as f64 * 0.12;
+        let sparks: Vec<(f64, f64)> = (0..SPARK_COUNT)
+            .flat_map(|i| {
+                let a = spin_angle + i as f64 * std::f64::consts::TAU / SPARK_COUNT as f64;
+                let sx = cx + a.cos() * radius;
+                let sy = cy + a.sin() * radius;
+                canvas_fx::filled_ellipse_points(sx, sy, 1.1, 1.1, 0.6)
+            })
+            .collect();
+        (ring, sparks)
+    });
+
     let canvas = Canvas::default()
         .x_bounds([0.0, WORLD_W])
         .y_bounds([0.0, WORLD_H])
@@ -258,11 +315,26 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
             for &(x1, y1, x2, y2) in &telegraph_lines {
                 ctx.draw(&CanvasLine { x1, y1, x2, y2, color: Color::Red });
             }
+            if !aurora_band_pts.is_empty() {
+                // 極光の武器色そのまま (LightYellow) だと灯・宝箱の発光と
+                // 同色で紛れるため、帯は暗めの Yellow にして区別できるようにする。
+                ctx.draw(&Points { coords: &aurora_band_pts, color: Color::Yellow });
+            }
+            if let Some((ring, _)) = &halo_visual {
+                if !ring.is_empty() {
+                    ctx.draw(&Points { coords: ring, color: Color::Magenta });
+                }
+            }
             for (pts, color) in &enemy_groups {
                 ctx.draw(&Points { coords: pts, color: *color });
             }
             if !hurt_points.is_empty() {
                 ctx.draw(&Points { coords: &hurt_points, color: Color::White });
+            }
+            if let Some((_, sparks)) = &halo_visual {
+                if !sparks.is_empty() {
+                    ctx.draw(&Points { coords: sparks, color: Color::LightMagenta });
+                }
             }
             for (pts, color) in &projectile_groups {
                 ctx.draw(&Points { coords: pts, color: *color });
@@ -632,6 +704,22 @@ mod tests {
         let mut state = EverlightState::new();
         logic::start_vigil(&mut state);
         logic::tick_n(&mut state, 100);
+        render_to_test_backend(&state, 40, 30);
+        render_to_test_backend(&state, 100, 30);
+    }
+
+    #[test]
+    fn vigil_renders_without_panicking_with_aurora_and_halo_active() {
+        use super::super::state::OwnedWeapon;
+
+        let mut state = EverlightState::new();
+        logic::start_vigil(&mut state);
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Aurora));
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Halo));
+        // 極光の薙ぎ払い帯は`aurora_flash`が立っている間だけ描くコードパス
+        // なので、実際の発火tickを計算せずフラグを直接立てて確実に通す
+        // (光輪は常時描画なので装備するだけでコードパスを通る)。
+        state.aurora_flash.trigger(1);
         render_to_test_backend(&state, 40, 30);
         render_to_test_backend(&state, 100, 30);
     }

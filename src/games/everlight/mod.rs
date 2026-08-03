@@ -229,6 +229,9 @@ impl EverlightGame {
         logic::select_rank(&mut self.state, next);
         if self.state.camp.selected_rank != before {
             sound::play(sound::CLICK);
+            // 次の定期autosaveを待つと、直後にリロードされた場合に選択が
+            // 第1夜へ戻ってしまうため、購入と同様に即座に保存する。
+            self.flush_save();
         } else {
             sound::play(sound::ERROR);
         }
@@ -565,6 +568,40 @@ mod tests {
         assert_eq!(game.state.camp.selected_rank, 3);
         assert!(game.handle_input(&click(CAMP_RANK_DOWN)));
         assert_eq!(game.state.camp.selected_rank, 2);
+    }
+
+    #[test]
+    fn changing_rank_flushes_save_immediately_instead_of_waiting_for_autosave() {
+        // ランク選択を変えた直後にリロードされても選択が第1夜へ戻らない
+        // よう、購入と同様に即座に保存されるはず。
+        let mut game = EverlightGame::new();
+        game.state.camp.max_unlocked_rank = 2;
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+
+        assert!(game.handle_input(&click(CAMP_RANK_UP)));
+
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL,
+            "ランク変更時にflush_saveが呼ばれてsave_countdownがリセットされるはず"
+        );
+    }
+
+    #[test]
+    fn no_op_rank_change_does_not_flush_save() {
+        // 上限/下限での no-op 操作まで毎回保存するのは無駄なので、実際に
+        // 値が変わった時だけ flush_save が走ることを確認する。
+        let mut game = EverlightGame::new();
+        assert_eq!(game.state.camp.max_unlocked_rank, 1);
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+
+        assert!(game.handle_input(&click(CAMP_RANK_UP)));
+
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL + 1000,
+            "変化が無ければflush_saveは呼ばれないはず"
+        );
     }
 
     #[test]

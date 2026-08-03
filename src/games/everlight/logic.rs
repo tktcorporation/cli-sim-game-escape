@@ -12,15 +12,34 @@ use super::state::{
     BoonKind, BoonOption, BossTelegraph, CampUpgrades, Chest, Enemy, EnemyKind, EverlightState,
     Lantern, Loadout, OwnedPassive, OwnedWeapon, PassiveKind, Phase, Projectile, WeaponKind,
     BOSS_EVERY_N_WAVES, BREACH_Y, CHEST_BASE_CATCH_RADIUS, CHEST_FALL_SPEED, COLUMNS,
-    ELITE_BASE_INTERVAL_TICKS, EVOLUTION_PASSIVE_THRESHOLD, LANTERN_MOVE_UNITS_PER_TICK,
-    LANTERN_Y, MAX_LEVEL, MAX_WEAPON_SLOTS, SPAWN_Y, WAVE_DURATION_TICKS, WORLD_H, WORLD_W,
+    ELITE_BASE_INTERVAL_TICKS, EVOLUTION_PASSIVE_THRESHOLD, LANE_HALF_WIDTH,
+    LANTERN_MOVE_UNITS_PER_TICK, LANTERN_Y, MAX_LEVEL, MAX_WEAPON_SLOTS, SPAWN_Y,
+    WAVE_DURATION_TICKS, WORLD_H, WORLD_W,
 };
 
 const PROJECTILE_SPEED: f64 = 9.0;
 const SPRAY_SPREAD_RAD: f64 = 1.3;
 const MAX_ENEMIES_ON_FIELD: usize = 200;
 const MAX_PROJECTILES_ON_FIELD: usize = 300;
-const LANE_HALF_WIDTH: f64 = WORLD_W / COLUMNS as f64 / 2.0;
+/// 極光の薙ぎ払い帯を表示する長さ (tick)。命中の有無に関わらず「発火した」
+/// こと自体を見せるための演出用タイマーなので、肉眼で追える長さにしている。
+///
+/// `GameTime::update` はフレーム落ち・バックグラウンドタブ復帰時に最大
+/// 500ms (10 ticks/sec換算で5tick) 分をまとめて処理してから1回だけ
+/// renderする (`src/time.rs`)。このフラッシュはtickごとに1ずつ減衰する
+/// ため、まとめ処理された同一バッチの最初のtickで発火すると、以降の
+/// 最大4回の減衰でrenderが一度も観測しないまま0まで減ってしまう
+/// (バッチの先頭で発火→残り4tick分減衰→値が0以下)。5未満にすると
+/// この「発火したのに一度も表示されない」退行が起こり得るため、
+/// 5を下限として維持すること。
+///
+/// 光輪には同種のタイマーを使っていない — 光輪のクールダウンは最短5tick
+/// (進化・速射パッシブでさらに短縮可能) で、このタイマーの下限(5)を
+/// 常に下回るか同じになるため、フラッシュが実質常時アクティブになって
+/// しまい「一瞬光る」演出として機能しない。光輪は常時描画するリングと
+/// 回転する光点だけで武器の存在・強化 (半径の拡大) を伝えており、発火
+/// 頻度が高いためこれだけで十分な視覚フィードバックになっている。
+const AURORA_FLASH_TICKS: u32 = 5;
 
 const BOSS_ATTACK_PERIOD_TICKS: u64 = 90;
 const BOSS_TELEGRAPH_TICKS: u32 = 20;
@@ -60,6 +79,7 @@ pub fn tick_n(state: &mut EverlightState, n: u32) {
 
 pub fn tick(state: &mut EverlightState) {
     state.lantern_hurt_flash.tick(1);
+    state.aurora_flash.tick(1);
     decay_damage_display(&mut state.last_light_damage);
     if state.log_display_ticks > 0 {
         state.log_display_ticks -= 1;
@@ -625,6 +645,13 @@ fn fire_weapons(state: &mut EverlightState, damage_mult: f64) {
 /// 極光: 灯のレーンにいる全ての敵に即ダメージを与える (ヒットスキャン)。
 /// `width_mult` は進化 (`OwnedWeapon::aurora_width_mult`) で広がる判定幅。
 fn apply_aurora_hit(state: &mut EverlightState, lantern_x: f64, damage: i32, width_mult: f64) {
+    // 命中の有無に関わらず、発火した事実そのものをrender.rsに伝える。
+    // 位置は現在の`state.lantern.x`ではなく、実際に判定に使ったこの
+    // `lantern_x` をスナップショットする — まとめtick処理中に灯が移動した
+    // 後にまとめて1回だけrenderされると、現在位置は実際に判定したレーンと
+    // ズレてしまうため。
+    state.aurora_flash.trigger(AURORA_FLASH_TICKS);
+    state.aurora_flash_x = lantern_x;
     let half_width = LANE_HALF_WIDTH * width_mult;
     for enemy in state.enemies.iter_mut() {
         if (enemy.x - lantern_x).abs() <= half_width {
@@ -652,9 +679,9 @@ fn fire_halo(state: &mut EverlightState, damage_mult: f64) {
     if !state.halo_tick.is_multiple_of(interval) {
         return;
     }
+    let lantern_x = state.lantern.x;
     let damage = ((halo.damage() as f64) * damage_mult).round() as i32;
     let radius = halo.halo_radius();
-    let lantern_x = state.lantern.x;
     for enemy in state.enemies.iter_mut() {
         let dx = enemy.x - lantern_x;
         let dy = enemy.y - LANTERN_Y;
@@ -1016,7 +1043,21 @@ fn new_boss_telegraph(kind: EnemyKind, source_enemy_id: u32, boss_x: f64, rng_st
             sweep_direction: None,
         },
         EnemyKind::Serpent => {
-            let direction = if rng_below(rng_state, 2) == 0 { -1 } else { 1 };
+            let lane = lane_index_of(boss_x);
+            // 端のレーンでは外向きの方向を選ぶと `lane_index_of` のクランプで
+            // 毎tick同じレーンへ戻され、警告が動かないまま止まって見える。
+            // 端では内向き固定にして、必ず動くことを保証する。
+            let direction = match lane {
+                0 => 1,
+                l if l == COLUMNS - 1 => -1,
+                _ => {
+                    if rng_below(rng_state, 2) == 0 {
+                        -1
+                    } else {
+                        1
+                    }
+                }
+            };
             BossTelegraph {
                 kind,
                 source_enemy_id,
@@ -1337,6 +1378,67 @@ mod tests {
             hit_ticks[1] - hit_ticks[0],
             expected_interval,
             "光輪のダメージ間隔は速射パッシブのcooldown_multを反映するはず"
+        );
+    }
+
+    #[test]
+    fn aurora_fire_triggers_flash_even_without_enemies_in_lane() {
+        // 極光は即着弾のヒットスキャンで実体弾を残さない。命中の有無に
+        // 関わらず発火自体をrender.rsへ伝えるフラグが無いと、敵がいない
+        // レーンを薙いだ時に武器の存在を確認する手段が一切無くなる
+        // (「武器を取っても強化しても何も起きていない」バグ報告の原因)。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon { kind: WeaponKind::Aurora, level: 1, cooldown_remaining: 0, evolved: false });
+        assert!(state.enemies.is_empty());
+        assert!(!state.aurora_flash.is_active());
+
+        fire_weapons(&mut state, 1.0);
+
+        assert!(state.aurora_flash.is_active(), "敵がいなくても発火した瞬間にフラッシュが立つはず");
+    }
+
+    #[test]
+    fn aurora_flash_survives_a_worst_case_five_tick_catch_up_batch() {
+        // GameTime::update はフレーム落ち・タブ復帰時に最大5tick (500ms分)
+        // をまとめて処理してから1回だけrenderする (src/time.rs)。バッチの
+        // 先頭tickで発火した場合、残り4tick分の減衰を経てもバッチ終了
+        // 時点でまだアクティブでなければ、render に一度も観測されないまま
+        // 消えてしまう (AURORA_FLASH_TICKS のコメント参照)。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon { kind: WeaponKind::Aurora, level: 1, cooldown_remaining: 0, evolved: false });
+
+        tick_n(&mut state, 5);
+
+        assert!(
+            state.aurora_flash.is_active(),
+            "5tickまとめ処理の先頭で発火しても、バッチ終了時点でまだフラッシュが有効なはず"
+        );
+    }
+
+    #[test]
+    fn aurora_flash_x_snapshots_firing_position_not_current_lantern_position() {
+        // render.rsは薙ぎ払い帯を`aurora_flash_x`から描く。もし代わりに
+        // `state.lantern.x`(現在位置)を使うと、まとめtick処理中に灯が
+        // 動いた後にまとめて1回だけrenderされた場合、実際に判定した
+        // レーンとは違う位置に帯が表示されてしまう (発火直後に灯だけを
+        // 動かして再現する)。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon { kind: WeaponKind::Aurora, level: 1, cooldown_remaining: 0, evolved: false });
+        let fired_at_x = state.lantern.x;
+
+        fire_weapons(&mut state, 1.0);
+        assert_eq!(state.aurora_flash_x, fired_at_x);
+
+        state.lantern.x = fired_at_x + 30.0;
+        assert_eq!(
+            state.aurora_flash_x, fired_at_x,
+            "aurora_flash_x は発火時点の位置を保持し続けるはず (現在位置に追従しない)"
         );
     }
 
@@ -2284,6 +2386,28 @@ mod tests {
         resolve_boss_telegraph(&mut state);
         let telegraph = state.boss_telegraph.as_ref().expect("影の魔女は構えを取るはず");
         assert_eq!(telegraph.lane_xs.len(), 2, "影の魔女は2レーン同時に警告するはず");
+    }
+
+    #[test]
+    fn serpent_telegraph_never_gets_stuck_at_arena_edges() {
+        // 端のレーンで外向きの方向を引くと、`lane_index_of` のクランプで
+        // 毎tick同じレーンへ戻され「動く警告」が実際には静止して見えて
+        // しまう回帰テスト。端では必ず内向きになることを確認する。
+        let mut left = EverlightState::new();
+        start_vigil(&mut left);
+        let telegraph =
+            new_boss_telegraph(EnemyKind::Serpent, 1, super::super::state::lane_center_x(0), &mut left.rng_state);
+        assert_eq!(telegraph.sweep_direction, Some(1), "左端では右向き固定のはず");
+
+        let mut right = EverlightState::new();
+        start_vigil(&mut right);
+        let telegraph = new_boss_telegraph(
+            EnemyKind::Serpent,
+            1,
+            super::super::state::lane_center_x(COLUMNS - 1),
+            &mut right.rng_state,
+        );
+        assert_eq!(telegraph.sweep_direction, Some(-1), "右端では左向き固定のはず");
     }
 
     #[test]
