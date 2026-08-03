@@ -220,12 +220,18 @@ impl EverlightGame {
 
     /// 挑戦ランクを `delta` (+1/-1) だけ動かす。範囲外は `logic::select_rank`
     /// が `max_unlocked_rank` へクランプするので、境界での操作もno-opに
-    /// なるだけで安全。
+    /// なるだけで安全。`buy_and_notify` と同じく、実際に動いたか (CLICK) /
+    /// 境界で動けなかったか (ERROR) を音で区別する。
     fn select_rank_and_notify(&mut self, delta: i32) -> bool {
-        let cur = self.state.camp.selected_rank as i32;
+        let before = self.state.camp.selected_rank;
+        let cur = before as i32;
         let next = (cur + delta).max(1) as u32;
         logic::select_rank(&mut self.state, next);
-        sound::play(sound::CLICK);
+        if self.state.camp.selected_rank != before {
+            sound::play(sound::CLICK);
+        } else {
+            sound::play(sound::ERROR);
+        }
         true
     }
 

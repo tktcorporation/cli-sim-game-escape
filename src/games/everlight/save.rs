@@ -47,6 +47,9 @@ struct GameSave {
     /// serdeのデフォルト(0)で読み込まれるが、`apply_save` 側で1未満を
     /// 1へ補正する (ランク1は常に挑戦可能なため)。
     max_unlocked_rank: u32,
+    /// 拠点で選択中の挑戦ランク。保存しないとリロードのたびに選択が
+    /// 第1夜へ戻ってしまう。
+    selected_rank: u32,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -62,6 +65,7 @@ fn extract_save(state: &EverlightState) -> SaveData {
             extra_slot_level: state.camp.extra_slot_level,
             rng_state: state.rng_state,
             max_unlocked_rank: state.camp.max_unlocked_rank,
+            selected_rank: state.camp.selected_rank,
         },
     }
 }
@@ -76,7 +80,9 @@ fn apply_save(state: &mut EverlightState, save: &GameSave) {
         power_level: save.power_level,
         extra_slot_level: save.extra_slot_level,
         max_unlocked_rank: save.max_unlocked_rank.max(1),
-        selected_rank: 1,
+        // 保存されたランクが (バージョン違いや手動編集で) 解放範囲外に
+        // なっていても安全に読めるよう、旧セーブと同じ経路でクランプする。
+        selected_rank: save.selected_rank.clamp(1, save.max_unlocked_rank.max(1)),
     };
     // 0 は rng_next 側で固定値に補正されるだけなので、未保存(旧セーブ)の
     // 0 をそのまま許容してよい。
@@ -163,6 +169,7 @@ mod tests {
         original.camp.power_level = 1;
         original.camp.extra_slot_level = 1;
         original.camp.max_unlocked_rank = 3;
+        original.camp.selected_rank = 2;
         original.rng_state = 999_999;
 
         let save = extract_save(&original);
@@ -180,6 +187,7 @@ mod tests {
         assert_eq!(restored.camp.power_level, 1);
         assert_eq!(restored.camp.extra_slot_level, 1);
         assert_eq!(restored.camp.max_unlocked_rank, 3, "解放済みランクも保存/復元されるはず");
+        assert_eq!(restored.camp.selected_rank, 2, "選択中ランクも保存/復元され、リロードで第1夜に戻らないはず");
         assert_eq!(restored.lantern.light_max, restored.camp.light_max());
         assert_eq!(
             restored.rng_state, 999_999,
@@ -223,6 +231,10 @@ mod tests {
         assert_eq!(
             restored.camp.max_unlocked_rank, 1,
             "旧セーブにmax_unlocked_rankが無くてもランク1は挑戦可能でなければならない"
+        );
+        assert_eq!(
+            restored.camp.selected_rank, 1,
+            "旧セーブにselected_rankが無くても範囲内(1)へ補正されるはず"
         );
     }
 }

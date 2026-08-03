@@ -650,6 +650,10 @@ impl CampUpgrades {
 pub struct BossTelegraph {
     /// ログ文言 ("〇〇の一撃で…") にボス名を出すために持つ。
     pub kind: EnemyKind,
+    /// 構えを取った個体の `Enemy::id`。「討伐すれば不発になる」判定を
+    /// 敵種ではなく個体で行うために持つ — 種類だけで見ると、構えた本体とは
+    /// 別のボス個体が偶然生きているだけで誤って不発を見送ってしまう。
+    pub source_enemy_id: u32,
     pub lane_xs: Vec<f64>,
     pub ticks_left: u32,
     /// 大蛇の特殊技: 構え中に `lane_xs[0]` が横へ移動する場合の方向

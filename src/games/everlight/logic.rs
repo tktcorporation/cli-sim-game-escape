@@ -984,30 +984,46 @@ fn adjacent_lane_x(x: f64) -> f64 {
 /// ボスの種類ごとに構えのレーン構成を決める。影の魔女/満月の魔王は
 /// 隣接2レーンを同時に、大蛇は1レーンだが構え中に横へ移動する — 同じ
 /// 「レーンから逃げる」判断でも毎回違う読み合いになるようにする。
-fn new_boss_telegraph(kind: EnemyKind, boss_x: f64, rng_state: &mut u32) -> BossTelegraph {
+fn new_boss_telegraph(kind: EnemyKind, source_enemy_id: u32, boss_x: f64, rng_state: &mut u32) -> BossTelegraph {
     match kind {
-        EnemyKind::ShadowWitch | EnemyKind::FullMoonBoss => {
-            BossTelegraph {
-                kind,
-                lane_xs: vec![boss_x, adjacent_lane_x(boss_x)],
-                ticks_left: BOSS_TELEGRAPH_TICKS,
-                sweep_direction: None,
-            }
-        }
+        EnemyKind::ShadowWitch | EnemyKind::FullMoonBoss => BossTelegraph {
+            kind,
+            source_enemy_id,
+            lane_xs: vec![boss_x, adjacent_lane_x(boss_x)],
+            ticks_left: BOSS_TELEGRAPH_TICKS,
+            sweep_direction: None,
+        },
         EnemyKind::Serpent => {
             let direction = if rng_below(rng_state, 2) == 0 { -1 } else { 1 };
-            BossTelegraph { kind, lane_xs: vec![boss_x], ticks_left: BOSS_TELEGRAPH_TICKS, sweep_direction: Some(direction) }
+            BossTelegraph {
+                kind,
+                source_enemy_id,
+                lane_xs: vec![boss_x],
+                ticks_left: BOSS_TELEGRAPH_TICKS,
+                sweep_direction: Some(direction),
+            }
         }
-        _ => BossTelegraph { kind, lane_xs: vec![boss_x], ticks_left: BOSS_TELEGRAPH_TICKS, sweep_direction: None },
+        _ => BossTelegraph {
+            kind,
+            source_enemy_id,
+            lane_xs: vec![boss_x],
+            ticks_left: BOSS_TELEGRAPH_TICKS,
+            sweep_direction: None,
+        },
     }
 }
 
 fn resolve_boss_telegraph(state: &mut EverlightState) {
-    let boss = state.enemies.iter().find(|e| e.kind.is_boss()).map(|e| (e.kind, e.x));
+    let boss = state.enemies.iter().find(|e| e.kind.is_boss()).map(|e| (e.kind, e.id, e.x));
 
     if let Some(mut telegraph) = state.boss_telegraph.take() {
-        // 構え中にボスを討ち取れば不発になる — 「間に合った」満足感のため。
-        if boss.is_none() {
+        // 構え中に「その」ボスを討ち取れば不発になる — 「間に合った」満足感の
+        // ため。敵種ではなく個体idで判定する: チェックポイントの間隔より
+        // 討伐が遅れて別種のボスと同時に生存する状況では、種類だけで見ると
+        // 構えたボスとは別個体が生きているだけで誤って「不発にならない」と
+        // 判定してしまう。
+        let source_alive = state.enemies.iter().any(|e| e.id == telegraph.source_enemy_id);
+        if !source_alive {
             return;
         }
         if telegraph.ticks_left <= 1 {
@@ -1036,10 +1052,10 @@ fn resolve_boss_telegraph(state: &mut EverlightState) {
         return;
     }
 
-    if let Some((kind, x)) = boss {
+    if let Some((kind, id, x)) = boss {
         let period = boss_attack_period_ticks(state.rank);
         if state.elapsed_ticks > 0 && state.elapsed_ticks.is_multiple_of(period) {
-            let telegraph = new_boss_telegraph(kind, x, &mut state.rng_state);
+            let telegraph = new_boss_telegraph(kind, id, x, &mut state.rng_state);
             state.boss_telegraph = Some(telegraph);
             state.add_log(format!("{}が灯喰らいの構え！", kind.name()));
         }
@@ -2242,5 +2258,52 @@ mod tests {
     fn boss_telegraph_damage_and_period_scale_with_rank() {
         assert!(boss_telegraph_damage(2) > boss_telegraph_damage(1), "高ランクほど一撃が重くなるはず");
         assert!(boss_attack_period_ticks(2) < boss_attack_period_ticks(1), "高ランクほど攻撃間隔は短くなるはず");
+    }
+
+    #[test]
+    fn killing_the_telegraphing_boss_cancels_the_attack_even_if_another_boss_kind_survives() {
+        // チェックポイントの間隔(5波)より討伐が遅れると、種類の異なるボスが
+        // 同時に生存しうる。この時「敵種が生きているか」ではなく「構えた
+        // "その個体" が生きているか」で不発判定しないと、既に倒したボスの
+        // 攻撃が誤って命中してしまう回帰テスト。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let x = state.lantern.x;
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Boss,
+            x,
+            y: 50.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        state.enemies.push(Enemy {
+            id: 2,
+            kind: EnemyKind::ShadowWitch,
+            x,
+            y: 60.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        state.elapsed_ticks = boss_attack_period_ticks(state.rank);
+        resolve_boss_telegraph(&mut state);
+        let telegraph = state.boss_telegraph.as_ref().expect("先頭に登録された魔王(id=1)が構えるはず");
+        assert_eq!(telegraph.source_enemy_id, 1);
+
+        // 構えた魔王(id=1)だけを討伐する。影の魔女(id=2)は生き残る。
+        state.enemies.retain(|e| e.id != 1);
+        let light_before = state.lantern.light;
+
+        resolve_boss_telegraph(&mut state);
+
+        assert!(state.boss_telegraph.is_none(), "構えた本体が死んだので不発になるはず");
+        assert_eq!(
+            state.lantern.light, light_before,
+            "別種のボスが生きているだけで誤って命中してはいけない"
+        );
     }
 }
