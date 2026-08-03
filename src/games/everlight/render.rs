@@ -27,7 +27,7 @@ use super::actions;
 use super::logic;
 use super::state::{
     BoonKind, CampUpgrades, EnemyKind, EverlightState, Phase, WeaponKind, BREACH_Y, COLUMNS,
-    ENEMY_BULLET_RADIUS, LANE_HALF_WIDTH, LANTERN_Y, SPAWN_Y, WORLD_H, WORLD_W,
+    ENEMY_BULLET_RADIUS, KILL_EFFECT_TICKS, LANE_HALF_WIDTH, LANTERN_Y, SPAWN_Y, WORLD_H, WORLD_W,
 };
 
 pub fn render(state: &EverlightState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
@@ -187,7 +187,7 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         0.8,
     );
 
-    const ENEMY_KINDS: [EnemyKind; 15] = [
+    const ENEMY_KINDS: [EnemyKind; 16] = [
         EnemyKind::Wisp,
         EnemyKind::Husk,
         EnemyKind::Swarmling,
@@ -195,6 +195,7 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         EnemyKind::Boss,
         EnemyKind::Sniper,
         EnemyKind::Caster,
+        EnemyKind::Wraith,
         EnemyKind::Shielded,
         EnemyKind::Splitter,
         EnemyKind::SprayShielded,
@@ -244,6 +245,21 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         .chests
         .iter()
         .flat_map(|c| canvas_fx::filled_ellipse_points(c.x, world_to_canvas_y(c.y), 1.6, 1.6, 0.9))
+        .collect();
+
+    // 敵を討った位置に一瞬だけ残す小さな爆破演出。`ticks_left`が
+    // `KILL_EFFECT_TICKS`から0へ減るのに合わせてリングを広げ、消える瞬間に
+    // 最大サイズになる「弾けた」見た目にする。
+    const KILL_EFFECT_MIN_RADIUS: f64 = 0.6;
+    const KILL_EFFECT_MAX_RADIUS: f64 = 2.6;
+    let kill_effect_pts: Vec<(f64, f64)> = state
+        .kill_effects
+        .iter()
+        .flat_map(|e| {
+            let progress = 1.0 - (e.ticks_left as f64 / KILL_EFFECT_TICKS as f64);
+            let radius = KILL_EFFECT_MIN_RADIUS + (KILL_EFFECT_MAX_RADIUS - KILL_EFFECT_MIN_RADIUS) * progress;
+            canvas_fx::ring_points(e.x, world_to_canvas_y(e.y), radius, 0.6)
+        })
         .collect();
 
     let enemy_bullet_pts: Vec<(f64, f64)> = state
@@ -362,6 +378,9 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
             }
             if !hurt_points.is_empty() {
                 ctx.draw(&Points { coords: &hurt_points, color: Color::White });
+            }
+            if !kill_effect_pts.is_empty() {
+                ctx.draw(&Points { coords: &kill_effect_pts, color: Color::Red });
             }
             if let Some((_, sparks)) = &halo_visual {
                 if !sparks.is_empty() {
@@ -789,12 +808,30 @@ mod tests {
     }
 
     #[test]
+    fn vigil_renders_without_panicking_with_kill_effects() {
+        use super::super::state::KillEffect;
+
+        let mut state = EverlightState::new();
+        logic::start_vigil(&mut state);
+        state.kill_effects.push(KillEffect { x: state.lantern.x, y: 30.0, ticks_left: KILL_EFFECT_TICKS });
+        render_to_test_backend(&state, 40, 30);
+        render_to_test_backend(&state, 100, 30);
+    }
+
+    #[test]
     fn vigil_renders_without_panicking_with_a_caster_and_enemy_bullets() {
         use super::super::state::EnemyBullet;
 
         let mut state = EverlightState::new();
         logic::start_vigil(&mut state);
-        state.enemy_bullets.push(EnemyBullet { x: state.lantern.x, y: 30.0, vx: 0.0, vy: 2.2, damage: 4 });
+        state.enemy_bullets.push(EnemyBullet {
+            x: state.lantern.x,
+            y: 30.0,
+            vx: 0.0,
+            vy: 2.2,
+            damage: 4,
+            source: EnemyKind::Caster,
+        });
         render_to_test_backend(&state, 40, 30);
         render_to_test_backend(&state, 100, 30);
     }

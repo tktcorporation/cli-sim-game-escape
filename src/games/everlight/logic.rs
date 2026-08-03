@@ -10,10 +10,10 @@ use crate::effects::FlashTimer;
 
 use super::state::{
     BoonKind, BoonOption, BossTelegraph, CampUpgrades, Chest, Enemy, EnemyBullet, EnemyKind,
-    EverlightState, Lantern, Loadout, OwnedPassive, OwnedWeapon, PassiveKind, Phase, Projectile,
-    WeaponKind, BOSS_EVERY_N_WAVES, BREACH_Y, CHEST_BASE_CATCH_RADIUS, CHEST_FALL_SPEED, COLUMNS,
-    ELITE_BASE_INTERVAL_TICKS, EVOLUTION_PASSIVE_THRESHOLD, LANE_HALF_WIDTH,
-    LANTERN_MOVE_UNITS_PER_TICK, LANTERN_Y, MAX_LEVEL, SPAWN_Y,
+    EverlightState, KillEffect, Lantern, Loadout, OwnedPassive, OwnedWeapon, PassiveKind, Phase,
+    Projectile, WeaponKind, BOSS_EVERY_N_WAVES, BREACH_Y, CHEST_BASE_CATCH_RADIUS, CHEST_FALL_SPEED,
+    COLUMNS, ELITE_BASE_INTERVAL_TICKS, EVOLUTION_PASSIVE_THRESHOLD, KILL_EFFECT_TICKS,
+    LANE_HALF_WIDTH, LANTERN_MOVE_UNITS_PER_TICK, LANTERN_Y, MAX_LEVEL, SPAWN_Y,
     WAVE_DURATION_TICKS, WORLD_H, WORLD_W,
 };
 
@@ -91,6 +91,10 @@ pub fn tick(state: &mut EverlightState) {
         *ticks_left = ticks_left.saturating_sub(1);
         *ticks_left > 0
     });
+    state.kill_effects.retain_mut(|e| {
+        e.ticks_left = e.ticks_left.saturating_sub(1);
+        e.ticks_left > 0
+    });
     decay_damage_display(&mut state.last_light_damage);
     if state.log_display_ticks > 0 {
         state.log_display_ticks -= 1;
@@ -106,14 +110,18 @@ pub fn tick(state: &mut EverlightState) {
     update_wave(state);
     move_lantern(state);
     spawn_enemies(state);
+    resolve_boss_summons(state);
     // 敵自身もこのtickで動くため、命中判定 (move_and_resolve_projectiles)
-    // では移動前の位置を敵ごとの相対運動の基準として使う。
+    // では移動前の位置を敵ごとの相対運動の基準として使う。召喚された個体も
+    // このtick中に動いてよいので、スナップショットは召喚の後に取る。
     let enemy_prev_positions: std::collections::HashMap<u32, (f64, f64)> =
         state.enemies.iter().map(|e| (e.id, (e.x, e.y))).collect();
     move_enemies(state);
     resolve_breaches(state);
     resolve_ranged_attacks(state);
     resolve_caster_shots(state);
+    resolve_wraith_shots(state);
+    resolve_boss_bullets(state);
     move_and_resolve_enemy_bullets(state);
 
     let damage_mult = effective_damage_mult(state);
@@ -261,6 +269,9 @@ const SNIPER_MIN_WAVE: u32 = 6;
 const CASTER_MIN_WAVE: u32 = 9;
 const SHIELDED_MIN_WAVE: u32 = 11;
 const CHARGER_MIN_WAVE: u32 = 13;
+/// マイルストーン波 (第15波、`milestone_wave(1)`) の直前で解禁する — 第1夜の
+/// 最終局面から「打たれ強い遠隔役」という新しい負荷を上乗せする。
+const WRAITH_MIN_WAVE: u32 = 14;
 const SPLITTER_MIN_WAVE: u32 = 16;
 const SPRAY_SHIELDED_MIN_WAVE: u32 = 18;
 const AURORA_SHIELDED_MIN_WAVE: u32 = 24;
@@ -268,9 +279,16 @@ const AURORA_SHIELDED_MIN_WAVE: u32 = 24;
 /// 通常湧きの1回あたりの同時湧き数がこのwaveから増え始める。
 /// `spawn_interval_ticks` の間隔短縮は第21波前後で下限に達し頭打ちに
 /// なるため、それ以降も物量そのものが伸び続けるようこちらで補う。
-const SWARM_RAMP_WAVE: u32 = 10;
-const SWARM_WAVE_STEP: u32 = 5;
-const SWARM_MAX_BATCH: u32 = 6;
+///
+/// `spawn_interval_ticks` 自体の間隔短縮 (base値) は意図的に触っていない
+/// — シミュレーターで検証したところ、そちらは全waveへ均等に効くため
+/// 数tick詰めるだけでも序盤の生存に直結し、平均到達波数を大きく崩す
+/// (`survival_balance_report`)。この3定数はwaveが進んでから初めて効き
+/// 始めるため、序盤の難易度を変えずに後半の物量だけ底上げできる。
+const SWARM_RAMP_WAVE: u32 = 9;
+const SWARM_WAVE_STEP: u32 = 4;
+/// `COLUMNS` (9) 未満という制約の上限いっぱい (8) まで引き上げている。
+const SWARM_MAX_BATCH: u32 = 8;
 // `spawn_enemies` はbatch分のレーンを `% COLUMNS` で割り当てるため、上限が
 // COLUMNS以上だと同一tick内で同じレーンに複数体が重なってしまう。
 const _: () = assert!(SWARM_MAX_BATCH < COLUMNS as u32);
@@ -302,6 +320,9 @@ fn regular_spawn_table(wave: u32) -> Vec<(EnemyKind, u32)> {
     }
     if wave >= CHARGER_MIN_WAVE {
         table.push((EnemyKind::Charger, 8));
+    }
+    if wave >= WRAITH_MIN_WAVE {
+        table.push((EnemyKind::Wraith, 8));
     }
     if wave >= SPLITTER_MIN_WAVE {
         table.push((EnemyKind::Splitter, 10));
@@ -419,13 +440,44 @@ const _: () = assert!(CASTER_STOP_Y < SNIPER_STOP_Y);
 const CHARGER_TRIGGER_Y: f64 = WORLD_H * 0.75;
 const CHARGER_BOOST_MULT: f64 = 2.8;
 
+/// 浮遊霊 (`EnemyKind::Wraith`) が接近をやめる y座標。詠唱者と狙撃者の
+/// 中間 — 完全な後方支援(詠唱者)ほど安全でもなく、狙撃者ほど深く踏み
+/// 込みもしない「居座る中距離の脅威」にする。
+const WRAITH_STOP_Y: f64 = WORLD_H * 0.45;
+const _: () = assert!(CASTER_STOP_Y < WRAITH_STOP_Y && WRAITH_STOP_Y < SNIPER_STOP_Y);
+
+/// 浮遊霊の横揺れの1tickあたりの速度振幅。位相 (`WRAITH_SWAY_ANGULAR_STEP`)
+/// と合わせて振幅 ≈ WRAITH_SWAY_STEP / WRAITH_SWAY_ANGULAR_STEP ≈ 6 ワールド
+/// 単位になるよう選んでいる — `LANE_HALF_WIDTH` (5.0) を上回るため、
+/// 隣のレーンへ実際にはみ出すことがあり「今どのレーンにいるか」を
+/// 常時見極めさせる。
+const WRAITH_SWAY_STEP: f64 = 0.6;
+/// 揺れの角速度 (rad/tick)。1周期 ≈ 2π/0.1 ≈ 63tick ≈ 6.3秒。
+const WRAITH_SWAY_ANGULAR_STEP: f64 = 0.1;
+/// 個体ごとに位相をずらすための倍率。`enemy.id` に掛けることで、同時に
+/// 複数体が湧いても横揺れが同期して見えないようにする。
+const WRAITH_SWAY_PHASE_ID_SCALE: f64 = 0.9;
+
+/// ボス級 (`EnemyKind::is_boss`) の「ふよふよ」した浮遊感を出す揺れの
+/// 速度振幅。x/yを別位相 (sin/cos) で揺らし円を描くような軌道にすることで、
+/// 直進+左右揺れの浮遊霊とは違う「その場で漂う」質感にする。既存の
+/// 接近ロジック (homing/直進) の上に加算するだけなので、進行方向を
+/// 逆転させるほどの大きさにはしていない。
+const BOSS_BOB_X_STEP: f64 = 0.3;
+const BOSS_BOB_Y_STEP: f64 = 0.16;
+/// 揺れの角速度 (rad/tick)。1周期 ≈ 2π/0.15 ≈ 42tick ≈ 4.2秒。
+const BOSS_BOB_ANGULAR_STEP: f64 = 0.15;
+const BOSS_BOB_PHASE_ID_SCALE: f64 = 0.7;
+
 fn move_enemies(state: &mut EverlightState) {
     let diff = wave_linear_difficulty(state.wave, state.rank);
     let lantern_x = state.lantern.x;
+    let elapsed_ticks = state.elapsed_ticks as f64;
     for enemy in state.enemies.iter_mut() {
         enemy.hurt_flash.tick(1);
         let holding = (enemy.kind == EnemyKind::Sniper && enemy.y >= SNIPER_STOP_Y)
-            || (enemy.kind == EnemyKind::Caster && enemy.y >= CASTER_STOP_Y);
+            || (enemy.kind == EnemyKind::Caster && enemy.y >= CASTER_STOP_Y)
+            || (enemy.kind == EnemyKind::Wraith && enemy.y >= WRAITH_STOP_Y);
         if !holding {
             let charge_boost =
                 if enemy.kind == EnemyKind::Charger && enemy.y >= CHARGER_TRIGGER_Y { CHARGER_BOOST_MULT } else { 1.0 };
@@ -438,6 +490,21 @@ fn move_enemies(state: &mut EverlightState) {
             let dx = lantern_x - enemy.x;
             let step = dx.abs().min(1.0);
             enemy.x += step * dx.signum();
+        } else if enemy.kind == EnemyKind::Wraith {
+            // 灯へは向かわず、時間と自身のidだけで決まる正弦波でx座標を
+            // 揺らす。専用フィールドを増やさずに済むよう、絶対位置を
+            // 都度計算するのではなく速度として毎tick加算する — 積分結果は
+            // 有界な振動になる (ただし振動の中心は湧いた瞬間の位相次第で
+            // 元のxから最大 `WRAITH_SWAY_STEP/WRAITH_SWAY_ANGULAR_STEP` ぶん
+            // ずれ得る。厳密に中心を揃えたい場合はx0を`Enemy`に持たせる
+            // 必要があるが、既存のリテラル構築箇所が多いため見送っている)。
+            let phase = (elapsed_ticks + enemy.id as f64 * WRAITH_SWAY_PHASE_ID_SCALE) * WRAITH_SWAY_ANGULAR_STEP;
+            enemy.x = (enemy.x + WRAITH_SWAY_STEP * phase.sin()).clamp(0.0, WORLD_W);
+        }
+        if enemy.kind.is_boss() {
+            let phase = (elapsed_ticks + enemy.id as f64 * BOSS_BOB_PHASE_ID_SCALE) * BOSS_BOB_ANGULAR_STEP;
+            enemy.x = (enemy.x + BOSS_BOB_X_STEP * phase.sin()).clamp(0.0, WORLD_W);
+            enemy.y += BOSS_BOB_Y_STEP * phase.cos();
         }
     }
 }
@@ -488,19 +555,21 @@ const CASTER_FIRE_INTERVAL_TICKS: u32 = 30;
 const CASTER_BULLET_DAMAGE: i32 = 4;
 const CASTER_BULLET_SPEED: f64 = 2.2;
 
-/// 詠唱者の弾がどの方向へ飛ぶかを決める。この一手が体感を大きく左右する:
+/// 実体弾を撃つ敵 (詠唱者・浮遊霊) 共通: 弾がどの方向へ飛ぶかを決める。
+/// この一手が体感を大きく左右する:
 ///
 /// - 発射時の灯の位置を狙って直進させる (`aim_velocity` と同じ「2点を
 ///   結ぶ向き×速度」) → 弾が見えた瞬間に別レーンへ逃げる予測回避の
 ///   駆け引きになる
-/// - 詠唱者自身のレーンをまっすぐ縦に落とすだけ (`vx=0`) → 「このレーンに
-///   詠唱者がいる」という位置取りのパズルになる (現在の実装)
+/// - 自身のレーンをまっすぐ縦に落とすだけ (`vx=0`) → 「このレーンに
+///   敵がいる」という位置取りのパズルになる (現在の実装)
 ///
 /// 今はシンプルな後者を選んでいるが、前者に変えると難易度も駆け引きの
-/// 質もかなり変わる。`caster_x`/`lantern_x` は狙い方を変える際に使う値
-/// として引数に残してある。
-fn aim_enemy_bullet(_caster_x: f64, _caster_y: f64, _lantern_x: f64) -> (f64, f64) {
-    (0.0, CASTER_BULLET_SPEED)
+/// 質もかなり変わる。両方の呼び出し元で共有しているため、変更すれば
+/// 詠唱者・浮遊霊の弾が同時に切り替わる。`shooter_x`/`shooter_y`/
+/// `lantern_x` は狙い方を変える際に使う値として引数に残してある。
+fn aim_enemy_bullet(_shooter_x: f64, _shooter_y: f64, _lantern_x: f64, speed: f64) -> (f64, f64) {
+    (0.0, speed)
 }
 
 /// 詠唱者の実体弾攻撃。`CASTER_STOP_Y` で停止した個体が一定間隔で
@@ -519,8 +588,58 @@ fn resolve_caster_shots(state: &mut EverlightState) {
             None => enemy.ranged_charge = Some(CASTER_FIRE_INTERVAL_TICKS),
             Some(t) if t <= 1 => {
                 enemy.ranged_charge = Some(CASTER_FIRE_INTERVAL_TICKS);
-                let (vx, vy) = aim_enemy_bullet(enemy.x, enemy.y, lantern_x);
-                new_bullets.push(EnemyBullet { x: enemy.x, y: enemy.y, vx, vy, damage: CASTER_BULLET_DAMAGE });
+                let (vx, vy) = aim_enemy_bullet(enemy.x, enemy.y, lantern_x, CASTER_BULLET_SPEED);
+                new_bullets.push(EnemyBullet {
+                    x: enemy.x,
+                    y: enemy.y,
+                    vx,
+                    vy,
+                    damage: CASTER_BULLET_DAMAGE,
+                    source: EnemyKind::Caster,
+                });
+            }
+            Some(t) => enemy.ranged_charge = Some(t - 1),
+        }
+    }
+    if state.enemy_bullets.len() + new_bullets.len() > MAX_ENEMY_BULLETS_ON_FIELD {
+        new_bullets.truncate(MAX_ENEMY_BULLETS_ON_FIELD.saturating_sub(state.enemy_bullets.len()));
+    }
+    state.enemy_bullets.extend(new_bullets);
+}
+
+/// 詠唱者 (`CASTER_FIRE_INTERVAL_TICKS`=30) より長め。横揺れそのものが
+/// 常時プレッシャーを掛ける分、発砲自体は少し緩めて負荷を弾一辺倒に
+/// しない。
+const WRAITH_FIRE_INTERVAL_TICKS: u32 = 34;
+/// 詠唱者 (4) より高いが狙撃者 (6) より低め。横揺れで飛来レーンの予測が
+/// 難しい分、被弾1回あたりの重さは詠唱者側に寄せている。
+const WRAITH_BULLET_DAMAGE: i32 = 5;
+const WRAITH_BULLET_SPEED: f64 = 2.0;
+
+/// 浮遊霊の実体弾攻撃。`WRAITH_STOP_Y` 到達後、`move_enemies` の横揺れで
+/// 常に位置が変わり続ける自身のx座標から、詠唱者と同じく縦にまっすぐ
+/// 弾を落とす (`aim_enemy_bullet`)。狙う側の位置が固定されない分、
+/// プレイヤーは「弾が出る瞬間のレーン」をその都度見て判断する必要がある。
+fn resolve_wraith_shots(state: &mut EverlightState) {
+    let lantern_x = state.lantern.x;
+    let mut new_bullets: Vec<EnemyBullet> = Vec::new();
+    for enemy in state.enemies.iter_mut() {
+        if enemy.kind != EnemyKind::Wraith || enemy.y < WRAITH_STOP_Y {
+            continue;
+        }
+        match enemy.ranged_charge {
+            None => enemy.ranged_charge = Some(WRAITH_FIRE_INTERVAL_TICKS),
+            Some(t) if t <= 1 => {
+                enemy.ranged_charge = Some(WRAITH_FIRE_INTERVAL_TICKS);
+                let (vx, vy) = aim_enemy_bullet(enemy.x, enemy.y, lantern_x, WRAITH_BULLET_SPEED);
+                new_bullets.push(EnemyBullet {
+                    x: enemy.x,
+                    y: enemy.y,
+                    vx,
+                    vy,
+                    damage: WRAITH_BULLET_DAMAGE,
+                    source: EnemyKind::Wraith,
+                });
             }
             Some(t) => enemy.ranged_charge = Some(t - 1),
         }
@@ -540,6 +659,10 @@ fn move_and_resolve_enemy_bullets(state: &mut EverlightState) {
     let lantern_x = state.lantern.x;
     let mut total_damage = 0i32;
     let mut hits = 0u32;
+    // ログは「最後に命中した1発」の撃ち手の名前で出す (`resolve_breaches`の
+    // `last_kind`と同じ割り切り) — 同一tickで詠唱者/浮遊霊が両方命中しても
+    // 1行に集約する都合上、両方を律儀に列挙はしない。
+    let mut last_source: Option<EnemyKind> = None;
     state.enemy_bullets.retain_mut(|b| {
         b.x += b.vx;
         b.y += b.vy;
@@ -552,6 +675,7 @@ fn move_and_resolve_enemy_bullets(state: &mut EverlightState) {
         if in_lantern_lane && reached_lantern_row {
             total_damage += b.damage;
             hits += 1;
+            last_source = Some(b.source);
             return false;
         }
         true
@@ -563,7 +687,9 @@ fn move_and_resolve_enemy_bullets(state: &mut EverlightState) {
     state.lantern.light -= total_damage;
     state.lantern_hurt_flash.trigger(3);
     state.last_light_damage = Some((total_damage, 6));
-    state.add_log(format!("詠唱者の弾で灯が{total_damage}削れた"));
+    if let Some(kind) = last_source {
+        state.add_log(format!("{}の弾で灯が{total_damage}削れた", kind.name()));
+    }
 }
 
 /// 防衛線 (`BREACH_Y`) に達した敵を「漏れ」として処理し、灯を削って消す。
@@ -638,6 +764,7 @@ fn apply_kills(state: &mut EverlightState, kills: Vec<KillInfo>) {
     for k in &kills {
         state.ember += ((k.kind.ember_reward() as f64) * ember_mult).round() as u32;
         state.kill_count += 1;
+        state.kill_effects.push(KillEffect { x: k.x, y: k.y, ticks_left: KILL_EFFECT_TICKS });
         if k.kind.drops_chest() {
             state.chests.push(Chest { x: k.x, y: k.y });
         }
@@ -1283,7 +1410,7 @@ pub fn boon_option_text(state: &EverlightState, kind: BoonKind) -> (String, Stri
     }
 }
 
-// ── ボスの特殊攻撃「灯喰らい」───────────────────────────────────────
+// ── ボスの特殊攻撃 (灯喰らい/実体弾/召喚) ───────────────────────────
 
 /// 構え中にレーンが移動するボス (大蛇) の、レーンを1つ移す間隔。
 const SWEEP_STEP_TICKS: u32 = 4;
@@ -1406,6 +1533,130 @@ fn resolve_boss_telegraph(state: &mut EverlightState) {
     }
 }
 
+/// ランクが上がるほど魔王/満月の魔王の実体弾攻撃も速くなる。
+/// `boss_attack_period_ticks` (基準90、rank5で66) とは意図的に異なる
+/// 基準値・減り方にしている — 周期を揃えると「灯喰らいの構えと実体弾が
+/// 毎回同時に来る/毎回ズレて来る」の単調な繰り返しになるため、独立した
+/// 周期にして重なる時と重ならない時が入り混じるようにする。
+fn boss_bullet_period_ticks(rank: u32) -> u32 {
+    (BOSS_BULLET_PERIOD_TICKS as i64 - rank.saturating_sub(1) as i64 * 4).max(24) as u32
+}
+const BOSS_BULLET_PERIOD_TICKS: u64 = 44;
+/// 詠唱者(4)/浮遊霊(5)の弾よりさらに重い — ボス級の攻撃という位置付け。
+const BOSS_BULLET_DAMAGE: i32 = 8;
+/// 詠唱者/浮遊霊の弾 (2.0〜2.2、レーン固定で縦に落ちるだけ) より速く、
+/// かつ発射時の灯位置へ直進する (`aim_velocity`)。狙われた瞬間に見えた
+/// 位置から逃げる、より短い判断時間を要求する別種の脅威にする。
+const BOSS_BULLET_SPEED: f64 = 2.6;
+/// 発射位置から灯のy座標までこの距離未満しか無い場合は撃たない。詠唱者/
+/// 浮遊霊は`CASTER_STOP_Y`/`WRAITH_STOP_Y`で停止するため灯からずっと
+/// 遠く、弾が複数tickかけて飛ぶことが構造的に保証されるが、ボス級は
+/// 停止せず防衛線際まで進み続けるため、近すぎる位置で撃つと
+/// `move_and_resolve_enemy_bullets`が同tick内で移動と命中判定まで終えて
+/// しまい、`GameTime::update`の最大5tickまとめ処理と重なった場合は
+/// 一度も描画されないまま被弾する (見てから避けられない)。
+/// `BOSS_BULLET_SPEED`で最低10tick以上飛ぶ距離を確保している。
+const BOSS_BULLET_MIN_TRAVEL: f64 = 30.0;
+
+/// 魔王/満月の魔王の実体弾攻撃。`resolve_boss_telegraph` (灯喰らい) とは
+/// 別の独立した攻撃系統 — 灯喰らいが「レーンへの警告→回避」の駆け引き
+/// なのに対し、こちらは発射時の灯位置を狙って直進する実弾という異なる
+/// 質の脅威を足す。狙撃者/詠唱者/浮遊霊と同じく `Enemy::ranged_charge`
+/// で個体ごとにcooldownを持たせる — `state.elapsed_ticks` 基準の一斉
+/// 判定だと、湧いた瞬間の位相によっては次の判定tickが来る前に防衛線へ
+/// 到達してしまい、一度も撃たずに退場する個体が発生し得るため、個体の
+/// 湧いた瞬間を基準にする。初回だけ `period/3` の短いcooldownにするのは、
+/// ホーミングで加速するボス (`wave_linear_difficulty` が高い高rank/高wave
+/// ほど速い) が通常の`period`より先に防衛線へ着いてしまい、一度も撃たずに
+/// 退場するケースを塞ぐため — 2発目以降は通常の`period`に戻る。
+fn resolve_boss_bullets(state: &mut EverlightState) {
+    let period = boss_bullet_period_ticks(state.rank);
+    let lantern_x = state.lantern.x;
+    let mut new_bullets: Vec<EnemyBullet> = Vec::new();
+    for enemy in state.enemies.iter_mut() {
+        if !enemy.kind.fires_boss_bullets() {
+            continue;
+        }
+        match enemy.ranged_charge {
+            None => enemy.ranged_charge = Some(period / 3),
+            Some(t) if t <= 1 => {
+                enemy.ranged_charge = Some(period);
+                // 防衛線際まで進んでしまった個体は、撃っても避ける猶予が
+                // 無いまま被弾させてしまうため発射自体を見送る (cooldownは
+                // 通常通りリセットするので、以降その個体はもう撃たなくなる —
+                // ボスは`homes()`等で前進し続けるだけで後退はしないため)。
+                if LANTERN_Y - enemy.y >= BOSS_BULLET_MIN_TRAVEL {
+                    let (vx, vy) = aim_velocity(enemy.x, enemy.y, lantern_x, LANTERN_Y, BOSS_BULLET_SPEED);
+                    new_bullets.push(EnemyBullet {
+                        x: enemy.x,
+                        y: enemy.y,
+                        vx,
+                        vy,
+                        damage: BOSS_BULLET_DAMAGE,
+                        source: enemy.kind,
+                    });
+                }
+            }
+            Some(t) => enemy.ranged_charge = Some(t - 1),
+        }
+    }
+    if state.enemy_bullets.len() + new_bullets.len() > MAX_ENEMY_BULLETS_ON_FIELD {
+        new_bullets.truncate(MAX_ENEMY_BULLETS_ON_FIELD.saturating_sub(state.enemy_bullets.len()));
+    }
+    // 発射自体はログに出さない (`resolve_caster_shots`/`resolve_wraith_shots`
+    // と同じ割り切り) — 命中は`move_and_resolve_enemy_bullets`が別途ログを
+    // 出すため、両方出すと1枠しかない`visible_log()`表示が発射→命中の
+    // 2行で埋まり、直前の他のログ (灯喰らいの命中/回避等) を早く流してしまう。
+    state.enemy_bullets.extend(new_bullets);
+}
+
+/// 影の魔女/大蛇が雑魚を呼び寄せる周期。`boss_bullet_period_ticks`と同じ
+/// 理由でボス系の他の攻撃周期とは独立させている。
+fn boss_summon_period_ticks(rank: u32) -> u32 {
+    (BOSS_SUMMON_PERIOD_TICKS as i64 - rank.saturating_sub(1) as i64 * 5).max(30) as u32
+}
+const BOSS_SUMMON_PERIOD_TICKS: u64 = 60;
+/// 召喚した2体をボスの左右へ離す距離。`SPLIT_OFFSET`と同じ理由 (同座標に
+/// 重ねて湧かせない) だが値は独立させている。
+const BOSS_SUMMON_OFFSET: f64 = 4.0;
+
+/// 影の魔女/大蛇の召喚攻撃。羽虫2体をボスの左右へ湧かせる。単体の脅威
+/// (ボス本体・灯喰らい・実体弾) への対応で手一杯になっている間にも物量で
+/// 圧をかける — 「敵召喚して飛ばしてくる」という、灯喰らいの回避判断とは
+/// 別種の「手数を割かれる」プレッシャーを足す。`SPAWN_Y` (湧き出し端) では
+/// なくボスの現在y座標に湧かせるのは意図的: ボスは`homes()`等で奥へ進み
+/// 続けるため、同じボスが長く生き残るほど後続の召喚は防衛線に近い位置で
+/// 発生するようになる — 「長引く戦いほど切迫する」という時間経過そのもの
+/// を脅威にする効果を狙っている。`resolve_boss_bullets`と同じく
+/// `Enemy::ranged_charge`で個体の湧いた瞬間を基準にcooldownを持たせ、
+/// 初回だけ`period/3`にして防衛線到達前に確実に1回は発動する猶予を作る。
+fn resolve_boss_summons(state: &mut EverlightState) {
+    let period = boss_summon_period_ticks(state.rank);
+    let mut triggers: Vec<(EnemyKind, f64, f64)> = Vec::new();
+    for enemy in state.enemies.iter_mut() {
+        if !enemy.kind.summons_minions() {
+            continue;
+        }
+        match enemy.ranged_charge {
+            None => enemy.ranged_charge = Some(period / 3),
+            Some(t) if t <= 1 => {
+                enemy.ranged_charge = Some(period);
+                triggers.push((enemy.kind, enemy.x, enemy.y));
+            }
+            Some(t) => enemy.ranged_charge = Some(t - 1),
+        }
+    }
+    for (kind, x, y) in triggers {
+        let left = spawn_enemy_at_xy(state, EnemyKind::Swarmling, (x - BOSS_SUMMON_OFFSET).clamp(0.0, WORLD_W), y);
+        let right = spawn_enemy_at_xy(state, EnemyKind::Swarmling, (x + BOSS_SUMMON_OFFSET).clamp(0.0, WORLD_W), y);
+        // 敵数上限 (`MAX_ENEMIES_ON_FIELD`) で両方とも湧けなかった時は、実際には
+        // 何も起きていないのに「呼び寄せた」と嘘をつくログを出さない。
+        if left || right {
+            state.add_log(format!("{}が魔物を呼び寄せた！", kind.name()));
+        }
+    }
+}
+
 // ── 拠点 (恒久強化) ────────────────────────────────────────────────
 
 pub fn purchase_light(state: &mut EverlightState) -> bool {
@@ -1460,6 +1711,7 @@ pub fn start_vigil(state: &mut EverlightState) {
     state.projectiles.clear();
     state.enemy_bullets.clear();
     state.chests.clear();
+    state.kill_effects.clear();
     state.loadout = Loadout::default();
     state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Bolt));
     state.wave = 1;
@@ -2009,6 +2261,42 @@ mod tests {
         assert!(state.enemies.is_empty());
         assert!(state.ember > ember_before);
         assert_eq!(state.kill_count, 1);
+    }
+
+    #[test]
+    fn killing_an_enemy_spawns_a_kill_effect_at_its_position() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let (kill_x, kill_y) = (state.lantern.x, LANTERN_Y - 5.0);
+        state.enemies.push(Enemy {
+            id: 4,
+            kind: EnemyKind::Wisp,
+            x: kill_x,
+            y: kill_y,
+            hp: 1,
+            max_hp: 7,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        state.projectiles.push(make_projectile(kill_x, 10, 1, 0.0, -1.0, Color::White, WeaponKind::Bolt));
+        state.projectiles[0].y = kill_y;
+        assert!(state.kill_effects.is_empty());
+        move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
+        assert_eq!(state.kill_effects.len(), 1, "討伐位置に爆破演出が1つ残るはず");
+        let effect = &state.kill_effects[0];
+        assert_eq!((effect.x, effect.y), (kill_x, kill_y), "演出は討伐位置に残るはず");
+        assert_eq!(effect.ticks_left, KILL_EFFECT_TICKS);
+    }
+
+    #[test]
+    fn kill_effects_decay_and_are_removed_via_tick() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.kill_effects.push(KillEffect { x: 10.0, y: 20.0, ticks_left: 2 });
+        tick(&mut state);
+        assert_eq!(state.kill_effects[0].ticks_left, 1, "毎tick1ずつ減るはず");
+        tick(&mut state);
+        assert!(state.kill_effects.is_empty(), "残りtickが尽きたら取り除かれるはず");
     }
 
     #[test]
@@ -2776,7 +3064,7 @@ mod tests {
             x: state.lantern.x,
             y: 50.0,
             hp: 0,
-            max_hp: 420,
+            max_hp: 505,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
         });
@@ -2805,7 +3093,7 @@ mod tests {
             x: state.lantern.x,
             y: 50.0,
             hp: 0,
-            max_hp: 420,
+            max_hp: 505,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
         });
@@ -2831,7 +3119,7 @@ mod tests {
             x: state.lantern.x,
             y: 50.0,
             hp: 0,
-            max_hp: 420,
+            max_hp: 505,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
         });
@@ -2853,7 +3141,7 @@ mod tests {
             x: state.lantern.x,
             y: 50.0,
             hp: 0,
-            max_hp: 320,
+            max_hp: 385,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
         });
@@ -3035,7 +3323,14 @@ mod tests {
         let mut state = EverlightState::new();
         start_vigil(&mut state);
         let lantern_x = state.lantern.x;
-        state.enemy_bullets.push(EnemyBullet { x: lantern_x, y: LANTERN_Y - 1.0, vx: 0.0, vy: 1.0, damage: 4 });
+        state.enemy_bullets.push(EnemyBullet {
+            x: lantern_x,
+            y: LANTERN_Y - 1.0,
+            vx: 0.0,
+            vy: 1.0,
+            damage: 4,
+            source: EnemyKind::Caster,
+        });
         let light_before = state.lantern.light;
         move_and_resolve_enemy_bullets(&mut state);
         assert!(state.lantern.light < light_before, "同じレーンに届いた弾は灯を削るはず");
@@ -3048,7 +3343,14 @@ mod tests {
         // 発射レーンから灯が離れていれば、弾が同じy帯へ届いても被弾しない。
         let mut state = EverlightState::new();
         start_vigil(&mut state);
-        state.enemy_bullets.push(EnemyBullet { x: 0.0, y: LANTERN_Y - 1.0, vx: 0.0, vy: 1.0, damage: 4 });
+        state.enemy_bullets.push(EnemyBullet {
+            x: 0.0,
+            y: LANTERN_Y - 1.0,
+            vx: 0.0,
+            vy: 1.0,
+            damage: 4,
+            source: EnemyKind::Caster,
+        });
         set_lantern_target_lane(&mut state, COLUMNS - 1);
         for _ in 0..40 {
             move_lantern(&mut state);
@@ -3062,11 +3364,125 @@ mod tests {
     fn enemy_bullet_leaving_the_field_is_removed_without_a_hit() {
         let mut state = EverlightState::new();
         start_vigil(&mut state);
-        state.enemy_bullets.push(EnemyBullet { x: state.lantern.x, y: WORLD_H + 15.0, vx: 0.0, vy: 1.0, damage: 4 });
+        state.enemy_bullets.push(EnemyBullet {
+            x: state.lantern.x,
+            y: WORLD_H + 15.0,
+            vx: 0.0,
+            vy: 1.0,
+            damage: 4,
+            source: EnemyKind::Caster,
+        });
         let light_before = state.lantern.light;
         move_and_resolve_enemy_bullets(&mut state);
         assert_eq!(state.lantern.light, light_before);
         assert!(state.enemy_bullets.is_empty(), "画面外へ出た弾は消えるはず");
+    }
+
+    #[test]
+    fn enemy_bullet_hit_log_names_the_actual_shooter() {
+        // 命中ログは `EnemyBullet::source` の名前を反映するはず — 浮遊霊の
+        // 弾が命中した時も正しく浮遊霊の名前で出ることの回帰テスト。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let lantern_x = state.lantern.x;
+        state.enemy_bullets.push(EnemyBullet {
+            x: lantern_x,
+            y: LANTERN_Y - 1.0,
+            vx: 0.0,
+            vy: 1.0,
+            damage: 4,
+            source: EnemyKind::Wraith,
+        });
+        move_and_resolve_enemy_bullets(&mut state);
+        let log = state.visible_log().expect("命中したのでログが出るはず");
+        assert!(log.contains(EnemyKind::Wraith.name()), "浮遊霊の弾なのに浮遊霊の名前が出ていない: {log}");
+    }
+
+    // ── 浮遊霊 (Wraith) ───────────────────────────────────────────────
+
+    #[test]
+    fn wraith_stops_advancing_between_the_caster_and_sniper_stop_lines() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Wraith,
+            x: state.lantern.x,
+            y: WRAITH_STOP_Y - 0.1,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        move_enemies(&mut state);
+        assert!(state.enemies[0].y >= WRAITH_STOP_Y, "停止線を越えたら以後y方向へは進まないはず");
+        let y_after_stop = state.enemies[0].y;
+        move_enemies(&mut state);
+        assert_eq!(state.enemies[0].y, y_after_stop, "停止後はそれ以上近づかないはず");
+    }
+
+    #[test]
+    fn wraith_sways_side_to_side_instead_of_homing_toward_the_lantern() {
+        // 突進者のような一直線の接近でも、Husk/Bossのような`homes()`の
+        // 灯への直行でもないことの回帰テスト — x座標が単調に灯へ寄る
+        // のではなく、往復して初期位置の前後をまたぐはず。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        set_lantern_target_lane(&mut state, COLUMNS - 1);
+        for _ in 0..40 {
+            move_lantern(&mut state);
+        }
+        let spawn_x = super::super::state::lane_center_x(0);
+        state.enemies.push(Enemy {
+            id: 7,
+            kind: EnemyKind::Wraith,
+            x: spawn_x,
+            y: WRAITH_STOP_Y,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        let mut saw_above = false;
+        let mut saw_below = false;
+        for _ in 0..200 {
+            move_enemies(&mut state);
+            state.elapsed_ticks += 1;
+            let x = state.enemies[0].x;
+            if x > spawn_x {
+                saw_above = true;
+            }
+            if x < spawn_x {
+                saw_below = true;
+            }
+        }
+        assert!(saw_above && saw_below, "横揺れなら初期x座標の両側を行き来するはず");
+        assert!(
+            state.enemies[0].x < state.lantern.x - 10.0,
+            "灯のレーンへ直行するhomes()と違い、灯とは無関係な位置に留まり続けるはず"
+        );
+    }
+
+    #[test]
+    fn wraith_fires_a_bullet_after_charging() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Wraith,
+            x: state.lantern.x,
+            y: WRAITH_STOP_Y,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        assert!(state.enemy_bullets.is_empty());
+        for _ in 0..=WRAITH_FIRE_INTERVAL_TICKS {
+            resolve_wraith_shots(&mut state);
+        }
+        assert_eq!(state.enemy_bullets.len(), 1, "チャージが完了したら弾を1発撃つはず");
+        assert_eq!(state.enemy_bullets[0].source, EnemyKind::Wraith);
     }
 
     #[test]
@@ -3120,6 +3536,63 @@ mod tests {
         let kills = drain_dead_enemies(&mut state);
         apply_kills(&mut state, kills);
         assert!(state.enemies.is_empty(), "羽虫はさらに分裂しないはず");
+    }
+
+    // ── ボスの浮遊 (ふよふよ) ─────────────────────────────────────────
+
+    #[test]
+    fn boss_sways_side_to_side_via_the_bob_even_without_homing() {
+        // 大蛇は`homes()`=falseなので、この揺れが「灯へのhoming」ではなく
+        // 独立した浮遊(bob)由来であることを切り分けて検証できる。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let spawn_x = super::super::state::lane_center_x(4);
+        state.enemies.push(Enemy {
+            id: 3,
+            kind: EnemyKind::Serpent,
+            x: spawn_x,
+            y: 20.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        let mut saw_above = false;
+        let mut saw_below = false;
+        for _ in 0..60 {
+            move_enemies(&mut state);
+            state.elapsed_ticks += 1;
+            let x = state.enemies[0].x;
+            if x > spawn_x {
+                saw_above = true;
+            }
+            if x < spawn_x {
+                saw_below = true;
+            }
+        }
+        assert!(saw_above && saw_below, "ふよふよ揺れるなら初期x座標の両側を行き来するはず");
+    }
+
+    #[test]
+    fn boss_bob_does_not_prevent_forward_progress_toward_the_breach() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let start_y = 20.0;
+        state.enemies.push(Enemy {
+            id: 5,
+            kind: EnemyKind::Boss,
+            x: state.lantern.x,
+            y: start_y,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        for _ in 0..60 {
+            move_enemies(&mut state);
+            state.elapsed_ticks += 1;
+        }
+        assert!(state.enemies[0].y > start_y + 10.0, "浮遊で揺れても全体としては着実に前進するはず");
     }
 
     // ── ボスの構え中攻撃 ───────────────────────────────────────────────
@@ -3201,6 +3674,7 @@ mod tests {
             EnemyKind::Splitter,
             EnemyKind::SprayShielded,
             EnemyKind::AuroraShielded,
+            EnemyKind::Wraith,
         ] {
             assert!(!early.iter().any(|&(k, _)| k == kind), "第1波では{kind:?}はまだ出ないはず");
         }
@@ -3214,6 +3688,7 @@ mod tests {
             EnemyKind::Splitter,
             EnemyKind::SprayShielded,
             EnemyKind::AuroraShielded,
+            EnemyKind::Wraith,
         ] {
             assert!(late.iter().any(|&(k, _)| k == kind), "第30波では{kind:?}が出るはず");
         }
@@ -3285,5 +3760,178 @@ mod tests {
             state.lantern.light, light_before,
             "別種のボスが生きているだけで誤って命中してはいけない"
         );
+    }
+
+    #[test]
+    fn boss_bullet_and_summon_periods_scale_with_rank_independently_of_the_telegraph() {
+        assert!(boss_bullet_period_ticks(2) < boss_bullet_period_ticks(1), "高ランクほど実体弾の間隔は短くなるはず");
+        assert!(boss_summon_period_ticks(2) < boss_summon_period_ticks(1), "高ランクほど召喚の間隔は短くなるはず");
+        assert_ne!(
+            boss_bullet_period_ticks(1) as u64,
+            boss_attack_period_ticks(1),
+            "実体弾は灯喰らいと同じ周期にならないはず (重なりっぱなしを避ける)"
+        );
+    }
+
+    #[test]
+    fn boss_fires_a_bullet_aimed_at_the_lantern_on_its_own_period() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        // 灯とは別レーンに配置し、弾が「発射時の灯位置」を狙って直進する
+        // (詠唱者/浮遊霊のような縦落下ではない) ことを速度の向きで確認する。
+        set_lantern_target_lane(&mut state, COLUMNS - 1);
+        for _ in 0..40 {
+            move_lantern(&mut state);
+        }
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Boss,
+            x: super::super::state::lane_center_x(0),
+            y: 50.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        assert!(state.enemy_bullets.is_empty());
+        let first_charge = boss_bullet_period_ticks(state.rank) / 3;
+        for _ in 0..=first_charge {
+            resolve_boss_bullets(&mut state);
+        }
+        assert_eq!(state.enemy_bullets.len(), 1, "初回cooldownが尽きたら実体弾を1発撃つはず");
+        let bullet = &state.enemy_bullets[0];
+        assert_eq!(bullet.source, EnemyKind::Boss);
+        assert!(bullet.vx > 0.0, "灯が右側にいるので右向きに直進するはず (vx={})", bullet.vx);
+    }
+
+    #[test]
+    fn boss_does_not_fire_a_bullet_when_too_close_to_the_lantern_to_dodge() {
+        // 防衛線際まで進んだボスが撃つと、`GameTime::update`の最大5tick
+        // まとめ処理と重なった場合に同tick内で着弾してしまい、一度も
+        // 見えないまま被弾する。`BOSS_BULLET_MIN_TRAVEL`未満の距離では
+        // 発射自体を見送ることを確認する回帰テスト。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Boss,
+            x: state.lantern.x,
+            y: LANTERN_Y - BOSS_BULLET_MIN_TRAVEL + 1.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        let first_charge = boss_bullet_period_ticks(state.rank) / 3;
+        for _ in 0..=first_charge {
+            resolve_boss_bullets(&mut state);
+        }
+        assert!(
+            state.enemy_bullets.is_empty(),
+            "防衛線に近すぎる位置からは避ける猶予が無いため撃たないはず"
+        );
+        assert_eq!(
+            state.enemies[0].ranged_charge,
+            Some(boss_bullet_period_ticks(state.rank)),
+            "発射を見送ってもcooldownは通常通りリセットされるはず"
+        );
+    }
+
+    #[test]
+    fn shadow_witch_summons_two_swarmlings_on_its_own_period() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::ShadowWitch,
+            x: state.lantern.x,
+            y: 50.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        assert_eq!(state.enemies.len(), 1);
+        let first_charge = boss_summon_period_ticks(state.rank) / 3;
+        for _ in 0..=first_charge {
+            resolve_boss_summons(&mut state);
+        }
+        assert_eq!(state.enemies.len(), 3, "ボス本体+召喚された羽虫2体になるはず");
+        assert_eq!(
+            state.enemies.iter().filter(|e| e.kind == EnemyKind::Swarmling).count(),
+            2,
+            "召喚される個体は羽虫のはず"
+        );
+    }
+
+    #[test]
+    fn boss_bullets_and_summons_do_not_fire_before_their_charge_completes() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::FullMoonBoss,
+            x: state.lantern.x,
+            y: 50.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        state.enemies.push(Enemy {
+            id: 2,
+            kind: EnemyKind::Serpent,
+            x: state.lantern.x,
+            y: 50.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        let bullet_first_charge = boss_bullet_period_ticks(state.rank) / 3;
+        let summon_first_charge = boss_summon_period_ticks(state.rank) / 3;
+        for _ in 0..bullet_first_charge.min(summon_first_charge) {
+            resolve_boss_bullets(&mut state);
+            resolve_boss_summons(&mut state);
+        }
+        assert!(state.enemy_bullets.is_empty(), "初回cooldownが尽きるまでは実体弾を撃たないはず");
+        assert_eq!(state.enemies.len(), 2, "初回cooldownが尽きるまでは召喚しないはず");
+    }
+
+    #[test]
+    fn a_fast_moving_boss_summons_at_least_once_before_reaching_the_breach() {
+        // 大蛇はrank2/wave20だと秒間2.88ワールド単位で進み、防衛線(140)へ
+        // 約49tickで到達する。個体の湧いた瞬間を基準にした初回cooldownを
+        // 短縮 (`period/3`) していないと、この速度域のボスは一度も召喚
+        // しないまま退場してしまう回帰テスト。
+        let mut state = EverlightState::new();
+        state.rank = 2;
+        state.wave = 20;
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Serpent,
+            x: state.lantern.x,
+            y: SPAWN_Y,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        let mut summoned = false;
+        for _ in 0..60 {
+            let enemies_before = state.enemies.len();
+            move_enemies(&mut state);
+            resolve_boss_summons(&mut state);
+            if state.enemies.len() > enemies_before {
+                summoned = true;
+                break;
+            }
+            state.elapsed_ticks += 1;
+            let breached = state.enemies.first().map(|e| e.y >= BREACH_Y).unwrap_or(true);
+            if breached {
+                break;
+            }
+        }
+        assert!(summoned, "防衛線へ到達する前に一度も召喚しなかった (回帰)");
     }
 }

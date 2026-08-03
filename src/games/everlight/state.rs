@@ -81,6 +81,13 @@ pub enum EnemyKind {
     /// 瞬間判定でしかなく「弾」を伴わない — こちらは実際に飛んでくる弾を
     /// 見てから避けるという別種の駆け引きを持たせる。
     Caster,
+    /// 浮遊霊 (第14波〜)。突進者とは正反対の性質を持たせた高耐久の遠隔役 —
+    /// 一直線に迫ることも、詠唱者/狙撃者のように停止後は同じレーンに
+    /// 固定されることもなく、`logic::WRAITH_STOP_Y` 到達後も横方向へ
+    /// 揺れ続けながら (`logic::move_enemies` のsway処理) 実体弾を撃つ。
+    /// 弾の飛来レーンを「今どこにいるか」で常に見極めさせる分、他の
+    /// 遠隔役より打たれ強く設計している。
+    Wraith,
     /// 影の魔女 (第10波枠のボス)。灯のレーンと隣接レーンを同時に構える。
     ShadowWitch,
     /// 大蛇 (第15波枠以降のボス)。警告のレーンが構え中に横へ移動する。
@@ -104,6 +111,7 @@ impl EnemyKind {
             EnemyKind::AuroraShielded => "極甲兵",
             EnemyKind::Charger => "突進者",
             EnemyKind::Caster => "詠唱者",
+            EnemyKind::Wraith => "浮遊霊",
             EnemyKind::ShadowWitch => "影の魔女",
             EnemyKind::Serpent => "大蛇",
             EnemyKind::FullMoonBoss => "満月の魔王",
@@ -116,7 +124,16 @@ impl EnemyKind {
             EnemyKind::Husk => 24,
             EnemyKind::Swarmling => 3,
             EnemyKind::Elite => 55,
-            EnemyKind::Boss => 320,
+            // ボス級は「ふよふよ」揺れながら弾/召喚も飛ばしてくる分、単純な
+            // 接近ループより長く粘って脅威であり続けるべき。相対比は
+            // 影の魔女<大蛇<魔王<満月の魔王で揃える。ボスが長生きする
+            // ほど光弾の自動照準 (`pick_bolt_target`) がその間ずっと
+            // ボスへ固定され、その間に雑魚の群れが手薄になって防衛線を
+            // 破られやすくなる — HPを上げすぎると
+            // `simulator::even_maxed_out_investment_eventually_ends_every_vigil`
+            // が検証する「極端な投資は明らかに効く」という性質を壊すため、
+            // 実測しながら控えめな値に留めている。
+            EnemyKind::Boss => 385,
             EnemyKind::Sniper => 18,
             EnemyKind::Shielded => 40,
             EnemyKind::Splitter => 14,
@@ -126,9 +143,13 @@ impl EnemyKind {
             // 低HP: 弾幕を止めたければ最優先で処理してほしいという
             // 「後方支援役は脆いが放置すると厄介」という役割を体現する。
             EnemyKind::Caster => 11,
-            EnemyKind::ShadowWitch => 280,
-            EnemyKind::Serpent => 300,
-            EnemyKind::FullMoonBoss => 420,
+            // 装甲系 (40〜46) より高いが軽減は持たない — どの武器で
+            // 削っても素直にこの数値ぶん時間がかかる、単純に「打たれ強い」
+            // 遠隔役にするため。
+            EnemyKind::Wraith => 48,
+            EnemyKind::ShadowWitch => 335,
+            EnemyKind::Serpent => 360,
+            EnemyKind::FullMoonBoss => 505,
         }
     }
 
@@ -149,6 +170,7 @@ impl EnemyKind {
             // `logic::CHARGER_BOOST_MULT` が別途乗算される。
             EnemyKind::Charger => 1.3,
             EnemyKind::Caster => 0.6,
+            EnemyKind::Wraith => 0.85,
             EnemyKind::ShadowWitch => 0.6,
             EnemyKind::Serpent => 0.65,
             EnemyKind::FullMoonBoss => 0.5,
@@ -170,6 +192,7 @@ impl EnemyKind {
             EnemyKind::AuroraShielded => 10,
             EnemyKind::Charger => 7,
             EnemyKind::Caster => 3,
+            EnemyKind::Wraith => 8,
             EnemyKind::ShadowWitch => 18,
             EnemyKind::Serpent => 20,
             EnemyKind::FullMoonBoss => 26,
@@ -190,6 +213,7 @@ impl EnemyKind {
             EnemyKind::AuroraShielded => 8,
             EnemyKind::Charger => 5,
             EnemyKind::Caster => 5,
+            EnemyKind::Wraith => 9,
             EnemyKind::ShadowWitch => 70,
             EnemyKind::Serpent => 75,
             EnemyKind::FullMoonBoss => 110,
@@ -211,6 +235,7 @@ impl EnemyKind {
             EnemyKind::AuroraShielded => 3.6,
             EnemyKind::Charger => 2.3,
             EnemyKind::Caster => 2.0,
+            EnemyKind::Wraith => 3.2,
             EnemyKind::ShadowWitch => 6.0,
             EnemyKind::Serpent => 6.2,
             EnemyKind::FullMoonBoss => 7.0,
@@ -238,6 +263,16 @@ impl EnemyKind {
         matches!(self, EnemyKind::Boss | EnemyKind::ShadowWitch | EnemyKind::Serpent | EnemyKind::FullMoonBoss)
     }
 
+    /// `logic::resolve_boss_bullets` の対象か (実体弾を撃つボス)。
+    pub fn fires_boss_bullets(self) -> bool {
+        matches!(self, EnemyKind::Boss | EnemyKind::FullMoonBoss)
+    }
+
+    /// `logic::resolve_boss_summons` の対象か (雑魚を召喚するボス)。
+    pub fn summons_minions(self) -> bool {
+        matches!(self, EnemyKind::ShadowWitch | EnemyKind::Serpent)
+    }
+
     pub fn color(self) -> Color {
         match self {
             EnemyKind::Wisp => Color::LightBlue,
@@ -257,6 +292,11 @@ impl EnemyKind {
             EnemyKind::AuroraShielded => Color::Yellow,
             EnemyKind::Charger => Color::Blue,
             EnemyKind::Caster => Color::Cyan,
+            // 名前付き色 (Light系含む) は他の敵種で使い切っているため
+            // Rgb直指定。既存のCyan(詠唱者)/Magenta系(精鬼・影の魔女)と
+            // 十分離れた紫がかったラベンダーにして、横揺れする本体だけでも
+            // 一目で「他と違う個体だ」と判別できるようにする。
+            EnemyKind::Wraith => Color::Rgb(178, 132, 255),
             EnemyKind::ShadowWitch => Color::Magenta,
             EnemyKind::Serpent => Color::Green,
             EnemyKind::FullMoonBoss => Color::White,
@@ -288,9 +328,10 @@ pub struct Enemy {
     pub hp: i32,
     pub max_hp: i32,
     pub hurt_flash: FlashTimer,
-    /// 狙撃者 (`EnemyKind::Sniper`) 専用: 次の遠隔攻撃着弾までの残りtick。
-    /// 他の敵種は常に `None` のまま使わない (敵種ごとに専用フィールドを
-    /// 増やすより、汎用の1フィールドに寄せて `Enemy` リテラルの増殖を防ぐ)。
+    /// 周期的な特殊行動を持つ敵種 (狙撃者/詠唱者/浮遊霊/魔王/満月の魔王/
+    /// 影の魔女/大蛇) 共用: 次の行動までの残りtick。それ以外の敵種は常に
+    /// `None` のまま使わない (敵種ごとに専用フィールドを増やすより、汎用の
+    /// 1フィールドに寄せて `Enemy` リテラルの増殖を防ぐ)。
     pub ranged_charge: Option<u32>,
 }
 
@@ -628,6 +669,9 @@ pub struct EnemyBullet {
     pub vx: f64,
     pub vy: f64,
     pub damage: i32,
+    /// どの敵種が撃ったか。命中ログ (「◯◯の弾で灯が削れた」) を撃った側の
+    /// 名前で正しく出すために使う — `Projectile::source` と同じ理由付け。
+    pub source: EnemyKind,
 }
 
 pub const ENEMY_BULLET_RADIUS: f64 = 1.8;
@@ -640,6 +684,23 @@ pub struct Chest {
 
 pub const CHEST_FALL_SPEED: f64 = 0.7;
 pub const CHEST_BASE_CATCH_RADIUS: f64 = 8.0;
+
+/// 敵を討った位置に一瞬だけ残す爆破演出。位置と寿命だけを持つ軽量な
+/// 構造体で、`logic::apply_kills` が討伐のたびに積み、`logic::tick` が
+/// 毎tick寿命を減らして尽きたものを取り除く (`enemy_bullets`と同じ
+/// retain方式)。render.rsはこれを拡大するリングとして描く。
+#[derive(Clone, Debug)]
+pub struct KillEffect {
+    pub x: f64,
+    pub y: f64,
+    pub ticks_left: u32,
+}
+
+/// `AURORA_FLASH_TICKS`/`METEOR_FLASH_TICKS`と同じ理由 (`GameTime::update`
+/// のまとめtick処理で最大5tick分が1回のrenderにまとまり得るため) で5を
+/// 下限にする — これより短いと「発火したのに一度も描画されない」退行が
+/// 起こり得る。
+pub const KILL_EFFECT_TICKS: u32 = 5;
 
 // ── レベルアップ選択肢 (宝箱を取ると開く) ───────────────────────────
 
@@ -725,6 +786,12 @@ impl CampUpgrades {
     pub const EXTRA_SLOT_COST: u32 = 60;
     /// 武器種が1種多い (5種) ぶん、受動効果スロット拡張より少し高い。
     pub const EXTRA_WEAPON_SLOT_COST: u32 = 90;
+    /// このレベルまでは`power_cost`が素の線形コストのまま (序盤の手触りを
+    /// 変えない)。超えた分だけ`POWER_COST_GROWTH_PER_LEVEL`で指数関数的に
+    /// 吊り上がる。
+    const POWER_COST_RAMP_LEVEL: u32 = 15;
+    /// `POWER_COST_RAMP_LEVEL`を超えた1レベルごとに乗算される係数。
+    const POWER_COST_GROWTH_PER_LEVEL: f64 = 1.12;
 
     /// `selected_rank` を範囲内に補正した値。保存データの破損や
     /// 手動編集で範囲外になっていても安全に読めるようにする。
@@ -736,8 +803,25 @@ impl CampUpgrades {
         8 + self.light_level * 6
     }
 
+    /// 「光力」(全武器威力+5%/lv) の次の1レベルのコスト。素の線形コスト
+    /// (10+8*lv) を、`POWER_COST_RAMP_LEVEL` までは据え置いたまま、それを
+    /// 超えた分だけ指数関数的に吊り上げる — `logic::wave_difficulty` が
+    /// マイルストーンまでは線形・以降は指数関数的escalationにするのと
+    /// 同じ考え方。%バフが恒久的に無制限へ積み上がる強化は、コスト自体も
+    /// 際限なく安いままだと「損耗なしにいくらでも強くなれる」状態になり、
+    /// 戦闘の緊張感を削ってしまう。序盤 (lv15未満) の手触りは変えず、
+    /// 深い投資だけを重くする。`lv149`付近から`f64 as u32`がu32::MAXへ
+    /// 飽和するが (指数関数的増大の必然)、実プレイでの到達レベルからは
+    /// 桁違いに遠いため実害はない。パニックしないこと自体は
+    /// `power_cost_never_panics_even_at_extreme_levels` で保証している。
     pub fn power_cost(&self) -> u32 {
-        10 + self.power_level * 8
+        let linear = 10 + self.power_level * 8;
+        let overflow = self.power_level.saturating_sub(Self::POWER_COST_RAMP_LEVEL);
+        if overflow == 0 {
+            return linear;
+        }
+        let escalation = Self::POWER_COST_GROWTH_PER_LEVEL.powi(overflow as i32);
+        (linear as f64 * escalation).round() as u32
     }
 
     pub fn light_max(&self) -> i32 {
@@ -808,6 +892,7 @@ pub struct EverlightState {
     pub projectiles: Vec<Projectile>,
     pub enemy_bullets: Vec<EnemyBullet>,
     pub chests: Vec<Chest>,
+    pub kill_effects: Vec<KillEffect>,
     pub loadout: Loadout,
     pub wave: u32,
     pub elapsed_ticks: u64,
@@ -919,6 +1004,7 @@ impl EverlightState {
             projectiles: Vec::new(),
             enemy_bullets: Vec::new(),
             chests: Vec::new(),
+            kill_effects: Vec::new(),
             loadout: Loadout::default(),
             wave: 1,
             elapsed_ticks: 0,
@@ -1005,6 +1091,44 @@ mod tests {
         let base_cost = camp.light_cost();
         camp.light_level += 1;
         assert!(camp.light_cost() > base_cost);
+    }
+
+    #[test]
+    fn power_cost_stays_linear_up_to_and_including_the_ramp_level() {
+        // 序盤の手触りを変えない、という設計意図の回帰テスト。
+        // ramp境界(15)自体もまだ線形のままであることを含めて確認する。
+        let mut camp = CampUpgrades::default();
+        for level in 0..=15 {
+            camp.power_level = level;
+            assert_eq!(camp.power_cost(), 10 + level * 8, "ramp以下は素の線形コストのままのはず");
+        }
+    }
+
+    #[test]
+    fn power_cost_escalates_faster_than_linear_past_the_ramp_level() {
+        // 「素の線形コストのままだと恒久強化がいくらでも安く積み上がって
+        // しまう」問題の回帰テスト — ramp を越えた分は線形コストより
+        // 明確に高くなるはず。
+        let camp = CampUpgrades { power_level: 40, ..CampUpgrades::default() };
+        let linear_equivalent = 10 + 40 * 8;
+        assert!(
+            camp.power_cost() > linear_equivalent * 2,
+            "ramp超過後は線形コストの2倍を優に超えるはず: actual={} linear={}",
+            camp.power_cost(),
+            linear_equivalent
+        );
+    }
+
+    #[test]
+    fn power_cost_never_panics_even_at_extreme_levels() {
+        // 指数関数的escalationのため、lv149付近から`f64 as u32`が
+        // u32::MAXへ飽和するがパニックはしないはず (実プレイでの到達
+        // レベルからは桁違いに遠いので、飽和自体は実害にならない)。
+        for level in [148, 149, 150, 300, 1000] {
+            let camp = CampUpgrades { power_level: level, ..CampUpgrades::default() };
+            let cost = camp.power_cost();
+            assert!(cost > 0, "コストが0以下にはならないはず: level={level} cost={cost}");
+        }
     }
 
     #[test]
