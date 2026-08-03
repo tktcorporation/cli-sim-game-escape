@@ -271,7 +271,8 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         let sparks: Vec<(f64, f64)> = (0..SPARK_COUNT)
             .flat_map(|i| {
                 let a = spin_angle + i as f64 * std::f64::consts::TAU / SPARK_COUNT as f64;
-                let (sy, sx) = (cy + a.sin() * radius, cx + a.cos() * radius);
+                let sx = cx + a.cos() * radius;
+                let sy = cy + a.sin() * radius;
                 canvas_fx::filled_ellipse_points(sx, sy, 1.1, 1.1, 0.6)
             })
             .collect();
@@ -288,7 +289,9 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
                 ctx.draw(&CanvasLine { x1, y1, x2, y2, color: Color::Red });
             }
             if !aurora_band_pts.is_empty() {
-                ctx.draw(&Points { coords: &aurora_band_pts, color: WeaponKind::Aurora.color() });
+                // 極光の武器色そのまま (LightYellow) だと灯・宝箱の発光と
+                // 同色で紛れるため、帯は暗めの Yellow にして区別できるようにする。
+                ctx.draw(&Points { coords: &aurora_band_pts, color: Color::Yellow });
             }
             if let Some((ring, _, ring_color)) = &halo_visual {
                 if !ring.is_empty() {
@@ -652,9 +655,13 @@ mod tests {
         logic::start_vigil(&mut state);
         state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Aurora));
         state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Halo));
-        // 両方が最低1回は発火し、薙ぎ払い帯・周回リングのパルス演出が
-        // 有効な状態で描画されるまで進める。
-        logic::tick_n(&mut state, 40);
+        // 実際の発火tickを計算して狙うと、各武器のクールダウン定数が変わる
+        // 度にこのテストの前提が壊れる (実際、tick_n(40)だと極光は非発火
+        // タイミングだった)。発火タイミングの計算をせず演出フラグを直接
+        // 立てることで、薙ぎ払い帯・周回リングのパルス描画コードパスを
+        // 確実に (かつバランス調整に影響されず) 通す。
+        state.aurora_flash.trigger(1);
+        state.halo_flash.trigger(1);
         render_to_test_backend(&state, 40, 30);
         render_to_test_backend(&state, 100, 30);
     }
