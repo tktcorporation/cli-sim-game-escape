@@ -2,12 +2,14 @@
 //! タワーディフェンス。
 //!
 //! コアループ:
-//!   1. 拠点で残光を払って恒久強化を整え、夜番へ出る
+//!   1. 拠点で残光を払って恒久強化を整え、挑戦ランクを選んで夜番へ出る
 //!   2. 灯を左右のレーンへ動かしながら、自動発砲する武器で敵を迎撃する
 //!   3. 精鋭/魔王を倒すと宝箱が落ちる。受け止めるとレベルアップ選択肢が
 //!      開き、新しい武器/効果を得るか既存を強化するかを選ぶ
-//!   4. 灯が0になる、または自ら撤退すると拠点へ戻る。波数と生存時間の
-//!      自己ベストが記録される (残光は失われない)
+//!   4. ランクの最終波 (`logic::milestone_wave`) の最終ボスを倒すと
+//!      「Dawn」を達成し、次のランクが解放される (プレイは続行可能)
+//!   5. 灯が0になる、または自ら撤退すると拠点へ戻る。波数と生存時間の
+//!      自己ベストが記録される (残光・解放ランクは失われない)
 
 pub mod actions;
 pub mod effects;
@@ -56,6 +58,7 @@ struct PrevSnapshot {
     light_hit_count: u32,
     chest_caught_count: u32,
     boss_spawn_count: u32,
+    dawn_count: u32,
 }
 
 impl PrevSnapshot {
@@ -67,6 +70,7 @@ impl PrevSnapshot {
             light_hit_count: state.light_hit_count,
             chest_caught_count: state.chest_caught_count,
             boss_spawn_count: state.boss_spawn_count,
+            dawn_count: state.dawn_count,
         }
     }
 }
@@ -120,6 +124,8 @@ impl EverlightGame {
                     adjust_scroll(&self.state.camp_scroll, 3);
                     true
                 }
+                'h' => self.select_rank_and_notify(-1),
+                'l' => self.select_rank_and_notify(1),
                 _ => false,
             },
             Phase::Vigil => match ch {
@@ -169,6 +175,8 @@ impl EverlightGame {
                     adjust_scroll(&self.state.camp_scroll, 3);
                     true
                 }
+                CAMP_RANK_DOWN => self.select_rank_and_notify(-1),
+                CAMP_RANK_UP => self.select_rank_and_notify(1),
                 _ => false,
             },
             Phase::Vigil => match action_id {
@@ -210,6 +218,26 @@ impl EverlightGame {
         true
     }
 
+    /// 挑戦ランクを `delta` (+1/-1) だけ動かす。範囲外は `logic::select_rank`
+    /// が `max_unlocked_rank` へクランプするので、境界での操作もno-opに
+    /// なるだけで安全。`buy_and_notify` と同じく、実際に動いたか (CLICK) /
+    /// 境界で動けなかったか (ERROR) を音で区別する。
+    fn select_rank_and_notify(&mut self, delta: i32) -> bool {
+        let before = self.state.camp.selected_rank;
+        let cur = before as i32;
+        let next = (cur + delta).max(1) as u32;
+        logic::select_rank(&mut self.state, next);
+        if self.state.camp.selected_rank != before {
+            sound::play(sound::CLICK);
+            // 次の定期autosaveを待つと、直後にリロードされた場合に選択が
+            // 第1夜へ戻ってしまうため、購入と同様に即座に保存する。
+            self.flush_save();
+        } else {
+            sound::play(sound::ERROR);
+        }
+        true
+    }
+
     fn detect_transitions(&self, area: Rect) {
         let prev = self.prev.get();
         let mut effects = self.effects.borrow_mut();
@@ -226,6 +254,9 @@ impl EverlightGame {
         }
         if self.state.boss_spawn_count != prev.boss_spawn_count {
             effects.push_boss_appear(area);
+        }
+        if self.state.dawn_count != prev.dawn_count {
+            effects.push_dawn(area);
         }
         // `!=` だと、夜番終了後 `start_vigil` が wave を1へ戻した時にも
         // 「波が変わった」と誤検知して無関係な進行演出が出てしまう
@@ -263,11 +294,16 @@ impl Game for EverlightGame {
 
     fn tick(&mut self, delta_ticks: u32) {
         let was_vigil = self.state.phase == Phase::Vigil;
+        let prev_max_unlocked_rank = self.state.camp.max_unlocked_rank;
         logic::tick_n(&mut self.state, delta_ticks);
 
         if was_vigil && self.state.phase == Phase::Camp {
             // 夜番終了でember/自己ベストが確定した直後 — 次の定期autosave
             // (最大30秒後) を待つとリロードで記録が失われうるため即座に保存する。
+            self.flush_save();
+        } else if self.state.camp.max_unlocked_rank != prev_max_unlocked_rank {
+            // Dawn達成で解放ランクが増えた瞬間。夜番はまだ続いているので
+            // 上のvigil終了パスは通らない — ここで個別に即時保存する。
             self.flush_save();
         } else if self.save_countdown > delta_ticks {
             self.save_countdown -= delta_ticks;
@@ -510,5 +546,96 @@ mod tests {
         logic::start_vigil(&mut game.state);
         game.tick(80);
         terminal.draw(|f| render::render(&game.state, f, f.area(), &click_state)).unwrap();
+    }
+
+    #[test]
+    fn rank_up_click_is_a_noop_beyond_max_unlocked_rank() {
+        let mut game = EverlightGame::new();
+        assert_eq!(game.state.camp.max_unlocked_rank, 1);
+        assert!(game.handle_input(&click(CAMP_RANK_UP)));
+        assert_eq!(game.state.camp.selected_rank, 1, "未解放ランクへは進めないはず");
+    }
+
+    #[test]
+    fn rank_up_then_down_click_moves_within_unlocked_range() {
+        let mut game = EverlightGame::new();
+        game.state.camp.max_unlocked_rank = 3;
+        assert!(game.handle_input(&click(CAMP_RANK_UP)));
+        assert_eq!(game.state.camp.selected_rank, 2);
+        assert!(game.handle_input(&click(CAMP_RANK_UP)));
+        assert_eq!(game.state.camp.selected_rank, 3);
+        assert!(game.handle_input(&click(CAMP_RANK_UP)), "上限を超える操作もno-opとして消費されるはず");
+        assert_eq!(game.state.camp.selected_rank, 3);
+        assert!(game.handle_input(&click(CAMP_RANK_DOWN)));
+        assert_eq!(game.state.camp.selected_rank, 2);
+    }
+
+    #[test]
+    fn changing_rank_flushes_save_immediately_instead_of_waiting_for_autosave() {
+        // ランク選択を変えた直後にリロードされても選択が第1夜へ戻らない
+        // よう、購入と同様に即座に保存されるはず。
+        let mut game = EverlightGame::new();
+        game.state.camp.max_unlocked_rank = 2;
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+
+        assert!(game.handle_input(&click(CAMP_RANK_UP)));
+
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL,
+            "ランク変更時にflush_saveが呼ばれてsave_countdownがリセットされるはず"
+        );
+    }
+
+    #[test]
+    fn no_op_rank_change_does_not_flush_save() {
+        // 上限/下限での no-op 操作まで毎回保存するのは無駄なので、実際に
+        // 値が変わった時だけ flush_save が走ることを確認する。
+        let mut game = EverlightGame::new();
+        assert_eq!(game.state.camp.max_unlocked_rank, 1);
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+
+        assert!(game.handle_input(&click(CAMP_RANK_UP)));
+
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL + 1000,
+            "変化が無ければflush_saveは呼ばれないはず"
+        );
+    }
+
+    #[test]
+    fn dawn_flushes_save_immediately_without_waiting_for_autosave() {
+        // Dawnは夜番の途中で起きる (vigil→camp遷移を伴わない) ため、
+        // 既存のvigil終了パスとは別に即時保存が必要。
+        let mut game = EverlightGame::new();
+        logic::start_vigil(&mut game.state);
+        // `tick()` は毎回 `update_wave` で `elapsed_ticks` から wave を
+        // 再計算し直すため、wave フィールドを直接上書きしても次の
+        // `tick()` で巻き戻ってしまう。マイルストーン波に自然に入る
+        // よう elapsed_ticks 側を調整する。
+        let milestone = logic::milestone_wave(game.state.rank);
+        game.state.elapsed_ticks = (milestone as u64 - 1) * state::WAVE_DURATION_TICKS as u64;
+
+        // マイルストーン波に入ると最終ボスが自然に湧く。Dawn判定はwaveの
+        // 一致ではなく湧いた個体のid (`state.milestone_boss_id`) で行うため、
+        // 実際に湧かせてからそのidの個体を倒す形でテストする。
+        game.tick(1);
+        let boss_id = game.state.milestone_boss_id.expect("マイルストーン波に入れば最終ボスが湧くはず");
+        for e in game.state.enemies.iter_mut() {
+            if e.id == boss_id {
+                e.hp = 0;
+            }
+        }
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+
+        game.tick(1);
+
+        assert_eq!(game.state.camp.max_unlocked_rank, 2, "Dawnで次のランクが解放されるはず");
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL,
+            "Dawn達成時にflush_saveが呼ばれてsave_countdownがリセットされるはず"
+        );
     }
 }

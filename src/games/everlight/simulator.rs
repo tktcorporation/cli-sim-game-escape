@@ -12,13 +12,17 @@
 use super::logic;
 use super::state::{EverlightState, Phase, COLUMNS, MAX_LEVEL, WORLD_W};
 
-/// 拠点では買える強化を買い切ってから出陣し、夜番中はレベルアップを
-/// 常に1番目の選択肢で受け取り、5tickごとに最も敵が密集しているレーン
-/// (宝箱があればそちらを優先) へ灯を寄せる、という単純な自動プレイ方策。
+/// 拠点では買える強化を買い切り、解放済みの最大ランクを選んでから出陣し、
+/// 夜番中はレベルアップを常に1番目の選択肢で受け取り、5tickごとに最も
+/// 敵が密集しているレーン (宝箱があればそちらを優先) へ灯を寄せる、
+/// という単純な自動プレイ方策。ランクを常に最大まで上げてから出るのは、
+/// 長時間シミュレーションでランクスケーリングが破綻を起こさないか
+/// (パニックしないか) を実際に踏ませて検証するため。
 fn auto_play_tick(state: &mut EverlightState, tick_index: u64) {
     match state.phase {
         Phase::Camp => {
             while logic::purchase_light(state) || logic::purchase_power(state) || logic::purchase_extra_slot(state) {}
+            logic::select_rank(state, state.camp.max_unlocked_rank);
             logic::start_vigil(state);
         }
         Phase::Vigil => {
@@ -67,6 +71,13 @@ fn long_run_never_panics_and_keeps_invariants() {
         );
         assert!(state.enemies.len() <= 200, "敵の数が上限を超えて増え続けている: {}", state.enemies.len());
         assert!(state.projectiles.len() <= 300, "弾の数が上限を超えて増え続けている: {}", state.projectiles.len());
+        assert!(state.camp.max_unlocked_rank >= 1, "解放済みランクは1未満にならないはず");
+        assert!(
+            state.camp.selected_rank <= state.camp.max_unlocked_rank,
+            "選択中ランクが解放済み範囲を超えている: selected={} max={}",
+            state.camp.selected_rank,
+            state.camp.max_unlocked_rank
+        );
         for w in &state.loadout.weapons {
             assert!(w.level >= 1 && w.level <= MAX_LEVEL, "武器レベルが範囲外: {}", w.level);
         }
@@ -174,4 +185,42 @@ fn camp_upgrades_accumulate_across_multiple_vigils() {
     }
     let total_camp_levels = state.camp.light_level + state.camp.power_level + state.camp.extra_slot_level;
     assert!(total_camp_levels > 0, "30000tick経っても拠点強化が一度も購入されていない");
+}
+
+/// ランク1のマイルストーン (第15波) を、拠点強化を積みながら複数回の
+/// 夜番に挑んで実際に突破できるかを検証する。「終わりを作った」つもりが
+/// 事実上到達不可能では意味が無いため、寛容な回数の夜番を与えた上で
+/// 次のランクまで解放できることを確認する。
+#[test]
+fn dawn_is_reachable_within_a_generous_number_of_vigils() {
+    let mut state = EverlightState::new();
+    for i in 0..80_000u64 {
+        auto_play_tick(&mut state, i);
+    }
+    assert!(
+        state.camp.max_unlocked_rank >= 2,
+        "80000tick (拠点強化を積みながら複数回挑戦) してもランク2が解放されない — \
+         マイルストーンが厳しすぎる可能性がある: max_unlocked_rank={}",
+        state.camp.max_unlocked_rank
+    );
+}
+
+/// `cargo test everlight::simulator::dawn_progression_report -- --nocapture`
+/// で確認できる、ランク解放の進み具合の人間向けレポート。
+#[test]
+fn dawn_progression_report() {
+    let mut state = EverlightState::new();
+    let mut dawn_ticks: Vec<u64> = Vec::new();
+    let mut last_dawn_count = 0u32;
+    for i in 0..80_000u64 {
+        auto_play_tick(&mut state, i);
+        if state.dawn_count != last_dawn_count {
+            dawn_ticks.push(i);
+            last_dawn_count = state.dawn_count;
+        }
+    }
+    eprintln!(
+        "[everlight/dawn] final_max_unlocked_rank={} dawn_count={} dawn_ticks={:?}",
+        state.camp.max_unlocked_rank, state.dawn_count, dawn_ticks
+    );
 }

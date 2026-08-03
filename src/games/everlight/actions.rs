@@ -7,6 +7,10 @@ pub const CAMP_START_VIGIL: u16 = 4;
 pub const CAMP_SCROLL_UP: u16 = 5;
 pub const CAMP_SCROLL_DOWN: u16 = 6;
 
+/// 挑戦ランクの選択 (◀/▶)。`max_unlocked_rank` を超えて選ぶことはできない。
+pub const CAMP_RANK_DOWN: u16 = 8;
+pub const CAMP_RANK_UP: u16 = 9;
+
 /// 夜番中に自ら拠点へ撤退する。灯が0になった時と同じ後処理を共有する。
 pub const RETREAT_TO_CAMP: u16 = 7;
 
