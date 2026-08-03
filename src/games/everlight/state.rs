@@ -197,42 +197,85 @@ impl WeaponKind {
             WeaponKind::Halo => Color::LightMagenta,
         }
     }
+
+    /// この武器がLvMAXの状態で「進化」するために必要な受動効果。武器と
+    /// 対応する受動効果には同じ色を与えている (`PassiveKind::color`) —
+    /// レシピそのものは説明せず、色の一致だけをヒントとして残すことで
+    /// プレイヤー自身に発見してもらう (「点と点を線にする」快感)。
+    pub fn evolution_partner(self) -> PassiveKind {
+        match self {
+            WeaponKind::Bolt => PassiveKind::FireRate,
+            WeaponKind::Spray => PassiveKind::Power,
+            WeaponKind::Aurora => PassiveKind::Radiance,
+            WeaponKind::Halo => PassiveKind::Magnet,
+        }
+    }
+
+    pub fn evolved_name(self) -> &'static str {
+        match self {
+            WeaponKind::Bolt => "連光弾",
+            WeaponKind::Spray => "豪雨散光",
+            WeaponKind::Aurora => "極光炉",
+            WeaponKind::Halo => "重光輪",
+        }
+    }
 }
+
+/// 進化に必要な相方の受動効果レベル。MAXの一歩手前 (Lv3) に設定し、
+/// 「武器を極めた」時点でギリギリ手が届くかどうかの緊張感を持たせる。
+pub const EVOLUTION_PASSIVE_THRESHOLD: u32 = 3;
 
 #[derive(Clone, Copy, Debug)]
 pub struct OwnedWeapon {
     pub kind: WeaponKind,
     pub level: u32,
     pub cooldown_remaining: u32,
+    /// 対応する受動効果と組み合わさって「進化」したか。
+    pub evolved: bool,
 }
 
 impl OwnedWeapon {
     pub fn new(kind: WeaponKind) -> Self {
-        Self { kind, level: 1, cooldown_remaining: 0 }
+        Self { kind, level: 1, cooldown_remaining: 0, evolved: false }
     }
 
     pub fn damage(&self) -> i32 {
         let l = self.level as i32;
-        match self.kind {
+        let base = match self.kind {
             WeaponKind::Bolt => 8 + (l - 1) * 3,
             WeaponKind::Spray => 5 + (l - 1) * 2,
             WeaponKind::Aurora => 14 + (l - 1) * 5,
             WeaponKind::Halo => 2 + (l - 1),
+        };
+        if self.evolved {
+            (base as f64 * 1.6).round() as i32
+        } else {
+            base
         }
     }
 
     pub fn cooldown_ticks(&self) -> u32 {
         let l = self.level;
-        match self.kind {
+        let base = match self.kind {
             WeaponKind::Bolt => 8u32.saturating_sub(l - 1).max(4),
             WeaponKind::Spray => 14u32.saturating_sub(l - 1).max(9),
             WeaponKind::Aurora => 26u32.saturating_sub((l - 1) * 3).max(14),
             WeaponKind::Halo => 5,
+        };
+        if self.evolved {
+            ((base as f64) * 0.75).round().max(3.0) as u32
+        } else {
+            base
         }
     }
 
     pub fn pierce(&self) -> u32 {
-        1 + self.level / 2
+        let base = 1 + self.level / 2;
+        if self.evolved && matches!(self.kind, WeaponKind::Bolt | WeaponKind::Spray) {
+            base + 1
+        } else {
+            base
+        }
     }
 
     pub fn projectile_count(&self) -> u32 {
@@ -243,11 +286,25 @@ impl OwnedWeapon {
     }
 
     pub fn halo_radius(&self) -> f64 {
-        10.0 + (self.level as f64 - 1.0) * 2.0
+        let base = 10.0 + (self.level as f64 - 1.0) * 2.0;
+        if self.evolved {
+            base * 1.3
+        } else {
+            base
+        }
     }
 
     pub fn halo_orb_count(&self) -> u32 {
         1 + (self.level - 1) / 2
+    }
+
+    /// 進化した極光は灯のレーンより横に広く命中判定する。
+    pub fn aurora_width_mult(&self) -> f64 {
+        if self.evolved {
+            1.5
+        } else {
+            1.0
+        }
     }
 }
 
@@ -295,6 +352,18 @@ impl PassiveKind {
             PassiveKind::Haste => "灯の移動速度上昇",
             PassiveKind::Radiance => "灯の最大値上昇 (即回復)",
             PassiveKind::Magnet => "宝箱の捕捉範囲拡大",
+        }
+    }
+
+    /// 進化の組み合わせ相手となる武器と同じ色を返す (`Haste` は相方無し)。
+    /// レシピ自体は説明しないが、色を揃えることで「気付ける」ヒントにする。
+    pub fn color(self) -> Color {
+        match self {
+            PassiveKind::FireRate => WeaponKind::Bolt.color(),
+            PassiveKind::Power => WeaponKind::Spray.color(),
+            PassiveKind::Radiance => WeaponKind::Aurora.color(),
+            PassiveKind::Magnet => WeaponKind::Halo.color(),
+            PassiveKind::Haste => Color::Gray,
         }
     }
 }
@@ -383,8 +452,17 @@ pub const CHEST_BASE_CATCH_RADIUS: f64 = 8.0;
 pub enum BoonKind {
     NewWeapon(WeaponKind),
     LevelWeapon(WeaponKind),
+    /// LvMAXの武器を、対応する受動効果(`WeaponKind::evolution_partner`)が
+    /// 一定レベルに達した状態で獲得すると解禁される隠し進化。
+    Evolve(WeaponKind),
     NewPassive(PassiveKind),
     LevelPassive(PassiveKind),
+    /// 灯を即座に回復する。武器/効果が全て上限に達した終盤でも宝箱を
+    /// 無意味にしないための、常に効果のある選択肢。
+    InstantHeal,
+    /// 残光を即座に得る。`InstantHeal` と対になる「無意味な選択肢を
+    /// 作らない」ための保険。
+    EmberWindfall,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -416,7 +494,10 @@ impl Lantern {
 pub struct CampUpgrades {
     pub light_level: u32,
     pub power_level: u32,
-    /// 0 または 1 (一度きりの解放): 武器スロットを5枠目まで拡張する。
+    /// 0 または 1 (一度きりの解放): 受動効果スロットを5枠目まで拡張する。
+    /// 武器は `WeaponKind::all()` がちょうど4種なので基本スロット数のまま
+    /// 拡張不要 — 受動効果は5種あるため、これを買わない限り1種は
+    /// 必ず持てないままになる (5種全ての進化レシピを狙う動機になる)。
     pub extra_slot_level: u32,
 }
 
@@ -440,8 +521,8 @@ impl CampUpgrades {
         1.0 + 0.05 * self.power_level as f64
     }
 
-    pub fn max_weapon_slots(&self) -> usize {
-        MAX_WEAPON_SLOTS + self.extra_slot_level.min(1) as usize
+    pub fn max_passive_slots(&self) -> usize {
+        MAX_PASSIVE_SLOTS + self.extra_slot_level.min(1) as usize
     }
 
     /// 次の1レベル購入で得られる1ポイントあたりの残光コスト。拠点画面で
@@ -644,5 +725,29 @@ mod tests {
         }
         assert!(s.log.len() <= 30);
         assert!(s.visible_log().is_some());
+    }
+
+    #[test]
+    fn evolution_partner_passive_shares_the_weapons_color() {
+        // 進化レシピは言葉で説明しない代わりに、色を揃えることをヒントに
+        // している。この対応がズレるとヒント自体が崩壊するので固定する。
+        for &kind in WeaponKind::all() {
+            assert_eq!(
+                kind.color(),
+                kind.evolution_partner().color(),
+                "{kind:?} とその進化相方の色が一致していない"
+            );
+        }
+    }
+
+    #[test]
+    fn evolved_weapon_hits_harder_and_faster_than_base() {
+        let mut w = OwnedWeapon::new(WeaponKind::Spray);
+        w.level = MAX_LEVEL;
+        let base_damage = w.damage();
+        let base_cooldown = w.cooldown_ticks();
+        w.evolved = true;
+        assert!(w.damage() > base_damage, "進化後は威力が上がるはず");
+        assert!(w.cooldown_ticks() <= base_cooldown, "進化後はクールダウンが縮むはず");
     }
 }

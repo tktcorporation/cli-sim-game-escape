@@ -12,8 +12,9 @@ use super::state::{
     BoonKind, BoonOption, CampUpgrades, Chest, Enemy, EnemyKind, EverlightState, Lantern,
     Loadout, OwnedPassive, OwnedWeapon, PassiveKind, Phase, Projectile, WeaponKind,
     BOSS_EVERY_N_WAVES, BREACH_Y, CHEST_BASE_CATCH_RADIUS, CHEST_FALL_SPEED, COLUMNS,
-    ELITE_BASE_INTERVAL_TICKS, HALO_DAMAGE_INTERVAL_TICKS, LANTERN_MOVE_UNITS_PER_TICK, LANTERN_Y,
-    MAX_LEVEL, MAX_PASSIVE_SLOTS, SPAWN_Y, WAVE_DURATION_TICKS, WORLD_H, WORLD_W,
+    ELITE_BASE_INTERVAL_TICKS, EVOLUTION_PASSIVE_THRESHOLD, HALO_DAMAGE_INTERVAL_TICKS,
+    LANTERN_MOVE_UNITS_PER_TICK, LANTERN_Y, MAX_LEVEL, MAX_WEAPON_SLOTS, SPAWN_Y,
+    WAVE_DURATION_TICKS, WORLD_H, WORLD_W,
 };
 
 const PROJECTILE_SPEED: f64 = 9.0;
@@ -25,6 +26,9 @@ const LANE_HALF_WIDTH: f64 = WORLD_W / COLUMNS as f64 / 2.0;
 const BOSS_ATTACK_PERIOD_TICKS: u64 = 90;
 const BOSS_TELEGRAPH_TICKS: u32 = 20;
 const BOSS_TELEGRAPH_DAMAGE: i32 = 22;
+
+const INSTANT_HEAL_AMOUNT: i32 = 30;
+const EMBER_WINDFALL_AMOUNT: u32 = 25;
 
 // ── 乱数 (xorshift32、seed は state に保存してセーブ/シミュレーターで再現可能にする) ──
 
@@ -218,8 +222,11 @@ fn move_enemies(state: &mut EverlightState) {
         enemy.hurt_flash.tick(1);
         enemy.y += enemy.kind.base_speed() * diff;
         if enemy.kind.homes() {
+            // 灯へ寄ってくる敵をおとりにして1レーンへ集め、極光で薙ぐ、
+            // という自力発見してほしいシナジー。誘引が弱すぎると気付かれ
+            // ないため、はっきり体感できる速さにしている。
             let dx = lantern_x - enemy.x;
-            let step = dx.abs().min(0.5);
+            let step = dx.abs().min(1.0);
             enemy.x += step * dx.signum();
         }
     }
@@ -227,12 +234,19 @@ fn move_enemies(state: &mut EverlightState) {
 
 /// 防衛線 (`BREACH_Y`) に達した敵を「漏れ」として処理し、灯を削って消す。
 fn resolve_breaches(state: &mut EverlightState) {
+    let lantern_x = state.lantern.x;
     let mut total_damage = 0i32;
     let mut breach_count = 0u32;
     let mut last_kind: Option<EnemyKind> = None;
     state.enemies.retain(|e| {
         if e.y >= BREACH_Y {
-            total_damage += e.kind.contact_damage();
+            let base = e.kind.contact_damage();
+            // 灯が今まさに漏れようとしている敵と同じレーンにいれば、灯の光に
+            // 炙られて弱った状態で突破する (=ダメージ半減)。「位置取りが
+            // 生存に効く」というタワーディフェンスらしい緊張感の核。
+            let in_lantern_lane = (e.x - lantern_x).abs() <= LANE_HALF_WIDTH;
+            let dmg = if in_lantern_lane { (base / 2).max(1) } else { base };
+            total_damage += dmg;
             breach_count += 1;
             last_kind = Some(e.kind);
             false
@@ -381,7 +395,8 @@ fn fire_weapons(state: &mut EverlightState, damage_mult: f64) {
                 }
             }
             WeaponKind::Aurora => {
-                apply_aurora_hit(state, lantern_x, damage);
+                let width_mult = state.loadout.weapons[i].aurora_width_mult();
+                apply_aurora_hit(state, lantern_x, damage, width_mult);
             }
             WeaponKind::Halo => unreachable!("Halo は上のcontinueで除外済み"),
         }
@@ -396,9 +411,11 @@ fn fire_weapons(state: &mut EverlightState, damage_mult: f64) {
 }
 
 /// 極光: 灯のレーンにいる全ての敵に即ダメージを与える (ヒットスキャン)。
-fn apply_aurora_hit(state: &mut EverlightState, lantern_x: f64, damage: i32) {
+/// `width_mult` は進化 (`OwnedWeapon::aurora_width_mult`) で広がる判定幅。
+fn apply_aurora_hit(state: &mut EverlightState, lantern_x: f64, damage: i32, width_mult: f64) {
+    let half_width = LANE_HALF_WIDTH * width_mult;
     for enemy in state.enemies.iter_mut() {
-        if (enemy.x - lantern_x).abs() <= LANE_HALF_WIDTH {
+        if (enemy.x - lantern_x).abs() <= half_width {
             enemy.hp -= damage;
             enemy.hurt_flash.trigger(4);
         }
@@ -526,8 +543,12 @@ fn candidate_boons(state: &EverlightState) -> Vec<BoonOption> {
         if let Some(w) = state.loadout.weapons.iter().find(|w| w.kind == kind) {
             if w.level < MAX_LEVEL {
                 v.push(BoonOption { kind: BoonKind::LevelWeapon(kind) });
+            } else if !w.evolved
+                && state.loadout.passive_level(kind.evolution_partner()) >= EVOLUTION_PASSIVE_THRESHOLD
+            {
+                v.push(BoonOption { kind: BoonKind::Evolve(kind) });
             }
-        } else if state.loadout.weapons.len() < state.camp.max_weapon_slots() {
+        } else if state.loadout.weapons.len() < MAX_WEAPON_SLOTS {
             v.push(BoonOption { kind: BoonKind::NewWeapon(kind) });
         }
     }
@@ -536,7 +557,7 @@ fn candidate_boons(state: &EverlightState) -> Vec<BoonOption> {
             if p.level < MAX_LEVEL {
                 v.push(BoonOption { kind: BoonKind::LevelPassive(kind) });
             }
-        } else if state.loadout.passives.len() < MAX_PASSIVE_SLOTS {
+        } else if state.loadout.passives.len() < state.camp.max_passive_slots() {
             v.push(BoonOption { kind: BoonKind::NewPassive(kind) });
         }
     }
@@ -554,10 +575,14 @@ fn roll_boon_options(state: &mut EverlightState) -> [BoonOption; 3] {
         chosen.push(pool.remove(idx));
     }
     // 装備・強化が全て上限に達した終盤は候補が3未満になり得る。その場合は
-    // 「威力」レベルアップで埋めて、モーダルが必ず3枠揃うようにする
-    // (apply_boon は既に MAX_LEVEL のものへは何もしないので安全)。
+    // 常に効果のある回復/残光で埋め、モーダルが必ず3枠揃うようにする。
+    // (かつて「威力」レベルアップで埋めていたが、既にLvMAXなら選んでも
+    // 何も起きない「空洞の選択肢」になってしまっていた)
+    const FALLBACK: [BoonKind; 2] = [BoonKind::InstantHeal, BoonKind::EmberWindfall];
+    let mut fallback_idx = 0usize;
     while chosen.len() < 3 {
-        chosen.push(BoonOption { kind: BoonKind::LevelPassive(PassiveKind::Power) });
+        chosen.push(BoonOption { kind: FALLBACK[fallback_idx % FALLBACK.len()] });
+        fallback_idx += 1;
     }
     [chosen[0], chosen[1], chosen[2]]
 }
@@ -588,6 +613,12 @@ fn apply_boon(state: &mut EverlightState, kind: BoonKind) {
             }
             state.add_log(format!("『{}』が強化された", k.name()));
         }
+        BoonKind::Evolve(k) => {
+            if let Some(w) = state.loadout.weapon_mut(k) {
+                w.evolved = true;
+            }
+            state.add_log(format!("『{}』が『{}』へ進化した！", k.name(), k.evolved_name()));
+        }
         BoonKind::NewPassive(k) => {
             state.loadout.passives.push(OwnedPassive::new(k));
             state.add_log(format!("『{}』を手に入れた", k.name()));
@@ -597,6 +628,14 @@ fn apply_boon(state: &mut EverlightState, kind: BoonKind) {
                 p.level = (p.level + 1).min(MAX_LEVEL);
             }
             state.add_log(format!("『{}』が強化された", k.name()));
+        }
+        BoonKind::InstantHeal => {
+            state.lantern.light = (state.lantern.light + INSTANT_HEAL_AMOUNT).min(state.lantern.light_max);
+            state.add_log(format!("灯が{INSTANT_HEAL_AMOUNT}回復した"));
+        }
+        BoonKind::EmberWindfall => {
+            state.ember += EMBER_WINDFALL_AMOUNT;
+            state.add_log(format!("残光を{EMBER_WINDFALL_AMOUNT}得た"));
         }
     }
     if matches!(kind, BoonKind::NewPassive(PassiveKind::Radiance) | BoonKind::LevelPassive(PassiveKind::Radiance)) {
@@ -625,11 +664,16 @@ pub fn boon_option_text(state: &EverlightState, kind: BoonKind) -> (String, Stri
             let cur = state.loadout.weapons.iter().find(|w| w.kind == k).map(|w| w.level).unwrap_or(1);
             (format!("{} Lv{}→{}", k.name(), cur, cur + 1), k.summary().to_string())
         }
+        BoonKind::Evolve(k) => {
+            (format!("進化: {}", k.evolved_name()), format!("『{}』の真価が解き放たれる", k.name()))
+        }
         BoonKind::NewPassive(k) => (format!("新効果: {}", k.name()), k.summary().to_string()),
         BoonKind::LevelPassive(k) => {
             let cur = state.loadout.passive_level(k);
             (format!("{} Lv{}→{}", k.name(), cur, cur + 1), k.summary().to_string())
         }
+        BoonKind::InstantHeal => ("灯を回復".to_string(), format!("灯を{INSTANT_HEAL_AMOUNT}回復する")),
+        BoonKind::EmberWindfall => ("残光の欠片".to_string(), format!("残光+{EMBER_WINDFALL_AMOUNT} (即時)")),
     }
 }
 
@@ -923,5 +967,139 @@ mod tests {
         tick(&mut state);
         assert_eq!(state.phase, Phase::Camp);
         assert_eq!(state.lantern.light, 0);
+    }
+
+    #[test]
+    fn breach_in_lantern_lane_deals_half_damage() {
+        let mut same_lane = EverlightState::new();
+        start_vigil(&mut same_lane);
+        same_lane.enemies.push(Enemy {
+            kind: EnemyKind::Husk,
+            x: same_lane.lantern.x,
+            y: BREACH_Y,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+        });
+        let light_before = same_lane.lantern.light;
+        resolve_breaches(&mut same_lane);
+        let same_lane_damage = light_before - same_lane.lantern.light;
+
+        let mut other_lane = EverlightState::new();
+        start_vigil(&mut other_lane);
+        other_lane.enemies.push(Enemy {
+            kind: EnemyKind::Husk,
+            x: (other_lane.lantern.x + WORLD_W / 2.0) % WORLD_W,
+            y: BREACH_Y,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+        });
+        let light_before = other_lane.lantern.light;
+        resolve_breaches(&mut other_lane);
+        let other_lane_damage = light_before - other_lane.lantern.light;
+
+        assert_eq!(other_lane_damage, EnemyKind::Husk.contact_damage());
+        assert_eq!(
+            same_lane_damage,
+            (EnemyKind::Husk.contact_damage() / 2).max(1),
+            "灯と同じレーンで漏れた敵はダメージが半減するはず"
+        );
+    }
+
+    #[test]
+    fn weapon_evolves_when_maxed_with_partner_passive_and_boon_chosen() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons[0].level = MAX_LEVEL; // Bolt
+        state.loadout.passives.push(OwnedPassive { kind: PassiveKind::FireRate, level: EVOLUTION_PASSIVE_THRESHOLD });
+
+        let candidates = candidate_boons(&state);
+        assert!(
+            candidates.iter().any(|o| o.kind == BoonKind::Evolve(WeaponKind::Bolt)),
+            "LvMAXの光弾+速射Lv3が揃えば進化が選択肢に出るはず"
+        );
+
+        apply_boon(&mut state, BoonKind::Evolve(WeaponKind::Bolt));
+        assert!(state.loadout.weapons[0].evolved);
+        let evolved_damage = state.loadout.weapons[0].damage();
+        state.loadout.weapons[0].evolved = false;
+        let base_damage = state.loadout.weapons[0].damage();
+        assert!(evolved_damage > base_damage, "進化後は威力が上がるはず");
+    }
+
+    #[test]
+    fn evolve_is_not_offered_without_partner_passive() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons[0].level = MAX_LEVEL; // Bolt, 速射(FireRate)なし
+        let candidates = candidate_boons(&state);
+        assert!(!candidates.iter().any(|o| matches!(o.kind, BoonKind::Evolve(_))));
+    }
+
+    #[test]
+    fn extra_slot_upgrade_unlocks_a_5th_passive_not_a_5th_weapon() {
+        // 武器種は WeaponKind::all() がちょうど4種なので、基本スロット数
+        // (MAX_WEAPON_SLOTS=4) だけで全種持てる — 拡張枠は無意味になる。
+        // 受動効果は5種あるため、拡張枠が意味を持つのはこちら側。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        for &kind in WeaponKind::all() {
+            if state.loadout.weapon_mut(kind).is_none() {
+                state.loadout.weapons.push(OwnedWeapon::new(kind));
+            }
+        }
+        assert_eq!(state.loadout.weapons.len(), WeaponKind::all().len());
+        assert!(
+            !candidate_boons(&state).iter().any(|o| matches!(o.kind, BoonKind::NewWeapon(_))),
+            "武器は基本スロットだけで全種類持てるので、これ以上NewWeaponは出ないはず"
+        );
+
+        for &kind in PassiveKind::all().iter().take(4) {
+            state.loadout.passives.push(OwnedPassive::new(kind));
+        }
+        assert_eq!(state.loadout.passives.len(), 4);
+        assert!(
+            !candidate_boons(&state).iter().any(|o| matches!(o.kind, BoonKind::NewPassive(_))),
+            "拡張前は基本4枠が埋まっているのでNewPassiveは出ないはず"
+        );
+
+        state.camp.extra_slot_level = 1;
+        assert!(
+            candidate_boons(&state).iter().any(|o| matches!(o.kind, BoonKind::NewPassive(_))),
+            "拡張枠を買えば5種目の受動効果がNewPassiveとして出るはず"
+        );
+    }
+
+    #[test]
+    fn fallback_boons_always_have_a_real_effect_even_when_everything_is_maxed() {
+        // 装備・受動効果を全て上限まで積んだ「もう成長先が無い」状態を作り、
+        // 埋め草の選択肢 (InstantHeal/EmberWindfall) が実際に効果を持つ
+        // ことを確認する (かつては効果ゼロの「空洞の選択肢」になり得た)。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        for &kind in WeaponKind::all() {
+            let mut w = OwnedWeapon::new(kind);
+            w.level = MAX_LEVEL;
+            w.evolved = true;
+            state.loadout.weapons.push(w);
+        }
+        state.loadout.passives.clear();
+        for &kind in PassiveKind::all() {
+            state.loadout.passives.push(OwnedPassive { kind, level: MAX_LEVEL });
+        }
+
+        let options = roll_boon_options(&mut state);
+        state.lantern.light -= 20;
+        let light_before = state.lantern.light;
+        let ember_before = state.ember;
+        for opt in options {
+            apply_boon(&mut state, opt.kind);
+        }
+        assert!(
+            state.lantern.light > light_before || state.ember > ember_before,
+            "全て上限に達していても埋め草の選択肢は何かしら実際の効果を持つはず"
+        );
     }
 }

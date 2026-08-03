@@ -26,8 +26,8 @@ use crate::widgets::{Clickable, ClickableGrid, ClickableList, ScrollableTab};
 use super::actions;
 use super::logic;
 use super::state::{
-    CampUpgrades, EnemyKind, EverlightState, Phase, WeaponKind, BREACH_Y, COLUMNS, LANTERN_Y,
-    SPAWN_Y, WORLD_H, WORLD_W,
+    BoonKind, CampUpgrades, EnemyKind, EverlightState, Phase, WeaponKind, BREACH_Y, COLUMNS,
+    LANTERN_Y, SPAWN_Y, WORLD_H, WORLD_W,
 };
 
 pub fn render(state: &EverlightState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
@@ -276,7 +276,10 @@ fn loadout_summary_text(state: &EverlightState) -> String {
         .loadout
         .weapons
         .iter()
-        .map(|w| format!("{}Lv{}", w.kind.name(), w.level))
+        .map(|w| {
+            let name = if w.evolved { w.kind.evolved_name() } else { w.kind.name() };
+            format!("{name}Lv{}", w.level)
+        })
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -290,7 +293,11 @@ fn render_side_panel(state: &EverlightState, f: &mut Frame, area: Rect) {
         lines.push(Line::from(" (なし)"));
     }
     for w in &state.loadout.weapons {
-        lines.push(Line::from(format!(" {} Lv{}", w.kind.name(), w.level)));
+        let name = if w.evolved { w.kind.evolved_name() } else { w.kind.name() };
+        lines.push(Line::from(Span::styled(
+            format!(" {name} Lv{}", w.level),
+            Style::default().fg(w.kind.color()),
+        )));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -300,8 +307,13 @@ fn render_side_panel(state: &EverlightState, f: &mut Frame, area: Rect) {
     if state.loadout.passives.is_empty() {
         lines.push(Line::from(" (なし)"));
     }
+    // パッシブの色はそれと組み合う武器と同じ色にしてある — 「なぜこの2つが
+    // 同じ色なんだろう」から進化レシピへ気付いてもらうための伏線。
     for p in &state.loadout.passives {
-        lines.push(Line::from(format!(" {} Lv{}", p.kind.name(), p.level)));
+        lines.push(Line::from(Span::styled(
+            format!(" {} Lv{}", p.kind.name(), p.level),
+            Style::default().fg(p.kind.color()),
+        )));
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
@@ -349,7 +361,7 @@ fn render_boon_modal(state: &EverlightState, f: &mut Frame, area: Rect, click_st
         cl.push_clickable(
             Line::from(Span::styled(
                 format!(" ▶ {title}"),
-                Style::default().fg(Color::LightCyan).add_modifier(Modifier::BOLD),
+                Style::default().fg(boon_accent_color(opt.kind)).add_modifier(Modifier::BOLD),
             )),
             action_id,
         );
@@ -366,6 +378,17 @@ fn render_boon_modal(state: &EverlightState, f: &mut Frame, area: Rect, click_st
         .title(" 灯を強化する ");
     let mut cs = click_state.borrow_mut();
     cl.render(f, modal_area, block, &mut cs, true, 0);
+}
+
+/// 選択肢に紐づく武器/受動効果の色。武器とその進化相方の受動効果は
+/// 同じ色を返す (`WeaponKind::color` / `PassiveKind::color` 参照) ので、
+/// モーダル上で並んだ時に色の一致が視覚的なヒントになる。
+fn boon_accent_color(kind: BoonKind) -> Color {
+    match kind {
+        BoonKind::NewWeapon(k) | BoonKind::LevelWeapon(k) | BoonKind::Evolve(k) => k.color(),
+        BoonKind::NewPassive(k) | BoonKind::LevelPassive(k) => k.color(),
+        BoonKind::InstantHeal | BoonKind::EmberWindfall => Color::LightYellow,
+    }
 }
 
 // ── 拠点 (Camp) 画面 ────────────────────────────────────────────
@@ -452,7 +475,7 @@ fn render_camp_body(
     cl.push(Line::from(""));
     if state.camp.extra_slot_level >= 1 {
         cl.push(Line::from(Span::styled(
-            " ✓ 武器スロット拡張 (5枠) 解放済み",
+            " ✓ 受動効果スロット拡張 (5枠) 解放済み",
             Style::default().fg(Color::Green),
         )));
     } else {
@@ -460,7 +483,7 @@ fn render_camp_body(
         let color = if affordable { Color::LightCyan } else { Color::DarkGray };
         cl.push_clickable(
             Line::from(Span::styled(
-                format!(" 武器スロット拡張 (5枠目解放) — {}残光", CampUpgrades::EXTRA_SLOT_COST),
+                format!(" 受動効果スロット拡張 (5枠目解放) — {}残光", CampUpgrades::EXTRA_SLOT_COST),
                 Style::default().fg(color),
             )),
             actions::CAMP_UPGRADE_EXTRA_SLOT,
