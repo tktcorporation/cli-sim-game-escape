@@ -700,6 +700,11 @@ pub struct EverlightState {
     /// 現在のランクのマイルストーン波 (`logic::milestone_wave`) を
     /// この夜番で既に達成したか。
     pub dawn_reached_this_vigil: bool,
+    /// マイルストーン波で湧いた最終ボスの `Enemy::id`。Dawn判定
+    /// (`logic::maybe_trigger_dawn`) はwaveの一致ではなくこのidの討伐で
+    /// 行う — 最終ボスはHPが高く、湧いた波(300 tick)以内に倒しきれず
+    /// 次の波へ持ち越されることがあるため。
+    pub milestone_boss_id: Option<u32>,
 
     // ── 演出用の単調増加カウンタ・一時表示 ──
     //
@@ -774,6 +779,7 @@ impl EverlightState {
             boss_telegraph: None,
             rank: camp.effective_selected_rank(),
             dawn_reached_this_vigil: false,
+            milestone_boss_id: None,
             rng_state: 0x9E37_79B9,
             kill_count: 0,
             breach_count: 0,

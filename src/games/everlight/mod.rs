@@ -579,16 +579,17 @@ mod tests {
         // よう elapsed_ticks 側を調整する。
         let milestone = logic::milestone_wave(game.state.rank);
         game.state.elapsed_ticks = (milestone as u64 - 1) * state::WAVE_DURATION_TICKS as u64;
-        game.state.enemies.push(state::Enemy {
-            id: 1,
-            kind: state::EnemyKind::FullMoonBoss,
-            x: game.state.lantern.x,
-            y: 50.0,
-            hp: 0,
-            max_hp: 420,
-            hurt_flash: crate::effects::FlashTimer::new(),
-            ranged_charge: None,
-        });
+
+        // マイルストーン波に入ると最終ボスが自然に湧く。Dawn判定はwaveの
+        // 一致ではなく湧いた個体のid (`state.milestone_boss_id`) で行うため、
+        // 実際に湧かせてからそのidの個体を倒す形でテストする。
+        game.tick(1);
+        let boss_id = game.state.milestone_boss_id.expect("マイルストーン波に入れば最終ボスが湧くはず");
+        for e in game.state.enemies.iter_mut() {
+            if e.id == boss_id {
+                e.hp = 0;
+            }
+        }
         game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
 
         game.tick(1);

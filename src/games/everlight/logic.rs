@@ -244,12 +244,23 @@ fn spawn_enemies(state: &mut EverlightState) {
     if state.wave.is_multiple_of(BOSS_EVERY_N_WAVES) && !state.boss_spawned_this_wave {
         let lane = rng_below(&mut state.rng_state, COLUMNS as u32) as usize;
         let boss_kind = boss_kind_for(state.wave, state.rank);
+        let is_milestone_boss = state.wave == milestone_wave(state.rank);
+        // 湧く"前"にidを控えておく — `spawn_enemy_at_xy` は現在の
+        // `next_enemy_id` をそのまま割り当てるので、成功した場合はこれが
+        // 実際に湧いた個体のidと一致する。
+        let spawned_id = state.next_enemy_id;
         // 敵数上限で実際には湧けなかった時に `boss_spawned_this_wave` を
         // 立ててしまうと、ログだけ「出現した」と嘘をつく上、そのウェーブ中
         // 二度とボスの湧き抽選が行われなくなる。実際に湧いた時だけ確定させ、
         // 上限で弾かれた場合は次tick以降に再抽選させる。
         if spawn_enemy_at(state, boss_kind, lane) {
             state.boss_spawned_this_wave = true;
+            if is_milestone_boss {
+                // `maybe_trigger_dawn` はwaveの一致ではなくこのidの討伐で
+                // 判定する — 最終ボスはHPが高く、湧いた波(300 tick)以内に
+                // 倒しきれず次の波へ持ち越されることがあるため。
+                state.milestone_boss_id = Some(spawned_id);
+            }
             state.add_log(format!("{}が現れた！", boss_kind.name()));
         }
     }
@@ -409,6 +420,7 @@ fn resolve_breaches(state: &mut EverlightState) {
 // ── 討伐処理の共通ヘルパー ─────────────────────────────────────────
 
 struct KillInfo {
+    id: u32,
     kind: EnemyKind,
     x: f64,
     y: f64,
@@ -421,7 +433,7 @@ fn drain_dead_enemies(state: &mut EverlightState) -> Vec<KillInfo> {
     let mut kills = Vec::new();
     state.enemies.retain(|e| {
         if e.hp <= 0 {
-            kills.push(KillInfo { kind: e.kind, x: e.x, y: e.y });
+            kills.push(KillInfo { id: e.id, kind: e.kind, x: e.x, y: e.y });
             false
         } else {
             true
@@ -469,16 +481,18 @@ fn apply_kills(state: &mut EverlightState, kills: Vec<KillInfo>) {
 /// 直後に灯が消えても/リロードされても達成が失われないようにする
 /// (呼び出し元の `mod.rs::tick()` が変化を検知して即座に保存する)。
 fn maybe_trigger_dawn(state: &mut EverlightState, kills: &[KillInfo]) {
-    if state.dawn_reached_this_vigil || state.wave != milestone_wave(state.rank) {
+    if state.dawn_reached_this_vigil {
         return;
     }
-    // 最終ボスの判定は `boss_kind_for` に一本化する。ここで独自に
-    // ランクの偶奇からFullMoonBoss/Serpentを再計算すると、ボスの
-    // ローテーションを変更した時に片方だけ直し忘れてDawn判定が
-    // ズレる恐れがある (waveが既にmilestone_waveと一致している以上、
-    // `boss_kind_for` の戻り値は必ず最終ボス側の分岐になる)。
-    let finale_kind = boss_kind_for(state.wave, state.rank);
-    if !kills.iter().any(|k| k.kind == finale_kind) {
+    // `state.wave == milestone_wave(state.rank)` では判定しない: 最終ボスは
+    // HPが高く、湧いた波(300 tick)以内に倒しきれず次の波へ持ち越されることが
+    // ある。持ち越された後に倒してもDawnが成立するよう、「湧いた時点で
+    // マイルストーンの最終ボスだった個体」をidで追跡し、そのidが討伐された
+    // かどうかだけを見る (`spawn_enemies` が湧いた瞬間に記録する)。
+    let Some(boss_id) = state.milestone_boss_id else {
+        return;
+    };
+    if !kills.iter().any(|k| k.id == boss_id) {
         return;
     }
     state.dawn_reached_this_vigil = true;
@@ -1128,6 +1142,7 @@ pub fn start_vigil(state: &mut EverlightState) {
     state.boss_telegraph = None;
     state.rank = state.camp.effective_selected_rank();
     state.dawn_reached_this_vigil = false;
+    state.milestone_boss_id = None;
     state.kill_count = 0;
     // breach_count はリセットしない: detect_transitions が前回renderとの
     // 差分で演出をトリガーする単調増加カウンタ (state.rsのコメント参照)。
@@ -2029,6 +2044,7 @@ mod tests {
         let mut state = EverlightState::new();
         start_vigil(&mut state);
         state.wave = milestone_wave(state.rank);
+        state.milestone_boss_id = Some(1);
         state.enemies.push(Enemy {
             id: 1,
             kind: EnemyKind::FullMoonBoss,
@@ -2049,10 +2065,39 @@ mod tests {
     }
 
     #[test]
+    fn defeating_the_finale_boss_after_its_wave_has_passed_still_triggers_dawn() {
+        // 最終ボスはHPが高く、湧いた波(300 tick)以内に倒しきれず次の波へ
+        // 持ち越されることがある。waveの一致だけで判定すると、追いついて
+        // 討伐した瞬間には既に次の波へ進んでおりDawnを取りこぼす回帰テスト。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let milestone = milestone_wave(state.rank);
+        state.milestone_boss_id = Some(1);
+        state.wave = milestone + 1; // 討伐が次の波にずれ込んだ状況を再現する。
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::FullMoonBoss,
+            x: state.lantern.x,
+            y: 50.0,
+            hp: 0,
+            max_hp: 420,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        let max_before = state.camp.max_unlocked_rank;
+        let kills = drain_dead_enemies(&mut state);
+        apply_kills(&mut state, kills);
+
+        assert!(state.dawn_reached_this_vigil, "waveが進んでいても、湧いた時のマイルストーンボスを倒せばDawnするはず");
+        assert_eq!(state.camp.max_unlocked_rank, max_before + 1);
+    }
+
+    #[test]
     fn dawn_does_not_trigger_twice_in_the_same_vigil() {
         let mut state = EverlightState::new();
         start_vigil(&mut state);
         state.wave = milestone_wave(state.rank);
+        state.milestone_boss_id = Some(1);
         state.dawn_reached_this_vigil = true;
         let max_before = state.camp.max_unlocked_rank;
         state.enemies.push(Enemy {
@@ -2071,10 +2116,12 @@ mod tests {
     }
 
     #[test]
-    fn defeating_a_non_finale_boss_does_not_trigger_dawn() {
+    fn defeating_a_different_enemy_than_the_tracked_milestone_boss_does_not_trigger_dawn() {
         let mut state = EverlightState::new();
         start_vigil(&mut state);
-        state.wave = 5; // ランク1の最終波(15)ではない通常チェックポイント。
+        state.wave = milestone_wave(state.rank);
+        // マイルストーンの最終ボス(id=2, まだ生存中)とは別の個体(id=1)を倒す。
+        state.milestone_boss_id = Some(2);
         state.enemies.push(Enemy {
             id: 1,
             kind: EnemyKind::Boss,
@@ -2088,8 +2135,22 @@ mod tests {
         let max_before = state.camp.max_unlocked_rank;
         let kills = drain_dead_enemies(&mut state);
         apply_kills(&mut state, kills);
-        assert_eq!(state.camp.max_unlocked_rank, max_before, "通常チェックポイントのボスではDawnしないはず");
+        assert_eq!(state.camp.max_unlocked_rank, max_before, "追跡中の個体と別の敵を倒してもDawnしないはず");
         assert!(!state.dawn_reached_this_vigil);
+    }
+
+    #[test]
+    fn spawning_the_milestone_boss_records_its_id_for_dawn_tracking() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.wave = milestone_wave(state.rank);
+        assert!(state.milestone_boss_id.is_none());
+
+        spawn_enemies(&mut state);
+
+        let id = state.milestone_boss_id.expect("マイルストーン波では最終ボスのidが記録されるはず");
+        let boss = state.enemies.iter().find(|e| e.id == id).expect("記録されたidの個体が盤面にいるはず");
+        assert_eq!(boss.kind, boss_kind_for(state.wave, state.rank));
     }
 
     // ── 新しい敵種 ───────────────────────────────────────────────────
