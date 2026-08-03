@@ -500,6 +500,9 @@ fn move_and_resolve_projectiles(state: &mut EverlightState) {
 
         let mut consumed = false;
         for enemy in state.enemies.iter_mut() {
+            if consumed {
+                break;
+            }
             if enemy.hp <= 0 || proj.hit_enemy_ids.contains(&enemy.id) {
                 continue;
             }
@@ -510,19 +513,20 @@ fn move_and_resolve_projectiles(state: &mut EverlightState) {
             enemy.hp -= proj.damage;
             enemy.hurt_flash.trigger(3);
             proj.hit_enemy_ids.push(enemy.id);
+            // スポーン地点でのクランプにより複数の敵が密集する状況では
+            // 移動経路1本が同tick中に複数体と交差しうる。次tickでは弾は
+            // 既にその塊を通り過ぎているため、ここで打ち切ると残り耐久は
+            // 二度と使われず貫通が実質的に無駄になる。持ちうる限り同tick
+            // 内で交差した全員に命中させる。同じ敵への再命中だけは
+            // `hit_enemy_ids` で恒久的に除外する — 合算当たり半径
+            // (最大16.2) が1tickの移動距離 (9) を超える大型の敵 (魔王等)
+            // では、複数tickにわたって当たり判定内に留まり続けることが
+            // あるため。
             if proj.pierce_remaining == 0 {
                 consumed = true;
             } else {
                 proj.pierce_remaining -= 1;
             }
-            // 貫通弾でも1tickにつき命中は1体まで — スタックした敵の
-            // 束を一瞬で焼き払わないための意図的な制限 (残りの敵には
-            // 次tickの移動後に改めて命中判定される)。
-            // なお同じ敵への命中は `hit_enemy_ids` で恒久的に除外する —
-            // 合算当たり半径 (最大16.2) が1tickの移動距離 (9) を超える
-            // 大型の敵 (魔王等) では、複数tickにわたって当たり判定内に
-            // 留まり続けることがあり、これが無いと貫通を1体に無駄遣いする。
-            break;
         }
         if !consumed && is_in_bounds(&proj) {
             surviving.push(proj);
@@ -1070,6 +1074,47 @@ mod tests {
         assert_eq!(
             state.enemies[0].hp, hp_after_first_hit,
             "同じ弾が同じ敵に連続してもう一度命中してはいけない"
+        );
+    }
+
+    #[test]
+    fn piercing_shot_hits_multiple_stacked_enemies_within_the_same_tick() {
+        // 密集スポーンで同レーンに複数の敵が並ぶと、1tickの移動経路が
+        // 複数体を同時に横切りうる。次tickでは弾は既にその塊を通り過ぎて
+        // いるため、1tick目で最初の1体しか処理しないと残りの貫通は
+        // 二度と敵に届かず無駄になってしまう。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let x = state.lantern.x;
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Wisp,
+            x,
+            y: 7.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+        });
+        state.enemies.push(Enemy {
+            id: 2,
+            kind: EnemyKind::Wisp,
+            x,
+            y: 3.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+        });
+        let mut proj = make_projectile(x, 10, 2, 0.0, -9.0, Color::White);
+        proj.y = 10.0;
+        state.projectiles.push(proj);
+
+        move_and_resolve_projectiles(&mut state);
+
+        assert_eq!(state.enemies[0].hp, 999 - 10, "1体目は同tick内で命中するはず");
+        assert_eq!(
+            state.enemies[1].hp,
+            999 - 10,
+            "残りの貫通が生きているなら2体目にも同tick内で命中するはず"
         );
     }
 
