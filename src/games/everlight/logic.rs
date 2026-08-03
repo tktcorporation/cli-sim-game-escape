@@ -262,12 +262,12 @@ const SNIPER_MIN_WAVE: u32 = 6;
 const CASTER_MIN_WAVE: u32 = 9;
 const SHIELDED_MIN_WAVE: u32 = 11;
 const CHARGER_MIN_WAVE: u32 = 13;
-const SPLITTER_MIN_WAVE: u32 = 16;
-const SPRAY_SHIELDED_MIN_WAVE: u32 = 18;
-const AURORA_SHIELDED_MIN_WAVE: u32 = 24;
 /// マイルストーン波 (第15波、`milestone_wave(1)`) の直前で解禁する — 第1夜の
 /// 最終局面から「打たれ強い遠隔役」という新しい負荷を上乗せする。
 const WRAITH_MIN_WAVE: u32 = 14;
+const SPLITTER_MIN_WAVE: u32 = 16;
+const SPRAY_SHIELDED_MIN_WAVE: u32 = 18;
+const AURORA_SHIELDED_MIN_WAVE: u32 = 24;
 
 /// 通常湧きの1回あたりの同時湧き数がこのwaveから増え始める。
 /// `spawn_interval_ticks` の間隔短縮は第21波前後で下限に達し頭打ちに
@@ -314,6 +314,9 @@ fn regular_spawn_table(wave: u32) -> Vec<(EnemyKind, u32)> {
     if wave >= CHARGER_MIN_WAVE {
         table.push((EnemyKind::Charger, 8));
     }
+    if wave >= WRAITH_MIN_WAVE {
+        table.push((EnemyKind::Wraith, 8));
+    }
     if wave >= SPLITTER_MIN_WAVE {
         table.push((EnemyKind::Splitter, 10));
     }
@@ -322,9 +325,6 @@ fn regular_spawn_table(wave: u32) -> Vec<(EnemyKind, u32)> {
     }
     if wave >= AURORA_SHIELDED_MIN_WAVE {
         table.push((EnemyKind::AuroraShielded, 8));
-    }
-    if wave >= WRAITH_MIN_WAVE {
-        table.push((EnemyKind::Wraith, 8));
     }
     table
 }
@@ -476,7 +476,10 @@ fn move_enemies(state: &mut EverlightState) {
             // 灯へは向かわず、時間と自身のidだけで決まる正弦波でx座標を
             // 揺らす。専用フィールドを増やさずに済むよう、絶対位置を
             // 都度計算するのではなく速度として毎tick加算する — 積分結果は
-            // 湧いた瞬間のxを中心とした有界な振動になる。
+            // 有界な振動になる (ただし振動の中心は湧いた瞬間の位相次第で
+            // 元のxから最大 `WRAITH_SWAY_STEP/WRAITH_SWAY_ANGULAR_STEP` ぶん
+            // ずれ得る。厳密に中心を揃えたい場合はx0を`Enemy`に持たせる
+            // 必要があるが、既存のリテラル構築箇所が多いため見送っている)。
             let phase = (elapsed_ticks + enemy.id as f64 * WRAITH_SWAY_PHASE_ID_SCALE) * WRAITH_SWAY_ANGULAR_STEP;
             enemy.x = (enemy.x + WRAITH_SWAY_STEP * phase.sin()).clamp(0.0, WORLD_W);
         }
@@ -529,19 +532,21 @@ const CASTER_FIRE_INTERVAL_TICKS: u32 = 30;
 const CASTER_BULLET_DAMAGE: i32 = 4;
 const CASTER_BULLET_SPEED: f64 = 2.2;
 
-/// 詠唱者の弾がどの方向へ飛ぶかを決める。この一手が体感を大きく左右する:
+/// 実体弾を撃つ敵 (詠唱者・浮遊霊) 共通: 弾がどの方向へ飛ぶかを決める。
+/// この一手が体感を大きく左右する:
 ///
 /// - 発射時の灯の位置を狙って直進させる (`aim_velocity` と同じ「2点を
 ///   結ぶ向き×速度」) → 弾が見えた瞬間に別レーンへ逃げる予測回避の
 ///   駆け引きになる
-/// - 詠唱者自身のレーンをまっすぐ縦に落とすだけ (`vx=0`) → 「このレーンに
-///   詠唱者がいる」という位置取りのパズルになる (現在の実装)
+/// - 自身のレーンをまっすぐ縦に落とすだけ (`vx=0`) → 「このレーンに
+///   敵がいる」という位置取りのパズルになる (現在の実装)
 ///
 /// 今はシンプルな後者を選んでいるが、前者に変えると難易度も駆け引きの
-/// 質もかなり変わる。`caster_x`/`lantern_x` は狙い方を変える際に使う値
-/// として引数に残してある。
-fn aim_enemy_bullet(_caster_x: f64, _caster_y: f64, _lantern_x: f64) -> (f64, f64) {
-    (0.0, CASTER_BULLET_SPEED)
+/// 質もかなり変わる。両方の呼び出し元で共有しているため、変更すれば
+/// 詠唱者・浮遊霊の弾が同時に切り替わる。`shooter_x`/`shooter_y`/
+/// `lantern_x` は狙い方を変える際に使う値として引数に残してある。
+fn aim_enemy_bullet(_shooter_x: f64, _shooter_y: f64, _lantern_x: f64, speed: f64) -> (f64, f64) {
+    (0.0, speed)
 }
 
 /// 詠唱者の実体弾攻撃。`CASTER_STOP_Y` で停止した個体が一定間隔で
@@ -560,7 +565,7 @@ fn resolve_caster_shots(state: &mut EverlightState) {
             None => enemy.ranged_charge = Some(CASTER_FIRE_INTERVAL_TICKS),
             Some(t) if t <= 1 => {
                 enemy.ranged_charge = Some(CASTER_FIRE_INTERVAL_TICKS);
-                let (vx, vy) = aim_enemy_bullet(enemy.x, enemy.y, lantern_x);
+                let (vx, vy) = aim_enemy_bullet(enemy.x, enemy.y, lantern_x, CASTER_BULLET_SPEED);
                 new_bullets.push(EnemyBullet {
                     x: enemy.x,
                     y: enemy.y,
@@ -579,6 +584,9 @@ fn resolve_caster_shots(state: &mut EverlightState) {
     state.enemy_bullets.extend(new_bullets);
 }
 
+/// 詠唱者 (`CASTER_FIRE_INTERVAL_TICKS`=30) より長め。横揺れそのものが
+/// 常時プレッシャーを掛ける分、発砲自体は少し緩めて負荷を弾一辺倒に
+/// しない。
 const WRAITH_FIRE_INTERVAL_TICKS: u32 = 34;
 /// 詠唱者 (4) より高いが狙撃者 (6) より低め。横揺れで飛来レーンの予測が
 /// 難しい分、被弾1回あたりの重さは詠唱者側に寄せている。
@@ -587,9 +595,10 @@ const WRAITH_BULLET_SPEED: f64 = 2.0;
 
 /// 浮遊霊の実体弾攻撃。`WRAITH_STOP_Y` 到達後、`move_enemies` の横揺れで
 /// 常に位置が変わり続ける自身のx座標から、詠唱者と同じく縦にまっすぐ
-/// 弾を落とす。狙う側の位置が固定されない分、プレイヤーは「弾が出る
-/// 瞬間のレーン」をその都度見て判断する必要がある。
+/// 弾を落とす (`aim_enemy_bullet`)。狙う側の位置が固定されない分、
+/// プレイヤーは「弾が出る瞬間のレーン」をその都度見て判断する必要がある。
 fn resolve_wraith_shots(state: &mut EverlightState) {
+    let lantern_x = state.lantern.x;
     let mut new_bullets: Vec<EnemyBullet> = Vec::new();
     for enemy in state.enemies.iter_mut() {
         if enemy.kind != EnemyKind::Wraith || enemy.y < WRAITH_STOP_Y {
@@ -599,11 +608,12 @@ fn resolve_wraith_shots(state: &mut EverlightState) {
             None => enemy.ranged_charge = Some(WRAITH_FIRE_INTERVAL_TICKS),
             Some(t) if t <= 1 => {
                 enemy.ranged_charge = Some(WRAITH_FIRE_INTERVAL_TICKS);
+                let (vx, vy) = aim_enemy_bullet(enemy.x, enemy.y, lantern_x, WRAITH_BULLET_SPEED);
                 new_bullets.push(EnemyBullet {
                     x: enemy.x,
                     y: enemy.y,
-                    vx: 0.0,
-                    vy: WRAITH_BULLET_SPEED,
+                    vx,
+                    vy,
                     damage: WRAITH_BULLET_DAMAGE,
                     source: EnemyKind::Wraith,
                 });
@@ -3185,9 +3195,8 @@ mod tests {
 
     #[test]
     fn enemy_bullet_hit_log_names_the_actual_shooter() {
-        // `move_and_resolve_enemy_bullets` のログは以前「詠唱者の弾で〜」に
-        // 固定されていた。浮遊霊の弾が命中した時も正しく浮遊霊の名前で
-        // 出ることの回帰テスト。
+        // 命中ログは `EnemyBullet::source` の名前を反映するはず — 浮遊霊の
+        // 弾が命中した時も正しく浮遊霊の名前で出ることの回帰テスト。
         let mut state = EverlightState::new();
         start_vigil(&mut state);
         let lantern_x = state.lantern.x;
