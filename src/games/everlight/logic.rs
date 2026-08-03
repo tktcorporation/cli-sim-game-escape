@@ -148,20 +148,29 @@ pub fn milestone_wave(rank: u32) -> u32 {
 /// escalationが始まった後、1波ごとに乗算される係数。
 const POST_MILESTONE_GROWTH_PER_WAVE: f64 = 1.09;
 
-/// 波とランクの両方から難易度倍率を出す。`milestone_wave` までは緩やかな
-/// 線形 (+12%/波) で伸ばし、そこを越えて夜番を続けた場合だけ指数関数的に
-/// 跳ね上げる — 拠点の恒久強化 (`power_level` 等) は上限なく積み上げ
-/// られるため、線形のままだと「十分強化すればマイルストーンの先も
-/// いつまでも進める」状態になってしまう。ランクはそれとは別に基礎値を
-/// 底上げする — 同じ第5波でもランク2の第5波はランク1より明確に手強い。
-fn wave_difficulty(wave: u32, rank: u32) -> f64 {
+/// 波とランクから、`milestone_wave` で頭打ちになる線形部分 (+12%/波) の
+/// 難易度倍率を出す。マイルストーンを越えても値はここで固定され、
+/// これ以上は伸びない — 敵の移動速度 (`move_enemies`) はこちらだけを
+/// 参照する。HPの指数関数的escalationまで速度に流用すると、遠くの敵が
+/// 1tickで防衛線まで到達する「反応不可能な瞬間死」が発生してしまうため。
+fn wave_linear_difficulty(wave: u32, rank: u32) -> f64 {
     let ramp_wave = milestone_wave(rank);
     let linear_wave = wave.min(ramp_wave);
     let base = 1.0 + linear_wave.saturating_sub(1) as f64 * 0.12;
+    let rank_mult = 1.0 + rank.saturating_sub(1) as f64 * 0.35;
+    base * rank_mult
+}
+
+/// 波とランクの両方から敵HPの難易度倍率を出す。`milestone_wave` までは
+/// `wave_linear_difficulty` のまま、そこを越えて夜番を続けた場合だけ
+/// 指数関数的に跳ね上げる — 拠点の恒久強化 (`power_level` 等) は上限なく
+/// 積み上げられるため、線形のままだと「十分強化すればマイルストーンの
+/// 先もいつまでも進める」状態になってしまう。
+fn wave_difficulty(wave: u32, rank: u32) -> f64 {
+    let ramp_wave = milestone_wave(rank);
     let overflow_waves = wave.saturating_sub(ramp_wave);
     let escalation = POST_MILESTONE_GROWTH_PER_WAVE.powi(overflow_waves as i32);
-    let rank_mult = 1.0 + rank.saturating_sub(1) as f64 * 0.35;
-    base * escalation * rank_mult
+    wave_linear_difficulty(wave, rank) * escalation
 }
 
 /// ランクが上がるほど討伐報酬 (残光) も伸びる — 高ランクは危険だが
@@ -371,7 +380,7 @@ fn spawn_enemy_at_xy(state: &mut EverlightState, kind: EnemyKind, x: f64, y: f64
 const SNIPER_STOP_Y: f64 = WORLD_H * 0.55;
 
 fn move_enemies(state: &mut EverlightState) {
-    let diff = wave_difficulty(state.wave, state.rank);
+    let diff = wave_linear_difficulty(state.wave, state.rank);
     let lantern_x = state.lantern.x;
     for enemy in state.enemies.iter_mut() {
         enemy.hurt_flash.tick(1);
@@ -2186,6 +2195,47 @@ mod tests {
                 "マイルストーンの{waves_past_milestone}波先での増分比が指数関数の想定と違う: ratio={ratio}"
             );
         }
+    }
+
+    #[test]
+    fn wave_linear_difficulty_freezes_past_the_milestone_wave() {
+        // `wave_difficulty` の指数関数側escalationは敵のHPだけに使うべきで、
+        // 移動速度 (`move_enemies`) には波が進んでも頭打ちのこちらを使う。
+        let rank = 1;
+        let milestone = milestone_wave(rank);
+        let at_milestone = wave_linear_difficulty(milestone, rank);
+        let far_past_milestone = wave_linear_difficulty(milestone + 100, rank);
+        assert_eq!(
+            at_milestone, far_past_milestone,
+            "マイルストーンを越えても線形難易度は凍結されたままのはず"
+        );
+    }
+
+    #[test]
+    fn move_enemies_never_lets_an_enemy_cross_the_field_in_a_single_tick_even_deep_past_milestone() {
+        // HPの指数関数的escalationを移動速度にまで流用すると、遠くの敵が
+        // 1tickで防衛線に到達する「反応不可能な瞬間死」が起こり得る。
+        // マイルストーンを大きく超えた極端な状況でもそれが起きないことを
+        // 直接 `move_enemies` を叩いて確認する回帰テスト。
+        let mut state = EverlightState::new();
+        state.wave = milestone_wave(5) + 100;
+        state.rank = 5;
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Swarmling,
+            x: 0.0,
+            y: 0.0,
+            hp: 1,
+            max_hp: 1,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+        move_enemies(&mut state);
+        let moved = state.enemies[0].y;
+        assert!(
+            moved < WORLD_H,
+            "マイルストーンを100波超えても、1tickで盤面を横断してはいけない: moved_y={moved} WORLD_H={WORLD_H}"
+        );
     }
 
     #[test]
