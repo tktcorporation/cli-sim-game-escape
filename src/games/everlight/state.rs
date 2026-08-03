@@ -618,10 +618,6 @@ pub struct EverlightState {
 
 /// 1件のログをポップ表示しておく時間 (tick)。
 pub const LOG_DISPLAY_TICKS: u32 = 24;
-/// 光輪のダメージ判定を行う間隔 (tick)。毎tick判定せずまとめて処理することで、
-/// 範囲内に居座られた時のダメージを浮動小数の累積ではなく整数の一定間隔
-/// ダメージにしている。
-pub const HALO_DAMAGE_INTERVAL_TICKS: u32 = 5;
 
 impl Default for EverlightState {
     fn default() -> Self {

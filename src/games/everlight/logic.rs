@@ -12,9 +12,8 @@ use super::state::{
     BoonKind, BoonOption, CampUpgrades, Chest, Enemy, EnemyKind, EverlightState, Lantern,
     Loadout, OwnedPassive, OwnedWeapon, PassiveKind, Phase, Projectile, WeaponKind,
     BOSS_EVERY_N_WAVES, BREACH_Y, CHEST_BASE_CATCH_RADIUS, CHEST_FALL_SPEED, COLUMNS,
-    ELITE_BASE_INTERVAL_TICKS, EVOLUTION_PASSIVE_THRESHOLD, HALO_DAMAGE_INTERVAL_TICKS,
-    LANTERN_MOVE_UNITS_PER_TICK, LANTERN_Y, MAX_LEVEL, MAX_WEAPON_SLOTS, SPAWN_Y,
-    WAVE_DURATION_TICKS, WORLD_H, WORLD_W,
+    ELITE_BASE_INTERVAL_TICKS, EVOLUTION_PASSIVE_THRESHOLD, LANTERN_MOVE_UNITS_PER_TICK,
+    LANTERN_Y, MAX_LEVEL, MAX_WEAPON_SLOTS, SPAWN_Y, WAVE_DURATION_TICKS, WORLD_H, WORLD_W,
 };
 
 const PROJECTILE_SPEED: f64 = 9.0;
@@ -441,15 +440,20 @@ fn apply_aurora_hit(state: &mut EverlightState, lantern_x: f64, damage: i32, wid
     apply_kills(state, kills);
 }
 
-/// 光輪: 灯の周囲を継続的に判定する近接武器。`HALO_DAMAGE_INTERVAL_TICKS`
-/// ごとにまとめて判定することで、範囲内に居座られた時のダメージ計算を
-/// 1tickごとの浮動小数累積ではなく整数の一定間隔ダメージにしている。
+/// 光輪: 灯の周囲を継続的に判定する近接武器。一定間隔でまとめて判定する
+/// ことで、範囲内に居座られた時のダメージ計算を1tickごとの浮動小数累積
+/// ではなく整数の一定間隔ダメージにしている。間隔は他の武器と同じく
+/// `cooldown_ticks()` (レベル/進化) と速射パッシブの `cooldown_mult()` を
+/// 反映する — でなければ光輪だけ「全武器のクールダウン短縮」という
+/// 速射パッシブの説明文が嘘になってしまう。
 fn fire_halo(state: &mut EverlightState, damage_mult: f64) {
     let Some(halo) = state.loadout.weapon_mut(WeaponKind::Halo).copied() else {
         return;
     };
+    let cooldown_mult = state.loadout.cooldown_mult();
+    let interval = ((halo.cooldown_ticks() as f64) * cooldown_mult).round().max(1.0) as u32;
     state.halo_tick += 1;
-    if !state.halo_tick.is_multiple_of(HALO_DAMAGE_INTERVAL_TICKS) {
+    if !state.halo_tick.is_multiple_of(interval) {
         return;
     }
     let damage = ((halo.damage() as f64) * damage_mult).round() as i32;
@@ -471,26 +475,29 @@ fn is_in_bounds(p: &Projectile) -> bool {
     p.y > -10.0 && p.y < WORLD_H + 10.0 && p.x > -10.0 && p.x < WORLD_W + 10.0
 }
 
-/// 線分 `start→end` が、中心 `center` 半径 `radius` の円と交わるか。
+/// 線分 `start→end` が、中心 `center` 半径 `radius` の円と交わる最も早い
+/// 時刻 `t∈[0,1]` を返す (交わらなければ `None`)。
 /// 弾は9ワールド単位/tick、最小の合算当たり半径は3.2しかないため、
 /// 移動後の終点だけで判定すると閉じるスピードの速い相手をすり抜ける
 /// (両者が接近しながらすれ違うと、始点でも終点でも半径内に入らないまま
 /// 通り過ぎてしまう)。移動した経路全体を線分として判定することで防ぐ。
-fn segment_hits_circle(start: (f64, f64), end: (f64, f64), center: (f64, f64), radius: f64) -> bool {
+/// `t` を返すのは、貫通弾が同tick中に複数の敵と交差した際、スポーン順
+/// ではなく実際に弾が通過する順で命中を解決するため。
+fn segment_hits_circle_at(start: (f64, f64), end: (f64, f64), center: (f64, f64), radius: f64) -> Option<f64> {
     let (dx, dy) = (end.0 - start.0, end.1 - start.1);
     let len_sq = dx * dx + dy * dy;
-    let (px, py) = if len_sq < 1e-9 {
-        start
+    let (t, px, py) = if len_sq < 1e-9 {
+        (0.0, start.0, start.1)
     } else {
         let t = (((center.0 - start.0) * dx + (center.1 - start.1) * dy) / len_sq).clamp(0.0, 1.0);
-        (start.0 + t * dx, start.1 + t * dy)
+        (t, start.0 + t * dx, start.1 + t * dy)
     };
     let (ddx, ddy) = (center.0 - px, center.1 - py);
-    ddx * ddx + ddy * ddy <= radius * radius
+    (ddx * ddx + ddy * ddy <= radius * radius).then_some(t)
 }
 
 /// 弾を移動させ、その移動経路上での命中判定まで一度に行う。
-/// (移動前位置が無いと `segment_hits_circle` によるすり抜け対策ができない
+/// (移動前位置が無いと `segment_hits_circle_at` によるすり抜け対策ができない
 /// ため、移動と命中判定は分離せずここで一体にしている)
 ///
 /// `enemy_prev_positions` はこのtickで敵が動く前の位置 (id→(x,y))。敵も
@@ -509,11 +516,14 @@ fn move_and_resolve_projectiles(state: &mut EverlightState, enemy_prev_positions
         proj.y += proj.vy;
         let end = (proj.x, proj.y);
 
-        let mut consumed = false;
-        for enemy in state.enemies.iter_mut() {
-            if consumed {
-                break;
-            }
+        // スポーン地点でのクランプにより複数の敵が密集する状況では、
+        // 移動経路1本が同tick中に複数体と交差しうる。`state.enemies` の
+        // 配列順 (=スポーン順) のまま処理すると、若く速い敵が古く遅い
+        // 敵を追い越して先に貫通を消費してしまう。まず全ての交差を
+        // 集めて実際に弾が通過する順 (`t` 昇順) に並べ替えてから命中を
+        // 解決する。
+        let mut hits: Vec<(usize, f64)> = Vec::new();
+        for (idx, enemy) in state.enemies.iter().enumerate() {
             if enemy.hp <= 0 || proj.hit_enemy_ids.contains(&enemy.id) {
                 continue;
             }
@@ -521,21 +531,25 @@ fn move_and_resolve_projectiles(state: &mut EverlightState, enemy_prev_positions
             let enemy_prev = enemy_prev_positions.get(&enemy.id).copied().unwrap_or((enemy.x, enemy.y));
             let rel_start = (start.0 - enemy_prev.0, start.1 - enemy_prev.1);
             let rel_end = (end.0 - enemy.x, end.1 - enemy.y);
-            if !segment_hits_circle(rel_start, rel_end, (0.0, 0.0), hit_dist) {
-                continue;
+            if let Some(t) = segment_hits_circle_at(rel_start, rel_end, (0.0, 0.0), hit_dist) {
+                hits.push((idx, t));
             }
+        }
+        hits.sort_by(|a, b| a.1.total_cmp(&b.1));
+
+        let mut consumed = false;
+        for (idx, _) in hits {
+            if consumed {
+                break;
+            }
+            let enemy = &mut state.enemies[idx];
             enemy.hp -= proj.damage;
             enemy.hurt_flash.trigger(3);
             proj.hit_enemy_ids.push(enemy.id);
-            // スポーン地点でのクランプにより複数の敵が密集する状況では
-            // 移動経路1本が同tick中に複数体と交差しうる。次tickでは弾は
-            // 既にその塊を通り過ぎているため、ここで打ち切ると残り耐久は
-            // 二度と使われず貫通が実質的に無駄になる。持ちうる限り同tick
-            // 内で交差した全員に命中させる。同じ敵への再命中だけは
-            // `hit_enemy_ids` で恒久的に除外する — 合算当たり半径
-            // (最大16.2) が1tickの移動距離 (9) を超える大型の敵 (魔王等)
-            // では、複数tickにわたって当たり判定内に留まり続けることが
-            // あるため。
+            // 同じ敵への再命中だけは `hit_enemy_ids` で恒久的に除外する —
+            // 合算当たり半径 (最大16.2) が1tickの移動距離 (9) を超える
+            // 大型の敵 (魔王等) では、複数tickにわたって当たり判定内に
+            // 留まり続けることがあるため。
             if proj.pierce_remaining == 0 {
                 consumed = true;
             } else {
@@ -987,6 +1001,50 @@ mod tests {
     }
 
     #[test]
+    fn halo_damage_interval_shrinks_with_fire_rate_passive() {
+        // 光輪だけ `cooldown_mult()` を無視すると、速射パッシブの
+        // 「全武器のクールダウン短縮」という説明文が嘘になる。パッシブ
+        // レベルを上げると実際にダメージ判定の間隔も縮むことを確認する。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon { kind: WeaponKind::Halo, level: 1, cooldown_remaining: 0, evolved: false });
+        state.loadout.passives.push(OwnedPassive { kind: PassiveKind::FireRate, level: 5 });
+        let x = state.lantern.x;
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Wisp,
+            x,
+            y: LANTERN_Y,
+            hp: 999_999,
+            max_hp: 999_999,
+            hurt_flash: FlashTimer::new(),
+        });
+
+        let expected_interval =
+            ((state.loadout.weapons[0].cooldown_ticks() as f64) * state.loadout.cooldown_mult()).round().max(1.0) as u32;
+        assert!(expected_interval < 5, "速射Lv5なら光輪の基礎間隔5より短くなるはず");
+
+        let mut hit_ticks = Vec::new();
+        for t in 1..=(expected_interval * 3) {
+            let hp_before = state.enemies[0].hp;
+            fire_halo(&mut state, 1.0);
+            if state.enemies[0].hp < hp_before {
+                hit_ticks.push(t);
+            }
+            if hit_ticks.len() >= 2 {
+                break;
+            }
+        }
+        assert_eq!(hit_ticks.len(), 2, "2回分のダメージ判定が観測できるはず");
+        assert_eq!(
+            hit_ticks[1] - hit_ticks[0],
+            expected_interval,
+            "光輪のダメージ間隔は速射パッシブのcooldown_multを反映するはず"
+        );
+    }
+
+    #[test]
     fn breach_damages_light_and_removes_enemy() {
         let mut state = EverlightState::new();
         start_vigil(&mut state);
@@ -1129,6 +1187,52 @@ mod tests {
             state.enemies[1].hp,
             999 - 10,
             "残りの貫通が生きているなら2体目にも同tick内で命中するはず"
+        );
+    }
+
+    #[test]
+    fn piercing_shot_resolves_hits_in_travel_order_not_array_order() {
+        // 配列の並び順 (=スポーン順) と実際の弾道上の通過順が食い違う
+        // 状況で、貫通の予算が配列の先頭にいる「遠い」敵に浪費されず、
+        // 実際に先に通過する「近い」敵へ命中することを確認する。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let x = state.lantern.x;
+        // 配列の先頭(index 0)に、弾の進路(y: 10→1)上では「遠い」y=3.0の
+        // 敵を置き、後ろ(index 1)に「近い」y=7.0の敵を置く — 配列順と
+        // 通過順を意図的に逆転させる。
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Wisp,
+            x,
+            y: 3.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+        });
+        state.enemies.push(Enemy {
+            id: 2,
+            kind: EnemyKind::Wisp,
+            x,
+            y: 7.0,
+            hp: 999,
+            max_hp: 999,
+            hurt_flash: FlashTimer::new(),
+        });
+        let mut proj = make_projectile(x, 10, 1, 0.0, -9.0, Color::White); // pierce=1 → 命中は1発分のみ
+        proj.y = 10.0;
+        state.projectiles.push(proj);
+
+        move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
+
+        assert_eq!(
+            state.enemies[1].hp,
+            999 - 10,
+            "弾の進路上で先に通過する近い敵(y=7)に命中するはず"
+        );
+        assert_eq!(
+            state.enemies[0].hp, 999,
+            "配列の先頭でも進路上遠い敵(y=3)には届かないはず (貫通1発分は近い敵で使い切る)"
         );
     }
 

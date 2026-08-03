@@ -134,6 +134,9 @@ impl EverlightGame {
                 'r' => {
                     logic::retreat_to_camp(&mut self.state);
                     sound::play(sound::CLICK);
+                    // 撤退は入力ハンドラでphaseを直接Campへ変えるため、
+                    // tick()側のVigil→Camp遷移検知 (was_vigil) では捉えられない。
+                    self.flush_save();
                     true
                 }
                 _ => false,
@@ -172,6 +175,9 @@ impl EverlightGame {
                 RETREAT_TO_CAMP => {
                     logic::retreat_to_camp(&mut self.state);
                     sound::play(sound::CLICK);
+                    // 撤退は入力ハンドラでphaseを直接Campへ変えるため、
+                    // tick()側のVigil→Camp遷移検知 (was_vigil) では捉えられない。
+                    self.flush_save();
                     true
                 }
                 id if (LANE_CLICK_BASE..LANE_CLICK_BASE + COLUMNS as u16).contains(&id) => {
@@ -374,6 +380,35 @@ mod tests {
         logic::start_vigil(&mut game.state);
         assert!(game.handle_input(&click(RETREAT_TO_CAMP)));
         assert_eq!(game.state.phase, Phase::Camp);
+    }
+
+    #[test]
+    fn retreat_flushes_save_immediately_instead_of_waiting_for_autosave() {
+        // 撤退は入力ハンドラでphaseを直接Campへ変えるため、tick()の
+        // Vigil→Camp遷移検知 (was_vigil) を経由しない。ここで即保存
+        // しないと、確定したはずの自己ベストが撤退直後のリロードで失われる。
+        let mut game = EverlightGame::new();
+        logic::start_vigil(&mut game.state);
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+        assert!(game.handle_input(&click(RETREAT_TO_CAMP)));
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL,
+            "撤退クリック時にflush_saveが呼ばれてsave_countdownがリセットされるはず"
+        );
+    }
+
+    #[test]
+    fn retreat_key_flushes_save_immediately_instead_of_waiting_for_autosave() {
+        let mut game = EverlightGame::new();
+        logic::start_vigil(&mut game.state);
+        game.save_countdown = save::AUTOSAVE_INTERVAL + 1000;
+        assert!(game.handle_input(&InputEvent::Key('r')));
+        assert_eq!(
+            game.save_countdown,
+            save::AUTOSAVE_INTERVAL,
+            "撤退キー入力時にflush_saveが呼ばれてsave_countdownがリセットされるはず"
+        );
     }
 
     #[test]
