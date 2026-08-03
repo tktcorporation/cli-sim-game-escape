@@ -262,9 +262,9 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
 
     // 光輪は近接の常時判定武器で、Aurora同様に実体弾を撃たない。判定半径
     // (`halo_radius`) そのままのリングを常時描き、周回する光点で「回転して
-    // いる」ことを視覚的に伝える。実際にダメージ判定した瞬間 (`halo_flash`)
-    // はリング全体を明るくしてパルスさせる。
-    let halo_visual = state.loadout.weapon(WeaponKind::Halo).map(|w| {
+    // いる」ことを視覚的に伝える。常時リングは常に現在の`lantern.x`を
+    // 追従してよい (発火位置ではなく「今の判定範囲」を示すものなので)。
+    let halo_idle = state.loadout.weapon(WeaponKind::Halo).map(|w| {
         let radius = w.halo_radius();
         let cx = state.lantern.x;
         let cy = world_to_canvas_y(LANTERN_Y);
@@ -279,9 +279,29 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
                 canvas_fx::filled_ellipse_points(sx, sy, 1.1, 1.1, 0.6)
             })
             .collect();
-        let ring_color = if state.halo_flash.is_active() { Color::LightMagenta } else { Color::Magenta };
-        (ring, sparks, ring_color)
+        (ring, sparks)
     });
+
+    // ダメージ判定した瞬間 (`halo_flash`) だけ、常時リングとは別に明るい
+    // パルスリングを重ねる。常時リングの色そのものを切り替える設計に
+    // しなかった理由は `halo_flash` のドキュメントコメント (state.rs)
+    // を参照。位置は現在の`lantern.x`ではなく`halo_flash_x`(発火時の
+    // スナップショット)を使う — 常時リングと違い、パルスは「あの時あの
+    // 位置で実際に判定した」ことを示す演出のため。
+    let halo_pulse_ring: Vec<(f64, f64)> = if state.halo_flash.is_active() {
+        state
+            .loadout
+            .weapon(WeaponKind::Halo)
+            .map(|w| {
+                let radius = w.halo_radius();
+                let cx = state.halo_flash_x;
+                let cy = world_to_canvas_y(LANTERN_Y);
+                canvas_fx::ring_points(cx, cy, radius, 0.2)
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     let canvas = Canvas::default()
         .x_bounds([0.0, WORLD_W])
@@ -296,10 +316,13 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
                 // 同色で紛れるため、帯は暗めの Yellow にして区別できるようにする。
                 ctx.draw(&Points { coords: &aurora_band_pts, color: Color::Yellow });
             }
-            if let Some((ring, _, ring_color)) = &halo_visual {
+            if let Some((ring, _)) = &halo_idle {
                 if !ring.is_empty() {
-                    ctx.draw(&Points { coords: ring, color: *ring_color });
+                    ctx.draw(&Points { coords: ring, color: Color::Magenta });
                 }
+            }
+            if !halo_pulse_ring.is_empty() {
+                ctx.draw(&Points { coords: &halo_pulse_ring, color: Color::LightMagenta });
             }
             for (pts, color) in &enemy_groups {
                 ctx.draw(&Points { coords: pts, color: *color });
@@ -307,7 +330,7 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
             if !hurt_points.is_empty() {
                 ctx.draw(&Points { coords: &hurt_points, color: Color::White });
             }
-            if let Some((_, sparks, _)) = &halo_visual {
+            if let Some((_, sparks)) = &halo_idle {
                 if !sparks.is_empty() {
                     ctx.draw(&Points { coords: sparks, color: Color::LightMagenta });
                 }

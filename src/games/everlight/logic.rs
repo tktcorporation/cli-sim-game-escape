@@ -479,11 +479,14 @@ fn fire_halo(state: &mut EverlightState, damage_mult: f64) {
     if !state.halo_tick.is_multiple_of(interval) {
         return;
     }
-    // 判定した事実そのものをrender.rsに伝え、常時表示のリングをパルスさせる。
+    // 判定した事実そのものをrender.rsに伝え、パルスリングを重ねさせる。
+    // 位置は現在の`state.lantern.x`ではなく、実際に判定に使うこの
+    // `lantern_x` をスナップショットする (`apply_aurora_hit`と同じ理由)。
+    let lantern_x = state.lantern.x;
     state.halo_flash.trigger(HALO_FLASH_TICKS);
+    state.halo_flash_x = lantern_x;
     let damage = ((halo.damage() as f64) * damage_mult).round() as i32;
     let radius = halo.halo_radius();
-    let lantern_x = state.lantern.x;
     for enemy in state.enemies.iter_mut() {
         let dx = enemy.x - lantern_x;
         let dy = enemy.y - LANTERN_Y;
@@ -1178,6 +1181,28 @@ mod tests {
         assert_eq!(
             state.aurora_flash_x, fired_at_x,
             "aurora_flash_x は発火時点の位置を保持し続けるはず (現在位置に追従しない)"
+        );
+    }
+
+    #[test]
+    fn halo_flash_x_snapshots_firing_position_not_current_lantern_position() {
+        // render.rsはパルスリングを`halo_flash_x`から描く。もし代わりに
+        // `state.lantern.x`(現在位置)を使うと、まとめtick処理中に灯が
+        // 動いた後にまとめて1回だけrenderされた場合、実際に判定した
+        // 位置とは違う位置にパルスが表示されてしまう。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon { kind: WeaponKind::Halo, level: 1, cooldown_remaining: 0, evolved: false });
+        let interval = state.loadout.weapons[0].cooldown_ticks();
+        tick_n(&mut state, interval);
+        let fired_at_x = state.halo_flash_x;
+        assert!(state.halo_flash.is_active());
+
+        state.lantern.x = fired_at_x + 30.0;
+        assert_eq!(
+            state.halo_flash_x, fired_at_x,
+            "halo_flash_x は発火時点の位置を保持し続けるはず (現在位置に追従しない)"
         );
     }
 
