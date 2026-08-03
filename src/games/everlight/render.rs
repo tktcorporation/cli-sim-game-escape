@@ -656,10 +656,9 @@ mod tests {
         state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Aurora));
         state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Halo));
         // 実際の発火tickを計算して狙うと、各武器のクールダウン定数が変わる
-        // 度にこのテストの前提が壊れる (実際、tick_n(40)だと極光は非発火
-        // タイミングだった)。発火タイミングの計算をせず演出フラグを直接
-        // 立てることで、薙ぎ払い帯・周回リングのパルス描画コードパスを
-        // 確実に (かつバランス調整に影響されず) 通す。
+        // 度にこのテストの前提が壊れる。発火タイミングの計算をせず演出
+        // フラグを直接立てることで、薙ぎ払い帯・周回リングのパルス描画
+        // コードパスを確実に (かつバランス調整に影響されず) 通す。
         state.aurora_flash.trigger(1);
         state.halo_flash.trigger(1);
         render_to_test_backend(&state, 40, 30);
