@@ -224,3 +224,77 @@ fn dawn_progression_report() {
         state.camp.max_unlocked_rank, state.dawn_count, dawn_ticks
     );
 }
+
+/// 拠点の恒久強化 (`light_level`/`power_level`) には上限が無いため、波の
+/// 難易度が波数に対して線形のままだと「十分積めばどこまでも夜番を
+/// 続けられる」状態になり得る。マイルストーン波を大きく超える極端な
+/// 投資 (`light_level`/`power_level` を150まで積む) を与えても、1回の
+/// 夜番が有限tick以内に必ず終わる (灯が尽きる) ことを検証する。
+#[test]
+fn even_maxed_out_investment_eventually_ends_a_single_vigil() {
+    const MAX_TICKS: u64 = 20_000;
+    let mut state = EverlightState::new();
+    state.camp.light_level = 150;
+    state.camp.power_level = 150;
+    state.camp.max_unlocked_rank = 5;
+    logic::select_rank(&mut state, 5);
+    logic::start_vigil(&mut state);
+
+    let mut t = 0u64;
+    while state.phase == Phase::Vigil && t < MAX_TICKS {
+        if state.pending_boons.is_some() {
+            logic::choose_boon(&mut state, 0);
+        } else if t.is_multiple_of(5) {
+            reposition_lantern(&mut state);
+        }
+        logic::tick(&mut state);
+        t += 1;
+    }
+
+    assert_eq!(
+        state.phase,
+        Phase::Camp,
+        "極端に投資したキャラクターでも{MAX_TICKS}tick以内に灯が尽きるはず — \
+         尽きないなら難易度の指数関数的escalationが機能していない: final_wave={}",
+        state.wave
+    );
+    let milestone = logic::milestone_wave(5);
+    assert!(
+        state.wave > milestone,
+        "マイルストーン波({milestone})すら超えられないのはescalationが厳しすぎる可能性: final_wave={}",
+        state.wave
+    );
+}
+
+/// `cargo test everlight::simulator::enemy_density_report -- --nocapture`
+/// で確認できる、waveが進むにつれて画面上の敵数がどう伸びるかのレポート。
+/// Vampire Survivors的な「後半ほど物量が増える」体感を数値で追える。
+#[test]
+fn enemy_density_report() {
+    let mut state = EverlightState::new();
+    state.camp.light_level = 150;
+    state.camp.power_level = 150;
+    state.camp.max_unlocked_rank = 5;
+    logic::select_rank(&mut state, 5);
+    logic::start_vigil(&mut state);
+
+    let mut max_enemies_by_wave: Vec<(u32, usize)> = Vec::new();
+    let mut last_wave = 0u32;
+    let mut t = 0u64;
+    while state.phase == Phase::Vigil && t < 20_000 {
+        if state.pending_boons.is_some() {
+            logic::choose_boon(&mut state, 0);
+        } else if t.is_multiple_of(5) {
+            reposition_lantern(&mut state);
+        }
+        logic::tick(&mut state);
+        t += 1;
+        if state.wave != last_wave {
+            last_wave = state.wave;
+            max_enemies_by_wave.push((state.wave, state.enemies.len()));
+        } else if let Some(last) = max_enemies_by_wave.last_mut() {
+            last.1 = last.1.max(state.enemies.len());
+        }
+    }
+    eprintln!("[everlight/density] enemies_on_field_by_wave={max_enemies_by_wave:?}");
+}
