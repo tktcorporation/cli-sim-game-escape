@@ -245,6 +245,9 @@ const SPLITTER_MIN_WAVE: u32 = 16;
 const SWARM_RAMP_WAVE: u32 = 10;
 const SWARM_WAVE_STEP: u32 = 5;
 const SWARM_MAX_BATCH: u32 = 6;
+// `spawn_enemies` はbatch分のレーンを `% COLUMNS` で割り当てるため、上限が
+// COLUMNS以上だと同一tick内で同じレーンに複数体が重なってしまう。
+const _: () = assert!(SWARM_MAX_BATCH < COLUMNS as u32);
 
 /// 通常湧き1回で同時に湧く敵の数。waveが進むほど「間隔を詰める」だけ
 /// でなく「一度に出てくる数」自体も増やし、後半にかけて画面が
