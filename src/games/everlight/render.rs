@@ -60,7 +60,7 @@ fn compute_vigil_layout(area: Rect) -> VigilLayout {
     let is_narrow = is_narrow_layout(area.width);
     let vchunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(4), Constraint::Min(10)])
+        .constraints([Constraint::Length(5), Constraint::Min(10)])
         .split(area);
     let header = vchunks[0];
     if is_narrow {
@@ -124,12 +124,14 @@ fn render_header(state: &EverlightState, f: &mut Frame, area: Rect, click_state:
         .border_style(Style::default().fg(theme::accent(&GameChoice::Everlight)))
         .title(" 常夜灯 ");
     let inner = block.inner(area);
-    let widget = Paragraph::new(vec![Line::from(line1), line2]).block(block);
+    // 撤退ボタンは灯/波数などの可変長テキストと同じ行に重ね描きしない。
+    // 専用の3行目を空けておき、そこへオーバーレイすることで、灯の残量が
+    // 3桁になったりダメージポップアップが出た時に文字が欠けるのを防ぐ。
+    let widget = Paragraph::new(vec![Line::from(line1), line2, Line::from("")]).block(block);
     f.render_widget(widget, area);
 
-    // 撤退ボタン (右上隅に重ね描き) — 灯を消さずとも自ら拠点へ戻れる。
-    if inner.width >= 4 && inner.height > 0 {
-        let retreat_area = Rect::new(inner.x + inner.width - 4, inner.y, 4, 1);
+    if inner.width >= 4 && inner.height >= 3 {
+        let retreat_area = Rect::new(inner.x + inner.width - 4, inner.y + 2, 4, 1);
         let para = Paragraph::new(Span::styled("撤退", Style::default().fg(Color::DarkGray)));
         let mut cs = click_state.borrow_mut();
         Clickable::new(para, actions::RETREAT_TO_CAMP).render(f, retreat_area, &mut cs);

@@ -344,6 +344,23 @@ mod tests {
     }
 
     #[test]
+    fn detect_transitions_triggers_effect_on_light_hit() {
+        let mut game = EverlightGame::new();
+        logic::start_vigil(&mut game.state);
+        let area = Rect::new(0, 0, 40, 30);
+        // 初回呼び出しでprevスナップショットを確定させておく。
+        game.detect_transitions(area);
+        assert!(!game.effects.borrow().is_running(), "変化が無ければ演出は起きないはず");
+
+        game.state.light_hit_count += 1;
+        game.detect_transitions(area);
+        assert!(
+            game.effects.borrow().is_running(),
+            "light_hit_count の増加でdetect_transitionsが演出を積むはず"
+        );
+    }
+
+    #[test]
     fn render_does_not_panic_across_phases() {
         // `Game::render` (トレイトメソッド) は内部で `time::now_ms()` を
         // 呼ぶが、これは web_sys 経由のため non-wasm ネイティブテストでは

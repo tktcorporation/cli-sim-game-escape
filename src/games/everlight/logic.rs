@@ -367,7 +367,11 @@ fn fire_weapons(state: &mut EverlightState, damage_mult: f64) {
         }
         let base_cooldown = state.loadout.weapons[i].cooldown_ticks();
         let cooldown = ((base_cooldown as f64) * cooldown_mult).round().max(1.0) as u32;
-        state.loadout.weapons[i].cooldown_remaining = cooldown;
+        // 発火した「今」のtickをcooldown 1周期に含めるため -1 する。
+        // ここを`cooldown`のまま代入すると、次に0になった次のtickまで
+        // 待ってから発火するため、実際の発射間隔が `cooldown_ticks()+1`
+        // tickになってしまう (バランス数値と実挙動がズレるオフバイワン)。
+        state.loadout.weapons[i].cooldown_remaining = cooldown.saturating_sub(1);
         let base_damage = state.loadout.weapons[i].damage();
         let damage = ((base_damage as f64) * damage_mult).round() as i32;
         let pierce = state.loadout.weapons[i].pierce();
@@ -509,7 +513,7 @@ fn move_chests(state: &mut EverlightState) {
 fn resolve_chest_catch(state: &mut EverlightState) {
     let lantern_x = state.lantern.x;
     let catch_radius = CHEST_BASE_CATCH_RADIUS + state.loadout.magnet_radius_bonus();
-    let mut caught = false;
+    let mut caught_count = 0u32;
     state.chests.retain(|c| {
         if c.y >= BREACH_Y {
             return false; // 取り逃した
@@ -517,16 +521,24 @@ fn resolve_chest_catch(state: &mut EverlightState) {
         let dx = (c.x - lantern_x).abs();
         let dy = (c.y - LANTERN_Y).abs();
         if dx <= catch_radius && dy <= 6.0 {
-            caught = true;
-            state.chest_caught_count += 1;
+            caught_count += 1;
             false
         } else {
             true
         }
     });
-    if caught && state.pending_boons.is_none() {
-        open_boon_modal(state);
+    if caught_count == 0 {
+        return;
     }
+    state.chest_caught_count += caught_count;
+    // 極光/光輪で精鋭・魔王を同一tickにまとめて倒すと、宝箱も同じ座標・
+    // 落下速度で同時に湧くため、同一tickでの複数キャッチが十分起こり得る。
+    // モーダルは1つずつしか開けないので、2個目以降は「次のモーダルが
+    // 閉じたら続けて開く」ようキューに積む (「宝箱を取ると必ず1回強化
+    // 選択が開く」という約束を、同時キャッチでも守るため)。
+    debug_assert!(state.pending_boons.is_none(), "tickはモーダル表示中に進まないはず");
+    open_boon_modal(state);
+    state.queued_boon_rolls += caught_count - 1;
 }
 
 // ── レベルアップ選択 (宝箱を取ると開く) ─────────────────────────────
@@ -598,6 +610,11 @@ pub fn choose_boon(state: &mut EverlightState, index: usize) -> bool {
     }
     apply_boon(state, options[index].kind);
     state.pending_boons = None;
+    // 同一tickに複数の宝箱を取っていた分、続けてもう1回モーダルを開く。
+    if state.queued_boon_rolls > 0 {
+        state.queued_boon_rolls -= 1;
+        open_boon_modal(state);
+    }
     true
 }
 
@@ -760,6 +777,7 @@ pub fn start_vigil(state: &mut EverlightState) {
     state.boss_spawned_this_wave = false;
     state.halo_tick = 0;
     state.pending_boons = None;
+    state.queued_boon_rolls = 0;
     state.boss_telegraph = None;
     state.kill_count = 0;
     state.breach_count = 0;
@@ -823,6 +841,31 @@ mod tests {
     }
 
     #[test]
+    fn weapon_fires_every_cooldown_ticks_exactly() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let cooldown = state.loadout.weapons[0].cooldown_ticks();
+        let mut fire_ticks = Vec::new();
+        let mut prev_count = 0usize;
+        for t in 1..=(cooldown * 2) {
+            tick(&mut state);
+            if state.projectiles.len() > prev_count {
+                fire_ticks.push(t);
+            }
+            prev_count = state.projectiles.len();
+            if fire_ticks.len() >= 2 {
+                break;
+            }
+        }
+        assert_eq!(fire_ticks.len(), 2, "2回分の発射が観測できるはず");
+        assert_eq!(
+            fire_ticks[1] - fire_ticks[0],
+            cooldown,
+            "発射間隔は cooldown_ticks() と正確に一致するはず (オフバイワン回帰防止)"
+        );
+    }
+
+    #[test]
     fn breach_damages_light_and_removes_enemy() {
         let mut state = EverlightState::new();
         start_vigil(&mut state);
@@ -874,6 +917,30 @@ mod tests {
         let elapsed_before = state.elapsed_ticks;
         tick(&mut state);
         assert_eq!(state.elapsed_ticks, elapsed_before, "モーダル表示中はtickが進まない");
+    }
+
+    #[test]
+    fn catching_two_chests_in_the_same_tick_queues_a_second_modal() {
+        // 極光/光輪で精鋭を同時に複数倒すと、宝箱も同一tickで同時に
+        // キャッチされ得る。どちらの宝箱も強化選択の機会を失ってはいけない。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.chests.push(Chest { x: state.lantern.x, y: LANTERN_Y });
+        state.chests.push(Chest { x: state.lantern.x, y: LANTERN_Y });
+
+        resolve_chest_catch(&mut state);
+        assert!(state.pending_boons.is_some(), "1個目でモーダルが開くはず");
+        assert_eq!(state.queued_boon_rolls, 1, "2個目の権利はキューに積まれるはず");
+
+        assert!(choose_boon(&mut state, 0));
+        assert!(
+            state.pending_boons.is_some(),
+            "1個目を選び終えたら、キューに積んであった2個目のモーダルが続けて開くはず"
+        );
+        assert_eq!(state.queued_boon_rolls, 0);
+
+        assert!(choose_boon(&mut state, 0));
+        assert!(state.pending_boons.is_none(), "2個消化したらモーダルは閉じたまま");
     }
 
     #[test]

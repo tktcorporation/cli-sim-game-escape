@@ -221,8 +221,9 @@ impl WeaponKind {
     }
 }
 
-/// 進化に必要な相方の受動効果レベル。MAXの一歩手前 (Lv3) に設定し、
-/// 「武器を極めた」時点でギリギリ手が届くかどうかの緊張感を持たせる。
+/// 進化に必要な相方の受動効果レベル。MAX(5)より低いLv3に設定し、
+/// 「武器を先にLvMAXまで極めた後、相方の受動効果もある程度育てれば
+/// 届く」現実的な到達ラインにしている (両方を同時にMAXまで積む必要は無い)。
 pub const EVOLUTION_PASSIVE_THRESHOLD: u32 = 3;
 
 #[derive(Clone, Copy, Debug)]
@@ -292,10 +293,6 @@ impl OwnedWeapon {
         } else {
             base
         }
-    }
-
-    pub fn halo_orb_count(&self) -> u32 {
-        1 + (self.level - 1) / 2
     }
 
     /// 進化した極光は灯のレーンより横に広く命中判定する。
@@ -563,6 +560,9 @@ pub struct EverlightState {
     pub boss_spawned_this_wave: bool,
     pub halo_tick: u32,
     pub pending_boons: Option<[BoonOption; 3]>,
+    /// 同一tickに複数の宝箱を取った時、現在のモーダルが閉じた後に
+    /// 続けて開くべきレベルアップモーダルの残数。
+    pub queued_boon_rolls: u32,
     pub boss_telegraph: Option<(f64, u32)>,
 
     // ── 演出用の単調増加カウンタ・一時表示 ──
@@ -630,6 +630,7 @@ impl EverlightState {
             boss_spawned_this_wave: false,
             halo_tick: 0,
             pending_boons: None,
+            queued_boon_rolls: 0,
             boss_telegraph: None,
             rng_state: 0x9E37_79B9,
             kill_count: 0,
