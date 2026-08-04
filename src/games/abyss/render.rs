@@ -6,7 +6,7 @@ use std::rc::Rc;
 use ratzilla::ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::text::{Line, Span};
-use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
+use ratzilla::ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
@@ -457,11 +457,14 @@ fn render_retreat_dialog(
 
     let mut cs = click_state.borrow_mut();
     // ポップアップ外のタップをキャンセル扱いにする (modal dismiss)。空 Paragraph は
-    // セルを書き換えないので下地は残る。ClickableList より先に登録するので、
-    // hit_test の reverse 走査でポップアップ内ボタンが優先される。
+    // セルを書き換えないので下地は残る (=クリック判定だけ乗せられる)。
+    // ClickableList より先に登録するので、hit_test の reverse 走査で
+    // ポップアップ内ボタンが優先される。
     Clickable::new(Paragraph::new(""), RETREAT_DIALOG_CANCEL).render(f, full_area, &mut cs);
-    // 下地が透けないよう、まず不透明ブロックで塗りつぶしてから内容を描く。
-    f.render_widget(Paragraph::new("").block(block.clone()), popup_area);
+    // 下地が透けないよう、Clear で popup_area を白紙化してから内容を描く。
+    // 空 Paragraph + block では symbol (文字自体) が書き換わらず下地の文字が
+    // 透けて残るため、セルを本当にリセットする Clear widget が必要。
+    f.render_widget(Clear, popup_area);
     cl.render(f, popup_area, block, &mut cs, true, 0);
 }
 

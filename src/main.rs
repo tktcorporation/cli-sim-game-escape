@@ -1,9 +1,11 @@
 use std::{
     cell::{Cell, RefCell},
+    f64::consts::TAU,
     io,
     rc::Rc,
 };
 
+use cli_sim_game_escape::canvas_fx;
 use cli_sim_game_escape::games::{self, create_game, AppState, GameChoice};
 use cli_sim_game_escape::input::{
     is_narrow_layout, pixel_x_to_col, pixel_y_to_row, ClickScope, ClickState, InputEvent,
@@ -17,8 +19,10 @@ use cli_sim_game_escape::BACK_TO_MENU;
 use ratzilla::event::{KeyCode, MouseButton, MouseEventKind};
 use ratzilla::ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
+use ratzilla::ratatui::symbols::Marker;
 use ratzilla::ratatui::text::{Line, Span};
-use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
+use ratzilla::ratatui::widgets::canvas::{Canvas, Line as CanvasLine, Points};
+use ratzilla::ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use ratzilla::ratatui::Terminal;
 use ratzilla::{DomBackend, WebRenderer};
 
@@ -548,21 +552,23 @@ fn render_menu(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3), // Title
-            Constraint::Min(8),   // Menu items
+            Constraint::Min(8),   // Menu items (+ 装飾パネル)
             Constraint::Length(3), // Footer
         ])
         .split(area);
 
-    // Title
-    let title = if is_narrow {
-        "Game Select"
-    } else {
-        "Game Select - ゲームを選んでください"
-    };
     let borders = if is_narrow {
         Borders::TOP | Borders::BOTTOM
     } else {
         Borders::ALL
+    };
+
+    // Title — Double border でホーム画面としての存在感を強める (通常画面は
+    // Borders::ALL/Plain のままにして、メニューだけ一段強い枠にする)。
+    let title = if is_narrow {
+        "Game Select"
+    } else {
+        "Game Select - ゲームを選んでください"
     };
     let title_widget = Paragraph::new(Line::from(Span::styled(
         title,
@@ -573,10 +579,26 @@ fn render_menu(
     .block(
         Block::default()
             .borders(borders)
+            .border_type(BorderType::Double)
             .border_style(Style::default().fg(Color::Cyan)),
     )
     .alignment(Alignment::Center);
     f.render_widget(title_widget, chunks[0]);
+
+    // ワイドレイアウトのみ、リストの右側にドット(Braille)表現の軌道パネルを
+    // 添える。everlight拠点画面の`render_camp_ambience`と同じ「Canvas+
+    // Brailleの質感をゲーム外の画面にも持ち込む」作法。ナロー(モバイル)幅
+    // では画面が足りずリストの可読性を優先し、パネルは出さない (同じ理由の
+    // 判断を`render_camp`側でも既に取っている)。
+    let (list_area, orbit_area) = if is_narrow {
+        (chunks[1], None)
+    } else {
+        let hchunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(30), Constraint::Length(22)])
+            .split(chunks[1]);
+        (hchunks[0], Some(hchunks[1]))
+    };
 
     // Menu items — driven by a single source of truth (MENU_ENTRIES) so
     // adding a new game is one entry edit. Each card occupies 3 visual
@@ -586,17 +608,19 @@ fn render_menu(
     // 一覧をスクロールした時にどのゲームか色で識別できる。ゲーム内 UI とも
     // 共有できるよう `theme::accent` を単一ソースにしている
     // (「設定」は GameChoice を持たないメニュー項目なので固定色のまま)。
-    type Entry = (&'static str, &'static str, u16, char, Color);
+    // 先頭の digit は数字キーによるショートカット (dispatch_event 参照) を
+    // 常時可視化する — 存在を知らないと使われない機能だったため。
+    type Entry = (char, &'static str, &'static str, u16, char, Color);
     const MENU_ENTRIES: &[Entry] = &[
-        ("Cookie Factory", "クッキーをクリックして増やす放置ゲーム", MENU_SELECT_COOKIE, '▶', theme::accent(&GameChoice::Cookie)),
-        ("Tiny Factory", "工場を作って生産ラインを最適化する放置ゲーム", MENU_SELECT_FACTORY, '▶', theme::accent(&GameChoice::Factory)),
-        ("Dungeon Dive", "ダンジョンを探索して帰還するローグライト風RPG", MENU_SELECT_RPG, '▶', theme::accent(&GameChoice::Rpg)),
-        ("深淵潜行 (Abyss Idle)", "自動戦闘で深層を目指す放置型ローグダンジョン", MENU_SELECT_ABYSS, '▶', theme::accent(&GameChoice::Abyss)),
-        ("神の戦場 (God Field)", "4人で戦うターン制カードバトルロイヤル", MENU_SELECT_GODFIELD, '▶', theme::accent(&GameChoice::Godfield)),
-        ("Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶', theme::accent(&GameChoice::Metropolis)),
-        ("周回討伐", "地形を配置し勇者が自動周回するローグライト", MENU_SELECT_LOOPMARCH, '▶', theme::accent(&GameChoice::LoopMarch)),
-        ("常夜灯", "降り注ぐ魔物から灯を守る縦画面バレットヘヴン", MENU_SELECT_EVERLIGHT, '▶', theme::accent(&GameChoice::Everlight)),
-        ("設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
+        ('1', "Cookie Factory", "クッキーをクリックして増やす放置ゲーム", MENU_SELECT_COOKIE, '▶', theme::accent(&GameChoice::Cookie)),
+        ('2', "Tiny Factory", "工場を作って生産ラインを最適化する放置ゲーム", MENU_SELECT_FACTORY, '▶', theme::accent(&GameChoice::Factory)),
+        ('3', "Dungeon Dive", "ダンジョンを探索して帰還するローグライト風RPG", MENU_SELECT_RPG, '▶', theme::accent(&GameChoice::Rpg)),
+        ('4', "深淵潜行 (Abyss Idle)", "自動戦闘で深層を目指す放置型ローグダンジョン", MENU_SELECT_ABYSS, '▶', theme::accent(&GameChoice::Abyss)),
+        ('5', "神の戦場 (God Field)", "4人で戦うターン制カードバトルロイヤル", MENU_SELECT_GODFIELD, '▶', theme::accent(&GameChoice::Godfield)),
+        ('6', "Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶', theme::accent(&GameChoice::Metropolis)),
+        ('7', "周回討伐", "地形を配置し勇者が自動周回するローグライト", MENU_SELECT_LOOPMARCH, '▶', theme::accent(&GameChoice::LoopMarch)),
+        ('8', "常夜灯", "降り注ぐ魔物から灯を守る縦画面バレットヘヴン", MENU_SELECT_EVERLIGHT, '▶', theme::accent(&GameChoice::Everlight)),
+        ('0', "設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 
     let menu_block = Block::default()
@@ -605,7 +629,7 @@ fn render_menu(
         .title(" Games ");
     // wrap=true で render するので、事前計算も同じ inner width で行う (行数は
     // `ClickableList::visual_height` / `render` 内の wrap と一致させる必要がある)。
-    let inner = menu_block.inner(chunks[1]);
+    let inner = menu_block.inner(list_area);
 
     let mut cl = ClickableList::new();
     // 各カードは blank(1) + title(1) + desc(wrap後の可変行数) 行で構成される。
@@ -614,7 +638,7 @@ fn render_menu(
     let mut cumulative_rows: u16 = 0;
     let mut selected_card_top: u16 = 0;
     let mut selected_card_bottom: u16 = 0;
-    for (i, (name, desc, action_id, default_marker, accent)) in MENU_ENTRIES.iter().enumerate() {
+    for (i, (digit, name, desc, action_id, default_marker, accent)) in MENU_ENTRIES.iter().enumerate() {
         let is_selected = i as u8 == selected;
         let card_top = cumulative_rows;
         // Highlighted card: solid yellow ▶ marker + bold yellow title.
@@ -635,23 +659,37 @@ fn render_menu(
         } else {
             Style::default().fg(*accent)
         };
+        // digit バッジ: 選択中は反転(黄地に黒文字)でホットキーが今どれかを
+        // 目立たせる。rail (│) も選択中のカードだけ黄色にして揃える。
+        let digit_style = if is_selected {
+            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let rail_style = Style::default().fg(if is_selected { Color::Yellow } else { Color::DarkGray });
+
         cl.push(Line::from(""));
-        let title_text = format!(" {} {}", marker, name);
+        let title_text = format!(" {} │ {} {}", digit, marker, name);
         let title_rows = wrapped_line_height(&title_text, inner.width);
         cl.push_clickable(
             Line::from(vec![
+                Span::styled(format!(" {} ", digit), digit_style),
+                Span::styled("│", rail_style),
                 Span::styled(format!(" {} ", marker), marker_style),
                 Span::styled(*name, title_style),
             ]),
             *action_id,
         );
-        let desc_text = format!("    {}", desc);
+        // rail (│) はタイトル行だけに付ける。説明文は折り返すことが多く、
+        // 折り返し継続行には ratatui の word-wrap が前の行のインデントを
+        // 引き継がない (2行目以降が桁0から始まる) ため、│ を続けると折れて
+        // 見える。単純な字下げなら折り返しても違和感が出ない。
+        let desc_text = format!("       {}", desc);
         let desc_rows = wrapped_line_height(&desc_text, inner.width);
         cl.push_clickable(
             Line::from(Span::styled(desc_text, Style::default().fg(Color::DarkGray))),
             *action_id,
         );
-
         let card_height = 1 + title_rows + desc_rows;
         cumulative_rows += card_height;
         if is_selected {
@@ -681,7 +719,7 @@ fn render_menu(
 
     {
         let mut cs = click_state.borrow_mut();
-        cl.render(f, chunks[1], menu_block, &mut cs, true, scroll_value);
+        cl.render(f, list_area, menu_block, &mut cs, true, scroll_value);
     }
 
     // Scroll indicator overlays — registered last so they win over rows below.
@@ -715,9 +753,19 @@ fn render_menu(
         );
     }
 
+    if let Some(orbit_area) = orbit_area {
+        let orbit_entries: Vec<(Color, &str)> = MENU_ENTRIES.iter().map(|e| (e.5, e.1)).collect();
+        render_menu_orbit(f, orbit_area, borders, selected, &orbit_entries);
+    }
+
     // Footer
+    let footer_text = if is_narrow {
+        "タップ / ↑↓+Enter で選択"
+    } else {
+        "↑↓ で移動 ・ Enter/Space で決定 ・ タップでも選択可"
+    };
     let footer_widget = Paragraph::new(Line::from(Span::styled(
-        "タップでゲームを選択",
+        footer_text,
         Style::default().fg(Color::DarkGray),
     )))
     .block(
@@ -727,6 +775,79 @@ fn render_menu(
     )
     .alignment(Alignment::Center);
     f.render_widget(footer_widget, chunks[2]);
+}
+
+/// 選択中のゲームをドット(Braille)表現で示す、ワイドレイアウト専用の装飾
+/// パネル。中心の「灯台」から各ゲームへ軌道上のノードとして線を延ばし、
+/// 選択中のノードだけ大きく・白いハローを添えて浮かび上がらせる —
+/// リスト側の ▶ マーカーと同じ選択状態を、別の見た目でもう一度伝える
+/// ことで「今どれを見ているか」を視覚的に強化する。クリック判定は持たない
+/// (everlightの`render_camp_ambience`と同じ、純粋な装飾)。
+fn render_menu_orbit(
+    f: &mut ratzilla::ratatui::Frame,
+    area: Rect,
+    borders: Borders,
+    selected: u8,
+    entries: &[(Color, &str)],
+) {
+    const W: f64 = 40.0;
+    const H: f64 = 60.0;
+    const ORBIT_R: f64 = 15.0;
+    let cx = W / 2.0;
+    let cy = H * 0.42;
+    let n = entries.len().max(1);
+
+    let hub_glow = canvas_fx::filled_ellipse_points(cx, cy, 3.2, 3.2, 0.6);
+    let hub_core = canvas_fx::filled_ellipse_points(cx, cy, 1.3, 1.3, 0.4);
+    let hub_ring = canvas_fx::ring_points(cx, cy, 4.4, 0.18);
+
+    let mut spokes: Vec<(f64, f64, f64, f64, Color)> = Vec::with_capacity(n);
+    let mut nodes: Vec<(f64, f64, Color, bool)> = Vec::with_capacity(n);
+    for (i, &(color, _)) in entries.iter().enumerate() {
+        let angle = -std::f64::consts::FRAC_PI_2 + TAU * (i as f64) / (n as f64);
+        let (sin, cos) = angle.sin_cos();
+        let nx = cx + cos * ORBIT_R;
+        let ny = cy + sin * ORBIT_R;
+        let is_selected = i as u8 == selected;
+        spokes.push((cx, cy, nx, ny, if is_selected { color } else { Color::DarkGray }));
+        nodes.push((nx, ny, color, is_selected));
+    }
+
+    let selected_entry = entries.get(selected as usize);
+    let selected_name = selected_entry.map(|e| e.1).unwrap_or("");
+    let selected_color = selected_entry.map(|e| e.0).unwrap_or(Color::DarkGray);
+
+    let canvas = Canvas::default()
+        .x_bounds([0.0, W])
+        .y_bounds([0.0, H])
+        .marker(Marker::Braille)
+        .paint(move |ctx| {
+            for &(x1, y1, x2, y2, color) in &spokes {
+                ctx.draw(&CanvasLine { x1, y1, x2, y2, color });
+            }
+            ctx.draw(&Points { coords: &hub_ring, color: Color::DarkGray });
+            ctx.draw(&Points { coords: &hub_glow, color: Color::Cyan });
+            ctx.draw(&Points { coords: &hub_core, color: Color::White });
+            for &(nx, ny, color, is_selected) in &nodes {
+                let r = if is_selected { 2.6 } else { 1.3 };
+                let pts = canvas_fx::filled_ellipse_points(nx, ny, r, r, 0.55);
+                ctx.draw(&Points { coords: &pts, color });
+                if is_selected {
+                    let halo = canvas_fx::ring_points(nx, ny, r + 1.2, 0.3);
+                    ctx.draw(&Points { coords: &halo, color: Color::White });
+                }
+            }
+        })
+        .block(
+            Block::default()
+                .borders(borders)
+                .border_style(Style::default().fg(selected_color))
+                .title(Span::styled(
+                    format!(" {} ", selected_name),
+                    Style::default().fg(selected_color).add_modifier(Modifier::BOLD),
+                )),
+        );
+    f.render_widget(canvas, area);
 }
 
 fn render_settings(
@@ -948,5 +1069,92 @@ fn render_confirm_dialog(
     {
         let mut cs = click_state.borrow_mut();
         cl.render(f, area, block, &mut cs, false, 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratzilla::ratatui::backend::TestBackend;
+
+    fn render_menu_to_test_backend(width: u16, height: u16, selected: u8) -> Rc<RefCell<ClickState>> {
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = width;
+        cs.borrow_mut().terminal_rows = height;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut scroll = 0u16;
+        terminal
+            .draw(|f| {
+                render_menu(f, f.area(), &cs, &mut scroll, selected);
+            })
+            .unwrap();
+        cs
+    }
+
+    #[test]
+    fn render_menu_does_not_panic_narrow_and_wide() {
+        // 軌道パネル (ワイドのみ) の有無、桁数バッジ・rail の折り返しなど
+        // 幅依存のレイアウトを一通り踏む。selected は先頭・中間・末尾
+        // (= 設定, 数字キー無しの ⚙ マーカー) を網羅する。
+        for &(w, h) in &[(40u16, 30u16), (60, 30), (100, 40)] {
+            for selected in [0u8, 4, 8] {
+                render_menu_to_test_backend(w, h, selected);
+            }
+        }
+    }
+
+    /// カード本体を digit バッジ + rail (│) + マーカー + 名前の複数 Span に
+    /// 組み替えたので、`ClickableList` の wrap-aware クリック登録が依然
+    /// 全カードで機能していることを確認する回帰テスト。
+    ///
+    /// 「9枚全部が常に同時に画面内にある」とは限らない (説明文の折り返しで
+    /// 縦に溢れればスクロールされ、後方のカードは一時的に隠れる) ので、
+    /// 「selected=i で描画した時、そのカード自身のタップ対象は必ず見える
+    /// 範囲に入る」という auto-scroll の契約を検証する。
+    fn assert_selected_card_is_always_reachable(width: u16, height: u16) {
+        const ACTION_IDS: [u16; 9] = [
+            MENU_SELECT_COOKIE,
+            MENU_SELECT_FACTORY,
+            MENU_SELECT_RPG,
+            MENU_SELECT_ABYSS,
+            MENU_SELECT_GODFIELD,
+            MENU_SELECT_METROPOLIS,
+            MENU_SELECT_LOOPMARCH,
+            MENU_SELECT_EVERLIGHT,
+            MENU_SELECT_SETTINGS,
+        ];
+        for (i, &action_id) in ACTION_IDS.iter().enumerate() {
+            let cs = render_menu_to_test_backend(width, height, i as u8);
+            let cs = cs.borrow();
+            let hit = (0..height).any(|y| (0..width).any(|x| cs.hit_test(x, y) == Some(action_id)));
+            assert!(hit, "selected={i} なのに action_id {action_id} のタップ対象が見当たらない");
+        }
+    }
+
+    #[test]
+    fn render_menu_registers_click_target_for_selected_card_in_wide_layout() {
+        assert_selected_card_is_always_reachable(100, 40);
+    }
+
+    #[test]
+    fn render_menu_registers_click_target_for_selected_card_in_narrow_layout() {
+        assert_selected_card_is_always_reachable(40, 40);
+    }
+
+    /// 装飾用の軌道パネルはワイドレイアウトでのみ描画される
+    /// (`render_camp_ambience` と同じ規約)。ナロー幅では
+    /// `Constraint::Length(22)` 分の列を消費しないぶん、リストの
+    /// 折り返し幅がワイド時と変わるだけで panic しないことを確認する。
+    #[test]
+    fn render_menu_orbit_panel_does_not_panic_for_various_selections() {
+        let entries: Vec<(Color, &str)> = (0..9).map(|_| (Color::LightMagenta, "x")).collect();
+        for selected in 0u8..9 {
+            let mut terminal = Terminal::new(TestBackend::new(22, 20)).unwrap();
+            terminal
+                .draw(|f| {
+                    render_menu_orbit(f, f.area(), Borders::ALL, selected, &entries);
+                })
+                .unwrap();
+        }
     }
 }

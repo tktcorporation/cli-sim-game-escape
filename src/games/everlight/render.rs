@@ -14,7 +14,7 @@ use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::symbols::Marker;
 use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::canvas::{Canvas, Line as CanvasLine, Points};
-use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratzilla::ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
 use crate::canvas_fx;
@@ -568,6 +568,10 @@ fn render_boon_modal(state: &EverlightState, f: &mut Frame, area: Rect, click_st
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::LightYellow))
         .title(" 灯を強化する ");
+    // Clear で modal_area を白紙化してから描く。Paragraph はテキストのある
+    // セルしか書き換えないため、Clear を挟まないと配下の戦場描画がモーダルの
+    // 余白から透けて見える。
+    f.render_widget(Clear, modal_area);
     let mut cs = click_state.borrow_mut();
     cl.render(f, modal_area, block, &mut cs, true, 0);
 }
@@ -728,6 +732,8 @@ fn render_weapon_detail_modal(state: &EverlightState, f: &mut Frame, area: Rect,
         .borders(Borders::ALL)
         .border_style(Style::default().fg(kind.color()))
         .title(" 武器詳細 ");
+    // Clear で modal_area を白紙化してから描く (render_boon_modal と同じ理由)。
+    f.render_widget(Clear, modal_area);
     let mut cs = click_state.borrow_mut();
     cl.render(f, modal_area, block, &mut cs, true, 0);
 }
@@ -1155,6 +1161,74 @@ mod tests {
             BoonOption { kind: BoonKind::NewWeapon(WeaponKind::Halo) },
         ]);
         render_to_test_backend(&state, 40, 30);
+    }
+
+    /// `render_boon_modal` は `render_battlefield` の後、同じフレーム内で
+    /// battlefield の上に重ね描きされる。`Clear` widget を挟まずに描くと、
+    /// モーダルの余白セル (テキストが無いセル) には battlefield の Braille
+    /// 点描がそのまま残る (`Paragraph` はテキストのあるセルしか書き換えない
+    /// ため) — これが「モーダル表示時に背面が透ける」不具合の実体。この
+    /// テストは、中央に置いた敵の Braille 点がモーダル領域内から一切
+    /// 見えなくなることを検証する回帰テスト。
+    #[test]
+    fn boon_modal_clears_battlefield_braille_underneath() {
+        use super::super::state::{BoonKind, BoonOption, Enemy};
+        use crate::effects::FlashTimer;
+
+        let mut state = EverlightState::new();
+        logic::start_vigil(&mut state);
+        // ワールド中心に敵を置く。world_to_canvas_y(WORLD_H/2) == WORLD_H/2
+        // なので、Canvas の x_bounds/y_bounds ([0,WORLD_W]/[0,WORLD_H]) 上でも
+        // battlefield Rect のちょうど中央に描かれ、中央に配置されるモーダルと
+        // 確実に重なる。
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Wisp,
+            x: WORLD_W / 2.0,
+            y: WORLD_H / 2.0,
+            hp: 10,
+            max_hp: 10,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+            slow_ticks: 0,
+        });
+        state.pending_boons = Some([
+            BoonOption { kind: BoonKind::NewWeapon(WeaponKind::Spray) },
+            BoonOption { kind: BoonKind::NewWeapon(WeaponKind::Aurora) },
+            BoonOption { kind: BoonKind::NewWeapon(WeaponKind::Halo) },
+        ]);
+
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = 60;
+        cs.borrow_mut().terminal_rows = 30;
+        let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                render(&state, f, f.area(), &cs);
+            })
+            .unwrap();
+
+        let layout = compute_vigil_layout(Rect::new(0, 0, 60, 30));
+        let modal_w = layout.battlefield.width.saturating_sub(2).max(1);
+        let modal_h = layout.battlefield.height.min(3 * 3 + 5);
+        let modal_area = Rect::new(
+            layout.battlefield.x + (layout.battlefield.width.saturating_sub(modal_w)) / 2,
+            layout.battlefield.y + (layout.battlefield.height.saturating_sub(modal_h)) / 2,
+            modal_w,
+            modal_h,
+        );
+
+        let buffer = terminal.backend().buffer();
+        for y in modal_area.y..modal_area.y + modal_area.height {
+            for x in modal_area.x..modal_area.x + modal_area.width {
+                let symbol = buffer[(x, y)].symbol();
+                let is_braille = symbol.chars().next().is_some_and(|c| ('\u{2800}'..='\u{28FF}').contains(&c));
+                assert!(
+                    !is_braille,
+                    "modal cell ({x},{y}) still shows a battlefield Braille glyph ({symbol:?}) — Clear is missing"
+                );
+            }
+        }
     }
 
     #[test]

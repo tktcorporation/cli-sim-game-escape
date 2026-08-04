@@ -12,7 +12,7 @@ use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::symbols::Marker;
 use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::canvas::{Canvas, Circle, Points};
-use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratzilla::ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
 use crate::canvas_fx;
@@ -860,8 +860,7 @@ fn render_event_popup(
     let popup_y = full_area.y + (full_area.height.saturating_sub(popup_h)) / 2;
     let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
 
-    // Clear the popup area first so the underlying map doesn't bleed through.
-    let clear_block = Block::default()
+    let popup_block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Yellow))
         .title(Span::styled(
@@ -916,14 +915,12 @@ fn render_event_popup(
     }
 
     let mut cs = click_state.borrow_mut();
-    // First render an opaque block so the map underneath is hidden.
-    f.render_widget(
-        Paragraph::new("").block(clear_block.clone()),
-        popup_area,
-    );
-    // Then draw the content with the same block (no double border because
-    // ratatui's Paragraph re-renders the block atomically).
-    cl.render(f, popup_area, clear_block, &mut cs, true, 0);
+    // Clear popup_area first so the underlying map doesn't bleed through:
+    // Paragraph only overwrites cells it actually draws text into, so an
+    // "empty Paragraph" render leaves untouched cells showing whatever was
+    // drawn earlier this frame. Clear resets every cell in the area first.
+    f.render_widget(Clear, popup_area);
+    cl.render(f, popup_area, popup_block, &mut cs, true, 0);
 }
 
 /// ログ本文のキーワードから種別を判定して色を返す。rpgのログは絵文字接頭辞
