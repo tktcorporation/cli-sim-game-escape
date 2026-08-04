@@ -187,7 +187,7 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         0.8,
     );
 
-    const ENEMY_KINDS: [EnemyKind; 16] = [
+    const ENEMY_KINDS: [EnemyKind; 17] = [
         EnemyKind::Wisp,
         EnemyKind::Husk,
         EnemyKind::Swarmling,
@@ -204,6 +204,7 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         EnemyKind::ShadowWitch,
         EnemyKind::Serpent,
         EnemyKind::FullMoonBoss,
+        EnemyKind::Brute,
     ];
     let mut enemy_groups: Vec<(Vec<(f64, f64)>, Color)> = Vec::new();
     for kind in ENEMY_KINDS {

@@ -94,6 +94,13 @@ pub enum EnemyKind {
     Serpent,
     /// 満月の魔王 (夜のマイルストーン最終ボス)。撃破すると Dawn を達成する。
     FullMoonBoss,
+    /// 巨鬼 (第7波〜)。`homes()` で灯のレーンへ寄ってきた後、他の敵より
+    /// 遥かに遅い速度でしか近づけない — 装甲系のような弱点武器ゲートは
+    /// 持たせず、ただ低速・高耐久なだけの「居座る的」にすることで、
+    /// 光輪 (`WeaponKind::Halo`、灯の周囲に継続ダメージ判定を持つ近接武器)
+    /// が長時間そのHPを削り続けられる状況を作る。他の敵は速く通り過ぎる
+    /// ため光輪の判定窓が短く当てにくいという弱点と対になる存在。
+    Brute,
 }
 
 impl EnemyKind {
@@ -115,6 +122,7 @@ impl EnemyKind {
             EnemyKind::ShadowWitch => "影の魔女",
             EnemyKind::Serpent => "大蛇",
             EnemyKind::FullMoonBoss => "満月の魔王",
+            EnemyKind::Brute => "巨鬼",
         }
     }
 
@@ -150,6 +158,9 @@ impl EnemyKind {
             EnemyKind::ShadowWitch => 335,
             EnemyKind::Serpent => 360,
             EnemyKind::FullMoonBoss => 505,
+            // 精鬼(55)と同程度の耐久。専用タイマーで湧く精鬼と違い通常湧きの
+            // 抽選テーブルに乗るため、頻度は重み付けで別途抑えている。
+            EnemyKind::Brute => 60,
         }
     }
 
@@ -174,6 +185,9 @@ impl EnemyKind {
             EnemyKind::ShadowWitch => 0.6,
             EnemyKind::Serpent => 0.65,
             EnemyKind::FullMoonBoss => 0.5,
+            // 石鬼(0.9)のさらに半分。灯へ到達するまでの道のりを長く引き
+            // 延ばし、光輪の判定半径に入っている時間そのものを稼ぐ。
+            EnemyKind::Brute => 0.45,
         }
     }
 
@@ -196,6 +210,7 @@ impl EnemyKind {
             EnemyKind::ShadowWitch => 18,
             EnemyKind::Serpent => 20,
             EnemyKind::FullMoonBoss => 26,
+            EnemyKind::Brute => 12,
         }
     }
 
@@ -217,6 +232,7 @@ impl EnemyKind {
             EnemyKind::ShadowWitch => 70,
             EnemyKind::Serpent => 75,
             EnemyKind::FullMoonBoss => 110,
+            EnemyKind::Brute => 10,
         }
     }
 
@@ -239,6 +255,7 @@ impl EnemyKind {
             EnemyKind::ShadowWitch => 6.0,
             EnemyKind::Serpent => 6.2,
             EnemyKind::FullMoonBoss => 7.0,
+            EnemyKind::Brute => 4.0,
         }
     }
 
@@ -255,7 +272,14 @@ impl EnemyKind {
 
     /// 灯のレーンへ少しずつ寄ってくるか。
     pub fn homes(self) -> bool {
-        matches!(self, EnemyKind::Husk | EnemyKind::Boss | EnemyKind::ShadowWitch | EnemyKind::FullMoonBoss)
+        matches!(
+            self,
+            EnemyKind::Husk
+                | EnemyKind::Boss
+                | EnemyKind::ShadowWitch
+                | EnemyKind::FullMoonBoss
+                | EnemyKind::Brute
+        )
     }
 
     /// ボス級 (夜番のwave帯チェックポイントで単体湧きする個体) かどうか。
@@ -300,6 +324,8 @@ impl EnemyKind {
             EnemyKind::ShadowWitch => Color::Magenta,
             EnemyKind::Serpent => Color::Green,
             EnemyKind::FullMoonBoss => Color::White,
+            // 「重量級」を表す褐色系。既存色と衝突しないRgb直指定。
+            EnemyKind::Brute => Color::Rgb(205, 133, 63),
         }
     }
 
@@ -437,7 +463,10 @@ impl OwnedWeapon {
             WeaponKind::Bolt => 8 + (l - 1) * 3,
             WeaponKind::Spray => 5 + (l - 1) * 2,
             WeaponKind::Aurora => 14 + (l - 1) * 5,
-            WeaponKind::Halo => 2 + (l - 1),
+            // 巨鬼のような低速・高耐久の敵が判定半径に長く留まる前提で、
+            // 「当てれば大きく削れる」体感を作るため他武器より強めに
+            // 引き上げている (旧: `2 + (l - 1)` の丁度2倍)。
+            WeaponKind::Halo => 4 + (l - 1) * 2,
             WeaponKind::Meteor => 22 + (l - 1) * 8,
         };
         if self.evolved {

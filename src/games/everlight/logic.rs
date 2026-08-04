@@ -266,6 +266,10 @@ fn spawn_interval_ticks(wave: u32) -> u32 {
 /// wave帯の下限。単純に敵を差し替えるのではなく既存の枠に加える形で
 /// 出現テーブル (`regular_spawn_table`) へ合流させる。
 const SNIPER_MIN_WAVE: u32 = 6;
+/// 巨鬼 (`EnemyKind::Brute`)。低速・高耐久な「居座る的」を狙撃者の
+/// 遠隔対応を覚えた直後に合流させ、光輪の判定半径で溶かす体験を早めに
+/// 提示する。
+const BRUTE_MIN_WAVE: u32 = 7;
 const CASTER_MIN_WAVE: u32 = 9;
 const SHIELDED_MIN_WAVE: u32 = 11;
 const CHARGER_MIN_WAVE: u32 = 13;
@@ -311,6 +315,11 @@ fn regular_spawn_table(wave: u32) -> Vec<(EnemyKind, u32)> {
     let mut table = vec![(EnemyKind::Swarmling, 15u32), (EnemyKind::Husk, 30), (EnemyKind::Wisp, 55)];
     if wave >= SNIPER_MIN_WAVE {
         table.push((EnemyKind::Sniper, 15));
+    }
+    if wave >= BRUTE_MIN_WAVE {
+        // 他の追加種より低めの重み — 低速・高耐久な個体が同時に何体も
+        // 湧くと`regular_spawn_batch_size`のbatch分だけ盤面が渋滞するため。
+        table.push((EnemyKind::Brute, 8));
     }
     if wave >= CASTER_MIN_WAVE {
         table.push((EnemyKind::Caster, 8));
@@ -1924,6 +1933,42 @@ mod tests {
             hit_ticks[1] - hit_ticks[0],
             expected_interval,
             "光輪のダメージ間隔は速射パッシブのcooldown_multを反映するはず"
+        );
+    }
+
+    #[test]
+    fn halo_significantly_damages_a_lingering_brute_over_its_slow_approach() {
+        // 巨鬼(低速・高耐久)が光輪の判定半径に留まり続けた場合、光輪の
+        // ダメージ強化が実際に効いて大きくHPを削れることを確認する
+        // 回帰テスト。数値を戻すと「光輪を当てても遅い敵が全然減らない」
+        // 体感に逆戻りする。
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon { kind: WeaponKind::Halo, level: 5, cooldown_remaining: 0, evolved: false });
+        let x = state.lantern.x;
+        let brute_hp = EnemyKind::Brute.base_hp();
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Brute,
+            x,
+            y: LANTERN_Y,
+            hp: brute_hp,
+            max_hp: brute_hp,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+        });
+
+        // L5光輪の基礎間隔(5tick)3周期分。低速な巨鬼が防衛線際で足止め
+        // されている間の目安として妥当な時間 (1.5秒)。
+        for _ in 0..15 {
+            fire_halo(&mut state, 1.0);
+        }
+
+        let remaining = state.enemies.first().map(|e| e.hp).unwrap_or(0);
+        assert!(
+            remaining <= brute_hp / 2,
+            "光輪の判定範囲に留まる巨鬼は、遅さゆえに大きく削れるはず: remaining={remaining} max={brute_hp}"
         );
     }
 
@@ -3668,6 +3713,7 @@ mod tests {
         let early = regular_spawn_table(1);
         for kind in [
             EnemyKind::Sniper,
+            EnemyKind::Brute,
             EnemyKind::Caster,
             EnemyKind::Shielded,
             EnemyKind::Charger,
@@ -3682,6 +3728,7 @@ mod tests {
         let late = regular_spawn_table(30);
         for kind in [
             EnemyKind::Sniper,
+            EnemyKind::Brute,
             EnemyKind::Caster,
             EnemyKind::Shielded,
             EnemyKind::Charger,
