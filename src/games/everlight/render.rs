@@ -1039,6 +1039,97 @@ mod tests {
         render_to_test_backend(&state, 100, 30);
     }
 
+    /// `render_weapon_detail_modal` は拠点画面(本体リスト + 情景パネル)の
+    /// 上に、同じフレーム内で重ね描みされる。`render_boon_modal` と同じ
+    /// `Clear` 漏れの回帰を検証する — ただしこちらは表示行数が「解放済み
+    /// か」「残光が足りるか」で変わる (`modal_h` が `cl.visual_height` に
+    /// 依存する) ため、その計算式をテスト側で複製すると本体の分岐が増えた
+    /// 時にテストだけ追従し忘れて誤った領域を検査するドリフトの危険がある。
+    /// 代わりに、実際に描画された枠線 (" 武器詳細 " というタイトルを持つ
+    /// border) をバッファから探して modal の実座標を特定する — 本体の
+    /// 行数が変わっても常に正しい領域を検査できる。
+    #[test]
+    fn weapon_detail_modal_clears_background_glyphs_underneath() {
+        let mut state = EverlightState::new();
+        state.weapon_detail_modal = Some(WeaponKind::Meteor);
+
+        let (w, h) = (100u16, 30u16);
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = w;
+        cs.borrow_mut().terminal_rows = h;
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| {
+                let bg = Paragraph::new(vec![Line::from("#".repeat(w as usize)); h as usize]);
+                f.render_widget(bg, f.area());
+                render(&state, f, f.area(), &cs);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let row_symbols = |y: u16| -> Vec<String> {
+            (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect()
+        };
+
+        // タイトル " 武器詳細 " を含む上端の border 行を探し、同じ列にある
+        // "┌"/"┐" を左右端、その列で "└"/"┘" が現れる行を下端とする。
+        let mut modal_left = None;
+        let mut modal_right = None;
+        let mut top_row = None;
+        for y in 0..h {
+            let cells = row_symbols(y);
+            for (x, symbol) in cells.iter().enumerate() {
+                if symbol != "┌" {
+                    continue;
+                }
+                // 全角文字はセルごとに空白の継続セルを伴うため、素の
+                // concat だと "武 器 詳 細" のように分断される。空白/空
+                // セルを除いてから連結することで、幅を気にせず部分一致
+                // 判定できるようにする。
+                let ahead: String = cells[x..(x + 20).min(cells.len())]
+                    .iter()
+                    .filter(|s| !s.trim().is_empty())
+                    .cloned()
+                    .collect();
+                if ahead.contains("武器詳細") {
+                    modal_left = Some(x as u16);
+                    top_row = Some(y);
+                    modal_right = cells[x + 1..]
+                        .iter()
+                        .position(|s| s == "┐")
+                        .map(|off| x as u16 + 1 + off as u16);
+                    break;
+                }
+            }
+            if top_row.is_some() {
+                break;
+            }
+        }
+        let (left, right, top) = (
+            modal_left.expect("武器詳細モーダルの左上が見つからない"),
+            modal_right.expect("武器詳細モーダルの右上が見つからない"),
+            top_row.unwrap(),
+        );
+        let mut bottom = None;
+        for y in (top + 1)..h {
+            if row_symbols(y)[left as usize] == "└" {
+                bottom = Some(y);
+                break;
+            }
+        }
+        let bottom = bottom.expect("武器詳細モーダルの下端が見つからない");
+
+        for y in (top + 1)..bottom {
+            for x in (left + 1)..right {
+                assert_ne!(
+                    buf[(x, y)].symbol(),
+                    "#",
+                    "modal cell ({x},{y}) still shows the background glyph underneath — Clear is missing"
+                );
+            }
+        }
+    }
+
     #[test]
     fn camp_renders_without_panicking_with_weapon_detail_modal_open() {
         let mut state = EverlightState::new();
