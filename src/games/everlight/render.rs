@@ -777,7 +777,7 @@ fn render_camp_body(
     push_upgrade_row(
         &mut cl,
         "灯心",
-        &format!("最大灯 +12 (現在 {})", state.camp.light_max()),
+        &format!("最大灯 +{} (現在 {})", state.camp.light_increment(), state.camp.light_max()),
         state.camp.light_level,
         state.camp.light_cost(),
         state.ember,

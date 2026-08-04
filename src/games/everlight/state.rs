@@ -1090,9 +1090,21 @@ impl CampUpgrades {
         (linear as f64 * escalation).round() as u32
     }
 
-    pub fn light_max(&self) -> i32 {
-        let base = LANTERN_BASE_LIGHT_MAX + self.light_level as i32 * 12;
+    fn light_max_at_level(&self, level: u32) -> i32 {
+        let base = LANTERN_BASE_LIGHT_MAX + level as i32 * 12;
         (base as f64 * self.lantern_type.light_max_mult()).round() as i32
+    }
+
+    pub fn light_max(&self) -> i32 {
+        self.light_max_at_level(self.light_level)
+    }
+
+    /// 次の1レベル購入で実際に増える最大灯の量。`lantern_type`の補正が
+    /// 合計値全体へ掛かる (`light_max`) ため、疾風/守灯では厳密に12には
+    /// ならない (常灯のみ正確に12)。拠点画面の表示・コスト効率の計算は
+    /// 固定値の12ではなく必ずこの値を使うこと。
+    pub fn light_increment(&self) -> i32 {
+        self.light_max_at_level(self.light_level + 1) - self.light_max_at_level(self.light_level)
     }
 
     /// 拠点強化による開始威力ボーナス倍率。
@@ -1125,9 +1137,11 @@ impl CampUpgrades {
 
     /// 次の1レベル購入で得られる1ポイントあたりの残光コスト。拠点画面で
     /// 「今どちらが割安か」を一目で比較できるようにする指標
-    /// (Cookie Factory の CPS/コスト比率と同じ考え方)。
+    /// (Cookie Factory の CPS/コスト比率と同じ考え方)。`light_increment()`
+    /// を使うのは、疾風/守灯では実際の増加量が12から変わるため
+    /// (`light_increment`のコメント参照)。
     pub fn light_cost_per_point(&self) -> f64 {
-        self.light_cost() as f64 / 12.0
+        self.light_cost() as f64 / self.light_increment().max(1) as f64
     }
 
     pub fn power_cost_per_point(&self) -> f64 {
@@ -1386,6 +1400,41 @@ mod tests {
         let base_cost = camp.light_cost();
         camp.light_level += 1;
         assert!(camp.light_cost() > base_cost);
+    }
+
+    #[test]
+    fn light_increment_is_exactly_12_for_steady_lantern() {
+        let camp = CampUpgrades::default();
+        assert_eq!(camp.lantern_type, LanternType::Steady);
+        assert_eq!(camp.light_increment(), 12, "常灯は無補正なので厳密に12のはず");
+    }
+
+    #[test]
+    fn light_increment_reflects_the_lantern_type_multiplier() {
+        // light_max() は合計値全体へ補正を掛けるため、疾風/守灯では
+        // 次の1レベルで実際に増える量が12から変わる。表示・コスト効率の
+        // 計算がこれを反映しないと、プレイヤーに誤った情報を見せてしまう
+        // (実際に踏んだレビュー指摘)。
+        for lantern_type in [LanternType::Swift, LanternType::Warden] {
+            let camp = CampUpgrades { lantern_type, light_level: 3, ..CampUpgrades::default() };
+            let expected = camp.light_max_at_level(4) - camp.light_max_at_level(3);
+            assert_eq!(camp.light_increment(), expected);
+            assert_ne!(camp.light_increment(), 12, "{lantern_type:?} は12そのものにはならないはず");
+        }
+    }
+
+    #[test]
+    fn light_cost_per_point_uses_the_actual_increment_not_a_hardcoded_12() {
+        let steady = CampUpgrades { light_level: 5, ..CampUpgrades::default() };
+        let swift = CampUpgrades { light_level: 5, lantern_type: LanternType::Swift, ..CampUpgrades::default() };
+
+        // コストは灯のタイプに依存しないので同額だが、1ポイントあたりの
+        // 実質コストは疾風の方が増加量が少ない分だけ割高になるはず。
+        assert_eq!(steady.light_cost(), swift.light_cost());
+        assert!(
+            swift.light_cost_per_point() > steady.light_cost_per_point(),
+            "疾風は同じ残光で常灯より少ない最大灯しか増えないので、1ポイントあたりのコストは高くなるはず"
+        );
     }
 
     #[test]
