@@ -26,9 +26,14 @@ use crate::widgets::{Clickable, ClickableGrid, ClickableList, ScrollableTab};
 use super::actions;
 use super::logic;
 use super::state::{
-    BoonKind, CampUpgrades, EnemyKind, EverlightState, Phase, WeaponKind, BREACH_Y, COLUMNS,
-    ENEMY_BULLET_RADIUS, KILL_EFFECT_TICKS, LANE_HALF_WIDTH, LANTERN_Y, SPAWN_Y, WORLD_H, WORLD_W,
+    BoonKind, CampUpgrades, EnemyKind, EverlightState, LanternType, Phase, WeaponKind, BREACH_Y,
+    COLUMNS, ENEMY_BULLET_RADIUS, KILL_EFFECT_TICKS, LANE_HALF_WIDTH, LANTERN_Y, SPAWN_Y, WORLD_H,
+    WORLD_W,
 };
+
+/// 燠火の色。情景パネルの熾火 (`render_camp_ambience`) と拠点画面の点描
+/// 区切り (`ember_divider_line`) で共有し、「地の炎」の質感を両方に一貫させる。
+const EMBER_COLOR: Color = Color::Rgb(120, 90, 40);
 
 pub fn render(state: &EverlightState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
     match state.phase {
@@ -598,10 +603,14 @@ fn render_camp(state: &EverlightState, f: &mut Frame, area: Rect, click_state: &
         .constraints([Constraint::Length(3), Constraint::Min(8)])
         .split(area);
 
-    let title = Paragraph::new(Line::from(Span::styled(
-        "拠点 — 常夜灯",
-        Style::default().fg(theme::accent(&GameChoice::Everlight)).add_modifier(Modifier::BOLD),
-    )))
+    let title = Paragraph::new(Line::from(vec![
+        Span::styled("⠐⠂ ", Style::default().fg(EMBER_COLOR)),
+        Span::styled(
+            "拠点 — 常夜灯",
+            Style::default().fg(theme::accent(&GameChoice::Everlight)).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" ⠂⠐", Style::default().fg(EMBER_COLOR)),
+    ]))
     .block(
         Block::default()
             .borders(borders)
@@ -621,26 +630,48 @@ fn render_camp(state: &EverlightState, f: &mut Frame, area: Rect, click_state: &
             .constraints([Constraint::Min(30), Constraint::Length(22)])
             .split(chunks[1]);
         render_camp_body(state, f, hchunks[0], click_state, borders);
-        render_camp_ambience(f, hchunks[1], borders);
+        render_camp_ambience(state, f, hchunks[1], borders);
     }
     if state.weapon_detail_modal.is_some() {
         render_weapon_detail_modal(state, f, chunks[1], click_state);
     }
 }
 
+/// 灯の残光量をこの値で割った比率で情景パネルの灯の大きさを決める。
+/// 最も高価な武器解放 (`WeaponKind::Wave` = 200) を賄えるくらい貯まった
+/// 時点で「満ちている」と感じられるよう、ゲーム内の実際の価格帯に合わせた。
+const EMBER_SCALE_CAP: u32 = 200;
+
+/// 灯のタイプごとの情景パネルの色味。`halo`は輪郭、`glow`はにじみ。
+/// 疾風は涼やかな白寄り、守灯は深く赤い熾火、常灯は素の暖色のまま —
+/// 拠点で選んだタイプが情景にも表れることで、選択が反映されている実感を持たせる。
+fn lantern_ambience_colors(t: LanternType) -> (Color, Color) {
+    match t {
+        LanternType::Steady => (Color::Rgb(255, 200, 80), Color::Rgb(200, 140, 40)),
+        LanternType::Swift => (Color::Rgb(215, 235, 255), Color::Rgb(140, 190, 210)),
+        LanternType::Warden => (Color::Rgb(255, 150, 90), Color::Rgb(200, 80, 40)),
+    }
+}
+
 /// 拠点画面ワイドレイアウトの右側に置く、点々表現の情景パネル。夜番の
-/// 戦闘画面と同じ Canvas+Braille の質感を待機画面にも持ち込むための装飾。
-/// クリック判定は持たない (常にBlockの背景として完結する)。
-fn render_camp_ambience(f: &mut Frame, area: Rect, borders: Borders) {
+/// 戦闘画面と同じ Canvas+Braille の質感を待機画面にも持ち込む。クリック
+/// 判定は持たない (常にBlockの背景として完結する) が、残光量で灯の大きさ、
+/// 選択中の灯タイプで色味が変わるため、単なる背景装飾ではなく拠点の
+/// 現在地を映す一部になっている。
+fn render_camp_ambience(state: &EverlightState, f: &mut Frame, area: Rect, borders: Borders) {
     const W: f64 = 40.0;
     const H: f64 = 60.0;
     let cx = W / 2.0;
     let cy = H * 0.42;
 
+    let ember_ratio = state.ember.min(EMBER_SCALE_CAP) as f64 / EMBER_SCALE_CAP as f64;
+    let scale = 1.0 + ember_ratio * 0.6;
+    let (halo_color, glow_color) = lantern_ambience_colors(state.camp.lantern_type);
+
     // 灯本体: 中心の明るい核 + 外側ににじむ淡い光の2層 + 輪郭のリング。
-    let core = canvas_fx::filled_ellipse_points(cx, cy, 2.2, 2.2, 0.5);
-    let glow = canvas_fx::filled_ellipse_points(cx, cy, 5.5, 5.5, 0.6);
-    let halo = canvas_fx::ring_points(cx, cy, 8.0, 0.15);
+    let core = canvas_fx::filled_ellipse_points(cx, cy, 2.2 * scale, 2.2 * scale, 0.5);
+    let glow = canvas_fx::filled_ellipse_points(cx, cy, 5.5 * scale, 5.5 * scale, 0.6);
+    let halo = canvas_fx::ring_points(cx, cy, 8.0 * scale, 0.15);
 
     // 立ち上る残り火。座標は毎フレーム同じ (アニメーションはしない) が、
     // 周波数の異なる複数のsin波を重ねることで手作業で散らしたような
@@ -659,9 +690,9 @@ fn render_camp_ambience(f: &mut Frame, area: Rect, borders: Borders) {
         .y_bounds([0.0, H])
         .marker(Marker::Braille)
         .paint(move |ctx| {
-            ctx.draw(&Points { coords: &embers, color: Color::Rgb(120, 90, 40) });
-            ctx.draw(&Points { coords: &halo, color: Color::Rgb(255, 200, 80) });
-            ctx.draw(&Points { coords: &glow, color: Color::Rgb(200, 140, 40) });
+            ctx.draw(&Points { coords: &embers, color: EMBER_COLOR });
+            ctx.draw(&Points { coords: &halo, color: halo_color });
+            ctx.draw(&Points { coords: &glow, color: glow_color });
             ctx.draw(&Points { coords: &core, color: Color::LightYellow });
         })
         .block(
@@ -747,38 +778,30 @@ fn render_camp_body(
 ) {
     let mut cl = ClickableList::new();
     cl.push(Line::from(""));
-    cl.push(Line::from(Span::styled(
-        format!(" 残光 {}", state.ember),
-        Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
-    )));
-    cl.push(Line::from(""));
+    cl.push(Line::from(vec![
+        Span::styled("⠄⠂ ", Style::default().fg(EMBER_COLOR)),
+        Span::styled("残光 ", Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{}", state.ember), Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD)),
+    ]));
+    cl.push(ember_divider_line());
 
     push_rank_selector(&mut cl, state);
-    cl.push(Line::from(""));
+    cl.push(ember_divider_line());
 
     push_starting_weapon_selector(&mut cl, state);
-    cl.push(Line::from(""));
+    cl.push(ember_divider_line());
     push_lantern_type_selector(&mut cl, state);
-    cl.push(Line::from(""));
+    cl.push(ember_divider_line());
 
-    cl.push_clickable(
-        Line::from(Span::styled(
-            " ▶ 夜番へ出る",
-            Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD),
-        )),
-        actions::CAMP_START_VIGIL,
-    );
+    let cta_style = Style::default().fg(Color::Black).bg(Color::LightGreen).add_modifier(Modifier::BOLD);
+    cl.push_clickable(Line::from(Span::styled("  ▶ 夜番へ出る  ", cta_style)), actions::CAMP_START_VIGIL);
     cl.push(Line::from(Span::styled(
         "    灯を持って魔物の群れを迎え撃つ",
         Style::default().fg(Color::DarkGray),
     )));
-    cl.push(Line::from(""));
+    cl.push(ember_divider_line());
 
-    cl.push(Line::from(Span::styled(
-        " 恒久強化",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    )));
-    cl.push(Line::from(""));
+    push_section_header(&mut cl, "恒久強化", Color::Yellow);
 
     push_upgrade_row(
         &mut cl,
@@ -800,8 +823,8 @@ fn render_camp_body(
         actions::CAMP_UPGRADE_POWER,
         state.camp.power_cost_per_point(),
     );
-
     cl.push(Line::from(""));
+
     if state.camp.extra_slot_level >= 1 {
         cl.push(Line::from(Span::styled(
             " ✓ 受動効果スロット拡張 (5枠) 解放済み",
@@ -836,14 +859,11 @@ fn render_camp_body(
         );
     }
 
-    cl.push(Line::from(""));
+    cl.push(ember_divider_line());
     push_weapon_unlock_section(&mut cl, state);
 
-    cl.push(Line::from(""));
-    cl.push(Line::from(Span::styled(
-        " 戦績",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    )));
+    cl.push(ember_divider_line());
+    push_section_header(&mut cl, "戦績", Color::Gray);
     cl.push(Line::from(format!(
         " 自己最高: 第{}波 / 生存 {}",
         state.best_wave,
@@ -863,17 +883,65 @@ fn render_camp_body(
         .render(f, area, &mut cs);
 }
 
+/// 拠点画面の各セクション見出し。太字ラベルの下に Braille の点罫線を
+/// 敷き、戦場 (Canvas+Braille) と同じ点描の質感を待機中の一覧にも
+/// 持ち込む。プレーンテキストが並ぶだけだったセクションの境目を、
+/// 色と点描の両方でひと目でわかるようにする。
+fn push_section_header(cl: &mut ClickableList, title: &str, color: Color) {
+    cl.push(Line::from(Span::styled(format!(" {title}"), Style::default().fg(color).add_modifier(Modifier::BOLD))));
+    cl.push(Line::from(Span::styled(" ⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒⠒", Style::default().fg(color))));
+}
+
+/// セクション間に挟む区切り。空行の代わりに、8方向いずれか1点だけが
+/// 立った braille を並べ、`render_camp_ambience` の熾火と同じ質感の
+/// 「燠火が散っている」ような一行にする。
+fn ember_divider_line() -> Line<'static> {
+    const DOTS: [char; 8] = ['⠁', '⠐', '⠂', '⠠', '⠄', '⢀', '⡀', '⠈'];
+    let dots: String = DOTS.iter().cycle().take(22).collect();
+    Line::from(Span::styled(format!(" {dots}"), Style::default().fg(EMBER_COLOR)))
+}
+
+/// 直近 [`RANK_PIP_WINDOW`] 件だけを表示するウィンドウ幅。
+/// `max_unlocked_rank` に上限が無いため、ランクが進むほど行が際限なく
+/// 伸びないよう選択中のランクを含む範囲だけを切り出す。
+const RANK_PIP_WINDOW: u32 = 10;
+/// 解放済みランクの先に、未解放のランクが控えていることを示す予告分。
+const RANK_PIP_LOOKAHEAD: u32 = 2;
+
+/// 挑戦ランクの解放状況を dot で可視化する行。選択中 (◆)・解放済み (●)・
+/// まだ先にある未解放 (○) を横に並べ、「あと何夜で次のランクか」を
+/// 文章を読まず一目で把握できるようにする。
+fn rank_pip_line(selected: u32, max_unlocked: u32) -> Line<'static> {
+    let end = max_unlocked + RANK_PIP_LOOKAHEAD;
+    let start = end.saturating_sub(RANK_PIP_WINDOW - 1).max(1);
+
+    let mut spans = vec![if start > 1 {
+        Span::styled(" …", Style::default().fg(Color::DarkGray))
+    } else {
+        Span::raw(" ")
+    }];
+    for rank in start..=end {
+        let (glyph, color) = if rank == selected {
+            ("◆", Color::LightYellow)
+        } else if rank <= max_unlocked {
+            ("●", Color::LightGreen)
+        } else {
+            ("○", Color::DarkGray)
+        };
+        spans.push(Span::styled(glyph, Style::default().fg(color)));
+    }
+    Line::from(spans)
+}
+
 /// 挑戦ランクの選択行と、選択中ランクの目標 (最終波・最終ボス名) を
 /// 積む。「次に何を目指すか」を拠点画面で常に見えるようにする。
 fn push_rank_selector(cl: &mut ClickableList, state: &EverlightState) {
     let selected = state.camp.effective_selected_rank();
     let max_unlocked = state.camp.max_unlocked_rank.max(1);
 
-    cl.push(Line::from(Span::styled(
-        " 挑戦ランク",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    )));
+    push_section_header(cl, "挑戦ランク", theme::accent(&GameChoice::Everlight));
     cl.push(Line::from(format!(" 第{selected}夜  (解放済み: 第{max_unlocked}夜まで)")));
+    cl.push(rank_pip_line(selected, max_unlocked));
 
     let down_color = if selected > 1 { Color::LightCyan } else { Color::DarkGray };
     cl.push_clickable(
@@ -898,10 +966,7 @@ fn push_rank_selector(cl: &mut ClickableList, state: &EverlightState) {
 /// (`logic::cycle_starting_weapon`)。
 fn push_starting_weapon_selector(cl: &mut ClickableList, state: &EverlightState) {
     let selected = state.camp.effective_starting_weapon();
-    cl.push(Line::from(Span::styled(
-        " 初期武器",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    )));
+    push_section_header(cl, "初期武器", selected.color());
     cl.push(Line::from(Span::styled(
         format!(" {} — {}", selected.name(), selected.summary()),
         Style::default().fg(selected.color()),
@@ -916,10 +981,10 @@ fn push_starting_weapon_selector(cl: &mut ClickableList, state: &EverlightState)
 /// (`logic::cycle_lantern_type`)。
 fn push_lantern_type_selector(cl: &mut ClickableList, state: &EverlightState) {
     let selected = state.camp.lantern_type;
-    cl.push(Line::from(Span::styled(
-        " 灯のタイプ",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    )));
+    // 見出しの色は `render_camp_ambience` の情景パネルと同じ配色を使う —
+    // 「このタイプを選ぶと灯の色味がこう変わる」を、選ぶ前から予告する。
+    let (accent, _) = lantern_ambience_colors(selected);
+    push_section_header(cl, "灯のタイプ", accent);
     cl.push(Line::from(format!(" {} — {}", selected.name(), selected.summary())));
     cl.push_clickable(
         Line::from(Span::styled(" ◀ 前のタイプ", Style::default().fg(Color::LightCyan))),
@@ -934,10 +999,7 @@ fn push_lantern_type_selector(cl: &mut ClickableList, state: &EverlightState) {
 /// 武器解放の一覧。タップすると `render_weapon_detail_modal` の詳細
 /// モーダルが開く (解放済みは確認、未解放は解放ボタン付き)。
 fn push_weapon_unlock_section(cl: &mut ClickableList, state: &EverlightState) {
-    cl.push(Line::from(Span::styled(
-        " 武器解放",
-        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-    )));
+    push_section_header(cl, "武器解放", Color::LightCyan);
     for &kind in WeaponKind::all() {
         let action_id = actions::CAMP_UNLOCK_WEAPON_BASE + kind.save_id() as u16;
         if state.camp.is_weapon_unlocked(kind) {
@@ -965,6 +1027,21 @@ fn push_weapon_unlock_section(cl: &mut ClickableList, state: &EverlightState) {
     }
 }
 
+/// 恒久強化のレベル表示に添える進行度バー (`theme::PROGRESS_FULL`/
+/// `PROGRESS_EMPTY`)。HPバーと同じ「塗り具合」の見た目言語を、上限の
+/// 無いレベルにも流用する。無制限に伸びるレベルをそのまま点で埋めると
+/// 行が際限なく伸びるため、`cap` 件で頭打ちにして超過分は "+N" で表す。
+const UPGRADE_PIP_CAP: u32 = 6;
+
+fn level_pip_string(level: u32, cap: u32) -> String {
+    let filled = level.min(cap);
+    let mut s: String = (0..cap).map(|i| if i < filled { theme::PROGRESS_FULL } else { theme::PROGRESS_EMPTY }).collect();
+    if level > cap {
+        s.push_str(&format!("+{}", level - cap));
+    }
+    s
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_upgrade_row(
     cl: &mut ClickableList,
@@ -983,6 +1060,7 @@ fn push_upgrade_row(
             format!(" {name} Lv{level}→{}", level + 1),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         ),
+        Span::styled(format!(" {}", level_pip_string(level, UPGRADE_PIP_CAP)), Style::default().fg(color)),
         Span::styled(format!("  {cost}残光"), Style::default().fg(color)),
         Span::styled(format!(" ({cost_per_point:.1}/pt)"), Style::default().fg(Color::DarkGray)),
     ];
@@ -998,6 +1076,75 @@ mod tests {
 
     fn render_to_test_backend(state: &EverlightState, width: u16, height: u16) {
         render_to_test_backend_with_click_state(state, width, height);
+    }
+
+    /// `Line` の表示テキストだけを取り出す (装飾スタイルを無視して内容を検査したいテスト用)。
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn rank_pip_line_marks_the_only_rank_as_selected_with_two_upcoming_locked_pips() {
+        let text = line_text(&rank_pip_line(1, 1));
+        assert_eq!(text.matches('◆').count(), 1, "選択中ランクはちょうど1つ表示されるはず: {text:?}");
+        assert_eq!(
+            text.matches('○').count(),
+            RANK_PIP_LOOKAHEAD as usize,
+            "解放済みランクの先に、未解放の予告pipがLOOKAHEAD件表示されるはず: {text:?}"
+        );
+        assert_eq!(text.matches('●').count(), 0);
+    }
+
+    #[test]
+    fn rank_pip_line_marks_unlocked_ranks_other_than_selected_as_filled() {
+        let text = line_text(&rank_pip_line(5, 8));
+        assert_eq!(text.matches('◆').count(), 1, "選択中ランクはちょうど1つ表示されるはず: {text:?}");
+        // 1..=8 (解放済み) のうち selected(5) 以外の7つが●、8+1..=8+2 の2つが未解放の予告○。
+        assert_eq!(text.matches('●').count(), 7);
+        assert_eq!(text.matches('○').count(), 2);
+    }
+
+    #[test]
+    fn rank_pip_line_windows_to_the_recent_ranks_and_flags_truncation_with_an_ellipsis() {
+        let text = line_text(&rank_pip_line(20, 20));
+        assert!(text.starts_with(" …"), "ウィンドウ外に切り捨てた先頭は省略記号を示すはず: {text:?}");
+        let pip_count = text.chars().filter(|c| matches!(c, '◆' | '●' | '○')).count();
+        assert_eq!(pip_count, RANK_PIP_WINDOW as usize, "表示されるpip数はウィンドウ幅に固定されるはず: {text:?}");
+    }
+
+    #[test]
+    fn level_pip_string_fills_proportionally_and_marks_overflow_with_plus_n() {
+        assert_eq!(level_pip_string(0, 6), "▱▱▱▱▱▱");
+        assert_eq!(level_pip_string(3, 6), "▰▰▰▱▱▱");
+        assert_eq!(level_pip_string(6, 6), "▰▰▰▰▰▰");
+        assert_eq!(level_pip_string(9, 6), "▰▰▰▰▰▰+3", "cap超過分は数字で表すはず");
+    }
+
+    #[test]
+    fn camp_body_renders_without_panicking_across_a_range_of_narrow_widths() {
+        // 実機のスマホ幅相当 (20〜)からデスクトップ幅までを一通りスイープし、
+        // 新しく追加した装飾行 (点罫線・pip・区切り) が特定の幅でだけ panic
+        // する回帰を防ぐ。
+        let state = EverlightState::new();
+        for w in 20u16..=100 {
+            render_to_test_backend(&state, w, 34);
+        }
+    }
+
+    #[test]
+    fn camp_body_renders_without_panicking_with_heavily_progressed_state() {
+        // pip表示 (`rank_pip_line`/`level_pip_string`) は「無制限に伸びる値」を
+        // 固定幅の点描に丸め込む設計。丸め込みが機能せず行が際限なく伸びて
+        // いないか、実際の進行では滅多に起きないくらい極端な値でも確認する。
+        let mut state = EverlightState::new();
+        state.camp.light_level = 500;
+        state.camp.power_level = 500;
+        state.camp.max_unlocked_rank = 500;
+        state.camp.selected_rank = 500;
+        state.ember = 100_000;
+        state.camp.unlocked_weapons = WeaponKind::all().to_vec();
+        render_to_test_backend(&state, 40, 34);
+        render_to_test_backend(&state, 100, 34);
     }
 
     /// `render_to_test_backend` の戻り値ありバージョン。描画後に実際に
