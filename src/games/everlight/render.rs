@@ -710,10 +710,13 @@ fn render_weapon_detail_modal(state: &EverlightState, f: &mut Frame, area: Rect,
     );
 
     // 固定行数だと内容 (残光不足の注記等) が増えた時に「閉じる」がborder外へ
-    // 押し出され、タップできなくなる (モーダルに詰む) 回帰を招く。実際の
-    // 行数 + 上下border分から高さを決める。
+    // 押し出され、タップできなくなる (モーダルに詰む) 回帰を招く。下で
+    // wrap=trueで render するため、論理行数 (`cl.len()`) ではなく実際に
+    // 折り返された後の行数 (`visual_height`) から高さを決める必要がある —
+    // 狭い端末幅では新武器3種の長い説明文が折り返され、論理行数のままだと
+    // 依然として閉じるボタンが押し出される。
     let modal_w = area.width.saturating_sub(4).clamp(1, 48);
-    let modal_h = (cl.len() as u16 + 2).min(area.height);
+    let modal_h = (cl.visual_height(modal_w.saturating_sub(2)) + 2).min(area.height);
     let modal_area = Rect::new(
         area.x + (area.width.saturating_sub(modal_w)) / 2,
         area.y + (area.height.saturating_sub(modal_h)) / 2,
@@ -1047,21 +1050,31 @@ mod tests {
     fn weapon_detail_modal_close_button_is_always_reachable() {
         // 「残光不足」の注記が出る最長の内容 (未解放+購入不可) でも、
         // 閉じるボタンがborder外へ押し出されてタップ不能にならないことを
-        // 確認する回帰テスト。modal_h を固定値にすると壊れる。
+        // 確認する回帰テスト。modal_h を固定値や論理行数 (`cl.len()`) から
+        // 決めると、狭い端末幅で説明文が折り返された時に壊れる —
+        // 実機のスマホ幅相当 (index.html の targetCols 計算で31〜45列
+        // 程度になる) を含む範囲を、説明文が最も長い新武器3種を含む
+        // 全武器種でスイープする。
+        let h = 30u16;
+        for &kind in WeaponKind::all() {
+            let mut state = EverlightState::new();
+            state.ember = 0;
+            state.weapon_detail_modal = Some(kind);
+            for w in 20u16..=50 {
+                let cs = render_to_test_backend_with_click_state(&state, w, h);
+                assert!(
+                    has_click_target(&cs, w, h, actions::CAMP_WEAPON_DETAIL_CLOSE),
+                    "{kind:?} at {w}x{h}: 閉じるボタンがクリック対象として登録されていない"
+                );
+            }
+        }
+
+        // タイトル帯を除いた本体が薄い、縦にも狭いケース。
         let mut state = EverlightState::new();
         state.ember = 0;
-        state.weapon_detail_modal = Some(WeaponKind::Meteor);
-
-        // 40x30/100x30 は他のスモークテストと同じ標準サイズ。40x16は
-        // タイトル帯(3行)を除いても本体が13行残るモバイル寄りの小さめ
-        // サイズだが、モーダルの内容(最大8行+border2行=10行)はまだ収まる。
-        for (w, h) in [(40u16, 30u16), (100, 30), (40, 16)] {
-            let cs = render_to_test_backend_with_click_state(&state, w, h);
-            assert!(
-                has_click_target(&cs, w, h, actions::CAMP_WEAPON_DETAIL_CLOSE),
-                "{w}x{h}: 閉じるボタンがクリック対象として登録されていない"
-            );
-        }
+        state.weapon_detail_modal = Some(WeaponKind::Chain);
+        let cs = render_to_test_backend_with_click_state(&state, 40, 16);
+        assert!(has_click_target(&cs, 40, 16, actions::CAMP_WEAPON_DETAIL_CLOSE));
     }
 
     #[test]
