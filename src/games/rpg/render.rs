@@ -1695,7 +1695,65 @@ fn render_game_clear(
 mod tests {
     use super::*;
     use crate::games::rpg::dungeon_map::generate_map;
-    use crate::games::rpg::state::Monster;
+    use crate::games::rpg::state::{DungeonEvent, EventAction, EventChoice, Monster};
+    use ratzilla::ratatui::backend::TestBackend;
+    use ratzilla::ratatui::Terminal;
+
+    /// `render_event_popup` は探索マップの上に、同じフレーム内で重ね描き
+    /// される (`render_scene_content` 参照)。`Paragraph` はテキストのある
+    /// セルしか書き換えないため、`Clear` を挟まずに描くとポップアップの
+    /// 余白セルにマップの文字がそのまま残る — これが「モーダル表示時に
+    /// 背面が透ける」不具合の実体 (everlightの同種テストと同じ検証)。
+    #[test]
+    fn event_popup_clears_map_glyphs_underneath() {
+        let mut state = RpgState::new();
+        state.active_event = Some(DungeonEvent {
+            description: vec!["何かが光っている".to_string()],
+            choices: vec![
+                EventChoice { label: "調べる".to_string(), action: EventAction::Continue },
+                EventChoice { label: "立ち去る".to_string(), action: EventAction::Ignore },
+            ],
+        });
+
+        let full_area = Rect::new(0, 0, 60, 30);
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = full_area.width;
+        cs.borrow_mut().terminal_rows = full_area.height;
+        let mut terminal = Terminal::new(TestBackend::new(full_area.width, full_area.height)).unwrap();
+        terminal
+            .draw(|f| {
+                // マップ描画の代わりに、区別しやすい '#' で背景を全面塗りつぶす。
+                let bg = Paragraph::new(vec![Line::from("#".repeat(full_area.width as usize)); full_area.height as usize]);
+                f.render_widget(bg, full_area);
+                render_event_popup(&state, f, full_area, &cs);
+            })
+            .unwrap();
+
+        // render_event_popup 自身の popup_area 計算式をそのまま再現し、
+        // 「クリアされているべきセル」の範囲を正確に特定する。
+        let event = state.active_event.as_ref().unwrap();
+        let max_choice_label = event.choices.iter().map(|c| c.label.chars().count()).max().unwrap_or(0) as u16;
+        let max_desc = event.description.iter().map(|l| l.chars().count()).max().unwrap_or(0) as u16;
+        let popup_w = (max_choice_label.max(max_desc) + 12)
+            .min(full_area.width.saturating_sub(2))
+            .max(28);
+        let lines_h = event.description.len() as u16 + event.choices.len() as u16 + 6;
+        let popup_h = lines_h.min(full_area.height.saturating_sub(2)).max(8);
+        let popup_x = full_area.x + (full_area.width.saturating_sub(popup_w)) / 2;
+        let popup_y = full_area.y + (full_area.height.saturating_sub(popup_h)) / 2;
+        let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
+
+        let buffer = terminal.backend().buffer();
+        for y in popup_area.y..popup_area.y + popup_area.height {
+            for x in popup_area.x..popup_area.x + popup_area.width {
+                assert_ne!(
+                    buffer[(x, y)].symbol(),
+                    "#",
+                    "popup cell ({x},{y}) still shows the map glyph underneath — Clear is missing"
+                );
+            }
+        }
+    }
 
     fn adjacent_monster(map: &DungeonMap, awake: bool) -> Monster {
         Monster {
