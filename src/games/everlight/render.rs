@@ -146,6 +146,29 @@ fn battlefield_block(is_narrow: bool) -> Block<'static> {
         .title(" 戦場 ")
 }
 
+/// 戦場に描画する敵種の一覧。`EnemyKind::all()` と食い違うと、新種を
+/// 追加した時に「湧いているのに一切描画されない」不具合になる —
+/// `enemy_kinds_render_list_covers_every_enemy_kind` テストで一致を検証する。
+const ENEMY_KINDS: [EnemyKind; 17] = [
+    EnemyKind::Wisp,
+    EnemyKind::Husk,
+    EnemyKind::Swarmling,
+    EnemyKind::Elite,
+    EnemyKind::Boss,
+    EnemyKind::Sniper,
+    EnemyKind::Caster,
+    EnemyKind::Wraith,
+    EnemyKind::Shielded,
+    EnemyKind::Splitter,
+    EnemyKind::SprayShielded,
+    EnemyKind::AuroraShielded,
+    EnemyKind::Charger,
+    EnemyKind::ShadowWitch,
+    EnemyKind::Serpent,
+    EnemyKind::FullMoonBoss,
+    EnemyKind::Brute,
+];
+
 fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
     let is_narrow = is_narrow_layout(area.width);
     let block = battlefield_block(is_narrow);
@@ -187,25 +210,6 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         0.8,
     );
 
-    const ENEMY_KINDS: [EnemyKind; 17] = [
-        EnemyKind::Wisp,
-        EnemyKind::Husk,
-        EnemyKind::Swarmling,
-        EnemyKind::Elite,
-        EnemyKind::Boss,
-        EnemyKind::Sniper,
-        EnemyKind::Caster,
-        EnemyKind::Wraith,
-        EnemyKind::Shielded,
-        EnemyKind::Splitter,
-        EnemyKind::SprayShielded,
-        EnemyKind::AuroraShielded,
-        EnemyKind::Charger,
-        EnemyKind::ShadowWitch,
-        EnemyKind::Serpent,
-        EnemyKind::FullMoonBoss,
-        EnemyKind::Brute,
-    ];
     let mut enemy_groups: Vec<(Vec<(f64, f64)>, Color)> = Vec::new();
     for kind in ENEMY_KINDS {
         let pts: Vec<(f64, f64)> = state
@@ -337,6 +341,15 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
     } else {
         Vec::new()
     };
+    // 連鎖が1体で終わると`windows(2)`は何も返さず線が引けない。極光/流星の
+    // 「発火した事実は必ず見せる」という前提が崩れないよう、単体ヒットの
+    // 場合はその1点に光点を描く。
+    let chain_single_hit_pts: Vec<(f64, f64)> = if state.chain_flash.is_active() && state.chain_flash_points.len() == 1 {
+        let (x, y) = state.chain_flash_points[0];
+        canvas_fx::filled_ellipse_points(x, world_to_canvas_y(y), 1.6, 1.6, 0.5)
+    } else {
+        Vec::new()
+    };
 
     // 光輪は近接の常時判定武器で、Aurora同様に実体弾を撃たない。判定半径
     // (`halo_radius`) そのままのリングを常時描き、周回する光点で「回転して
@@ -380,6 +393,9 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
             }
             for &(x1, y1, x2, y2) in &chain_lines {
                 ctx.draw(&CanvasLine { x1, y1, x2, y2, color: WeaponKind::Chain.color() });
+            }
+            if !chain_single_hit_pts.is_empty() {
+                ctx.draw(&Points { coords: &chain_single_hit_pts, color: WeaponKind::Chain.color() });
             }
             if !aurora_band_pts.is_empty() {
                 // 極光の武器色そのまま (LightYellow) だと灯・宝箱の発光と
@@ -661,15 +677,6 @@ fn render_weapon_detail_modal(state: &EverlightState, f: &mut Frame, area: Rect,
         return;
     };
 
-    let modal_w = area.width.saturating_sub(4).clamp(1, 48);
-    let modal_h = 9u16.min(area.height);
-    let modal_area = Rect::new(
-        area.x + (area.width.saturating_sub(modal_w)) / 2,
-        area.y + (area.height.saturating_sub(modal_h)) / 2,
-        modal_w,
-        modal_h,
-    );
-
     let unlocked = state.camp.is_weapon_unlocked(kind);
     let mut cl = ClickableList::new();
     cl.push(Line::from(""));
@@ -700,6 +707,18 @@ fn render_weapon_detail_modal(state: &EverlightState, f: &mut Frame, area: Rect,
     cl.push_clickable(
         Line::from(Span::styled(" 閉じる", Style::default().fg(Color::Gray))),
         actions::CAMP_WEAPON_DETAIL_CLOSE,
+    );
+
+    // 固定行数だと内容 (残光不足の注記等) が増えた時に「閉じる」がborder外へ
+    // 押し出され、タップできなくなる (モーダルに詰む) 回帰を招く。実際の
+    // 行数 + 上下border分から高さを決める。
+    let modal_w = area.width.saturating_sub(4).clamp(1, 48);
+    let modal_h = (cl.len() as u16 + 2).min(area.height);
+    let modal_area = Rect::new(
+        area.x + (area.width.saturating_sub(modal_w)) / 2,
+        area.y + (area.height.saturating_sub(modal_h)) / 2,
+        modal_w,
+        modal_h,
     );
 
     let block = Block::default()
@@ -969,6 +988,13 @@ mod tests {
     use ratzilla::ratatui::Terminal;
 
     fn render_to_test_backend(state: &EverlightState, width: u16, height: u16) {
+        render_to_test_backend_with_click_state(state, width, height);
+    }
+
+    /// `render_to_test_backend` の戻り値ありバージョン。描画後に実際に
+    /// 登録されたクリック対象を検査したいテスト用 (モーダルのボタンが
+    /// border外へ押し出されて登録されない、といった回帰を検知するため)。
+    fn render_to_test_backend_with_click_state(state: &EverlightState, width: u16, height: u16) -> Rc<RefCell<ClickState>> {
         let cs = Rc::new(RefCell::new(ClickState::new()));
         cs.borrow_mut().terminal_cols = width;
         cs.borrow_mut().terminal_rows = height;
@@ -978,6 +1004,23 @@ mod tests {
                 render(state, f, f.area(), &cs);
             })
             .unwrap();
+        cs
+    }
+
+    /// `click_state` に登録された領域のうち `action_id` を返すセルが
+    /// 1つでもあるか。
+    fn has_click_target(click_state: &Rc<RefCell<ClickState>>, cols: u16, rows: u16, action_id: u16) -> bool {
+        let cs = click_state.borrow();
+        (0..rows).any(|row| (0..cols).any(|col| cs.hit_test(col, row) == Some(action_id)))
+    }
+
+    #[test]
+    fn enemy_kinds_render_list_covers_every_enemy_kind() {
+        // ENEMY_KINDS が EnemyKind::all() を取りこぼすと、その敵種は湧いて
+        // いるのに一切描画されない (過去に実際に踏んだ不具合パターン)。
+        let all: std::collections::HashSet<_> = EnemyKind::all().iter().collect();
+        let rendered: std::collections::HashSet<_> = ENEMY_KINDS.iter().collect();
+        assert_eq!(all, rendered, "ENEMY_KINDSがEnemyKind::all()と食い違っている");
     }
 
     #[test]
@@ -998,6 +1041,27 @@ mod tests {
         state.camp.unlocked_weapons.push(WeaponKind::Meteor);
         state.weapon_detail_modal = Some(WeaponKind::Meteor);
         render_to_test_backend(&state, 100, 30);
+    }
+
+    #[test]
+    fn weapon_detail_modal_close_button_is_always_reachable() {
+        // 「残光不足」の注記が出る最長の内容 (未解放+購入不可) でも、
+        // 閉じるボタンがborder外へ押し出されてタップ不能にならないことを
+        // 確認する回帰テスト。modal_h を固定値にすると壊れる。
+        let mut state = EverlightState::new();
+        state.ember = 0;
+        state.weapon_detail_modal = Some(WeaponKind::Meteor);
+
+        // 40x30/100x30 は他のスモークテストと同じ標準サイズ。40x16は
+        // タイトル帯(3行)を除いても本体が13行残るモバイル寄りの小さめ
+        // サイズだが、モーダルの内容(最大8行+border2行=10行)はまだ収まる。
+        for (w, h) in [(40u16, 30u16), (100, 30), (40, 16)] {
+            let cs = render_to_test_backend_with_click_state(&state, w, h);
+            assert!(
+                has_click_target(&cs, w, h, actions::CAMP_WEAPON_DETAIL_CLOSE),
+                "{w}x{h}: 閉じるボタンがクリック対象として登録されていない"
+            );
+        }
     }
 
     #[test]

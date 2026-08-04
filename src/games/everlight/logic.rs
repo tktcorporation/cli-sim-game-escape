@@ -19,11 +19,13 @@ use super::state::{
 
 const PROJECTILE_SPEED: f64 = 9.0;
 const SPRAY_SPREAD_RAD: f64 = 1.3;
-/// 波光の蛇行の振幅 (ワールド単位/tick、`vx`に直接加算する速度成分)。
+/// 波光の蛇行の振幅 (ワールド単位、`wave_origin.0`からの最大変位)。
 /// `LANE_HALF_WIDTH` (5.0) を上回るため、隣接レーンまではみ出して進む。
 const WAVE_AMPLITUDE: f64 = 6.0;
-/// 波光の蛇行の角速度。yを位相として使うため単位は rad/ワールド単位。
-const WAVE_FREQUENCY: f64 = 0.15;
+/// 波光の蛇行の角速度 (rad/ワールド単位、`wave_origin.1`からの距離を位相
+/// にする)。1周期 ≈ 2π/(0.08*9) ≈ 8.7tick (弾速9/tick換算) — 短すぎると
+/// 目で追える蛇行に見えず単なるノイズになる。
+const WAVE_FREQUENCY: f64 = 0.08;
 /// 氷華の減速効果中、敵の移動速度に掛かる倍率。
 const FROST_SLOW_SPEED_MULT: f64 = 0.4;
 const MAX_ENEMIES_ON_FIELD: usize = 200;
@@ -94,6 +96,7 @@ pub fn tick(state: &mut EverlightState) {
     state.lantern_hurt_flash.tick(1);
     state.aurora_flash.tick(1);
     state.meteor_flash.tick(1);
+    state.chain_flash.tick(1);
     // 烙印は残りtickが尽きたら自動で外れる。死亡した敵のidも (討伐時に
     // 明示削除するのではなく) 自然減衰に任せることで掃除漏れを防ぐ。
     state.bolt_marks.retain(|_, ticks_left| {
@@ -884,8 +887,9 @@ fn make_projectile(x: f64, damage: i32, pierce: u32, vx: f64, vy: f64, color: Co
         color,
         source,
         hit_enemy_ids: Vec::new(),
-        // 氷華だけが呼び出し元 (`fire_weapons`) で構築後に上書きする。
+        // 氷華/波光だけが呼び出し元 (`fire_weapons`) で構築後に上書きする。
         slow_ticks_on_hit: 0,
+        wave_origin: (0.0, 0.0),
     }
 }
 
@@ -1023,11 +1027,12 @@ fn fire_weapons(state: &mut EverlightState, damage_mult: f64) {
                 new_projectiles.push(proj);
             }
             WeaponKind::Wave => {
-                // 発射直後はまっすぐ上へ。蛇行そのものは
-                // `move_and_resolve_projectiles` が `source == Wave` を見て
-                // 毎tick vx を再計算する (弾に波の位相を持たせる専用フィールド
-                // は不要 — 現在のyそのものを位相として使う)。
-                new_projectiles.push(make_projectile(lantern_x, damage, pierce, 0.0, -PROJECTILE_SPEED, kind.color(), kind));
+                // 蛇行は移動後に`move_and_resolve_projectiles`が`wave_origin`
+                // からの位置の式として毎tick計算し直す (vxへの速度加算では
+                // ない)。ここでは基準点だけ発射位置に焼き込む。
+                let mut proj = make_projectile(lantern_x, damage, pierce, 0.0, -PROJECTILE_SPEED, kind.color(), kind);
+                proj.wave_origin = (lantern_x, LANTERN_Y);
+                new_projectiles.push(proj);
             }
             WeaponKind::Chain => {
                 let max_targets = state.loadout.weapons[i].chain_max_targets();
@@ -1274,15 +1279,19 @@ fn move_and_resolve_projectiles(state: &mut EverlightState, enemy_prev_positions
     let mut surviving = Vec::with_capacity(projectiles.len());
 
     for mut proj in projectiles {
-        if proj.source == WeaponKind::Wave {
-            // 専用の位相フィールドを`Projectile`に持たせずに済むよう、
-            // 現在のyそのものを位相として使う — 積分ではなくyの関数として
-            // 毎tick vx を再計算するので、状態を持たずに同じ蛇行を再現できる。
-            proj.vx = WAVE_AMPLITUDE * (proj.y * WAVE_FREQUENCY).sin();
-        }
         let start = (proj.x, proj.y);
-        proj.x += proj.vx;
         proj.y += proj.vy;
+        if proj.source == WeaponKind::Wave {
+            // vxへの速度加算で蛇行させると、その積分 (=x座標) には初期位相
+            // 由来の直流成分が乗り、`wave_origin`を軸にした対称な蛇行に
+            // ならない (発射のたびに左右どちらかへ偏る)。位置そのものを
+            // yの関数として毎tick計算し直すことで、`wave_origin.0`を中心に
+            // 必ず対称に振れるようにする。
+            let (ox, oy) = proj.wave_origin;
+            proj.x = ox + WAVE_AMPLITUDE * ((proj.y - oy) * WAVE_FREQUENCY).sin();
+        } else {
+            proj.x += proj.vx;
+        }
         let end = (proj.x, proj.y);
 
         // スポーン地点でのクランプにより複数の敵が密集する状況では、
@@ -1953,6 +1962,9 @@ pub fn start_vigil(state: &mut EverlightState) {
     // next_enemy_id をここで0へ戻すため、前の夜番の烙印がid再利用で
     // 誤って新しい敵に適用されないようクリアする。
     state.bolt_marks.clear();
+    // 前の夜番で雷光が最後に通過した経路が、tick停止中の拠点滞在を挟んで
+    // 次の夜番へ持ち越されないようにする。
+    state.chain_flash_points.clear();
     state.kill_count = 0;
     // breach_count はリセットしない: detect_transitions が前回renderとの
     // 差分で演出をトリガーする単調増加カウンタ (state.rsのコメント参照)。
@@ -2349,6 +2361,7 @@ mod tests {
             source: WeaponKind::Bolt,
             hit_enemy_ids: Vec::new(),
             slow_ticks_on_hit: 0,
+            wave_origin: (0.0, 0.0),
         });
         move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
         assert!(state.bolt_marks.contains_key(&1), "光弾+極光を両方装備していれば命中で烙印が付くはず");
@@ -2386,6 +2399,7 @@ mod tests {
             source: WeaponKind::Bolt,
             hit_enemy_ids: Vec::new(),
             slow_ticks_on_hit: 0,
+            wave_origin: (0.0, 0.0),
         });
         move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
         assert!(!state.bolt_marks.contains_key(&1), "極光を装備していなければ烙印は付かないはず");
@@ -4409,6 +4423,33 @@ mod tests {
     }
 
     #[test]
+    fn slow_effect_expires_and_speed_returns_to_normal() {
+        // `move_enemies` は `slow_ticks` をデクリメントしてから同じ呼び出し内で
+        // 判定するため、slow_ticks=2 は「次の1回だけ減速」を意味する
+        // (2→1: 1>0なので減速、続く1→0: 0>0は偽なので通常速度)。
+        let mut state = EverlightState::new();
+        state.wave = 1;
+        let x = state.lantern.x;
+        push_enemy_at(&mut state, 1, x, 0.0);
+        state.enemies[0].slow_ticks = 2;
+
+        let y0 = state.enemies[0].y;
+        move_enemies(&mut state);
+        let slowed_step = state.enemies[0].y - y0;
+
+        let y1 = state.enemies[0].y;
+        move_enemies(&mut state);
+        let normal_step = state.enemies[0].y - y1;
+
+        assert!(normal_step > slowed_step, "slow_ticksが尽きたら通常速度に戻るはず");
+        assert_eq!(
+            normal_step,
+            EnemyKind::Wisp.base_speed() * wave_linear_difficulty(state.wave, state.rank),
+            "尽きた後の移動量は素の速度と一致するはず"
+        );
+    }
+
+    #[test]
     fn chain_hit_damages_multiple_nearby_enemies_with_falloff() {
         let mut state = EverlightState::new();
         let x = state.lantern.x;
@@ -4443,20 +4484,65 @@ mod tests {
     }
 
     #[test]
-    fn wave_projectile_oscillates_horizontally_as_it_travels() {
+    fn chain_hit_stops_at_an_enemy_outside_the_chain_radius() {
         let mut state = EverlightState::new();
-        state.projectiles.push(make_projectile(state.lantern.x, 10, 1, 0.0, -PROJECTILE_SPEED, Color::White, WeaponKind::Wave));
+        let x = state.lantern.x;
+        // 起点選定は防衛線に最も近い(=yが最大の)個体を優先するため、
+        // 起点にしたい方をより大きいyに置く。
+        push_enemy_at(&mut state, 1, x, LANTERN_Y - 40.0);
+        // chain_radius(10.0)の外側に置く — 連鎖はここで届かないはず。
+        push_enemy_at(&mut state, 2, x + 30.0, LANTERN_Y - 60.0);
 
-        let mut vx_signs = std::collections::HashSet::new();
+        apply_chain_hit(&mut state, 20, 3, 10.0);
+
+        assert!(state.enemies[0].hp < 999, "起点は必ず命中するはず");
+        assert_eq!(state.enemies[1].hp, 999, "半径の外側の敵まで連鎖してはいけない");
+    }
+
+    #[test]
+    fn chain_flash_decays_after_a_few_ticks() {
+        // フラッシュが `tick()` で減衰しないと、雷光を1度撃っただけで
+        // 連鎖の線が画面に残り続ける回帰 (chain_lines は
+        // `chain_flash.is_active()` の間だけ描かれる、render.rs参照)。
+        let mut state = EverlightState::new();
+        let x = state.lantern.x;
+        push_enemy_at(&mut state, 1, x, LANTERN_Y - 40.0);
+        apply_chain_hit(&mut state, 20, 1, 10.0);
+        assert!(state.chain_flash.is_active());
+
+        for _ in 0..10 {
+            tick(&mut state);
+        }
+        assert!(!state.chain_flash.is_active(), "十分なtickの後はフラッシュが消えているはず");
+    }
+
+    #[test]
+    fn wave_projectile_oscillates_symmetrically_around_its_spawn_lane() {
+        // 単に符号が両方観測されるだけでは、片側に大きく偏った蛇行
+        // (例: 右に1しか振れないのに左に8振れる) も見逃してしまう回帰
+        // テストになる。`wave_origin.0`からの変位が正負ともに振幅の
+        // 大部分まで達することまで確認する。
+        let mut state = EverlightState::new();
+        let origin_x = state.lantern.x;
+        let mut proj =
+            make_projectile(origin_x, 10, 1, 0.0, -PROJECTILE_SPEED, Color::White, WeaponKind::Wave);
+        proj.wave_origin = (origin_x, LANTERN_Y);
+        state.projectiles.push(proj);
+
+        let mut max_dev = f64::MIN;
+        let mut min_dev = f64::MAX;
         for _ in 0..40 {
             if state.projectiles.is_empty() {
                 break;
             }
             move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
             if let Some(p) = state.projectiles.first() {
-                vx_signs.insert(p.vx > 0.0);
+                let dev = p.x - origin_x;
+                max_dev = max_dev.max(dev);
+                min_dev = min_dev.min(dev);
             }
         }
-        assert_eq!(vx_signs.len(), 2, "波光は進行中に左右へ蛇行するはず (vxの符号が両方観測されるはず)");
+        assert!(max_dev > WAVE_AMPLITUDE * 0.8, "右側の振れ幅が小さすぎる: max_dev={max_dev}");
+        assert!(min_dev < -WAVE_AMPLITUDE * 0.8, "左側の振れ幅が小さすぎる (左右非対称): min_dev={min_dev}");
     }
 }

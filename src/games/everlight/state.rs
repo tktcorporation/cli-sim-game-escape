@@ -104,6 +104,32 @@ pub enum EnemyKind {
 }
 
 impl EnemyKind {
+    /// `render.rs`の`ENEMY_KINDS`描画リストが取りこぼしなく全種を含むかを
+    /// テストで検証するために持つ (`WeaponKind::all()`と同じ理由 — 新種を
+    /// 追加した時、描画側のリスト更新を忘れると「湧いているのに一切
+    /// 描画されない」不具合になる)。
+    pub fn all() -> &'static [EnemyKind] {
+        &[
+            EnemyKind::Wisp,
+            EnemyKind::Husk,
+            EnemyKind::Swarmling,
+            EnemyKind::Elite,
+            EnemyKind::Boss,
+            EnemyKind::Sniper,
+            EnemyKind::Shielded,
+            EnemyKind::Splitter,
+            EnemyKind::SprayShielded,
+            EnemyKind::AuroraShielded,
+            EnemyKind::Charger,
+            EnemyKind::Caster,
+            EnemyKind::Wraith,
+            EnemyKind::ShadowWitch,
+            EnemyKind::Serpent,
+            EnemyKind::FullMoonBoss,
+            EnemyKind::Brute,
+        ]
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             EnemyKind::Wisp => "鬼火",
@@ -412,14 +438,13 @@ impl WeaponKind {
     /// 光弾以外は拠点で解放するまで初期武器にも宝箱の候補にもならない
     /// (`CampUpgrades::is_weapon_unlocked`/`logic::candidate_boons` 参照)。
     ///
-    /// 既存4種 (散光/極光/光輪/流星) はこれまで無条件で使えていた。解放制に
-    /// 移行しても最初の1〜2回の夜番でほぼ揃う程度の安さに抑えているのは、
-    /// これらは既存のバランス調整 (`simulator::even_maxed_out_investment_*`
-    /// 等) がこの4種すぐ使える前提で成り立っているため — 高くしすぎると
-    /// 装備が長期間Bolt単体に偏り、既存の難易度カーブが破綻する
+    /// 散光/極光/光輪/流星は最初の1〜2回の夜番でほぼ揃う程度の安さに
+    /// 抑えている。バランス調整 (`simulator::even_maxed_out_investment_*`
+    /// 等) がこの4種をすぐ使える前提で成り立っているため — 高くしすぎると
+    /// 装備が長期間Bolt単体に偏り、難易度カーブが破綻する
     /// (`simulator::new_enemy_kinds_and_meteor_weapon_appear_over_a_long_run`
     /// で実測して確認済み)。新武器3種 (氷華/雷光/波光) は「だんだん増やして
-    /// いく」体験の主眼なので、既存4種よりはっきり高価にして解放順そのもの
+    /// いく」体験の主眼なので、この4種よりはっきり高価にして解放順そのもの
     /// が進行の目安になるようにしている。
     pub fn unlock_cost(self) -> Option<u32> {
         match self {
@@ -522,8 +547,10 @@ impl WeaponKind {
         }
     }
 
-    /// `evolution_partner()` が `None` の武器では選ばれない
-    /// (`logic::candidate_boons` 参照) ため、以下の3種の値は現状使われない。
+    /// `evolution_partner()` が `None` の武器 (氷華/雷光/波光) では
+    /// `Evolve` 自体が選ばれない (`logic::candidate_boons` 参照) ため、
+    /// これらは `name()` と同じ文字列を返しておく — 進化しないのに専用の
+    /// 名前を持たせると、片方だけ変更した時に無言で食い違う。
     pub fn evolved_name(self) -> &'static str {
         match self {
             WeaponKind::Bolt => "連光弾",
@@ -531,9 +558,7 @@ impl WeaponKind {
             WeaponKind::Aurora => "極光炉",
             WeaponKind::Halo => "重光輪",
             WeaponKind::Meteor => "隕石雨",
-            WeaponKind::Frost => "氷華",
-            WeaponKind::Chain => "雷光",
-            WeaponKind::Wave => "波光",
+            WeaponKind::Frost | WeaponKind::Chain | WeaponKind::Wave => self.name(),
         }
     }
 }
@@ -564,8 +589,7 @@ impl OwnedWeapon {
             WeaponKind::Spray => 5 + (l - 1) * 2,
             WeaponKind::Aurora => 14 + (l - 1) * 5,
             // 巨鬼のような低速・高耐久の敵が判定半径に長く留まる前提で、
-            // 「当てれば大きく削れる」体感を作るため他武器より強めに
-            // 引き上げている (旧: `2 + (l - 1)` の丁度2倍)。
+            // 「当てれば大きく削れる」体感を作るため他武器より強めにしている。
             WeaponKind::Halo => 4 + (l - 1) * 2,
             WeaponKind::Meteor => 22 + (l - 1) * 8,
             // 光弾より控えめ — ダメージではなく減速そのものが価値の武器。
@@ -813,6 +837,12 @@ pub struct Projectile {
     /// 弾自身に焼き込んでおくことで、命中判定側は武器の現在レベルを
     /// 逆引きせずに済む。
     pub slow_ticks_on_hit: u32,
+    /// 波光 (`WeaponKind::Wave`) の蛇行の基準点 (発射位置)。蛇行は
+    /// `vx`への速度加算ではなく`x = origin.0 + A*sin(k*(y-origin.1))`
+    /// という位置の式で毎tick再計算する — 速度を積分する方式だと初期位相
+    /// 由来の直流成分が乗り、レーン中心を軸にした対称な蛇行にならない
+    /// (`WeaponKind::Wave` 以外は常に `(0.0, 0.0)` で未使用)。
+    pub wave_origin: (f64, f64),
 }
 
 /// 詠唱者 (`EnemyKind::Caster`) が撃つ実体弾。プレイヤー側の `Projectile`
@@ -905,7 +935,7 @@ impl Lantern {
 /// 武器解放とは別の性格の選択肢にするため。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LanternType {
-    /// 常灯。移動速度・最大残光ともに補正なし (これまでの挙動そのもの)。
+    /// 常灯。移動速度・最大残光ともに補正なしの標準タイプ。
     Steady,
     /// 疾風。移動速度+35%の代わりに最大残光-10%。
     Swift,
@@ -1395,7 +1425,7 @@ mod tests {
 
     #[test]
     fn lantern_type_steady_has_no_multipliers() {
-        // 常灯は「これまでの挙動そのまま」がデフォルトの不変条件。
+        // 常灯は無補正であることがデフォルトの不変条件。
         assert_eq!(LanternType::Steady.move_speed_mult(), 1.0);
         assert_eq!(LanternType::Steady.light_max_mult(), 1.0);
     }
