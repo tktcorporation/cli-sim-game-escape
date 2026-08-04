@@ -9,11 +9,11 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
-use super::state::{CampUpgrades, EverlightState};
+use super::state::{CampUpgrades, EverlightState, LanternType, WeaponKind};
 
 /// セーブデータのフォーマットバージョン。フィールド追加時にインクリメントすること。
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 1;
+const SAVE_VERSION: u32 = 2;
 
 /// 互換性を維持できる最小バージョン。
 #[cfg(any(target_arch = "wasm32", test))]
@@ -51,6 +51,17 @@ struct GameSave {
     /// 拠点で選択中の挑戦ランク。保存しないとリロードのたびに選択が
     /// 第1夜へ戻ってしまう。
     selected_rank: u32,
+    /// 解放済み武器の `WeaponKind::save_id()` 一覧。旧セーブ (フィールド
+    /// 無し) は空Vecで読み込まれるが、`apply_save` 側で「光弾のみ解放」
+    /// (`CampUpgrades::default()`相当) へ補正する — 空Vecのまま扱うと
+    /// 光弾すら使えない状態になってしまう。
+    unlocked_weapon_ids: Vec<u8>,
+    /// 夜番開始時の初期武器 (`WeaponKind::save_id()`)。デフォルト0=光弾は
+    /// 旧セーブの欠損値としても自然に成立する。
+    starting_weapon_id: u8,
+    /// 灯のタイプ (`LanternType::save_id()`)。デフォルト0=常灯は旧セーブの
+    /// 欠損値 (=挙動が変わらない) としても自然に成立する。
+    lantern_type_id: u8,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -68,6 +79,9 @@ fn extract_save(state: &EverlightState) -> SaveData {
             rng_state: state.rng_state,
             max_unlocked_rank: state.camp.max_unlocked_rank,
             selected_rank: state.camp.selected_rank,
+            unlocked_weapon_ids: state.camp.unlocked_weapons.iter().map(|k| k.save_id()).collect(),
+            starting_weapon_id: state.camp.starting_weapon.save_id(),
+            lantern_type_id: state.camp.lantern_type.save_id(),
         },
     }
 }
@@ -77,6 +91,25 @@ fn apply_save(state: &mut EverlightState, save: &GameSave) {
     state.ember = save.ember;
     state.best_wave = save.best_wave;
     state.best_survival_ticks = save.best_survival_ticks;
+    // 旧セーブ (フィールド無し→空Vec) は「光弾のみ解放」のデフォルトへ
+    // 補正する。未知のidは将来のバージョン間往復を安全にするため無視し、
+    // 重複idも1件に畳む (手動編集されたセーブが同じ武器を複数回タップ
+    // 対象として登録してしまわないようにするため)。
+    let mut unlocked_weapons: Vec<WeaponKind> = Vec::new();
+    for &id in &save.unlocked_weapon_ids {
+        if let Some(kind) = WeaponKind::from_save_id(id) {
+            if !unlocked_weapons.contains(&kind) {
+                unlocked_weapons.push(kind);
+            }
+        }
+    }
+    if !unlocked_weapons.contains(&WeaponKind::Bolt) {
+        // 光弾は常に無料解放済みという不変条件を、手動編集されたセーブ
+        // からの復元でも保つ。`WeaponKind::all()` と同じ先頭順にしておく。
+        unlocked_weapons.insert(0, WeaponKind::Bolt);
+    }
+    let starting_weapon = WeaponKind::from_save_id(save.starting_weapon_id).unwrap_or(WeaponKind::Bolt);
+    let lantern_type = LanternType::from_save_id(save.lantern_type_id).unwrap_or(LanternType::Steady);
     state.camp = CampUpgrades {
         light_level: save.light_level,
         power_level: save.power_level,
@@ -86,6 +119,9 @@ fn apply_save(state: &mut EverlightState, save: &GameSave) {
         // 保存されたランクが (バージョン違いや手動編集で) 解放範囲外に
         // なっていても安全に読めるよう、旧セーブと同じ経路でクランプする。
         selected_rank: save.selected_rank.clamp(1, save.max_unlocked_rank.max(1)),
+        unlocked_weapons,
+        starting_weapon,
+        lantern_type,
     };
     // 0 は rng_next 側で固定値に補正されるだけなので、未保存(旧セーブ)の
     // 0 をそのまま許容してよい。
@@ -174,6 +210,9 @@ mod tests {
         original.camp.extra_weapon_slot_level = 1;
         original.camp.max_unlocked_rank = 3;
         original.camp.selected_rank = 2;
+        original.camp.unlocked_weapons = vec![WeaponKind::Bolt, WeaponKind::Spray, WeaponKind::Chain];
+        original.camp.starting_weapon = WeaponKind::Chain;
+        original.camp.lantern_type = LanternType::Warden;
         original.rng_state = 999_999;
 
         let save = extract_save(&original);
@@ -197,6 +236,32 @@ mod tests {
         assert_eq!(
             restored.rng_state, 999_999,
             "rng_state を保存しないとリロードのたびに同じ乱数列を再生してしまう"
+        );
+        assert_eq!(
+            restored.camp.unlocked_weapons, original.camp.unlocked_weapons,
+            "解放済み武器も保存/復元されるはず"
+        );
+        assert_eq!(restored.camp.starting_weapon, WeaponKind::Chain, "初期武器も保存/復元されるはず");
+        assert_eq!(restored.camp.lantern_type, LanternType::Warden, "灯のタイプも保存/復元されるはず");
+    }
+
+    #[test]
+    fn unlocked_weapon_ids_missing_bolt_gets_bolt_prepended_and_deduped() {
+        // 手動編集や将来のバージョン間往復で、Bolt(id=0)を含まない/idが
+        // 重複したセーブが来ても、光弾は必ず含まれ・重複は1件に畳まれる
+        // ことを保証する。
+        let save = GameSave {
+            unlocked_weapon_ids: vec![WeaponKind::Spray.save_id(), WeaponKind::Spray.save_id()],
+            ..GameSave::default()
+        };
+
+        let mut restored = EverlightState::new();
+        apply_save(&mut restored, &save);
+
+        assert_eq!(
+            restored.camp.unlocked_weapons,
+            vec![WeaponKind::Bolt, WeaponKind::Spray],
+            "光弾が先頭に補われ、散光の重複は1件に畳まれるはず"
         );
     }
 
@@ -242,5 +307,8 @@ mod tests {
             restored.camp.selected_rank, 1,
             "旧セーブにselected_rankが無くても範囲内(1)へ補正されるはず"
         );
+        assert_eq!(restored.camp.unlocked_weapons, vec![WeaponKind::Bolt], "旧セーブでは光弾のみ解放済みになるはず");
+        assert_eq!(restored.camp.starting_weapon, WeaponKind::Bolt);
+        assert_eq!(restored.camp.lantern_type, LanternType::Steady);
     }
 }

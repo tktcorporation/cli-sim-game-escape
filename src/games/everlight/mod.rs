@@ -106,6 +106,22 @@ impl EverlightGame {
                 _ => false,
             };
         }
+        if self.state.weapon_detail_modal.is_some() {
+            // 設定画面の確認ダイアログ (y=はい / n・q=いいえ) と同じ配色に
+            // 揃える。'q' をここで消費して `true` を返すことで、main.rs の
+            // 「ゲームが消費しなければメニューへ戻る」処理より先にモーダルを
+            // 閉じる — ポインタで開いたモーダルをキーボードだけでも
+            // 必ず閉じられるようにするため。
+            return match ch {
+                'y' => self.buy_and_notify(logic::confirm_weapon_detail_purchase),
+                'n' | 'q' => {
+                    logic::close_weapon_detail_modal(&mut self.state);
+                    sound::play(sound::CLICK);
+                    true
+                }
+                _ => false,
+            };
+        }
         match self.state.phase {
             Phase::Camp => match ch {
                 '1' => self.buy_and_notify(logic::purchase_light),
@@ -127,6 +143,10 @@ impl EverlightGame {
                 }
                 'h' => self.select_rank_and_notify(-1),
                 'l' => self.select_rank_and_notify(1),
+                '[' => self.cycle_starting_weapon_and_notify(-1),
+                ']' => self.cycle_starting_weapon_and_notify(1),
+                '{' => self.cycle_lantern_type_and_notify(-1),
+                '}' => self.cycle_lantern_type_and_notify(1),
                 _ => false,
             },
             Phase::Vigil => match ch {
@@ -158,6 +178,17 @@ impl EverlightGame {
             }
             return false;
         }
+        if self.state.weapon_detail_modal.is_some() {
+            return match action_id {
+                CAMP_WEAPON_DETAIL_CONFIRM => self.buy_and_notify(logic::confirm_weapon_detail_purchase),
+                CAMP_WEAPON_DETAIL_CLOSE => {
+                    logic::close_weapon_detail_modal(&mut self.state);
+                    sound::play(sound::CLICK);
+                    true
+                }
+                _ => false,
+            };
+        }
         match self.state.phase {
             Phase::Camp => match action_id {
                 CAMP_UPGRADE_LIGHT => self.buy_and_notify(logic::purchase_light),
@@ -179,6 +210,22 @@ impl EverlightGame {
                 }
                 CAMP_RANK_DOWN => self.select_rank_and_notify(-1),
                 CAMP_RANK_UP => self.select_rank_and_notify(1),
+                CAMP_STARTING_WEAPON_PREV => self.cycle_starting_weapon_and_notify(-1),
+                CAMP_STARTING_WEAPON_NEXT => self.cycle_starting_weapon_and_notify(1),
+                CAMP_LANTERN_TYPE_PREV => self.cycle_lantern_type_and_notify(-1),
+                CAMP_LANTERN_TYPE_NEXT => self.cycle_lantern_type_and_notify(1),
+                id if (CAMP_UNLOCK_WEAPON_BASE..CAMP_UNLOCK_WEAPON_BASE + state::WeaponKind::all().len() as u16)
+                    .contains(&id) =>
+                {
+                    match state::WeaponKind::from_save_id((id - CAMP_UNLOCK_WEAPON_BASE) as u8) {
+                        Some(kind) => {
+                            logic::open_weapon_detail_modal(&mut self.state, kind);
+                            sound::play(sound::CLICK);
+                            true
+                        }
+                        None => false,
+                    }
+                }
                 _ => false,
             },
             Phase::Vigil => match action_id {
@@ -236,6 +283,28 @@ impl EverlightGame {
             self.flush_save();
         } else {
             sound::play(sound::ERROR);
+        }
+        true
+    }
+
+    fn cycle_starting_weapon_and_notify(&mut self, delta: i32) -> bool {
+        let before = self.state.camp.starting_weapon;
+        logic::cycle_starting_weapon(&mut self.state, delta);
+        if self.state.camp.starting_weapon != before {
+            sound::play(sound::CLICK);
+            self.flush_save();
+        } else {
+            sound::play(sound::ERROR);
+        }
+        true
+    }
+
+    fn cycle_lantern_type_and_notify(&mut self, delta: i32) -> bool {
+        let before = self.state.camp.lantern_type;
+        logic::cycle_lantern_type(&mut self.state, delta);
+        if self.state.camp.lantern_type != before {
+            sound::play(sound::CLICK);
+            self.flush_save();
         }
         true
     }
@@ -489,6 +558,97 @@ mod tests {
         assert!(!game.handle_input(&click(LANE_CLICK_BASE)));
         assert!(game.handle_input(&click(BOON_OPTION_BASE + 1)));
         assert!(game.state.loadout.weapons.iter().any(|w| w.kind == WeaponKind::Aurora));
+    }
+
+    #[test]
+    fn tapping_a_weapon_unlock_row_opens_a_detail_modal_instead_of_buying_immediately() {
+        let mut game = EverlightGame::new();
+        game.state.ember = 1000;
+        let action_id = CAMP_UNLOCK_WEAPON_BASE + WeaponKind::Spray.save_id() as u16;
+        assert!(game.handle_input(&click(action_id)));
+        assert_eq!(game.state.weapon_detail_modal, Some(WeaponKind::Spray));
+        assert!(!game.state.camp.is_weapon_unlocked(WeaponKind::Spray), "タップした時点ではまだ購入されないはず");
+    }
+
+    #[test]
+    fn confirming_the_weapon_detail_modal_purchases_and_closes_it() {
+        let mut game = EverlightGame::new();
+        game.state.ember = 1000;
+        game.state.weapon_detail_modal = Some(WeaponKind::Spray);
+        assert!(game.handle_input(&click(CAMP_WEAPON_DETAIL_CONFIRM)));
+        assert!(game.state.camp.is_weapon_unlocked(WeaponKind::Spray));
+        assert_eq!(game.state.weapon_detail_modal, None, "購入が成立したらモーダルは閉じるはず");
+    }
+
+    #[test]
+    fn closing_the_weapon_detail_modal_does_not_purchase_anything() {
+        let mut game = EverlightGame::new();
+        game.state.ember = 1000;
+        game.state.weapon_detail_modal = Some(WeaponKind::Spray);
+        assert!(game.handle_input(&click(CAMP_WEAPON_DETAIL_CLOSE)));
+        assert_eq!(game.state.weapon_detail_modal, None);
+        assert!(!game.state.camp.is_weapon_unlocked(WeaponKind::Spray), "閉じるだけでは購入されないはず");
+    }
+
+    #[test]
+    fn weapon_detail_modal_blocks_background_camp_clicks_and_keys() {
+        let mut game = EverlightGame::new();
+        game.state.ember = 1000;
+        game.state.weapon_detail_modal = Some(WeaponKind::Spray);
+        assert!(!game.handle_input(&click(CAMP_UPGRADE_LIGHT)), "モーダル表示中は背後の購入操作を無視するはず");
+        assert_eq!(game.state.camp.light_level, 0);
+        assert!(!game.handle_input(&InputEvent::Key('1')));
+        assert_eq!(game.state.camp.light_level, 0, "モーダル表示中はキー操作も無視するはず");
+    }
+
+    #[test]
+    fn pressing_y_confirms_the_weapon_detail_modal_via_keyboard() {
+        let mut game = EverlightGame::new();
+        game.state.ember = 1000;
+        game.state.weapon_detail_modal = Some(WeaponKind::Spray);
+        assert!(game.handle_input(&InputEvent::Key('y')));
+        assert!(game.state.camp.is_weapon_unlocked(WeaponKind::Spray));
+        assert_eq!(game.state.weapon_detail_modal, None);
+    }
+
+    #[test]
+    fn pressing_n_or_q_closes_the_weapon_detail_modal_via_keyboard() {
+        for ch in ['n', 'q'] {
+            let mut game = EverlightGame::new();
+            game.state.ember = 1000;
+            game.state.weapon_detail_modal = Some(WeaponKind::Spray);
+            assert!(game.handle_input(&InputEvent::Key(ch)), "'{ch}' でモーダルを閉じられるはず");
+            assert_eq!(game.state.weapon_detail_modal, None);
+            assert!(!game.state.camp.is_weapon_unlocked(WeaponKind::Spray), "閉じるだけでは購入されないはず");
+        }
+    }
+
+    #[test]
+    fn pressing_q_with_the_modal_open_does_not_leave_the_game() {
+        // main.rs は 'q' を「ゲームが消費しなければメニューへ戻る」判定に
+        // 使う。モーダルの'q'ハンドラが `true` を返さないと、ポインタで
+        // 開いたモーダルを閉じたいだけの操作でゲームごと抜けてしまう。
+        let mut game = EverlightGame::new();
+        game.state.weapon_detail_modal = Some(WeaponKind::Spray);
+        let consumed = game.handle_input(&InputEvent::Key('q'));
+        assert!(consumed, "'q' はモーダルが消費し、上位のメニュー復帰処理へは渡らないはず");
+    }
+
+    #[test]
+    fn keyboard_can_cycle_starting_weapon_and_lantern_type() {
+        let mut game = EverlightGame::new();
+        game.state.ember = 1000;
+        logic::purchase_weapon_unlock(&mut game.state, WeaponKind::Spray);
+
+        assert!(game.handle_input(&InputEvent::Key(']')));
+        assert_eq!(game.state.camp.starting_weapon, WeaponKind::Spray, "']' で次の初期武器へ進むはず");
+        assert!(game.handle_input(&InputEvent::Key('[')));
+        assert_eq!(game.state.camp.starting_weapon, WeaponKind::Bolt, "'[' で前の初期武器へ戻るはず");
+
+        assert!(game.handle_input(&InputEvent::Key('}')));
+        assert_eq!(game.state.camp.lantern_type, state::LanternType::Swift, "'}}' で次の灯タイプへ進むはず");
+        assert!(game.handle_input(&InputEvent::Key('{')));
+        assert_eq!(game.state.camp.lantern_type, state::LanternType::Steady, "'{{' で前の灯タイプへ戻るはず");
     }
 
     #[test]

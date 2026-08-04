@@ -146,6 +146,29 @@ fn battlefield_block(is_narrow: bool) -> Block<'static> {
         .title(" 戦場 ")
 }
 
+/// 戦場に描画する敵種の一覧。`EnemyKind::all()` と食い違うと、新種を
+/// 追加した時に「湧いているのに一切描画されない」不具合になる —
+/// `enemy_kinds_render_list_covers_every_enemy_kind` テストで一致を検証する。
+const ENEMY_KINDS: [EnemyKind; 17] = [
+    EnemyKind::Wisp,
+    EnemyKind::Husk,
+    EnemyKind::Swarmling,
+    EnemyKind::Elite,
+    EnemyKind::Boss,
+    EnemyKind::Sniper,
+    EnemyKind::Caster,
+    EnemyKind::Wraith,
+    EnemyKind::Shielded,
+    EnemyKind::Splitter,
+    EnemyKind::SprayShielded,
+    EnemyKind::AuroraShielded,
+    EnemyKind::Charger,
+    EnemyKind::ShadowWitch,
+    EnemyKind::Serpent,
+    EnemyKind::FullMoonBoss,
+    EnemyKind::Brute,
+];
+
 fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
     let is_narrow = is_narrow_layout(area.width);
     let block = battlefield_block(is_narrow);
@@ -187,24 +210,6 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         0.8,
     );
 
-    const ENEMY_KINDS: [EnemyKind; 16] = [
-        EnemyKind::Wisp,
-        EnemyKind::Husk,
-        EnemyKind::Swarmling,
-        EnemyKind::Elite,
-        EnemyKind::Boss,
-        EnemyKind::Sniper,
-        EnemyKind::Caster,
-        EnemyKind::Wraith,
-        EnemyKind::Shielded,
-        EnemyKind::Splitter,
-        EnemyKind::SprayShielded,
-        EnemyKind::AuroraShielded,
-        EnemyKind::Charger,
-        EnemyKind::ShadowWitch,
-        EnemyKind::Serpent,
-        EnemyKind::FullMoonBoss,
-    ];
     let mut enemy_groups: Vec<(Vec<(f64, f64)>, Color)> = Vec::new();
     for kind in ENEMY_KINDS {
         let pts: Vec<(f64, f64)> = state
@@ -320,6 +325,32 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         Vec::new()
     };
 
+    // 雷光もAurora/流星同様、連鎖の命中そのものはヒットスキャンで弾道が
+    // 無い。`chain_flash` が立っている間だけ、実際に連鎖が通過した経路
+    // (`chain_flash_points`、起点→末端の順) を線で結んで見せる。
+    let chain_lines: Vec<(f64, f64, f64, f64)> = if state.chain_flash.is_active() {
+        state
+            .chain_flash_points
+            .windows(2)
+            .map(|w| {
+                let (x1, y1) = w[0];
+                let (x2, y2) = w[1];
+                (x1, world_to_canvas_y(y1), x2, world_to_canvas_y(y2))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // 連鎖が1体で終わると`windows(2)`は何も返さず線が引けない。極光/流星の
+    // 「発火した事実は必ず見せる」という前提が崩れないよう、単体ヒットの
+    // 場合はその1点に光点を描く。
+    let chain_single_hit_pts: Vec<(f64, f64)> = if state.chain_flash.is_active() && state.chain_flash_points.len() == 1 {
+        let (x, y) = state.chain_flash_points[0];
+        canvas_fx::filled_ellipse_points(x, world_to_canvas_y(y), 1.6, 1.6, 0.5)
+    } else {
+        Vec::new()
+    };
+
     // 光輪は近接の常時判定武器で、Aurora同様に実体弾を撃たない。判定半径
     // (`halo_radius`) そのままのリングを常時描き、周回する光点で「回転して
     // いる」ことを視覚的に伝える。常時リングは常に現在の`lantern.x`を
@@ -359,6 +390,12 @@ fn render_battlefield(state: &EverlightState, f: &mut Frame, area: Rect, click_s
         .paint(move |ctx| {
             for &(x1, y1, x2, y2) in &telegraph_lines {
                 ctx.draw(&CanvasLine { x1, y1, x2, y2, color: Color::Red });
+            }
+            for &(x1, y1, x2, y2) in &chain_lines {
+                ctx.draw(&CanvasLine { x1, y1, x2, y2, color: WeaponKind::Chain.color() });
+            }
+            if !chain_single_hit_pts.is_empty() {
+                ctx.draw(&Points { coords: &chain_single_hit_pts, color: WeaponKind::Chain.color() });
             }
             if !aurora_band_pts.is_empty() {
                 // 極光の武器色そのまま (LightYellow) だと灯・宝箱の発光と
@@ -569,7 +606,130 @@ fn render_camp(state: &EverlightState, f: &mut Frame, area: Rect, click_state: &
     .alignment(Alignment::Center);
     f.render_widget(title, chunks[0]);
 
-    render_camp_body(state, f, chunks[1], click_state, borders);
+    if is_narrow {
+        render_camp_body(state, f, chunks[1], click_state, borders);
+    } else {
+        // ワイドレイアウトのみ右側に情景パネルを置く。ナロー(モバイル)では
+        // 画面幅が足りず、リストの可読性を犠牲にしてまで確保する価値が
+        // 無いため素通りする。
+        let hchunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(30), Constraint::Length(22)])
+            .split(chunks[1]);
+        render_camp_body(state, f, hchunks[0], click_state, borders);
+        render_camp_ambience(f, hchunks[1], borders);
+    }
+    if state.weapon_detail_modal.is_some() {
+        render_weapon_detail_modal(state, f, chunks[1], click_state);
+    }
+}
+
+/// 拠点画面ワイドレイアウトの右側に置く、点々表現の情景パネル。夜番の
+/// 戦闘画面と同じ Canvas+Braille の質感を待機画面にも持ち込むための装飾。
+/// クリック判定は持たない (常にBlockの背景として完結する)。
+fn render_camp_ambience(f: &mut Frame, area: Rect, borders: Borders) {
+    const W: f64 = 40.0;
+    const H: f64 = 60.0;
+    let cx = W / 2.0;
+    let cy = H * 0.42;
+
+    // 灯本体: 中心の明るい核 + 外側ににじむ淡い光の2層 + 輪郭のリング。
+    let core = canvas_fx::filled_ellipse_points(cx, cy, 2.2, 2.2, 0.5);
+    let glow = canvas_fx::filled_ellipse_points(cx, cy, 5.5, 5.5, 0.6);
+    let halo = canvas_fx::ring_points(cx, cy, 8.0, 0.15);
+
+    // 立ち上る残り火。座標は毎フレーム同じ (アニメーションはしない) が、
+    // 周波数の異なる複数のsin波を重ねることで手作業で散らしたような
+    // 自然な配置にする — 単純な等間隔グリッドだと機械的に見えるため。
+    let embers: Vec<(f64, f64)> = (0..26)
+        .map(|i| {
+            let t = i as f64;
+            let x = cx + (t * 2.3).sin() * (4.0 + (t * 0.7).cos() * 10.0);
+            let y = H - (t * 7.3 + (t * 1.9).sin() * 6.0) % (H - 4.0) - 2.0;
+            (x.clamp(1.0, W - 1.0), y)
+        })
+        .collect();
+
+    let canvas = Canvas::default()
+        .x_bounds([0.0, W])
+        .y_bounds([0.0, H])
+        .marker(Marker::Braille)
+        .paint(move |ctx| {
+            ctx.draw(&Points { coords: &embers, color: Color::Rgb(120, 90, 40) });
+            ctx.draw(&Points { coords: &halo, color: Color::Rgb(255, 200, 80) });
+            ctx.draw(&Points { coords: &glow, color: Color::Rgb(200, 140, 40) });
+            ctx.draw(&Points { coords: &core, color: Color::LightYellow });
+        })
+        .block(
+            Block::default()
+                .borders(borders)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(" 灯 "),
+        );
+    f.render_widget(canvas, area);
+}
+
+/// 武器解放欄でタップした武器の詳細モーダル。`render_boon_modal` と同じ
+/// 「選択→モーダル」の作法 (同じ`<pre>`上への上書き描画、別DOM要素は
+/// 生やさない) を拠点画面にも揃える。
+fn render_weapon_detail_modal(state: &EverlightState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+    let Some(kind) = state.weapon_detail_modal else {
+        return;
+    };
+
+    let unlocked = state.camp.is_weapon_unlocked(kind);
+    let mut cl = ClickableList::new();
+    cl.push(Line::from(""));
+    cl.push(Line::from(Span::styled(
+        format!(" {}", kind.name()),
+        Style::default().fg(kind.color()).add_modifier(Modifier::BOLD),
+    )));
+    cl.push(Line::from(Span::styled(format!(" {}", kind.summary()), Style::default().fg(Color::Gray))));
+    cl.push(Line::from(""));
+
+    if unlocked {
+        cl.push(Line::from(Span::styled(" ✓ 解放済み", Style::default().fg(Color::Green))));
+    } else if let Some(cost) = kind.unlock_cost() {
+        let affordable = state.ember >= cost;
+        let color = if affordable { Color::LightGreen } else { Color::DarkGray };
+        cl.push_clickable(
+            Line::from(Span::styled(format!(" ▶ 解放する — {cost}残光", cost = cost), Style::default().fg(color))),
+            actions::CAMP_WEAPON_DETAIL_CONFIRM,
+        );
+        if !affordable {
+            cl.push(Line::from(Span::styled(
+                format!("    残光が足りない (所持 {})", state.ember),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    cl.push(Line::from(""));
+    cl.push_clickable(
+        Line::from(Span::styled(" 閉じる", Style::default().fg(Color::Gray))),
+        actions::CAMP_WEAPON_DETAIL_CLOSE,
+    );
+
+    // 固定行数だと内容 (残光不足の注記等) が増えた時に「閉じる」がborder外へ
+    // 押し出され、タップできなくなる (モーダルに詰む) 回帰を招く。下で
+    // wrap=trueで render するため、論理行数 (`cl.len()`) ではなく実際に
+    // 折り返された後の行数 (`visual_height`) から高さを決める必要がある —
+    // 狭い端末幅では新武器3種の長い説明文が折り返され、論理行数のままだと
+    // 依然として閉じるボタンが押し出される。
+    let modal_w = area.width.saturating_sub(4).clamp(1, 48);
+    let modal_h = (cl.visual_height(modal_w.saturating_sub(2)) + 2).min(area.height);
+    let modal_area = Rect::new(
+        area.x + (area.width.saturating_sub(modal_w)) / 2,
+        area.y + (area.height.saturating_sub(modal_h)) / 2,
+        modal_w,
+        modal_h,
+    );
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(kind.color()))
+        .title(" 武器詳細 ");
+    let mut cs = click_state.borrow_mut();
+    cl.render(f, modal_area, block, &mut cs, true, 0);
 }
 
 fn render_camp_body(
@@ -588,6 +748,11 @@ fn render_camp_body(
     cl.push(Line::from(""));
 
     push_rank_selector(&mut cl, state);
+    cl.push(Line::from(""));
+
+    push_starting_weapon_selector(&mut cl, state);
+    cl.push(Line::from(""));
+    push_lantern_type_selector(&mut cl, state);
     cl.push(Line::from(""));
 
     cl.push_clickable(
@@ -612,7 +777,7 @@ fn render_camp_body(
     push_upgrade_row(
         &mut cl,
         "灯心",
-        &format!("最大灯 +12 (現在 {})", state.camp.light_max()),
+        &format!("最大灯 +{} (現在 {})", state.camp.light_increment(), state.camp.light_max()),
         state.camp.light_level,
         state.camp.light_cost(),
         state.ember,
@@ -664,6 +829,9 @@ fn render_camp_body(
             actions::CAMP_UPGRADE_EXTRA_WEAPON_SLOT,
         );
     }
+
+    cl.push(Line::from(""));
+    push_weapon_unlock_section(&mut cl, state);
 
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
@@ -720,6 +888,77 @@ fn push_rank_selector(cl: &mut ClickableList, state: &EverlightState) {
     )));
 }
 
+/// 夜番開始時に持つ武器の選択。解放済みの武器のみを巡回する
+/// (`logic::cycle_starting_weapon`)。
+fn push_starting_weapon_selector(cl: &mut ClickableList, state: &EverlightState) {
+    let selected = state.camp.effective_starting_weapon();
+    cl.push(Line::from(Span::styled(
+        " 初期武器",
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )));
+    cl.push(Line::from(Span::styled(
+        format!(" {} — {}", selected.name(), selected.summary()),
+        Style::default().fg(selected.color()),
+    )));
+    let multi = WeaponKind::all().iter().filter(|&&k| state.camp.is_weapon_unlocked(k)).count() > 1;
+    let color = if multi { Color::LightCyan } else { Color::DarkGray };
+    cl.push_clickable(Line::from(Span::styled(" ◀ 前の武器", Style::default().fg(color))), actions::CAMP_STARTING_WEAPON_PREV);
+    cl.push_clickable(Line::from(Span::styled(" ▶ 次の武器", Style::default().fg(color))), actions::CAMP_STARTING_WEAPON_NEXT);
+}
+
+/// 灯のタイプの選択。武器と違い常に3種すべてから自由に選べる
+/// (`logic::cycle_lantern_type`)。
+fn push_lantern_type_selector(cl: &mut ClickableList, state: &EverlightState) {
+    let selected = state.camp.lantern_type;
+    cl.push(Line::from(Span::styled(
+        " 灯のタイプ",
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )));
+    cl.push(Line::from(format!(" {} — {}", selected.name(), selected.summary())));
+    cl.push_clickable(
+        Line::from(Span::styled(" ◀ 前のタイプ", Style::default().fg(Color::LightCyan))),
+        actions::CAMP_LANTERN_TYPE_PREV,
+    );
+    cl.push_clickable(
+        Line::from(Span::styled(" ▶ 次のタイプ", Style::default().fg(Color::LightCyan))),
+        actions::CAMP_LANTERN_TYPE_NEXT,
+    );
+}
+
+/// 武器解放の一覧。タップすると `render_weapon_detail_modal` の詳細
+/// モーダルが開く (解放済みは確認、未解放は解放ボタン付き)。
+fn push_weapon_unlock_section(cl: &mut ClickableList, state: &EverlightState) {
+    cl.push(Line::from(Span::styled(
+        " 武器解放",
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )));
+    for &kind in WeaponKind::all() {
+        let action_id = actions::CAMP_UNLOCK_WEAPON_BASE + kind.save_id() as u16;
+        if state.camp.is_weapon_unlocked(kind) {
+            cl.push_clickable(
+                Line::from(Span::styled(
+                    format!(" ✓ {} 解放済み — {}", kind.name(), kind.summary()),
+                    Style::default().fg(kind.color()),
+                )),
+                action_id,
+            );
+            continue;
+        }
+        let Some(cost) = kind.unlock_cost() else {
+            continue;
+        };
+        let affordable = state.ember >= cost;
+        let color = if affordable { Color::LightCyan } else { Color::DarkGray };
+        cl.push_clickable(
+            Line::from(Span::styled(
+                format!(" {} — {cost}残光 ({})", kind.name(), kind.summary()),
+                Style::default().fg(color),
+            )),
+            action_id,
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn push_upgrade_row(
     cl: &mut ClickableList,
@@ -752,6 +991,13 @@ mod tests {
     use ratzilla::ratatui::Terminal;
 
     fn render_to_test_backend(state: &EverlightState, width: u16, height: u16) {
+        render_to_test_backend_with_click_state(state, width, height);
+    }
+
+    /// `render_to_test_backend` の戻り値ありバージョン。描画後に実際に
+    /// 登録されたクリック対象を検査したいテスト用 (モーダルのボタンが
+    /// border外へ押し出されて登録されない、といった回帰を検知するため)。
+    fn render_to_test_backend_with_click_state(state: &EverlightState, width: u16, height: u16) -> Rc<RefCell<ClickState>> {
         let cs = Rc::new(RefCell::new(ClickState::new()));
         cs.borrow_mut().terminal_cols = width;
         cs.borrow_mut().terminal_rows = height;
@@ -761,6 +1007,23 @@ mod tests {
                 render(state, f, f.area(), &cs);
             })
             .unwrap();
+        cs
+    }
+
+    /// `click_state` に登録された領域のうち `action_id` を返すセルが
+    /// 1つでもあるか。
+    fn has_click_target(click_state: &Rc<RefCell<ClickState>>, cols: u16, rows: u16, action_id: u16) -> bool {
+        let cs = click_state.borrow();
+        (0..rows).any(|row| (0..cols).any(|col| cs.hit_test(col, row) == Some(action_id)))
+    }
+
+    #[test]
+    fn enemy_kinds_render_list_covers_every_enemy_kind() {
+        // ENEMY_KINDS が EnemyKind::all() を取りこぼすと、その敵種は湧いて
+        // いるのに一切描画されない (過去に実際に踏んだ不具合パターン)。
+        let all: std::collections::HashSet<_> = EnemyKind::all().iter().collect();
+        let rendered: std::collections::HashSet<_> = ENEMY_KINDS.iter().collect();
+        assert_eq!(all, rendered, "ENEMY_KINDSがEnemyKind::all()と食い違っている");
     }
 
     #[test]
@@ -768,6 +1031,50 @@ mod tests {
         let state = EverlightState::new();
         render_to_test_backend(&state, 40, 30);
         render_to_test_backend(&state, 100, 30);
+    }
+
+    #[test]
+    fn camp_renders_without_panicking_with_weapon_detail_modal_open() {
+        let mut state = EverlightState::new();
+        state.weapon_detail_modal = Some(WeaponKind::Meteor);
+        render_to_test_backend(&state, 40, 30);
+        render_to_test_backend(&state, 100, 30);
+
+        state.ember = 1000;
+        state.camp.unlocked_weapons.push(WeaponKind::Meteor);
+        state.weapon_detail_modal = Some(WeaponKind::Meteor);
+        render_to_test_backend(&state, 100, 30);
+    }
+
+    #[test]
+    fn weapon_detail_modal_close_button_is_always_reachable() {
+        // 「残光不足」の注記が出る最長の内容 (未解放+購入不可) でも、
+        // 閉じるボタンがborder外へ押し出されてタップ不能にならないことを
+        // 確認する回帰テスト。modal_h を固定値や論理行数 (`cl.len()`) から
+        // 決めると、狭い端末幅で説明文が折り返された時に壊れる —
+        // 実機のスマホ幅相当 (index.html の targetCols 計算で31〜45列
+        // 程度になる) を含む範囲を、説明文が最も長い新武器3種を含む
+        // 全武器種でスイープする。
+        let h = 30u16;
+        for &kind in WeaponKind::all() {
+            let mut state = EverlightState::new();
+            state.ember = 0;
+            state.weapon_detail_modal = Some(kind);
+            for w in 20u16..=50 {
+                let cs = render_to_test_backend_with_click_state(&state, w, h);
+                assert!(
+                    has_click_target(&cs, w, h, actions::CAMP_WEAPON_DETAIL_CLOSE),
+                    "{kind:?} at {w}x{h}: 閉じるボタンがクリック対象として登録されていない"
+                );
+            }
+        }
+
+        // タイトル帯を除いた本体が薄い、縦にも狭いケース。
+        let mut state = EverlightState::new();
+        state.ember = 0;
+        state.weapon_detail_modal = Some(WeaponKind::Chain);
+        let cs = render_to_test_backend_with_click_state(&state, 40, 16);
+        assert!(has_click_target(&cs, 40, 16, actions::CAMP_WEAPON_DETAIL_CLOSE));
     }
 
     #[test]
