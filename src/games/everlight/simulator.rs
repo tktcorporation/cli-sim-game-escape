@@ -25,6 +25,7 @@ fn auto_play_tick(state: &mut EverlightState, tick_index: u64) {
                 || logic::purchase_power(state)
                 || logic::purchase_extra_slot(state)
                 || logic::purchase_extra_weapon_slot(state)
+                || WeaponKind::all().iter().any(|&k| logic::purchase_weapon_unlock(state, k))
             {}
             logic::select_rank(state, state.camp.max_unlocked_rank);
             logic::start_vigil(state);
@@ -291,6 +292,13 @@ fn new_enemy_kinds_and_meteor_weapon_appear_over_a_long_run() {
         );
     }
     assert!(seen_meteor, "流星が80000tickの自動プレイで一度も獲得されなかった — 武器スロット拡張が到達不能な可能性");
+
+    for kind in [WeaponKind::Frost, WeaponKind::Chain, WeaponKind::Wave] {
+        assert!(
+            state.camp.is_weapon_unlocked(kind),
+            "{kind:?} が80000tickの自動プレイで一度も解放されなかった — unlock_costが高すぎる可能性"
+        );
+    }
 }
 
 /// 拠点の恒久強化 (`light_level`/`power_level`) には上限が無いため、波の
@@ -323,6 +331,13 @@ fn even_maxed_out_investment_eventually_ends_every_vigil() {
         state.camp.light_level = 150;
         state.camp.power_level = 150;
         state.camp.max_unlocked_rank = 5;
+        // 「極端な投資」の一部として、武器も全種解放し、武器/受動効果の
+        // 拡張枠も両方買っておく — どれか未購入のままだと恒久強化をいくら
+        // 積んでも装備が偏ったまま頭打ちになり、このテストが検証したい
+        // 「escalationの強さ」自体を測れなくなる。
+        state.camp.unlocked_weapons = WeaponKind::all().to_vec();
+        state.camp.extra_weapon_slot_level = 1;
+        state.camp.extra_slot_level = 1;
         logic::select_rank(&mut state, 5);
         logic::start_vigil(&mut state);
 

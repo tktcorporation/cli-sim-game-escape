@@ -359,6 +359,10 @@ pub struct Enemy {
     /// `None` のまま使わない (敵種ごとに専用フィールドを増やすより、汎用の
     /// 1フィールドに寄せて `Enemy` リテラルの増殖を防ぐ)。
     pub ranged_charge: Option<u32>,
+    /// 氷華 (`WeaponKind::Frost`) の命中で残っている減速の残りtick。
+    /// 敵種を問わず任意の個体が対象になり得るため `EnemyKind` 側ではなく
+    /// こちらに持たせる。0は未減速。
+    pub slow_ticks: u32,
 }
 
 // ── 弾 ─────────────────────────────────────────────────────────
@@ -376,11 +380,87 @@ pub enum WeaponKind {
     /// 流星 — 敵が最も密集している地点へ範囲着弾する。単体特化の光弾や
     /// 縦一列の極光では対応しにくい、横に広がった密集への回答。
     Meteor,
+    /// 氷華 — 光弾と同じ自動照準の単発だが、命中した敵を一定時間
+    /// 大きく減速させる。ダメージそのものは光弾より控えめで、
+    /// 「足止めして他の武器の的にする」制圧寄りの役割を持つ。
+    Frost,
+    /// 雷光 — 命中した敵から近くの未着弾の敵へ連鎖しながら削る
+    /// ヒットスキャン。跳ぶたびにダメージは減衰するが、密集した敵を
+    /// 数珠つなぎに巻き込める。
+    Chain,
+    /// 波光 — 灯のレーンを正弦波で蛇行しながら進む貫通弾。直進する
+    /// 光弾/散光と違い、レーンの左右にはみ出しながら進むため、
+    /// 隣接レーンへ逃げた敵も巻き込みやすい。
+    Wave,
 }
 
 impl WeaponKind {
     pub fn all() -> &'static [WeaponKind] {
-        &[WeaponKind::Bolt, WeaponKind::Spray, WeaponKind::Aurora, WeaponKind::Halo, WeaponKind::Meteor]
+        &[
+            WeaponKind::Bolt,
+            WeaponKind::Spray,
+            WeaponKind::Aurora,
+            WeaponKind::Halo,
+            WeaponKind::Meteor,
+            WeaponKind::Frost,
+            WeaponKind::Chain,
+            WeaponKind::Wave,
+        ]
+    }
+
+    /// 解放に必要な残光コスト。`None` は最初から解放済み (光弾のみ) を表す。
+    /// 光弾以外は拠点で解放するまで初期武器にも宝箱の候補にもならない
+    /// (`CampUpgrades::is_weapon_unlocked`/`logic::candidate_boons` 参照)。
+    ///
+    /// 既存4種 (散光/極光/光輪/流星) はこれまで無条件で使えていた。解放制に
+    /// 移行しても最初の1〜2回の夜番でほぼ揃う程度の安さに抑えているのは、
+    /// これらは既存のバランス調整 (`simulator::even_maxed_out_investment_*`
+    /// 等) がこの4種すぐ使える前提で成り立っているため — 高くしすぎると
+    /// 装備が長期間Bolt単体に偏り、既存の難易度カーブが破綻する
+    /// (`simulator::new_enemy_kinds_and_meteor_weapon_appear_over_a_long_run`
+    /// で実測して確認済み)。新武器3種 (氷華/雷光/波光) は「だんだん増やして
+    /// いく」体験の主眼なので、既存4種よりはっきり高価にして解放順そのもの
+    /// が進行の目安になるようにしている。
+    pub fn unlock_cost(self) -> Option<u32> {
+        match self {
+            WeaponKind::Bolt => None,
+            WeaponKind::Spray => Some(15),
+            WeaponKind::Aurora => Some(25),
+            WeaponKind::Halo => Some(35),
+            WeaponKind::Meteor => Some(50),
+            WeaponKind::Frost => Some(120),
+            WeaponKind::Chain => Some(160),
+            WeaponKind::Wave => Some(200),
+        }
+    }
+
+    /// セーブデータ上の安定したID。`all()`の並び順が変わっても既存セーブの
+    /// 解放状況が壊れないよう、宣言順とは独立に固定する。
+    pub fn save_id(self) -> u8 {
+        match self {
+            WeaponKind::Bolt => 0,
+            WeaponKind::Spray => 1,
+            WeaponKind::Aurora => 2,
+            WeaponKind::Halo => 3,
+            WeaponKind::Meteor => 4,
+            WeaponKind::Frost => 5,
+            WeaponKind::Chain => 6,
+            WeaponKind::Wave => 7,
+        }
+    }
+
+    pub fn from_save_id(id: u8) -> Option<Self> {
+        match id {
+            0 => Some(WeaponKind::Bolt),
+            1 => Some(WeaponKind::Spray),
+            2 => Some(WeaponKind::Aurora),
+            3 => Some(WeaponKind::Halo),
+            4 => Some(WeaponKind::Meteor),
+            5 => Some(WeaponKind::Frost),
+            6 => Some(WeaponKind::Chain),
+            7 => Some(WeaponKind::Wave),
+            _ => None,
+        }
     }
 
     pub fn name(self) -> &'static str {
@@ -390,6 +470,9 @@ impl WeaponKind {
             WeaponKind::Aurora => "極光",
             WeaponKind::Halo => "光輪",
             WeaponKind::Meteor => "流星",
+            WeaponKind::Frost => "氷華",
+            WeaponKind::Chain => "雷光",
+            WeaponKind::Wave => "波光",
         }
     }
 
@@ -400,6 +483,9 @@ impl WeaponKind {
             WeaponKind::Aurora => "灯のレーンを縦に薙ぐ",
             WeaponKind::Halo => "灯を周回する光の輪",
             WeaponKind::Meteor => "密集地点へ範囲着弾する隕石",
+            WeaponKind::Frost => "命中した敵を減速させる自動照準弾",
+            WeaponKind::Chain => "近くの敵へ連鎖するヒットスキャン",
+            WeaponKind::Wave => "レーンを蛇行しながら進む貫通弾",
         }
     }
 
@@ -410,6 +496,9 @@ impl WeaponKind {
             WeaponKind::Aurora => Color::LightYellow,
             WeaponKind::Halo => Color::LightMagenta,
             WeaponKind::Meteor => Color::Gray,
+            WeaponKind::Frost => Color::Rgb(150, 220, 255),
+            WeaponKind::Chain => Color::Rgb(255, 215, 0),
+            WeaponKind::Wave => Color::Rgb(80, 200, 180),
         }
     }
 
@@ -417,16 +506,24 @@ impl WeaponKind {
     /// 対応する受動効果には同じ色を与えている (`PassiveKind::color`) —
     /// レシピそのものは説明せず、色の一致だけをヒントとして残すことで
     /// プレイヤー自身に発見してもらう (「点と点を線にする」快感)。
-    pub fn evolution_partner(self) -> PassiveKind {
+    /// `None` を返す武器 (氷華/雷光/波光) は進化を持たない —
+    /// 受動効果側も5種のまま (1:1対応) を保っており、新武器のぶんだけ
+    /// 受動効果を追加で作ると1種に対して複数の武器が進化相方候補になり
+    /// 「色を揃える」ヒントの一意性が崩れる。進化を持たせるかは、まず
+    /// この3種の使用感を見てから判断する (今後の課題として別途記録)。
+    pub fn evolution_partner(self) -> Option<PassiveKind> {
         match self {
-            WeaponKind::Bolt => PassiveKind::FireRate,
-            WeaponKind::Spray => PassiveKind::Power,
-            WeaponKind::Aurora => PassiveKind::Radiance,
-            WeaponKind::Halo => PassiveKind::Magnet,
-            WeaponKind::Meteor => PassiveKind::Haste,
+            WeaponKind::Bolt => Some(PassiveKind::FireRate),
+            WeaponKind::Spray => Some(PassiveKind::Power),
+            WeaponKind::Aurora => Some(PassiveKind::Radiance),
+            WeaponKind::Halo => Some(PassiveKind::Magnet),
+            WeaponKind::Meteor => Some(PassiveKind::Haste),
+            WeaponKind::Frost | WeaponKind::Chain | WeaponKind::Wave => None,
         }
     }
 
+    /// `evolution_partner()` が `None` の武器では選ばれない
+    /// (`logic::candidate_boons` 参照) ため、以下の3種の値は現状使われない。
     pub fn evolved_name(self) -> &'static str {
         match self {
             WeaponKind::Bolt => "連光弾",
@@ -434,6 +531,9 @@ impl WeaponKind {
             WeaponKind::Aurora => "極光炉",
             WeaponKind::Halo => "重光輪",
             WeaponKind::Meteor => "隕石雨",
+            WeaponKind::Frost => "氷華",
+            WeaponKind::Chain => "雷光",
+            WeaponKind::Wave => "波光",
         }
     }
 }
@@ -468,6 +568,10 @@ impl OwnedWeapon {
             // 引き上げている (旧: `2 + (l - 1)` の丁度2倍)。
             WeaponKind::Halo => 4 + (l - 1) * 2,
             WeaponKind::Meteor => 22 + (l - 1) * 8,
+            // 光弾より控えめ — ダメージではなく減速そのものが価値の武器。
+            WeaponKind::Frost => 6 + (l - 1) * 2,
+            WeaponKind::Chain => 10 + (l - 1) * 4,
+            WeaponKind::Wave => 7 + (l - 1) * 3,
         };
         if self.evolved {
             (base as f64 * 1.6).round() as i32
@@ -484,6 +588,9 @@ impl OwnedWeapon {
             WeaponKind::Aurora => 26u32.saturating_sub((l - 1) * 3).max(14),
             WeaponKind::Halo => 5,
             WeaponKind::Meteor => 42u32.saturating_sub((l - 1) * 5).max(24),
+            WeaponKind::Frost => 10u32.saturating_sub(l - 1).max(6),
+            WeaponKind::Chain => 24u32.saturating_sub((l - 1) * 2).max(14),
+            WeaponKind::Wave => 16u32.saturating_sub(l - 1).max(10),
         };
         if self.evolved {
             ((base as f64) * 0.75).round().max(3.0) as u32
@@ -534,6 +641,21 @@ impl OwnedWeapon {
         } else {
             base
         }
+    }
+
+    /// 氷華が命中した敵を減速させる時間 (tick)。
+    pub fn frost_slow_ticks(&self) -> u32 {
+        20 + (self.level - 1) * 4
+    }
+
+    /// 雷光が連鎖する最大対象数 (起点を含む)。
+    pub fn chain_max_targets(&self) -> u32 {
+        2 + self.level / 2
+    }
+
+    /// 雷光が次の対象を探す範囲 (ワールド単位)。
+    pub fn chain_radius(&self) -> f64 {
+        12.0 + (self.level as f64 - 1.0) * 1.5
     }
 }
 
@@ -686,6 +808,11 @@ pub struct Projectile {
     /// この履歴が無いと同じ相手へ毎tick命中し続けて貫通を無駄に消費して
     /// しまう。
     pub hit_enemy_ids: Vec<u32>,
+    /// 氷華の弾が命中した敵に与える減速の長さ (tick)。0なら通常弾
+    /// (`WeaponKind::Frost` 以外は常に0)。発射時のレベルで決まる値を
+    /// 弾自身に焼き込んでおくことで、命中判定側は武器の現在レベルを
+    /// 逆引きせずに済む。
+    pub slow_ticks_on_hit: u32,
 }
 
 /// 詠唱者 (`EnemyKind::Caster`) が撃つ実体弾。プレイヤー側の `Projectile`
@@ -771,12 +898,82 @@ impl Lantern {
     }
 }
 
+// ── 灯のタイプ (プレイスタイル選択) ───────────────────────────────
+
+/// 拠点で選べる灯の性質。武器のように解放制ではなく、常に3種から自由に
+/// 選べる — プレイの「戦略」ではなく「好み」を反映させる軸として、
+/// 武器解放とは別の性格の選択肢にするため。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LanternType {
+    /// 常灯。移動速度・最大残光ともに補正なし (これまでの挙動そのもの)。
+    Steady,
+    /// 疾風。移動速度+35%の代わりに最大残光-10%。
+    Swift,
+    /// 守灯。最大残光+15%の代わりに移動速度-15%。
+    Warden,
+}
+
+impl LanternType {
+    pub fn all() -> &'static [LanternType] {
+        &[LanternType::Steady, LanternType::Swift, LanternType::Warden]
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            LanternType::Steady => "常灯",
+            LanternType::Swift => "疾風",
+            LanternType::Warden => "守灯",
+        }
+    }
+
+    pub fn summary(self) -> &'static str {
+        match self {
+            LanternType::Steady => "標準の灯。補正なし",
+            LanternType::Swift => "移動+35% / 最大残光-10%",
+            LanternType::Warden => "最大残光+15% / 移動-15%",
+        }
+    }
+
+    pub fn move_speed_mult(self) -> f64 {
+        match self {
+            LanternType::Steady => 1.0,
+            LanternType::Swift => 1.35,
+            LanternType::Warden => 0.85,
+        }
+    }
+
+    pub fn light_max_mult(self) -> f64 {
+        match self {
+            LanternType::Steady => 1.0,
+            LanternType::Swift => 0.9,
+            LanternType::Warden => 1.15,
+        }
+    }
+
+    pub fn save_id(self) -> u8 {
+        match self {
+            LanternType::Steady => 0,
+            LanternType::Swift => 1,
+            LanternType::Warden => 2,
+        }
+    }
+
+    pub fn from_save_id(id: u8) -> Option<Self> {
+        match id {
+            0 => Some(LanternType::Steady),
+            1 => Some(LanternType::Swift),
+            2 => Some(LanternType::Warden),
+            _ => None,
+        }
+    }
+}
+
 // ── 拠点の恒久強化 ─────────────────────────────────────────────
 
 /// 拠点で積み上がる恒久進行。灯が消えても/リロードしてもリセットされない。
 /// 残光で購入する強化 (`light_level`/`power_level`/`extra_slot_level`/
-/// `extra_weapon_slot_level`) と、夜番を「Dawn」まで走り切ることで解放
-/// される `max_unlocked_rank` の2系統を持つ。
+/// `extra_weapon_slot_level`/武器解放) と、夜番を「Dawn」まで走り切ることで
+/// 解放される `max_unlocked_rank` の2系統を持つ。
 #[derive(Clone, Debug)]
 pub struct CampUpgrades {
     pub light_level: u32,
@@ -786,9 +983,9 @@ pub struct CampUpgrades {
     /// なる (5種全ての進化レシピを狙う動機になる)。
     pub extra_slot_level: u32,
     /// 0 または 1 (一度きりの解放): 武器スロットを5枠目まで拡張する。
-    /// `WeaponKind::all()` が5種 (流星の追加で4→5) になったため、これを
-    /// 買わない限り必ず1種は持てない — `extra_slot_level` と同じ理由で、
-    /// 受動効果と同じ「全種を持つには拠点投資が要る」構図に揃えている。
+    /// `WeaponKind::all()` が8種になったため、これを買わない限り必ず
+    /// 1種は持てない — `extra_slot_level` と同じ理由で、受動効果と
+    /// 同じ「全種を持つには拠点投資が要る」構図に揃えている。
     pub extra_weapon_slot_level: u32,
     /// 挑戦を許された最大の夜番ランク。常に1以上 (ランク1は最初から
     /// 挑戦可能)。現在のランクの最終波 (`milestone_wave`) のボスを倒すと
@@ -796,6 +993,13 @@ pub struct CampUpgrades {
     pub max_unlocked_rank: u32,
     /// 拠点で選択中の挑戦ランク。1..=max_unlocked_rank にクランプする。
     pub selected_rank: u32,
+    /// 解放済みの武器一覧。光弾は常にここへ含まれる (無料の初期武器)。
+    /// 未解放の武器は初期武器にも宝箱のNewWeapon候補にもならない
+    /// (`is_weapon_unlocked`/`logic::candidate_boons`)。
+    pub unlocked_weapons: Vec<WeaponKind>,
+    /// 夜番開始時に持つ武器。`unlocked_weapons` に含まれる種のみ選べる。
+    pub starting_weapon: WeaponKind,
+    pub lantern_type: LanternType,
 }
 
 impl Default for CampUpgrades {
@@ -807,6 +1011,9 @@ impl Default for CampUpgrades {
             extra_weapon_slot_level: 0,
             max_unlocked_rank: 1,
             selected_rank: 1,
+            unlocked_weapons: vec![WeaponKind::Bolt],
+            starting_weapon: WeaponKind::Bolt,
+            lantern_type: LanternType::Steady,
         }
     }
 }
@@ -854,12 +1061,28 @@ impl CampUpgrades {
     }
 
     pub fn light_max(&self) -> i32 {
-        LANTERN_BASE_LIGHT_MAX + self.light_level as i32 * 12
+        let base = LANTERN_BASE_LIGHT_MAX + self.light_level as i32 * 12;
+        (base as f64 * self.lantern_type.light_max_mult()).round() as i32
     }
 
     /// 拠点強化による開始威力ボーナス倍率。
     pub fn starting_power_mult(&self) -> f64 {
         1.0 + 0.05 * self.power_level as f64
+    }
+
+    pub fn is_weapon_unlocked(&self, kind: WeaponKind) -> bool {
+        self.unlocked_weapons.contains(&kind)
+    }
+
+    /// `starting_weapon` が (手動編集やセーブ破損で) 未解放になっていても
+    /// 安全に読めるよう、`effective_selected_rank` と同じ経路で光弾へ
+    /// 補正する。
+    pub fn effective_starting_weapon(&self) -> WeaponKind {
+        if self.is_weapon_unlocked(self.starting_weapon) {
+            self.starting_weapon
+        } else {
+            WeaponKind::Bolt
+        }
     }
 
     pub fn max_passive_slots(&self) -> usize {
@@ -987,6 +1210,12 @@ pub struct EverlightState {
     /// 併せてスナップショットする。
     pub meteor_flash: FlashTimer,
     pub meteor_flash_pos: (f64, f64),
+    /// 雷光が命中した瞬間に立てる。`aurora_flash`/`meteor_flash` と同じ
+    /// 理由 (発火した事実自体を伝える手段が要る)。
+    pub chain_flash: FlashTimer,
+    /// 連鎖が実際に通過した敵の座標列 (起点→末端の順)。render.rsが
+    /// これを線で結んで描く。
+    pub chain_flash_points: Vec<(f64, f64)>,
     /// 光弾+極光シナジー「烙印」用のマーク: 敵id → 残りtick。`Enemy` に
     /// 専用フィールドを増やすと (`ranged_charge` と同じ理由で) 使わない
     /// 敵種にも空値が付いて回るため、対象を敵id側に持たせている。
@@ -1012,6 +1241,10 @@ pub struct EverlightState {
     /// 拠点画面のスクロール位置。`Game::render(&self, ...)` から
     /// (`&mut self` 無しで) クランプ書き戻しできるよう `Cell` で持つ。
     pub camp_scroll: Cell<u16>,
+    /// 拠点の「武器解放」欄で選択中の武器。`Some` の間はモーダルを開き、
+    /// 詳細と解放ボタンを表示する (`pending_boons` と同じ「選択→モーダル」
+    /// の作法を拠点画面にも揃える)。
+    pub weapon_detail_modal: Option<WeaponKind>,
 }
 
 /// 1件のログをポップ表示しておく時間 (tick)。
@@ -1061,6 +1294,8 @@ impl EverlightState {
             aurora_flash_x: lane_center_x(COLUMNS / 2),
             meteor_flash: FlashTimer::new(),
             meteor_flash_pos: (lane_center_x(COLUMNS / 2), SPAWN_Y),
+            chain_flash: FlashTimer::new(),
+            chain_flash_points: Vec::new(),
             bolt_marks: std::collections::HashMap::new(),
             ember: 0,
             camp,
@@ -1069,6 +1304,7 @@ impl EverlightState {
             log: vec!["常夜灯へようこそ。拠点で身支度を整え、夜番へ出よう。".into()],
             log_display_ticks: 0,
             camp_scroll: Cell::new(0),
+            weapon_detail_modal: None,
         }
     }
 
@@ -1120,6 +1356,55 @@ mod tests {
         let base_cost = camp.light_cost();
         camp.light_level += 1;
         assert!(camp.light_cost() > base_cost);
+    }
+
+    #[test]
+    fn is_weapon_unlocked_defaults_to_bolt_only() {
+        let camp = CampUpgrades::default();
+        assert!(camp.is_weapon_unlocked(WeaponKind::Bolt));
+        for &kind in WeaponKind::all() {
+            if kind != WeaponKind::Bolt {
+                assert!(!camp.is_weapon_unlocked(kind), "{kind:?} はデフォルトでは未解放のはず");
+            }
+        }
+    }
+
+    #[test]
+    fn effective_starting_weapon_falls_back_to_bolt_when_not_unlocked() {
+        // 手動編集/セーブ破損で未解放の武器が starting_weapon に入っている
+        // ケースを想定する。
+        let mut camp = CampUpgrades { starting_weapon: WeaponKind::Meteor, ..CampUpgrades::default() };
+        assert_eq!(camp.effective_starting_weapon(), WeaponKind::Bolt);
+        camp.unlocked_weapons.push(WeaponKind::Meteor);
+        assert_eq!(camp.effective_starting_weapon(), WeaponKind::Meteor);
+    }
+
+    #[test]
+    fn only_bolt_has_no_unlock_cost() {
+        for &kind in WeaponKind::all() {
+            assert_eq!(kind.unlock_cost().is_none(), kind == WeaponKind::Bolt, "{kind:?} の unlock_cost が期待と異なる");
+        }
+    }
+
+    #[test]
+    fn weapon_kind_save_id_round_trips_for_all_kinds() {
+        for &kind in WeaponKind::all() {
+            assert_eq!(WeaponKind::from_save_id(kind.save_id()), Some(kind));
+        }
+    }
+
+    #[test]
+    fn lantern_type_steady_has_no_multipliers() {
+        // 常灯は「これまでの挙動そのまま」がデフォルトの不変条件。
+        assert_eq!(LanternType::Steady.move_speed_mult(), 1.0);
+        assert_eq!(LanternType::Steady.light_max_mult(), 1.0);
+    }
+
+    #[test]
+    fn lantern_type_save_id_round_trips_for_all_types() {
+        for &t in LanternType::all() {
+            assert_eq!(LanternType::from_save_id(t.save_id()), Some(t));
+        }
     }
 
     #[test]
@@ -1193,11 +1478,10 @@ mod tests {
         // 進化レシピは言葉で説明しない代わりに、色を揃えることをヒントに
         // している。この対応がズレるとヒント自体が崩壊するので固定する。
         for &kind in WeaponKind::all() {
-            assert_eq!(
-                kind.color(),
-                kind.evolution_partner().color(),
-                "{kind:?} とその進化相方の色が一致していない"
-            );
+            let Some(partner) = kind.evolution_partner() else {
+                continue;
+            };
+            assert_eq!(kind.color(), partner.color(), "{kind:?} とその進化相方の色が一致していない");
         }
     }
 

@@ -10,15 +10,22 @@ use crate::effects::FlashTimer;
 
 use super::state::{
     BoonKind, BoonOption, BossTelegraph, CampUpgrades, Chest, Enemy, EnemyBullet, EnemyKind,
-    EverlightState, KillEffect, Lantern, Loadout, OwnedPassive, OwnedWeapon, PassiveKind, Phase,
-    Projectile, WeaponKind, BOSS_EVERY_N_WAVES, BREACH_Y, CHEST_BASE_CATCH_RADIUS, CHEST_FALL_SPEED,
-    COLUMNS, ELITE_BASE_INTERVAL_TICKS, EVOLUTION_PASSIVE_THRESHOLD, KILL_EFFECT_TICKS,
-    LANE_HALF_WIDTH, LANTERN_MOVE_UNITS_PER_TICK, LANTERN_Y, MAX_LEVEL, SPAWN_Y,
+    EverlightState, KillEffect, Lantern, LanternType, Loadout, OwnedPassive, OwnedWeapon, PassiveKind,
+    Phase, Projectile, WeaponKind, BOSS_EVERY_N_WAVES, BREACH_Y, CHEST_BASE_CATCH_RADIUS,
+    CHEST_FALL_SPEED, COLUMNS, ELITE_BASE_INTERVAL_TICKS, EVOLUTION_PASSIVE_THRESHOLD,
+    KILL_EFFECT_TICKS, LANE_HALF_WIDTH, LANTERN_MOVE_UNITS_PER_TICK, LANTERN_Y, MAX_LEVEL, SPAWN_Y,
     WAVE_DURATION_TICKS, WORLD_H, WORLD_W,
 };
 
 const PROJECTILE_SPEED: f64 = 9.0;
 const SPRAY_SPREAD_RAD: f64 = 1.3;
+/// 波光の蛇行の振幅 (ワールド単位/tick、`vx`に直接加算する速度成分)。
+/// `LANE_HALF_WIDTH` (5.0) を上回るため、隣接レーンまではみ出して進む。
+const WAVE_AMPLITUDE: f64 = 6.0;
+/// 波光の蛇行の角速度。yを位相として使うため単位は rad/ワールド単位。
+const WAVE_FREQUENCY: f64 = 0.15;
+/// 氷華の減速効果中、敵の移動速度に掛かる倍率。
+const FROST_SLOW_SPEED_MULT: f64 = 0.4;
 const MAX_ENEMIES_ON_FIELD: usize = 200;
 const MAX_PROJECTILES_ON_FIELD: usize = 300;
 const MAX_ENEMY_BULLETS_ON_FIELD: usize = 300;
@@ -44,6 +51,8 @@ const AURORA_FLASH_TICKS: u32 = 5;
 /// 流星の着弾フラッシュ表示tick数。`AURORA_FLASH_TICKS` と同じ
 /// まとめtick処理の見逃し対策のため、5を下限として維持すること。
 const METEOR_FLASH_TICKS: u32 = 5;
+/// 雷光の連鎖フラッシュ表示tick数。理由は`AURORA_FLASH_TICKS`と同じ。
+const CHAIN_FLASH_TICKS: u32 = 5;
 
 const BOSS_ATTACK_PERIOD_TICKS: u64 = 90;
 const BOSS_TELEGRAPH_TICKS: u32 = 20;
@@ -246,7 +255,8 @@ pub fn nudge_lantern(state: &mut EverlightState, delta: i32) {
 fn move_lantern(state: &mut EverlightState) {
     let target_x = super::state::lane_center_x(state.lantern.target_lane);
     let dx = target_x - state.lantern.x;
-    let max_step = LANTERN_MOVE_UNITS_PER_TICK * state.loadout.move_speed_mult();
+    let max_step =
+        LANTERN_MOVE_UNITS_PER_TICK * state.loadout.move_speed_mult() * state.camp.lantern_type.move_speed_mult();
     if dx.abs() <= max_step {
         state.lantern.x = target_x;
     } else {
@@ -430,7 +440,17 @@ fn spawn_enemy_at_xy(state: &mut EverlightState, kind: EnemyKind, x: f64, y: f64
     let hp = (kind.base_hp() as f64 * diff).round() as i32;
     let id = state.next_enemy_id;
     state.next_enemy_id += 1;
-    state.enemies.push(Enemy { id, kind, x, y, hp, max_hp: hp, hurt_flash: FlashTimer::new(), ranged_charge: None });
+    state.enemies.push(Enemy {
+        id,
+        kind,
+        x,
+        y,
+        hp,
+        max_hp: hp,
+        hurt_flash: FlashTimer::new(),
+        ranged_charge: None,
+        slow_ticks: 0,
+    });
     true
 }
 
@@ -484,13 +504,15 @@ fn move_enemies(state: &mut EverlightState) {
     let elapsed_ticks = state.elapsed_ticks as f64;
     for enemy in state.enemies.iter_mut() {
         enemy.hurt_flash.tick(1);
+        enemy.slow_ticks = enemy.slow_ticks.saturating_sub(1);
         let holding = (enemy.kind == EnemyKind::Sniper && enemy.y >= SNIPER_STOP_Y)
             || (enemy.kind == EnemyKind::Caster && enemy.y >= CASTER_STOP_Y)
             || (enemy.kind == EnemyKind::Wraith && enemy.y >= WRAITH_STOP_Y);
         if !holding {
             let charge_boost =
                 if enemy.kind == EnemyKind::Charger && enemy.y >= CHARGER_TRIGGER_Y { CHARGER_BOOST_MULT } else { 1.0 };
-            enemy.y += enemy.kind.base_speed() * diff * charge_boost;
+            let slow_mult = if enemy.slow_ticks > 0 { FROST_SLOW_SPEED_MULT } else { 1.0 };
+            enemy.y += enemy.kind.base_speed() * diff * charge_boost * slow_mult;
         }
         if enemy.kind.homes() {
             // 灯へ寄ってくる敵をおとりにして1レーンへ集め、極光で薙ぐ、
@@ -862,6 +884,8 @@ fn make_projectile(x: f64, damage: i32, pierce: u32, vx: f64, vy: f64, color: Co
         color,
         source,
         hit_enemy_ids: Vec::new(),
+        // 氷華だけが呼び出し元 (`fire_weapons`) で構築後に上書きする。
+        slow_ticks_on_hit: 0,
     }
 }
 
@@ -986,6 +1010,30 @@ fn fire_weapons(state: &mut EverlightState, damage_mult: f64) {
                 };
                 apply_meteor_hit(state, synergy_damage, radius);
             }
+            WeaponKind::Frost => {
+                // 光弾と同じ自動照準。命中時の減速は
+                // `move_and_resolve_projectiles` が `slow_ticks_on_hit` を
+                // 見て適用する。
+                let (vx, vy) = match pick_bolt_target(state) {
+                    Some((tx, ty)) => aim_velocity(lantern_x, LANTERN_Y, tx, ty, PROJECTILE_SPEED),
+                    None => (0.0, -PROJECTILE_SPEED),
+                };
+                let mut proj = make_projectile(lantern_x, damage, pierce, vx, vy, kind.color(), kind);
+                proj.slow_ticks_on_hit = state.loadout.weapons[i].frost_slow_ticks();
+                new_projectiles.push(proj);
+            }
+            WeaponKind::Wave => {
+                // 発射直後はまっすぐ上へ。蛇行そのものは
+                // `move_and_resolve_projectiles` が `source == Wave` を見て
+                // 毎tick vx を再計算する (弾に波の位相を持たせる専用フィールド
+                // は不要 — 現在のyそのものを位相として使う)。
+                new_projectiles.push(make_projectile(lantern_x, damage, pierce, 0.0, -PROJECTILE_SPEED, kind.color(), kind));
+            }
+            WeaponKind::Chain => {
+                let max_targets = state.loadout.weapons[i].chain_max_targets();
+                let radius = state.loadout.weapons[i].chain_radius();
+                apply_chain_hit(state, damage, max_targets, radius);
+            }
             WeaponKind::Halo => unreachable!("Halo は上のcontinueで除外済み"),
         }
     }
@@ -1020,6 +1068,80 @@ fn apply_aurora_hit(state: &mut EverlightState, lantern_x: f64, damage: i32, wid
             enemy.hurt_flash.trigger(4);
         }
     }
+    let kills = drain_dead_enemies(state);
+    apply_kills(state, kills);
+}
+
+/// 雷光が跳ぶたびにダメージへ掛かる減衰率。無制限に連鎖しても総ダメージが
+/// 際限なく増えないよう、連鎖するほど1体あたりの威力は下がる。
+const CHAIN_FALLOFF_MULT: f64 = 0.75;
+
+/// 雷光の連鎖起点を選ぶ。光弾の自動照準 (`pick_bolt_target`) と同じ優先度
+/// (精鋭/魔王の中で最も残りHPが少ない個体を優先、いなければ防衛線に
+/// 最も近い個体) だが、インデックスで返す — 連鎖先の探索も同じ配列を
+/// 直接書き換えながら進めるため。
+fn pick_chain_start_idx(state: &EverlightState) -> Option<usize> {
+    if let Some((idx, _)) =
+        state.enemies.iter().enumerate().filter(|(_, e)| e.kind.drops_chest()).min_by_key(|(_, e)| e.hp)
+    {
+        return Some(idx);
+    }
+    state
+        .enemies
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(idx, _)| idx)
+}
+
+/// 雷光: 起点の敵から近くの未着弾の敵へ連鎖しながらダメージを与える
+/// ヒットスキャン。散光 (面制圧) や光弾 (単体特化) と違い、密集した敵を
+/// 数珠つなぎに削る役割を持つ。対象がいなければ何もしない (クールダウンの
+/// 消費は呼び出し元の `fire_weapons` が既に行っている)。
+fn apply_chain_hit(state: &mut EverlightState, damage: i32, max_targets: u32, chain_radius: f64) {
+    let Some(start_idx) = pick_chain_start_idx(state) else {
+        return;
+    };
+    let mut hit_ids: Vec<u32> = Vec::new();
+    let mut chain_points: Vec<(f64, f64)> = Vec::new();
+    let mut current_idx = start_idx;
+    let mut current_damage = damage;
+
+    loop {
+        let (ex, ey) = {
+            let enemy = &mut state.enemies[current_idx];
+            enemy.hp -= effective_damage_against(current_damage, WeaponKind::Chain, enemy.kind);
+            enemy.hurt_flash.trigger(3);
+            hit_ids.push(enemy.id);
+            (enemy.x, enemy.y)
+        };
+        chain_points.push((ex, ey));
+        if hit_ids.len() as u32 >= max_targets {
+            break;
+        }
+        let next_idx = state
+            .enemies
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.hp > 0 && !hit_ids.contains(&e.id))
+            .filter(|(_, e)| (e.x - ex).powi(2) + (e.y - ey).powi(2) <= chain_radius * chain_radius)
+            .min_by(|(_, a), (_, b)| {
+                let da = (a.x - ex).powi(2) + (a.y - ey).powi(2);
+                let db = (b.x - ex).powi(2) + (b.y - ey).powi(2);
+                da.total_cmp(&db)
+            })
+            .map(|(idx, _)| idx);
+        let Some(next_idx) = next_idx else {
+            break;
+        };
+        current_idx = next_idx;
+        current_damage = (current_damage as f64 * CHAIN_FALLOFF_MULT).round().max(1.0) as i32;
+    }
+
+    // 連鎖が1体で終わっても命中自体はしているので、極光/流星と同じく
+    // 発火の事実をrender.rsへ伝えるフラグを立てる。
+    state.chain_flash.trigger(CHAIN_FLASH_TICKS);
+    state.chain_flash_points = chain_points;
     let kills = drain_dead_enemies(state);
     apply_kills(state, kills);
 }
@@ -1152,6 +1274,12 @@ fn move_and_resolve_projectiles(state: &mut EverlightState, enemy_prev_positions
     let mut surviving = Vec::with_capacity(projectiles.len());
 
     for mut proj in projectiles {
+        if proj.source == WeaponKind::Wave {
+            // 専用の位相フィールドを`Projectile`に持たせずに済むよう、
+            // 現在のyそのものを位相として使う — 積分ではなくyの関数として
+            // 毎tick vx を再計算するので、状態を持たずに同じ蛇行を再現できる。
+            proj.vx = WAVE_AMPLITUDE * (proj.y * WAVE_FREQUENCY).sin();
+        }
         let start = (proj.x, proj.y);
         proj.x += proj.vx;
         proj.y += proj.vy;
@@ -1190,6 +1318,9 @@ fn move_and_resolve_projectiles(state: &mut EverlightState, enemy_prev_positions
             let hit_enemy_id = enemy.id;
             if proj.source == WeaponKind::Bolt && state.loadout.has(WeaponKind::Aurora) {
                 state.bolt_marks.insert(hit_enemy_id, MARK_DURATION_TICKS);
+            }
+            if proj.slow_ticks_on_hit > 0 {
+                enemy.slow_ticks = enemy.slow_ticks.max(proj.slow_ticks_on_hit);
             }
             // 同じ敵への再命中だけは `hit_enemy_ids` で恒久的に除外する —
             // 合算当たり半径 (最大16.2) が1tickの移動距離 (9) を超える
@@ -1261,11 +1392,18 @@ fn open_boon_modal(state: &mut EverlightState) {
 fn candidate_boons(state: &EverlightState) -> Vec<BoonOption> {
     let mut v = Vec::new();
     for &kind in WeaponKind::all() {
+        if !state.camp.is_weapon_unlocked(kind) {
+            // 未解放の武器は拾えない — 拠点で解放するまで宝箱にも
+            // 並ばない (`CampUpgrades::unlocked_weapons` 参照)。
+            continue;
+        }
         if let Some(w) = state.loadout.weapons.iter().find(|w| w.kind == kind) {
             if w.level < MAX_LEVEL {
                 v.push(BoonOption { kind: BoonKind::LevelWeapon(kind) });
             } else if !w.evolved
-                && state.loadout.passive_level(kind.evolution_partner()) >= EVOLUTION_PASSIVE_THRESHOLD
+                && kind
+                    .evolution_partner()
+                    .is_some_and(|partner| state.loadout.passive_level(partner) >= EVOLUTION_PASSIVE_THRESHOLD)
             {
                 v.push(BoonOption { kind: BoonKind::Evolve(kind) });
             }
@@ -1712,6 +1850,81 @@ pub fn select_rank(state: &mut EverlightState, rank: u32) {
     state.camp.selected_rank = rank.clamp(1, state.camp.max_unlocked_rank.max(1));
 }
 
+/// 拠点の「武器解放」欄で武器を選ぶと開く詳細モーダル。
+pub fn open_weapon_detail_modal(state: &mut EverlightState, kind: WeaponKind) {
+    state.weapon_detail_modal = Some(kind);
+}
+
+pub fn close_weapon_detail_modal(state: &mut EverlightState) {
+    state.weapon_detail_modal = None;
+}
+
+/// モーダルで表示中の武器を解放する。購入が成立したらモーダルを閉じる
+/// (失敗時は開いたままにして、再度残光を貯めてから押し直せるようにする)。
+pub fn confirm_weapon_detail_purchase(state: &mut EverlightState) -> bool {
+    let Some(kind) = state.weapon_detail_modal else {
+        return false;
+    };
+    let bought = purchase_weapon_unlock(state, kind);
+    if bought {
+        state.weapon_detail_modal = None;
+    }
+    bought
+}
+
+/// 武器を残光で解放する。光弾のように既に解放済み、または未定義の
+/// コスト (`unlock_cost` が `None` = 光弾自身) では何もしない。
+pub fn purchase_weapon_unlock(state: &mut EverlightState, kind: WeaponKind) -> bool {
+    if state.camp.is_weapon_unlocked(kind) {
+        return false;
+    }
+    let Some(cost) = kind.unlock_cost() else {
+        return false;
+    };
+    if state.ember < cost {
+        return false;
+    }
+    state.ember -= cost;
+    state.camp.unlocked_weapons.push(kind);
+    true
+}
+
+/// 夜番開始時の初期武器を選ぶ。解放済みでない種は無視する (拠点UIは
+/// 解放済みの種しか選択肢に出さないが、防御的にここでも弾く)。
+pub fn set_starting_weapon(state: &mut EverlightState, kind: WeaponKind) {
+    if state.camp.is_weapon_unlocked(kind) {
+        state.camp.starting_weapon = kind;
+    }
+}
+
+pub fn set_lantern_type(state: &mut EverlightState, lantern_type: LanternType) {
+    state.camp.lantern_type = lantern_type;
+}
+
+/// 初期武器を、解放済みの武器の中で `WeaponKind::all()` の並び順に
+/// `delta` 分だけ巡回させる (◀/▶ ボタン用)。解放済みが1種もない状態は
+/// 光弾が常に解放済みなので起こらない。
+pub fn cycle_starting_weapon(state: &mut EverlightState, delta: i32) {
+    let unlocked: Vec<WeaponKind> =
+        WeaponKind::all().iter().copied().filter(|&k| state.camp.is_weapon_unlocked(k)).collect();
+    if unlocked.is_empty() {
+        return;
+    }
+    let current = unlocked.iter().position(|&k| k == state.camp.effective_starting_weapon()).unwrap_or(0);
+    let len = unlocked.len() as i32;
+    let next = (current as i32 + delta).rem_euclid(len) as usize;
+    state.camp.starting_weapon = unlocked[next];
+}
+
+/// 灯のタイプを `LanternType::all()` の並び順に `delta` 分だけ巡回させる。
+pub fn cycle_lantern_type(state: &mut EverlightState, delta: i32) {
+    let all = LanternType::all();
+    let current = all.iter().position(|&t| t == state.camp.lantern_type).unwrap_or(0);
+    let len = all.len() as i32;
+    let next = (current as i32 + delta).rem_euclid(len) as usize;
+    state.camp.lantern_type = all[next];
+}
+
 pub fn start_vigil(state: &mut EverlightState) {
     let light_max = state.camp.light_max();
     state.phase = Phase::Vigil;
@@ -1722,7 +1935,7 @@ pub fn start_vigil(state: &mut EverlightState) {
     state.chests.clear();
     state.kill_effects.clear();
     state.loadout = Loadout::default();
-    state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Bolt));
+    state.loadout.weapons.push(OwnedWeapon::new(state.camp.effective_starting_weapon()));
     state.wave = 1;
     state.elapsed_ticks = 0;
     state.spawn_progress = 0;
@@ -1733,6 +1946,7 @@ pub fn start_vigil(state: &mut EverlightState) {
     state.pending_boons = None;
     state.queued_boon_rolls = 0;
     state.boss_telegraph = None;
+    state.weapon_detail_modal = None;
     state.rank = state.camp.effective_selected_rank();
     state.dawn_reached_this_vigil = false;
     state.milestone_boss_id = None;
@@ -1817,6 +2031,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         resolve_breaches(&mut state);
         assert_eq!(state.breach_count, 1);
@@ -1852,6 +2067,7 @@ mod tests {
                 max_hp: 1,
                 hurt_flash: FlashTimer::new(),
                 ranged_charge: None,
+            slow_ticks: 0,
             });
         }
 
@@ -1911,6 +2127,7 @@ mod tests {
             max_hp: 999_999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
 
         let expected_interval =
@@ -1957,6 +2174,7 @@ mod tests {
             max_hp: brute_hp,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
 
         // L5光輪の基礎間隔(5tick)3周期分。低速な巨鬼が防衛線際で足止め
@@ -2045,6 +2263,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
     }
 
@@ -2129,6 +2348,7 @@ mod tests {
             color: WeaponKind::Bolt.color(),
             source: WeaponKind::Bolt,
             hit_enemy_ids: Vec::new(),
+            slow_ticks_on_hit: 0,
         });
         move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
         assert!(state.bolt_marks.contains_key(&1), "光弾+極光を両方装備していれば命中で烙印が付くはず");
@@ -2165,6 +2385,7 @@ mod tests {
             color: WeaponKind::Bolt.color(),
             source: WeaponKind::Bolt,
             hit_enemy_ids: Vec::new(),
+            slow_ticks_on_hit: 0,
         });
         move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
         assert!(!state.bolt_marks.contains_key(&1), "極光を装備していなければ烙印は付かないはず");
@@ -2277,6 +2498,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let light_before = state.lantern.light;
         resolve_breaches(&mut state);
@@ -2298,6 +2520,7 @@ mod tests {
             max_hp: 7,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         state.projectiles.push(make_projectile(state.lantern.x, 10, 1, 0.0, -1.0, Color::White, WeaponKind::Bolt));
         state.projectiles[0].y = LANTERN_Y - 5.0;
@@ -2322,6 +2545,7 @@ mod tests {
             max_hp: 7,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         state.projectiles.push(make_projectile(kill_x, 10, 1, 0.0, -1.0, Color::White, WeaponKind::Bolt));
         state.projectiles[0].y = kill_y;
@@ -2380,6 +2604,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         state.projectiles.push(make_projectile(x, 10, 1, 0.0, -9.0, Color::White, WeaponKind::Bolt));
         state.projectiles[0].y = 10.0;
@@ -2411,6 +2636,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let mut proj = make_projectile(x, 10, 2, 0.0, -9.0, Color::White, WeaponKind::Bolt);
         proj.y = 10.0;
@@ -2445,6 +2671,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         state.enemies.push(Enemy {
             id: 2,
@@ -2455,6 +2682,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let mut proj = make_projectile(x, 10, 2, 0.0, -9.0, Color::White, WeaponKind::Bolt);
         proj.y = 10.0;
@@ -2490,6 +2718,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         state.enemies.push(Enemy {
             id: 2,
@@ -2500,6 +2729,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let mut proj = make_projectile(x, 10, 1, 0.0, -9.0, Color::White, WeaponKind::Bolt); // pierce=1 → 命中は1発分のみ
         proj.y = 10.0;
@@ -2537,6 +2767,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         // 中心距離8.2・半径8.1(合算)の魔王。中心距離は雑魚より遠いが、
         // 境界進入は (8.2-8.1)=0.1 と雑魚より先。
@@ -2549,6 +2780,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let mut proj = make_projectile(x, 10, 1, 0.0, -9.0, Color::White, WeaponKind::Bolt); // pierce=1 → 命中は1発分のみ
         proj.y = 10.0;
@@ -2587,6 +2819,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let mut proj = make_projectile(x, 10, 1, 0.0, -9.0, Color::White, WeaponKind::Bolt);
         proj.y = 10.0;
@@ -2761,6 +2994,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         tick(&mut state);
         assert_eq!(state.phase, Phase::Camp);
@@ -2785,6 +3019,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         for _ in 0..2 {
             state.chests.push(Chest { x: state.lantern.x, y: LANTERN_Y });
@@ -2810,6 +3045,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let light_before = same_lane.lantern.light;
         resolve_breaches(&mut same_lane);
@@ -2826,6 +3062,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let light_before = other_lane.lantern.light;
         resolve_breaches(&mut other_lane);
@@ -2895,6 +3132,9 @@ mod tests {
         // (MAX_WEAPON_SLOTS=4) のままだと必ず1種は持てない — 受動効果と
         // 同じ「拡張枠を買わない限り全種は揃わない」構図に揃えている。
         let mut state = EverlightState::new();
+        // このテストはスロット数のゲートを検証したいので、解放状況は
+        // 無関係な変数として全種解放しておく。
+        state.camp.unlocked_weapons = WeaponKind::all().to_vec();
         start_vigil(&mut state);
         state.loadout.weapons.clear();
         for &kind in WeaponKind::all().iter().take(4) {
@@ -3072,6 +3312,7 @@ mod tests {
             max_hp: 1,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         move_enemies(&mut state);
         let moved = state.enemies[0].y;
@@ -3112,6 +3353,7 @@ mod tests {
             max_hp: 505,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let max_before = state.camp.max_unlocked_rank;
         let kills = drain_dead_enemies(&mut state);
@@ -3141,6 +3383,7 @@ mod tests {
             max_hp: 505,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let max_before = state.camp.max_unlocked_rank;
         let kills = drain_dead_enemies(&mut state);
@@ -3167,6 +3410,7 @@ mod tests {
             max_hp: 505,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let kills = drain_dead_enemies(&mut state);
         apply_kills(&mut state, kills);
@@ -3189,6 +3433,7 @@ mod tests {
             max_hp: 385,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let max_before = state.camp.max_unlocked_rank;
         let kills = drain_dead_enemies(&mut state);
@@ -3264,6 +3509,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         move_enemies(&mut state);
         assert!(state.enemies[0].y >= SNIPER_STOP_Y, "停止線を越えたら以後は静止するはず");
@@ -3286,6 +3532,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let light_before = state.lantern.light;
         for _ in 0..=SNIPER_CHARGE_TICKS {
@@ -3307,6 +3554,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         set_lantern_target_lane(&mut state, COLUMNS - 1);
         for _ in 0..40 {
@@ -3334,6 +3582,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         move_enemies(&mut state);
         assert!(state.enemies[0].y >= CASTER_STOP_Y, "停止線を越えたら以後は静止するはず");
@@ -3355,6 +3604,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         assert!(state.enemy_bullets.is_empty());
         for _ in 0..=CASTER_FIRE_INTERVAL_TICKS {
@@ -3458,6 +3708,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         move_enemies(&mut state);
         assert!(state.enemies[0].y >= WRAITH_STOP_Y, "停止線を越えたら以後y方向へは進まないはず");
@@ -3487,6 +3738,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let mut saw_above = false;
         let mut saw_below = false;
@@ -3521,6 +3773,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         assert!(state.enemy_bullets.is_empty());
         for _ in 0..=WRAITH_FIRE_INTERVAL_TICKS {
@@ -3543,6 +3796,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         move_enemies(&mut state);
         let step_before_trigger = state.enemies[0].y - (CHARGER_TRIGGER_Y - 5.0);
@@ -3568,6 +3822,7 @@ mod tests {
             max_hp: 14,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let kills = drain_dead_enemies(&mut state);
         apply_kills(&mut state, kills);
@@ -3601,6 +3856,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let mut saw_above = false;
         let mut saw_below = false;
@@ -3632,6 +3888,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         for _ in 0..60 {
             move_enemies(&mut state);
@@ -3655,6 +3912,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         state.elapsed_ticks = boss_attack_period_ticks(state.rank);
         resolve_boss_telegraph(&mut state);
@@ -3697,6 +3955,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         state.elapsed_ticks = boss_attack_period_ticks(state.rank);
         resolve_boss_telegraph(&mut state);
@@ -3780,6 +4039,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         state.enemies.push(Enemy {
             id: 2,
@@ -3790,6 +4050,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         state.elapsed_ticks = boss_attack_period_ticks(state.rank);
         resolve_boss_telegraph(&mut state);
@@ -3839,6 +4100,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         assert!(state.enemy_bullets.is_empty());
         let first_charge = boss_bullet_period_ticks(state.rank) / 3;
@@ -3868,6 +4130,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let first_charge = boss_bullet_period_ticks(state.rank) / 3;
         for _ in 0..=first_charge {
@@ -3897,6 +4160,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         assert_eq!(state.enemies.len(), 1);
         let first_charge = boss_summon_period_ticks(state.rank) / 3;
@@ -3924,6 +4188,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         state.enemies.push(Enemy {
             id: 2,
@@ -3934,6 +4199,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let bullet_first_charge = boss_bullet_period_ticks(state.rank) / 3;
         let summon_first_charge = boss_summon_period_ticks(state.rank) / 3;
@@ -3963,6 +4229,7 @@ mod tests {
             max_hp: 999,
             hurt_flash: FlashTimer::new(),
             ranged_charge: None,
+            slow_ticks: 0,
         });
         let mut summoned = false;
         for _ in 0..60 {
@@ -3980,5 +4247,216 @@ mod tests {
             }
         }
         assert!(summoned, "防衛線へ到達する前に一度も召喚しなかった (回帰)");
+    }
+
+    // ── 武器解放・初期武器・灯のタイプ ──────────────────────────────
+
+    #[test]
+    fn purchase_weapon_unlock_deducts_ember_and_marks_unlocked() {
+        let mut state = EverlightState::new();
+        state.ember = 100;
+        let cost = WeaponKind::Spray.unlock_cost().unwrap();
+        assert!(purchase_weapon_unlock(&mut state, WeaponKind::Spray));
+        assert_eq!(state.ember, 100 - cost);
+        assert!(state.camp.is_weapon_unlocked(WeaponKind::Spray));
+    }
+
+    #[test]
+    fn purchase_weapon_unlock_rejects_bolt_and_duplicates_and_insufficient_ember() {
+        let mut state = EverlightState::new();
+        state.ember = 1000;
+        assert!(!purchase_weapon_unlock(&mut state, WeaponKind::Bolt), "光弾は購入対象にならないはず");
+
+        assert!(purchase_weapon_unlock(&mut state, WeaponKind::Spray));
+        let ember_after_first = state.ember;
+        assert!(!purchase_weapon_unlock(&mut state, WeaponKind::Spray), "既に解放済みは再購入できないはず");
+        assert_eq!(state.ember, ember_after_first, "二重購入で残光が減ってはいけない");
+
+        state.ember = 0;
+        assert!(!purchase_weapon_unlock(&mut state, WeaponKind::Aurora), "残光不足では解放できないはず");
+    }
+
+    #[test]
+    fn candidate_boons_excludes_locked_weapons_from_new_weapon_options() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+
+        let new_weapon_kinds: Vec<WeaponKind> = candidate_boons(&state)
+            .iter()
+            .filter_map(|o| match o.kind {
+                BoonKind::NewWeapon(k) => Some(k),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(new_weapon_kinds, vec![WeaponKind::Bolt], "デフォルトでは光弾以外はNewWeapon候補に出ないはず");
+
+        state.ember = 1000;
+        purchase_weapon_unlock(&mut state, WeaponKind::Spray);
+        assert!(
+            candidate_boons(&state).iter().any(|o| o.kind == BoonKind::NewWeapon(WeaponKind::Spray)),
+            "解放すればNewWeapon候補に出るはず"
+        );
+    }
+
+    #[test]
+    fn start_vigil_grants_the_selected_starting_weapon() {
+        let mut state = EverlightState::new();
+        state.ember = 1000;
+        purchase_weapon_unlock(&mut state, WeaponKind::Meteor);
+        set_starting_weapon(&mut state, WeaponKind::Meteor);
+        start_vigil(&mut state);
+        assert_eq!(state.loadout.weapons.len(), 1);
+        assert_eq!(state.loadout.weapons[0].kind, WeaponKind::Meteor);
+    }
+
+    #[test]
+    fn set_starting_weapon_ignores_locked_weapons() {
+        let mut state = EverlightState::new();
+        set_starting_weapon(&mut state, WeaponKind::Meteor);
+        assert_eq!(state.camp.starting_weapon, WeaponKind::Bolt, "未解放の武器は初期武器に設定されないはず");
+    }
+
+    #[test]
+    fn cycle_starting_weapon_only_visits_unlocked_weapons_and_wraps() {
+        let mut state = EverlightState::new();
+        state.ember = 1000;
+        purchase_weapon_unlock(&mut state, WeaponKind::Spray);
+        purchase_weapon_unlock(&mut state, WeaponKind::Aurora);
+        // 解放済み: 光弾/散光/極光の3種のみ。
+
+        cycle_starting_weapon(&mut state, 1);
+        assert_eq!(state.camp.starting_weapon, WeaponKind::Spray);
+        cycle_starting_weapon(&mut state, 1);
+        assert_eq!(state.camp.starting_weapon, WeaponKind::Aurora);
+        cycle_starting_weapon(&mut state, 1);
+        assert_eq!(state.camp.starting_weapon, WeaponKind::Bolt, "末尾から先頭へ巡回するはず");
+        cycle_starting_weapon(&mut state, -1);
+        assert_eq!(state.camp.starting_weapon, WeaponKind::Aurora, "逆方向にも巡回できるはず");
+    }
+
+    #[test]
+    fn cycle_lantern_type_wraps_around_all_three_types() {
+        let mut state = EverlightState::new();
+        assert_eq!(state.camp.lantern_type, LanternType::Steady);
+        cycle_lantern_type(&mut state, 1);
+        assert_eq!(state.camp.lantern_type, LanternType::Swift);
+        cycle_lantern_type(&mut state, 1);
+        assert_eq!(state.camp.lantern_type, LanternType::Warden);
+        cycle_lantern_type(&mut state, 1);
+        assert_eq!(state.camp.lantern_type, LanternType::Steady, "末尾から先頭へ巡回するはず");
+    }
+
+    #[test]
+    fn swift_lantern_type_moves_faster_than_steady() {
+        let mut swift = EverlightState::new();
+        set_lantern_type(&mut swift, LanternType::Swift);
+        start_vigil(&mut swift);
+        set_lantern_target_lane(&mut swift, COLUMNS - 1);
+        move_lantern(&mut swift);
+
+        let mut steady = EverlightState::new();
+        start_vigil(&mut steady);
+        set_lantern_target_lane(&mut steady, COLUMNS - 1);
+        move_lantern(&mut steady);
+
+        assert!(swift.lantern.x > steady.lantern.x, "疾風は常灯より1tickで大きく進むはず");
+    }
+
+    #[test]
+    fn warden_lantern_type_has_a_higher_light_max() {
+        let mut camp = CampUpgrades::default();
+        let steady_max = camp.light_max();
+        camp.lantern_type = LanternType::Warden;
+        assert!(camp.light_max() > steady_max, "守灯は常灯より最大残光が高いはず");
+    }
+
+    // ── 新武器: 氷華/雷光/波光 ────────────────────────────────────
+
+    #[test]
+    fn frost_shot_slows_the_enemy_it_hits() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        state.loadout.weapons.clear();
+        state.loadout.weapons.push(OwnedWeapon::new(WeaponKind::Frost));
+        let x = state.lantern.x;
+        push_enemy_at(&mut state, 1, x, LANTERN_Y - 5.0);
+
+        assert_eq!(state.enemies[0].slow_ticks, 0);
+        fire_weapons(&mut state, 1.0);
+        move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
+
+        assert!(state.enemies[0].slow_ticks > 0, "氷華の命中で減速が付くはず");
+    }
+
+    #[test]
+    fn slowed_enemy_advances_slower_than_normal() {
+        let mut state = EverlightState::new();
+        state.wave = 1;
+        let x = state.lantern.x;
+        push_enemy_at(&mut state, 1, x, 0.0);
+        let normal_y = {
+            let mut s2 = EverlightState::new();
+            s2.wave = 1;
+            let x2 = s2.lantern.x;
+            push_enemy_at(&mut s2, 1, x2, 0.0);
+            move_enemies(&mut s2);
+            s2.enemies[0].y
+        };
+        state.enemies[0].slow_ticks = 10;
+        move_enemies(&mut state);
+        assert!(state.enemies[0].y < normal_y, "減速中の敵は通常より進みが遅いはず");
+    }
+
+    #[test]
+    fn chain_hit_damages_multiple_nearby_enemies_with_falloff() {
+        let mut state = EverlightState::new();
+        let x = state.lantern.x;
+        push_enemy_at(&mut state, 1, x, LANTERN_Y - 40.0);
+        push_enemy_at(&mut state, 2, x + 3.0, LANTERN_Y - 42.0);
+        push_enemy_at(&mut state, 3, x + 6.0, LANTERN_Y - 44.0);
+
+        apply_chain_hit(&mut state, 40, 3, 20.0);
+
+        let losses: Vec<i32> = state.enemies.iter().map(|e| 999 - e.hp).collect();
+        assert!(losses.iter().all(|&l| l > 0), "連鎖範囲内の全員がダメージを受けるはず: {losses:?}");
+        assert!(losses[0] > losses[1] && losses[1] > losses[2], "跳ぶたびにダメージが減衰するはず: {losses:?}");
+    }
+
+    #[test]
+    fn chain_hit_does_not_exceed_max_targets() {
+        let mut state = EverlightState::new();
+        let x = state.lantern.x;
+        for i in 0..5u32 {
+            push_enemy_at(&mut state, i + 1, x, LANTERN_Y - 40.0 - i as f64 * 2.0);
+        }
+        apply_chain_hit(&mut state, 20, 2, 30.0);
+        let hit_count = state.enemies.iter().filter(|e| e.hp < 999).count();
+        assert_eq!(hit_count, 2, "max_targetsを超えて連鎖してはいけない");
+    }
+
+    #[test]
+    fn chain_hit_does_nothing_when_no_enemies_present() {
+        let mut state = EverlightState::new();
+        apply_chain_hit(&mut state, 20, 3, 20.0);
+        assert!(!state.chain_flash.is_active(), "対象がいなければ発火フラグも立たないはず");
+    }
+
+    #[test]
+    fn wave_projectile_oscillates_horizontally_as_it_travels() {
+        let mut state = EverlightState::new();
+        state.projectiles.push(make_projectile(state.lantern.x, 10, 1, 0.0, -PROJECTILE_SPEED, Color::White, WeaponKind::Wave));
+
+        let mut vx_signs = std::collections::HashSet::new();
+        for _ in 0..40 {
+            if state.projectiles.is_empty() {
+                break;
+            }
+            move_and_resolve_projectiles(&mut state, &std::collections::HashMap::new());
+            if let Some(p) = state.projectiles.first() {
+                vx_signs.insert(p.vx > 0.0);
+            }
+        }
+        assert_eq!(vx_signs.len(), 2, "波光は進行中に左右へ蛇行するはず (vxの符号が両方観測されるはず)");
     }
 }

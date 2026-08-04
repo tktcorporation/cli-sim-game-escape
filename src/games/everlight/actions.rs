@@ -15,6 +15,24 @@ pub const CAMP_RANK_UP: u16 = 9;
 /// よう、レベルアップ選択肢の帯 (10..13) の外側に置く。
 pub const CAMP_UPGRADE_EXTRA_WEAPON_SLOT: u16 = 13;
 
+/// 武器解放の購入: action_id = CAMP_UNLOCK_WEAPON_BASE + `WeaponKind::save_id()`。
+/// `WeaponKind::all()` は現状8種なので 20..28 を占有する。
+pub const CAMP_UNLOCK_WEAPON_BASE: u16 = 20;
+
+/// 初期武器の選択 (◀/▶)。解放済みの武器のみを `WeaponKind::all()` の
+/// 順で巡回する。
+pub const CAMP_STARTING_WEAPON_PREV: u16 = 30;
+pub const CAMP_STARTING_WEAPON_NEXT: u16 = 31;
+
+/// 灯のタイプの選択 (◀/▶)。`LanternType::all()` を巡回する。
+pub const CAMP_LANTERN_TYPE_PREV: u16 = 32;
+pub const CAMP_LANTERN_TYPE_NEXT: u16 = 33;
+
+/// 武器詳細モーダル (`state.weapon_detail_modal`) の確定/閉じるボタン。
+/// モーダル中は常に1件しか開かないため、対象を引数に持たない固定IDでよい。
+pub const CAMP_WEAPON_DETAIL_CONFIRM: u16 = 34;
+pub const CAMP_WEAPON_DETAIL_CLOSE: u16 = 35;
+
 /// 夜番中に自ら拠点へ撤退する。灯が0になった時と同じ後処理を共有する。
 pub const RETREAT_TO_CAMP: u16 = 7;
 

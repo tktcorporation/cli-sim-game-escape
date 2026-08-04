@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
-use super::state::{CampUpgrades, EverlightState};
+use super::state::{CampUpgrades, EverlightState, LanternType, WeaponKind};
 
 /// セーブデータのフォーマットバージョン。フィールド追加時にインクリメントすること。
 #[cfg(any(target_arch = "wasm32", test))]
@@ -51,6 +51,17 @@ struct GameSave {
     /// 拠点で選択中の挑戦ランク。保存しないとリロードのたびに選択が
     /// 第1夜へ戻ってしまう。
     selected_rank: u32,
+    /// 解放済み武器の `WeaponKind::save_id()` 一覧。旧セーブ (フィールド
+    /// 無し) は空Vecで読み込まれるが、`apply_save` 側で「光弾のみ解放」
+    /// (`CampUpgrades::default()`相当) へ補正する — 空Vecのまま扱うと
+    /// 光弾すら使えない状態になってしまう。
+    unlocked_weapon_ids: Vec<u8>,
+    /// 夜番開始時の初期武器 (`WeaponKind::save_id()`)。デフォルト0=光弾は
+    /// 旧セーブの欠損値としても自然に成立する。
+    starting_weapon_id: u8,
+    /// 灯のタイプ (`LanternType::save_id()`)。デフォルト0=常灯は旧セーブの
+    /// 欠損値 (=挙動が変わらない) としても自然に成立する。
+    lantern_type_id: u8,
 }
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -68,6 +79,9 @@ fn extract_save(state: &EverlightState) -> SaveData {
             rng_state: state.rng_state,
             max_unlocked_rank: state.camp.max_unlocked_rank,
             selected_rank: state.camp.selected_rank,
+            unlocked_weapon_ids: state.camp.unlocked_weapons.iter().map(|k| k.save_id()).collect(),
+            starting_weapon_id: state.camp.starting_weapon.save_id(),
+            lantern_type_id: state.camp.lantern_type.save_id(),
         },
     }
 }
@@ -77,6 +91,19 @@ fn apply_save(state: &mut EverlightState, save: &GameSave) {
     state.ember = save.ember;
     state.best_wave = save.best_wave;
     state.best_survival_ticks = save.best_survival_ticks;
+    // 旧セーブ (フィールド無し→空Vec) は「光弾のみ解放」のデフォルトへ
+    // 補正する。未知のidは将来のバージョン間往復を安全にするため無視する。
+    let mut unlocked_weapons: Vec<WeaponKind> =
+        save.unlocked_weapon_ids.iter().filter_map(|&id| WeaponKind::from_save_id(id)).collect();
+    if unlocked_weapons.is_empty() {
+        unlocked_weapons.push(WeaponKind::Bolt);
+    } else if !unlocked_weapons.contains(&WeaponKind::Bolt) {
+        // 光弾は常に無料解放済みという不変条件を、手動編集されたセーブ
+        // からの復元でも保つ。
+        unlocked_weapons.push(WeaponKind::Bolt);
+    }
+    let starting_weapon = WeaponKind::from_save_id(save.starting_weapon_id).unwrap_or(WeaponKind::Bolt);
+    let lantern_type = LanternType::from_save_id(save.lantern_type_id).unwrap_or(LanternType::Steady);
     state.camp = CampUpgrades {
         light_level: save.light_level,
         power_level: save.power_level,
@@ -86,6 +113,9 @@ fn apply_save(state: &mut EverlightState, save: &GameSave) {
         // 保存されたランクが (バージョン違いや手動編集で) 解放範囲外に
         // なっていても安全に読めるよう、旧セーブと同じ経路でクランプする。
         selected_rank: save.selected_rank.clamp(1, save.max_unlocked_rank.max(1)),
+        unlocked_weapons,
+        starting_weapon,
+        lantern_type,
     };
     // 0 は rng_next 側で固定値に補正されるだけなので、未保存(旧セーブ)の
     // 0 をそのまま許容してよい。
@@ -174,6 +204,9 @@ mod tests {
         original.camp.extra_weapon_slot_level = 1;
         original.camp.max_unlocked_rank = 3;
         original.camp.selected_rank = 2;
+        original.camp.unlocked_weapons = vec![WeaponKind::Bolt, WeaponKind::Spray, WeaponKind::Chain];
+        original.camp.starting_weapon = WeaponKind::Chain;
+        original.camp.lantern_type = LanternType::Warden;
         original.rng_state = 999_999;
 
         let save = extract_save(&original);
@@ -198,6 +231,28 @@ mod tests {
             restored.rng_state, 999_999,
             "rng_state を保存しないとリロードのたびに同じ乱数列を再生してしまう"
         );
+        assert_eq!(
+            restored.camp.unlocked_weapons, original.camp.unlocked_weapons,
+            "解放済み武器も保存/復元されるはず"
+        );
+        assert_eq!(restored.camp.starting_weapon, WeaponKind::Chain, "初期武器も保存/復元されるはず");
+        assert_eq!(restored.camp.lantern_type, LanternType::Warden, "灯のタイプも保存/復元されるはず");
+    }
+
+    #[test]
+    fn save_without_new_unlock_fields_loads_with_bolt_only_defaults() {
+        // 武器解放システム導入前の旧セーブ (該当キーが無いJSON) を読み込んでも
+        // panicせず、「光弾のみ解放・初期武器は光弾・灯は常灯」という
+        // 導入前と同じ挙動になることを保証する。
+        let json = r#"{"version":1,"game":{"ember":10,"best_wave":2}}"#;
+        let loaded: SaveData = serde_json::from_str(json).unwrap();
+
+        let mut restored = EverlightState::new();
+        apply_save(&mut restored, &loaded.game);
+
+        assert_eq!(restored.camp.unlocked_weapons, vec![WeaponKind::Bolt]);
+        assert_eq!(restored.camp.starting_weapon, WeaponKind::Bolt);
+        assert_eq!(restored.camp.lantern_type, LanternType::Steady);
     }
 
     #[test]
