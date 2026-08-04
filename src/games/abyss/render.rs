@@ -6,7 +6,7 @@ use std::rc::Rc;
 use ratzilla::ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::text::{Line, Span};
-use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
+use ratzilla::ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::input::{is_narrow_layout, ClickState};
@@ -457,11 +457,14 @@ fn render_retreat_dialog(
 
     let mut cs = click_state.borrow_mut();
     // ポップアップ外のタップをキャンセル扱いにする (modal dismiss)。空 Paragraph は
-    // セルを書き換えないので下地は残る。ClickableList より先に登録するので、
-    // hit_test の reverse 走査でポップアップ内ボタンが優先される。
+    // セルを書き換えないので下地は残る (=クリック判定だけ乗せられる)。
+    // ClickableList より先に登録するので、hit_test の reverse 走査で
+    // ポップアップ内ボタンが優先される。
     Clickable::new(Paragraph::new(""), RETREAT_DIALOG_CANCEL).render(f, full_area, &mut cs);
-    // 下地が透けないよう、まず不透明ブロックで塗りつぶしてから内容を描く。
-    f.render_widget(Paragraph::new("").block(block.clone()), popup_area);
+    // 下地が透けないよう、Clear で popup_area を白紙化してから内容を描く。
+    // 空 Paragraph + block では symbol (文字自体) が書き換わらず下地の文字が
+    // 透けて残るため、セルを本当にリセットする Clear widget が必要。
+    f.render_widget(Clear, popup_area);
     cl.render(f, popup_area, block, &mut cs, true, 0);
 }
 
@@ -1881,6 +1884,50 @@ mod tests {
             }
         }
         assert!(full && partial && cancel, "撤退ダイアログの選択肢が揃うべき");
+    }
+
+    /// `render_retreat_dialog` は Settings タブの上に、同じフレーム内で重ね
+    /// 描きされる。`Paragraph` はテキストのあるセルしか書き換えないため、
+    /// `Clear` を挟まずに描くとダイアログの余白セルに配下の文字がそのまま
+    /// 残る — 「モーダル表示時に背面が透ける」不具合の実体 (rpg/everlightの
+    /// 同種テストと同じ検証)。
+    #[test]
+    fn retreat_dialog_clears_background_glyphs_underneath() {
+        let mut state = AbyssState::new();
+        state.tab = Tab::Settings;
+        state.floor = 30;
+
+        let full_area = Rect::new(0, 0, 80, 30);
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        let mut terminal = Terminal::new(TestBackend::new(full_area.width, full_area.height)).unwrap();
+        terminal
+            .draw(|f| {
+                let bg = Paragraph::new(vec![Line::from("#".repeat(full_area.width as usize)); full_area.height as usize]);
+                f.render_widget(bg, full_area);
+                render_retreat_dialog(&state, f, full_area, &cs);
+            })
+            .unwrap();
+
+        // render_retreat_dialog 自身の popup_area 計算式をそのまま再現する。
+        let partial_target = state.floor.saturating_sub(logic::RETREAT_PARTIAL_STEPS).max(1);
+        let partial_available = partial_target > 1;
+        let popup_w = 40u16.min(full_area.width.saturating_sub(2)).max(24);
+        let popup_h_target = if partial_available { 11u16 } else { 9u16 };
+        let popup_h = popup_h_target.min(full_area.height.saturating_sub(2)).max(7);
+        let popup_x = full_area.x + (full_area.width.saturating_sub(popup_w)) / 2;
+        let popup_y = full_area.y + (full_area.height.saturating_sub(popup_h)) / 2;
+        let popup_area = Rect::new(popup_x, popup_y, popup_w, popup_h);
+
+        let buffer = terminal.backend().buffer();
+        for y in popup_area.y..popup_area.y + popup_area.height {
+            for x in popup_area.x..popup_area.x + popup_area.width {
+                assert_ne!(
+                    buffer[(x, y)].symbol(),
+                    "#",
+                    "popup cell ({x},{y}) still shows the background glyph underneath — Clear is missing"
+                );
+            }
+        }
     }
 
     /// partial 撤退先が B1F と同じになる低フロアでは [2] を出さない (full と同義になるため)。

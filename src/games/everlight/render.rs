@@ -14,7 +14,7 @@ use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::symbols::Marker;
 use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::canvas::{Canvas, Line as CanvasLine, Points};
-use ratzilla::ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratzilla::ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 use ratzilla::ratatui::Frame;
 
 use crate::canvas_fx;
@@ -568,6 +568,10 @@ fn render_boon_modal(state: &EverlightState, f: &mut Frame, area: Rect, click_st
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::LightYellow))
         .title(" 灯を強化する ");
+    // Clear で modal_area を白紙化してから描く。Paragraph はテキストのある
+    // セルしか書き換えないため、Clear を挟まないと配下の戦場描画がモーダルの
+    // 余白から透けて見える。
+    f.render_widget(Clear, modal_area);
     let mut cs = click_state.borrow_mut();
     cl.render(f, modal_area, block, &mut cs, true, 0);
 }
@@ -728,6 +732,8 @@ fn render_weapon_detail_modal(state: &EverlightState, f: &mut Frame, area: Rect,
         .borders(Borders::ALL)
         .border_style(Style::default().fg(kind.color()))
         .title(" 武器詳細 ");
+    // Clear で modal_area を白紙化してから描く (render_boon_modal と同じ理由)。
+    f.render_widget(Clear, modal_area);
     let mut cs = click_state.borrow_mut();
     cl.render(f, modal_area, block, &mut cs, true, 0);
 }
@@ -1033,6 +1039,97 @@ mod tests {
         render_to_test_backend(&state, 100, 30);
     }
 
+    /// `render_weapon_detail_modal` は拠点画面(本体リスト + 情景パネル)の
+    /// 上に、同じフレーム内で重ね描みされる。`render_boon_modal` と同じ
+    /// `Clear` 漏れの回帰を検証する — ただしこちらは表示行数が「解放済み
+    /// か」「残光が足りるか」で変わる (`modal_h` が `cl.visual_height` に
+    /// 依存する) ため、その計算式をテスト側で複製すると本体の分岐が増えた
+    /// 時にテストだけ追従し忘れて誤った領域を検査するドリフトの危険がある。
+    /// 代わりに、実際に描画された枠線 (" 武器詳細 " というタイトルを持つ
+    /// border) をバッファから探して modal の実座標を特定する — 本体の
+    /// 行数が変わっても常に正しい領域を検査できる。
+    #[test]
+    fn weapon_detail_modal_clears_background_glyphs_underneath() {
+        let mut state = EverlightState::new();
+        state.weapon_detail_modal = Some(WeaponKind::Meteor);
+
+        let (w, h) = (100u16, 30u16);
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = w;
+        cs.borrow_mut().terminal_rows = h;
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal
+            .draw(|f| {
+                let bg = Paragraph::new(vec![Line::from("#".repeat(w as usize)); h as usize]);
+                f.render_widget(bg, f.area());
+                render(&state, f, f.area(), &cs);
+            })
+            .unwrap();
+
+        let buf = terminal.backend().buffer();
+        let row_symbols = |y: u16| -> Vec<String> {
+            (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect()
+        };
+
+        // タイトル " 武器詳細 " を含む上端の border 行を探し、同じ列にある
+        // "┌"/"┐" を左右端、その列で "└"/"┘" が現れる行を下端とする。
+        let mut modal_left = None;
+        let mut modal_right = None;
+        let mut top_row = None;
+        for y in 0..h {
+            let cells = row_symbols(y);
+            for (x, symbol) in cells.iter().enumerate() {
+                if symbol != "┌" {
+                    continue;
+                }
+                // 全角文字はセルごとに空白の継続セルを伴うため、素の
+                // concat だと "武 器 詳 細" のように分断される。空白/空
+                // セルを除いてから連結することで、幅を気にせず部分一致
+                // 判定できるようにする。
+                let ahead: String = cells[x..(x + 20).min(cells.len())]
+                    .iter()
+                    .filter(|s| !s.trim().is_empty())
+                    .cloned()
+                    .collect();
+                if ahead.contains("武器詳細") {
+                    modal_left = Some(x as u16);
+                    top_row = Some(y);
+                    modal_right = cells[x + 1..]
+                        .iter()
+                        .position(|s| s == "┐")
+                        .map(|off| x as u16 + 1 + off as u16);
+                    break;
+                }
+            }
+            if top_row.is_some() {
+                break;
+            }
+        }
+        let (left, right, top) = (
+            modal_left.expect("武器詳細モーダルの左上が見つからない"),
+            modal_right.expect("武器詳細モーダルの右上が見つからない"),
+            top_row.unwrap(),
+        );
+        let mut bottom = None;
+        for y in (top + 1)..h {
+            if row_symbols(y)[left as usize] == "└" {
+                bottom = Some(y);
+                break;
+            }
+        }
+        let bottom = bottom.expect("武器詳細モーダルの下端が見つからない");
+
+        for y in (top + 1)..bottom {
+            for x in (left + 1)..right {
+                assert_ne!(
+                    buf[(x, y)].symbol(),
+                    "#",
+                    "modal cell ({x},{y}) still shows the background glyph underneath — Clear is missing"
+                );
+            }
+        }
+    }
+
     #[test]
     fn camp_renders_without_panicking_with_weapon_detail_modal_open() {
         let mut state = EverlightState::new();
@@ -1155,6 +1252,74 @@ mod tests {
             BoonOption { kind: BoonKind::NewWeapon(WeaponKind::Halo) },
         ]);
         render_to_test_backend(&state, 40, 30);
+    }
+
+    /// `render_boon_modal` は `render_battlefield` の後、同じフレーム内で
+    /// battlefield の上に重ね描きされる。`Clear` widget を挟まずに描くと、
+    /// モーダルの余白セル (テキストが無いセル) には battlefield の Braille
+    /// 点描がそのまま残る (`Paragraph` はテキストのあるセルしか書き換えない
+    /// ため) — これが「モーダル表示時に背面が透ける」不具合の実体。この
+    /// テストは、中央に置いた敵の Braille 点がモーダル領域内から一切
+    /// 見えなくなることを検証する回帰テスト。
+    #[test]
+    fn boon_modal_clears_battlefield_braille_underneath() {
+        use super::super::state::{BoonKind, BoonOption, Enemy};
+        use crate::effects::FlashTimer;
+
+        let mut state = EverlightState::new();
+        logic::start_vigil(&mut state);
+        // ワールド中心に敵を置く。world_to_canvas_y(WORLD_H/2) == WORLD_H/2
+        // なので、Canvas の x_bounds/y_bounds ([0,WORLD_W]/[0,WORLD_H]) 上でも
+        // battlefield Rect のちょうど中央に描かれ、中央に配置されるモーダルと
+        // 確実に重なる。
+        state.enemies.push(Enemy {
+            id: 1,
+            kind: EnemyKind::Wisp,
+            x: WORLD_W / 2.0,
+            y: WORLD_H / 2.0,
+            hp: 10,
+            max_hp: 10,
+            hurt_flash: FlashTimer::new(),
+            ranged_charge: None,
+            slow_ticks: 0,
+        });
+        state.pending_boons = Some([
+            BoonOption { kind: BoonKind::NewWeapon(WeaponKind::Spray) },
+            BoonOption { kind: BoonKind::NewWeapon(WeaponKind::Aurora) },
+            BoonOption { kind: BoonKind::NewWeapon(WeaponKind::Halo) },
+        ]);
+
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = 60;
+        cs.borrow_mut().terminal_rows = 30;
+        let mut terminal = Terminal::new(TestBackend::new(60, 30)).unwrap();
+        terminal
+            .draw(|f| {
+                render(&state, f, f.area(), &cs);
+            })
+            .unwrap();
+
+        let layout = compute_vigil_layout(Rect::new(0, 0, 60, 30));
+        let modal_w = layout.battlefield.width.saturating_sub(2).max(1);
+        let modal_h = layout.battlefield.height.min(3 * 3 + 5);
+        let modal_area = Rect::new(
+            layout.battlefield.x + (layout.battlefield.width.saturating_sub(modal_w)) / 2,
+            layout.battlefield.y + (layout.battlefield.height.saturating_sub(modal_h)) / 2,
+            modal_w,
+            modal_h,
+        );
+
+        let buffer = terminal.backend().buffer();
+        for y in modal_area.y..modal_area.y + modal_area.height {
+            for x in modal_area.x..modal_area.x + modal_area.width {
+                let symbol = buffer[(x, y)].symbol();
+                let is_braille = symbol.chars().next().is_some_and(|c| ('\u{2800}'..='\u{28FF}').contains(&c));
+                assert!(
+                    !is_braille,
+                    "modal cell ({x},{y}) still shows a battlefield Braille glyph ({symbol:?}) — Clear is missing"
+                );
+            }
+        }
     }
 
     #[test]
