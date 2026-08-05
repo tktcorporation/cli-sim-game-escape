@@ -15,6 +15,12 @@ pub const CAMP_RANK_UP: u16 = 9;
 /// よう、レベルアップ選択肢の帯 (10..13) の外側に置く。
 pub const CAMP_UPGRADE_EXTRA_WEAPON_SLOT: u16 = 13;
 
+/// 拠点画面のタブ切替 (出撃/強化/武器/戦績)。
+pub const CAMP_TAB_PREPARE: u16 = 14;
+pub const CAMP_TAB_UPGRADES: u16 = 15;
+pub const CAMP_TAB_WEAPONS: u16 = 16;
+pub const CAMP_TAB_STATS: u16 = 17;
+
 /// 武器解放の購入: action_id = CAMP_UNLOCK_WEAPON_BASE + `WeaponKind::save_id()`。
 /// `WeaponKind::all()` は現状8種なので 20..28 を占有する。
 pub const CAMP_UNLOCK_WEAPON_BASE: u16 = 20;
