@@ -998,18 +998,29 @@ fn push_lantern_type_selector(cl: &mut ClickableList, state: &EverlightState) {
 
 /// 武器解放の一覧。タップすると `render_weapon_detail_modal` の詳細
 /// モーダルが開く (解放済みは確認、未解放は解放ボタン付き)。
+///
+/// 名前・状態・コスト・説明を1行に詰め込むと、8種が隙間なく並んで
+/// どこからどこまでが1つのボタンなのか読み取りにくくなる。`push_upgrade_row`
+/// と同じ「太字の見出し行 + インデントした説明行」の2行構成に揃え、
+/// 行間の空行で1件ずつ独立したボタンとして読めるようにする — 装飾を
+/// 足すのではなく、既存のレイアウト言語をここにも適用する。
 fn push_weapon_unlock_section(cl: &mut ClickableList, state: &EverlightState) {
     push_section_header(cl, "武器解放", Color::LightCyan);
-    for &kind in WeaponKind::all() {
+    let kinds = WeaponKind::all();
+    for (i, &kind) in kinds.iter().enumerate() {
+        if i > 0 {
+            cl.push(Line::from(""));
+        }
         let action_id = actions::CAMP_UNLOCK_WEAPON_BASE + kind.save_id() as u16;
         if state.camp.is_weapon_unlocked(kind) {
             cl.push_clickable(
                 Line::from(Span::styled(
-                    format!(" ✓ {} 解放済み — {}", kind.name(), kind.summary()),
-                    Style::default().fg(kind.color()),
+                    format!(" ✓ {}  解放済み", kind.name()),
+                    Style::default().fg(kind.color()).add_modifier(Modifier::BOLD),
                 )),
                 action_id,
             );
+            cl.push(Line::from(Span::styled(format!("    {}", kind.summary()), Style::default().fg(Color::DarkGray))));
             continue;
         }
         let Some(cost) = kind.unlock_cost() else {
@@ -1018,12 +1029,13 @@ fn push_weapon_unlock_section(cl: &mut ClickableList, state: &EverlightState) {
         let affordable = state.ember >= cost;
         let color = if affordable { Color::LightCyan } else { Color::DarkGray };
         cl.push_clickable(
-            Line::from(Span::styled(
-                format!(" {} — {cost}残光 ({})", kind.name(), kind.summary()),
-                Style::default().fg(color),
-            )),
+            Line::from(vec![
+                Span::styled(format!(" ▶ {}", kind.name()), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  {cost}残光"), Style::default().fg(color)),
+            ]),
             action_id,
         );
+        cl.push(Line::from(Span::styled(format!("    {}", kind.summary()), Style::default().fg(Color::DarkGray))));
     }
 }
 
@@ -1145,6 +1157,21 @@ mod tests {
         state.camp.unlocked_weapons = WeaponKind::all().to_vec();
         render_to_test_backend(&state, 40, 34);
         render_to_test_backend(&state, 100, 34);
+    }
+
+    #[test]
+    fn every_weapon_unlock_row_is_individually_clickable() {
+        // 武器解放欄を「見出し行+説明行+空行」の3行構成に組み替えた際、
+        // 空行の挿入タイミング (`i > 0` の位置) を間違えると特定の武器だけ
+        // クリック対象がずれる/消える回帰が起こり得る。全武器種について
+        // 個別に action_id が登録されていることを確認する。
+        let state = EverlightState::new();
+        let (w, h) = (80u16, 200u16);
+        let cs = render_to_test_backend_with_click_state(&state, w, h);
+        for &kind in WeaponKind::all() {
+            let action_id = actions::CAMP_UNLOCK_WEAPON_BASE + kind.save_id() as u16;
+            assert!(has_click_target(&cs, w, h, action_id), "{kind:?} の武器解放行がクリック対象として登録されていない");
+        }
     }
 
     /// `render_to_test_backend` の戻り値ありバージョン。描画後に実際に
