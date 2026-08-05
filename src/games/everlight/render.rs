@@ -860,7 +860,7 @@ fn render_camp_body(
     }
 
     cl.push(ember_divider_line());
-    push_weapon_unlock_section(&mut cl, state);
+    push_weapon_unlock_section(&mut cl, state, area.width);
 
     cl.push(ember_divider_line());
     push_section_header(&mut cl, "戦績", Color::Gray);
@@ -996,6 +996,48 @@ fn push_lantern_type_selector(cl: &mut ClickableList, state: &EverlightState) {
     );
 }
 
+/// 説明文を、先頭に4スペースのインデントを付けた複数行へ手動で折り返す。
+///
+/// `ClickableList` の自動 wrap は「継続行に元のインデントを引き継がない」
+/// (先頭行だけが `"    "` を保持し、2行目以降は左端に張り付く) ため、
+/// 長い説明文がwrapされると `push_weapon_unlock_section` が作る「見出し+
+/// インデントした説明」というブロックの見た目が崩れる。ここで先に短い
+/// 行へ割ってしまえば自動 wrap 自体が発生せず、崩れを防げる。
+///
+/// `area_width` は実際の描画幅そのものではなく `render_camp_body` に渡る
+/// 外枠の `Rect::width` (ScrollableTabのborder等を引く前の値)。厳密な内側
+/// 幅を計算する代わりに大きめの余白 (`SAFE_WIDTH_MARGIN`) を引いて必ず
+/// 実際の描画幅以下になるようにしている — 実際より狭く見積もる分には、
+/// 折り返しがやや増えるだけで崩れない (安全側)。
+const SAFE_WIDTH_MARGIN: u16 = 5;
+const DESCRIPTION_INDENT: &str = "    ";
+
+fn wrap_indented_description(text: &str, area_width: u16) -> Vec<Line<'static>> {
+    let indent_width = Span::raw(DESCRIPTION_INDENT).width() as u16;
+    let budget = area_width.saturating_sub(SAFE_WIDTH_MARGIN).saturating_sub(indent_width).max(1);
+
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0u16;
+    for ch in text.chars() {
+        let ch_width = Span::raw(ch.to_string()).width() as u16;
+        if current_width + ch_width > budget && !current.is_empty() {
+            rows.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width += ch_width;
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+    rows.into_iter()
+        .map(|row| {
+            Line::from(Span::styled(format!("{DESCRIPTION_INDENT}{row}"), Style::default().fg(Color::DarkGray)))
+        })
+        .collect()
+}
+
 /// 武器解放の一覧。タップすると `render_weapon_detail_modal` の詳細
 /// モーダルが開く (解放済みは確認、未解放は解放ボタン付き)。
 ///
@@ -1004,7 +1046,7 @@ fn push_lantern_type_selector(cl: &mut ClickableList, state: &EverlightState) {
 /// と同じ「太字の見出し行 + インデントした説明行」の2行構成に揃え、
 /// 行間の空行で1件ずつ独立したボタンとして読めるようにする — 装飾を
 /// 足すのではなく、既存のレイアウト言語をここにも適用する。
-fn push_weapon_unlock_section(cl: &mut ClickableList, state: &EverlightState) {
+fn push_weapon_unlock_section(cl: &mut ClickableList, state: &EverlightState, area_width: u16) {
     push_section_header(cl, "武器解放", Color::LightCyan);
     let kinds = WeaponKind::all();
     for (i, &kind) in kinds.iter().enumerate() {
@@ -1020,7 +1062,9 @@ fn push_weapon_unlock_section(cl: &mut ClickableList, state: &EverlightState) {
                 )),
                 action_id,
             );
-            cl.push(Line::from(Span::styled(format!("    {}", kind.summary()), Style::default().fg(Color::DarkGray))));
+            for line in wrap_indented_description(kind.summary(), area_width) {
+                cl.push(line);
+            }
             continue;
         }
         let Some(cost) = kind.unlock_cost() else {
@@ -1035,7 +1079,9 @@ fn push_weapon_unlock_section(cl: &mut ClickableList, state: &EverlightState) {
             ]),
             action_id,
         );
-        cl.push(Line::from(Span::styled(format!("    {}", kind.summary()), Style::default().fg(Color::DarkGray))));
+        for line in wrap_indented_description(kind.summary(), area_width) {
+            cl.push(line);
+        }
     }
 }
 
@@ -1172,6 +1218,48 @@ mod tests {
             let action_id = actions::CAMP_UNLOCK_WEAPON_BASE + kind.save_id() as u16;
             assert!(has_click_target(&cs, w, h, action_id), "{kind:?} の武器解放行がクリック対象として登録されていない");
         }
+    }
+
+    #[test]
+    fn wrap_indented_description_keeps_short_text_on_one_indented_line() {
+        let lines = wrap_indented_description("短い説明", 80);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(line_text(&lines[0]), "    短い説明");
+    }
+
+    #[test]
+    fn wrap_indented_description_splits_long_text_and_indents_every_row() {
+        // 氷華の説明文で実機再現した回帰: 折り返しが起きた継続行が左端に
+        // 張り付き、見出し行とのインデントが揃わなくなっていた。
+        let lines = wrap_indented_description("命中した敵を減速させる自動照準弾", 40);
+        assert!(lines.len() > 1, "40幅では1行に収まらないはず");
+        for line in &lines {
+            let text = line_text(line);
+            assert!(text.starts_with(DESCRIPTION_INDENT), "継続行も含め全行がインデントされるはず: {text:?}");
+        }
+        // 分割前後で文字が失われていないこと。
+        let rejoined: String = lines.iter().map(|l| line_text(l).trim_start().to_string()).collect();
+        assert_eq!(rejoined, "命中した敵を減速させる自動照準弾");
+    }
+
+    #[test]
+    fn wrap_indented_description_each_row_fits_within_the_conservative_budget() {
+        for &kind in WeaponKind::all() {
+            for area_width in [20u16, 31, 45, 100] {
+                for line in wrap_indented_description(kind.summary(), area_width) {
+                    let width = line.width() as u16;
+                    assert!(
+                        width <= area_width,
+                        "{kind:?} at area_width={area_width}: 行幅{width}が実際の描画幅を超えている: {line:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_indented_description_never_panics_on_zero_width() {
+        assert!(!wrap_indented_description("何かの説明文", 0).is_empty());
     }
 
     /// `render_to_test_backend` の戻り値ありバージョン。描画後に実際に
