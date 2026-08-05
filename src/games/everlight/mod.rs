@@ -214,6 +214,26 @@ impl EverlightGame {
                 CAMP_STARTING_WEAPON_NEXT => self.cycle_starting_weapon_and_notify(1),
                 CAMP_LANTERN_TYPE_PREV => self.cycle_lantern_type_and_notify(-1),
                 CAMP_LANTERN_TYPE_NEXT => self.cycle_lantern_type_and_notify(1),
+                CAMP_TAB_PREPARE => {
+                    switch_camp_tab(&mut self.state, state::CampTab::Prepare);
+                    sound::play(sound::CLICK);
+                    true
+                }
+                CAMP_TAB_UPGRADES => {
+                    switch_camp_tab(&mut self.state, state::CampTab::Upgrades);
+                    sound::play(sound::CLICK);
+                    true
+                }
+                CAMP_TAB_WEAPONS => {
+                    switch_camp_tab(&mut self.state, state::CampTab::Weapons);
+                    sound::play(sound::CLICK);
+                    true
+                }
+                CAMP_TAB_STATS => {
+                    switch_camp_tab(&mut self.state, state::CampTab::Stats);
+                    sound::play(sound::CLICK);
+                    true
+                }
                 id if (CAMP_UNLOCK_WEAPON_BASE..CAMP_UNLOCK_WEAPON_BASE + state::WeaponKind::all().len() as u16)
                     .contains(&id) =>
                 {
@@ -399,6 +419,16 @@ impl Game for EverlightGame {
         let elapsed = self.frame_clock.elapsed(time::now_ms().unwrap_or(0.0));
         self.effects.borrow_mut().process(elapsed, f.buffer_mut(), area);
     }
+}
+
+/// タブ切替時に拠点画面のスクロールを先頭へ戻す。タブごとに内容の長さが
+/// 大きく異なるため、前のタブで深くスクロールしていると切替直後に
+/// 「いきなり中間位置」が表示されて違和感が出る。
+fn switch_camp_tab(state: &mut state::EverlightState, tab: state::CampTab) {
+    if state.camp_tab != tab {
+        state.camp_scroll.set(0);
+    }
+    state.camp_tab = tab;
 }
 
 /// `Cell<u16>` スクロール値を負にならないよう飽和加算/減算で更新する。
@@ -764,6 +794,40 @@ mod tests {
             save::AUTOSAVE_INTERVAL + 1000,
             "変化が無ければflush_saveは呼ばれないはず"
         );
+    }
+
+    #[test]
+    fn tab_click_switches_the_active_camp_tab() {
+        let mut game = EverlightGame::new();
+        assert_eq!(game.state.camp_tab, state::CampTab::Prepare);
+        assert!(game.handle_input(&click(CAMP_TAB_WEAPONS)));
+        assert_eq!(game.state.camp_tab, state::CampTab::Weapons);
+        assert!(game.handle_input(&click(CAMP_TAB_UPGRADES)));
+        assert_eq!(game.state.camp_tab, state::CampTab::Upgrades);
+        assert!(game.handle_input(&click(CAMP_TAB_STATS)));
+        assert_eq!(game.state.camp_tab, state::CampTab::Stats);
+        assert!(game.handle_input(&click(CAMP_TAB_PREPARE)));
+        assert_eq!(game.state.camp_tab, state::CampTab::Prepare);
+    }
+
+    #[test]
+    fn switching_to_a_different_camp_tab_resets_scroll_to_top() {
+        // タブごとに内容の長さが違うため、前のタブで深くスクロールした
+        // ままだと切替直後に中途半端な位置が表示されてしまう。
+        let mut game = EverlightGame::new();
+        game.state.camp_scroll.set(5);
+        assert!(game.handle_input(&click(CAMP_TAB_WEAPONS)));
+        assert_eq!(game.state.camp_scroll.get(), 0);
+    }
+
+    #[test]
+    fn clicking_the_already_active_camp_tab_does_not_reset_scroll() {
+        // 既に開いているタブを再タップしただけでスクロールが吹き飛ぶと、
+        // 誤タップのたびに読んでいた位置を見失ってしまう。
+        let mut game = EverlightGame::new();
+        game.state.camp_scroll.set(5);
+        assert!(game.handle_input(&click(CAMP_TAB_PREPARE)), "既にPrepareタブがアクティブな状態でのタップ");
+        assert_eq!(game.state.camp_scroll.get(), 5, "同じタブの再選択ではスクロール位置を保つはず");
     }
 
     #[test]

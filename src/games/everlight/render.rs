@@ -21,14 +21,14 @@ use crate::canvas_fx;
 use crate::games::GameChoice;
 use crate::input::{is_narrow_layout, ClickState};
 use crate::theme;
-use crate::widgets::{Clickable, ClickableGrid, ClickableList, ScrollableTab};
+use crate::widgets::{Clickable, ClickableGrid, ClickableList, ScrollableTab, TabBar};
 
 use super::actions;
 use super::logic;
 use super::state::{
-    BoonKind, CampUpgrades, EnemyKind, EverlightState, LanternType, Phase, WeaponKind, BREACH_Y,
-    COLUMNS, ENEMY_BULLET_RADIUS, KILL_EFFECT_TICKS, LANE_HALF_WIDTH, LANTERN_Y, SPAWN_Y, WORLD_H,
-    WORLD_W,
+    BoonKind, CampTab, CampUpgrades, EnemyKind, EverlightState, LanternType, Phase, WeaponKind,
+    BREACH_Y, COLUMNS, ENEMY_BULLET_RADIUS, KILL_EFFECT_TICKS, LANE_HALF_WIDTH, LANTERN_Y, SPAWN_Y,
+    WORLD_H, WORLD_W,
 };
 
 /// 燠火の色。情景パネルの熾火 (`render_camp_ambience`) と拠点画面の点描
@@ -769,6 +769,15 @@ fn render_weapon_detail_modal(state: &EverlightState, f: &mut Frame, area: Rect,
     cl.render(f, modal_area, block, &mut cs, true, 0);
 }
 
+/// 拠点画面の本体。目的別の4タブ (`CampTab`) に分け、選択中のタブだけを
+/// スクロール一覧として描く。以前は全項目を1本の長いリストに詰め込んで
+/// いたため「毎回選ぶもの」「残光で払うもの」「振り返るだけのもの」が
+/// 混在して見づらかった — タブで区切ることで、画面には常に1つの目的の
+/// 項目だけが載るようにする。
+///
+/// `TabBar`/`ScrollableTab` の組み合わせは `metropolis::render_tab_panel`
+/// と同じ構成 (外枠のBlockを手動で描き、内側を [タブバー1行 / 内容] に
+/// 分割する) を踏襲している。
 fn render_camp_body(
     state: &EverlightState,
     f: &mut Frame,
@@ -776,6 +785,56 @@ fn render_camp_body(
     click_state: &Rc<RefCell<ClickState>>,
     borders: Borders,
 ) {
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Green))
+        .title(" 拠点 ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.height == 0 || inner.width == 0 {
+        return;
+    }
+
+    let vchunks =
+        Layout::default().direction(Direction::Vertical).constraints([Constraint::Length(1), Constraint::Min(0)]).split(inner);
+
+    {
+        let mut cs = click_state.borrow_mut();
+        TabBar::new("│")
+            .tab(CampTab::Prepare.label(), camp_tab_style(state.camp_tab == CampTab::Prepare), actions::CAMP_TAB_PREPARE)
+            .tab(CampTab::Upgrades.label(), camp_tab_style(state.camp_tab == CampTab::Upgrades), actions::CAMP_TAB_UPGRADES)
+            .tab(CampTab::Weapons.label(), camp_tab_style(state.camp_tab == CampTab::Weapons), actions::CAMP_TAB_WEAPONS)
+            .tab(CampTab::Stats.label(), camp_tab_style(state.camp_tab == CampTab::Stats), actions::CAMP_TAB_STATS)
+            .render(f, vchunks[0], &mut cs);
+    }
+
+    let list = match state.camp_tab {
+        CampTab::Prepare => camp_prepare_list(state),
+        CampTab::Upgrades => camp_upgrades_list(state),
+        CampTab::Weapons => camp_weapons_list(state, vchunks[1].width),
+        CampTab::Stats => camp_stats_list(state),
+    };
+    let mut cs = click_state.borrow_mut();
+    ScrollableTab::new(list, &state.camp_scroll, actions::CAMP_SCROLL_UP, actions::CAMP_SCROLL_DOWN)
+        .wrap(true)
+        .arrow_color(Color::Green)
+        .render(f, vchunks[1], &mut cs);
+}
+
+/// 選択中のタブは Everlight のブランドカラー (`theme::accent`) を反転背景
+/// で強調し、それ以外は暗く沈める — `render_camp_body` の CTA ボタンと
+/// 同じ「反転色 = 今アクティブ/主役」という配色言語を、タブの選択状態にも揃える。
+fn camp_tab_style(active: bool) -> Style {
+    if active {
+        Style::default().fg(Color::Black).bg(theme::accent(&GameChoice::Everlight)).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
+}
+
+/// 「出撃」タブ: 夜番へ出る前に毎回見直すもの (残光・挑戦ランク・初期武器・
+/// 灯のタイプ) と、出撃ボタンそのもの。
+fn camp_prepare_list(state: &EverlightState) -> ClickableList<'static> {
     let mut cl = ClickableList::new();
     cl.push(Line::from(""));
     cl.push(Line::from(vec![
@@ -799,9 +858,14 @@ fn render_camp_body(
         "    灯を持って魔物の群れを迎え撃つ",
         Style::default().fg(Color::DarkGray),
     )));
-    cl.push(ember_divider_line());
+    cl.push(Line::from(""));
+    cl
+}
 
-    push_section_header(&mut cl, "恒久強化", Color::Yellow);
+/// 「強化」タブ: 残光で払う恒久強化 (灯心/光力/スロット拡張)。
+fn camp_upgrades_list(state: &EverlightState) -> ClickableList<'static> {
+    let mut cl = ClickableList::new();
+    cl.push(Line::from(""));
 
     push_upgrade_row(
         &mut cl,
@@ -858,29 +922,30 @@ fn render_camp_body(
             actions::CAMP_UPGRADE_EXTRA_WEAPON_SLOT,
         );
     }
+    cl.push(Line::from(""));
+    cl
+}
 
-    cl.push(ember_divider_line());
-    push_weapon_unlock_section(&mut cl, state);
+/// 「武器」タブ: 残光で解放する武器の一覧。
+fn camp_weapons_list(state: &EverlightState, area_width: u16) -> ClickableList<'static> {
+    let mut cl = ClickableList::new();
+    cl.push(Line::from(""));
+    push_weapon_unlock_section(&mut cl, state, area_width);
+    cl.push(Line::from(""));
+    cl
+}
 
-    cl.push(ember_divider_line());
-    push_section_header(&mut cl, "戦績", Color::Gray);
+/// 「戦績」タブ: 自己ベストの振り返り。読み取り専用でタップ操作は無い。
+fn camp_stats_list(state: &EverlightState) -> ClickableList<'static> {
+    let mut cl = ClickableList::new();
+    cl.push(Line::from(""));
     cl.push(Line::from(format!(
         " 自己最高: 第{}波 / 生存 {}",
         state.best_wave,
         format_survival(state.best_survival_ticks)
     )));
     cl.push(Line::from(""));
-
-    let block = Block::default()
-        .borders(borders)
-        .border_style(Style::default().fg(Color::Green))
-        .title(" 拠点 ");
-    let mut cs = click_state.borrow_mut();
-    ScrollableTab::new(cl, &state.camp_scroll, actions::CAMP_SCROLL_UP, actions::CAMP_SCROLL_DOWN)
-        .block(block)
-        .wrap(true)
-        .arrow_color(Color::Green)
-        .render(f, area, &mut cs);
+    cl
 }
 
 /// 拠点画面の各セクション見出し。太字ラベルの下に Braille の点罫線を
@@ -996,20 +1061,74 @@ fn push_lantern_type_selector(cl: &mut ClickableList, state: &EverlightState) {
     );
 }
 
+/// 説明文を、先頭に4スペースのインデントを付けた複数行へ手動で折り返す。
+///
+/// `ClickableList` の自動 wrap は「継続行に元のインデントを引き継がない」
+/// (先頭行だけが `"    "` を保持し、2行目以降は左端に張り付く) ため、
+/// 長い説明文がwrapされると `push_weapon_unlock_section` が作る「見出し+
+/// インデントした説明」というブロックの見た目が崩れる。ここで先に短い
+/// 行へ割ってしまえば自動 wrap 自体が発生せず、崩れを防げる。
+///
+/// `area_width` は `render_camp_body` がタブ内容へ渡す内側 (border控除後)
+/// の `Rect::width` だが、`ScrollableTab` が予約する矢印列ぶんはここでは
+/// 引いていない。厳密な最終幅を計算する代わりに大きめの余白
+/// (`SAFE_WIDTH_MARGIN`) を引いて必ず実際の描画幅以下になるようにしている
+/// — 実際より狭く見積もる分には、折り返しがやや増えるだけで崩れない (安全側)。
+const SAFE_WIDTH_MARGIN: u16 = 5;
+const DESCRIPTION_INDENT: &str = "    ";
+
+fn wrap_indented_description(text: &str, area_width: u16) -> Vec<Line<'static>> {
+    let indent_width = Span::raw(DESCRIPTION_INDENT).width() as u16;
+    let budget = area_width.saturating_sub(SAFE_WIDTH_MARGIN).saturating_sub(indent_width).max(1);
+
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0u16;
+    for ch in text.chars() {
+        let ch_width = Span::raw(ch.to_string()).width() as u16;
+        if current_width + ch_width > budget && !current.is_empty() {
+            rows.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        current.push(ch);
+        current_width += ch_width;
+    }
+    if !current.is_empty() {
+        rows.push(current);
+    }
+    rows.into_iter()
+        .map(|row| {
+            Line::from(Span::styled(format!("{DESCRIPTION_INDENT}{row}"), Style::default().fg(Color::DarkGray)))
+        })
+        .collect()
+}
+
 /// 武器解放の一覧。タップすると `render_weapon_detail_modal` の詳細
 /// モーダルが開く (解放済みは確認、未解放は解放ボタン付き)。
-fn push_weapon_unlock_section(cl: &mut ClickableList, state: &EverlightState) {
-    push_section_header(cl, "武器解放", Color::LightCyan);
-    for &kind in WeaponKind::all() {
+///
+/// 名前・状態・コスト・説明を1行に詰め込むと、8種が隙間なく並んで
+/// どこからどこまでが1つのボタンなのか読み取りにくくなる。`push_upgrade_row`
+/// と同じ「太字の見出し行 + インデントした説明行」の2行構成に揃え、
+/// 行間の空行で1件ずつ独立したボタンとして読めるようにする — 装飾を
+/// 足すのではなく、既存のレイアウト言語をここにも適用する。
+fn push_weapon_unlock_section(cl: &mut ClickableList, state: &EverlightState, area_width: u16) {
+    let kinds = WeaponKind::all();
+    for (i, &kind) in kinds.iter().enumerate() {
+        if i > 0 {
+            cl.push(Line::from(""));
+        }
         let action_id = actions::CAMP_UNLOCK_WEAPON_BASE + kind.save_id() as u16;
         if state.camp.is_weapon_unlocked(kind) {
             cl.push_clickable(
                 Line::from(Span::styled(
-                    format!(" ✓ {} 解放済み — {}", kind.name(), kind.summary()),
-                    Style::default().fg(kind.color()),
+                    format!(" ✓ {}  解放済み", kind.name()),
+                    Style::default().fg(kind.color()).add_modifier(Modifier::BOLD),
                 )),
                 action_id,
             );
+            for line in wrap_indented_description(kind.summary(), area_width) {
+                cl.push(line);
+            }
             continue;
         }
         let Some(cost) = kind.unlock_cost() else {
@@ -1018,12 +1137,15 @@ fn push_weapon_unlock_section(cl: &mut ClickableList, state: &EverlightState) {
         let affordable = state.ember >= cost;
         let color = if affordable { Color::LightCyan } else { Color::DarkGray };
         cl.push_clickable(
-            Line::from(Span::styled(
-                format!(" {} — {cost}残光 ({})", kind.name(), kind.summary()),
-                Style::default().fg(color),
-            )),
+            Line::from(vec![
+                Span::styled(format!(" ▶ {}", kind.name()), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(format!("  {cost}残光"), Style::default().fg(color)),
+            ]),
             action_id,
         );
+        for line in wrap_indented_description(kind.summary(), area_width) {
+            cl.push(line);
+        }
     }
 }
 
@@ -1145,6 +1267,129 @@ mod tests {
         state.camp.unlocked_weapons = WeaponKind::all().to_vec();
         render_to_test_backend(&state, 40, 34);
         render_to_test_backend(&state, 100, 34);
+    }
+
+    #[test]
+    fn every_weapon_unlock_row_is_individually_clickable() {
+        // 武器解放欄を「見出し行+説明行+空行」の3行構成に組み替えた際、
+        // 空行の挿入タイミング (`i > 0` の位置) を間違えると特定の武器だけ
+        // クリック対象がずれる/消える回帰が起こり得る。全武器種について
+        // 個別に action_id が登録されていることを確認する。
+        let mut state = EverlightState::new();
+        state.camp_tab = CampTab::Weapons;
+        let (w, h) = (80u16, 200u16);
+        let cs = render_to_test_backend_with_click_state(&state, w, h);
+        for &kind in WeaponKind::all() {
+            let action_id = actions::CAMP_UNLOCK_WEAPON_BASE + kind.save_id() as u16;
+            assert!(has_click_target(&cs, w, h, action_id), "{kind:?} の武器解放行がクリック対象として登録されていない");
+        }
+    }
+
+    #[test]
+    fn every_camp_tab_renders_without_panicking_narrow_and_wide() {
+        let mut state = EverlightState::new();
+        for tab in [CampTab::Prepare, CampTab::Upgrades, CampTab::Weapons, CampTab::Stats] {
+            state.camp_tab = tab;
+            render_to_test_backend(&state, 40, 30);
+            render_to_test_backend(&state, 100, 30);
+        }
+    }
+
+    #[test]
+    fn scroll_indicator_never_appears_on_the_tab_bar_row() {
+        // タブバー (1行) とスクロール矢印列は `render_camp_body` の
+        // `Layout::split` で別々の Rect (vchunks[0]/vchunks[1]) に分けている。
+        // 分割を間違えると矢印がタブバー行に描かれてしまいかねないので、
+        // 武器タブを全解放してスクロールが確実に発生する高さで検証する。
+        let mut state = EverlightState::new();
+        state.camp_tab = CampTab::Weapons;
+        state.camp.unlocked_weapons = WeaponKind::all().to_vec();
+        let (w, h) = (40u16, 20u16);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = w;
+        cs.borrow_mut().terminal_rows = h;
+        terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
+        let buf = terminal.backend().buffer();
+
+        let row_text = |y: u16| -> String { (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect() };
+        let tab_row = (0..h)
+            .find(|&y| {
+                let compact: String = row_text(y).chars().filter(|c| !c.is_whitespace()).collect();
+                compact.contains("出撃") && compact.contains("戦績")
+            })
+            .expect("タブバー行が見つからない");
+
+        let tab_row_text = row_text(tab_row);
+        assert!(
+            !tab_row_text.contains('▲') && !tab_row_text.contains('▼'),
+            "タブバー行に矢印が描かれている: {tab_row_text:?}"
+        );
+
+        // このassertだけだと「そもそも矢印が無い」だけでも通ってしまうため、
+        // 矢印自体はどこかの行に実際に出ていることも確認する。
+        let has_scroll_indicator = (0..h).any(|y| row_text(y).contains('▼') || row_text(y).contains('▲'));
+        assert!(has_scroll_indicator, "この高さでは全武器を並べきれずスクロールが発生するはず");
+    }
+
+    #[test]
+    fn camp_tabs_show_only_their_own_content() {
+        // 「出撃」タブにしか無い夜番開始ボタンが、他のタブでも誤って
+        // 表示され続ける (=タブの切り替えがコンテンツに反映されていない)
+        // 回帰を検知する。
+        let mut state = EverlightState::new();
+
+        state.camp_tab = CampTab::Prepare;
+        let cs = render_to_test_backend_with_click_state(&state, 80, 40);
+        assert!(has_click_target(&cs, 80, 40, actions::CAMP_START_VIGIL), "出撃タブには夜番へ出るボタンがあるはず");
+
+        for tab in [CampTab::Upgrades, CampTab::Weapons, CampTab::Stats] {
+            state.camp_tab = tab;
+            let cs = render_to_test_backend_with_click_state(&state, 80, 40);
+            assert!(!has_click_target(&cs, 80, 40, actions::CAMP_START_VIGIL), "{tab:?}タブに夜番へ出るボタンが漏れている");
+        }
+    }
+
+    #[test]
+    fn wrap_indented_description_keeps_short_text_on_one_indented_line() {
+        let lines = wrap_indented_description("短い説明", 80);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(line_text(&lines[0]), "    短い説明");
+    }
+
+    #[test]
+    fn wrap_indented_description_splits_long_text_and_indents_every_row() {
+        // 氷華の説明文で実機再現した回帰: 折り返しが起きた継続行が左端に
+        // 張り付き、見出し行とのインデントが揃わなくなっていた。
+        let lines = wrap_indented_description("命中した敵を減速させる自動照準弾", 40);
+        assert!(lines.len() > 1, "40幅では1行に収まらないはず");
+        for line in &lines {
+            let text = line_text(line);
+            assert!(text.starts_with(DESCRIPTION_INDENT), "継続行も含め全行がインデントされるはず: {text:?}");
+        }
+        // 分割前後で文字が失われていないこと。
+        let rejoined: String = lines.iter().map(|l| line_text(l).trim_start().to_string()).collect();
+        assert_eq!(rejoined, "命中した敵を減速させる自動照準弾");
+    }
+
+    #[test]
+    fn wrap_indented_description_each_row_fits_within_the_conservative_budget() {
+        for &kind in WeaponKind::all() {
+            for area_width in [20u16, 31, 45, 100] {
+                for line in wrap_indented_description(kind.summary(), area_width) {
+                    let width = line.width() as u16;
+                    assert!(
+                        width <= area_width,
+                        "{kind:?} at area_width={area_width}: 行幅{width}が実際の描画幅を超えている: {line:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn wrap_indented_description_never_panics_on_zero_width() {
+        assert!(!wrap_indented_description("何かの説明文", 0).is_empty());
     }
 
     /// `render_to_test_backend` の戻り値ありバージョン。描画後に実際に

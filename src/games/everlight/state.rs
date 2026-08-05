@@ -1285,10 +1285,36 @@ pub struct EverlightState {
     /// 拠点画面のスクロール位置。`Game::render(&self, ...)` から
     /// (`&mut self` 無しで) クランプ書き戻しできるよう `Cell` で持つ。
     pub camp_scroll: Cell<u16>,
+    /// 拠点画面で選択中のタブ。
+    pub camp_tab: CampTab,
     /// 拠点の「武器解放」欄で選択中の武器。`Some` の間はモーダルを開き、
     /// 詳細と解放ボタンを表示する (`pending_boons` と同じ「選択→モーダル」
     /// の作法を拠点画面にも揃える)。
     pub weapon_detail_modal: Option<WeaponKind>,
+}
+
+/// 拠点画面のタブ。「毎回選ぶもの (出撃)」「残光で払うもの (強化)」
+/// 「武器を増やすもの (武器)」「振り返るもの (戦績)」と目的別に分けることで、
+/// 全項目を1本の長いリストへ詰め込んでいた見づらさを解消する。
+/// セーブはしない (`save.rs` 参照) — `camp_scroll` と同じく、リロード時は
+/// 常に最初のタブから始まってよいUI状態のため。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CampTab {
+    Prepare,
+    Upgrades,
+    Weapons,
+    Stats,
+}
+
+impl CampTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            CampTab::Prepare => "出撃",
+            CampTab::Upgrades => "強化",
+            CampTab::Weapons => "武器",
+            CampTab::Stats => "戦績",
+        }
+    }
 }
 
 /// 1件のログをポップ表示しておく時間 (tick)。
@@ -1348,6 +1374,7 @@ impl EverlightState {
             log: vec!["常夜灯へようこそ。拠点で身支度を整え、夜番へ出よう。".into()],
             log_display_ticks: 0,
             camp_scroll: Cell::new(0),
+            camp_tab: CampTab::Prepare,
             weapon_detail_modal: None,
         }
     }
