@@ -8,6 +8,7 @@ pub mod godfield;
 pub mod loopmarch;
 pub mod metropolis;
 pub mod rpg;
+pub mod shatterlab;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -50,6 +51,8 @@ pub enum GameChoice {
     Metropolis,
     LoopMarch,
     Everlight,
+    /// 破壊表現の比較試作（本編ではない）
+    ShatterLab,
 }
 
 /// Top-level application state.
@@ -88,5 +91,6 @@ pub fn create_game(choice: &GameChoice) -> Box<dyn Game> {
         GameChoice::Metropolis => Box::new(metropolis::MetropolisGame::new()),
         GameChoice::LoopMarch => Box::new(loopmarch::LoopMarchGame::new()),
         GameChoice::Everlight => Box::new(everlight::EverlightGame::new()),
+        GameChoice::ShatterLab => Box::new(shatterlab::ShatterLabGame::new()),
     }
 }

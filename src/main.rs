@@ -6,7 +6,7 @@ use std::{
 };
 
 use cli_sim_game_escape::canvas_fx;
-use cli_sim_game_escape::games::{self, create_game, AppState, GameChoice};
+use cli_sim_game_escape::games::{create_game, AppState, GameChoice};
 use cli_sim_game_escape::input::{
     is_narrow_layout, pixel_x_to_col, pixel_y_to_row, ClickScope, ClickState, InputEvent,
 };
@@ -41,9 +41,10 @@ pub const MENU_SCROLL_DOWN: u16 = 9;
 // 追加者が採番に迷わないよう連続させている。
 pub const MENU_SELECT_LOOPMARCH: u16 = 16;
 pub const MENU_SELECT_EVERLIGHT: u16 = 19;
+pub const MENU_SELECT_SHATTERLAB: u16 = 21;
 
-/// Last valid index of the main menu cards (8 games + settings → 0..=8).
-const MENU_LAST_INDEX: u8 = 8;
+/// Last valid index of the main menu cards (9 games + settings → 0..=9).
+const MENU_LAST_INDEX: u8 = 9;
 
 /// Cursor → menu action, used for the A button on the main menu.
 enum MenuPick {
@@ -61,6 +62,7 @@ fn menu_pick_for(idx: u8) -> MenuPick {
         5 => MenuPick::Game(GameChoice::Metropolis),
         6 => MenuPick::Game(GameChoice::LoopMarch),
         7 => MenuPick::Game(GameChoice::Everlight),
+        8 => MenuPick::Game(GameChoice::ShatterLab),
         _ => MenuPick::Settings,
     }
 }
@@ -283,6 +285,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 InputEvent::Key('8') | InputEvent::Click(_, MENU_SELECT_EVERLIGHT) => {
                     Some(MenuPick::Game(GameChoice::Everlight))
                 }
+                InputEvent::Key('9') | InputEvent::Click(_, MENU_SELECT_SHATTERLAB) => {
+                    Some(MenuPick::Game(GameChoice::ShatterLab))
+                }
                 InputEvent::Key('0') | InputEvent::Click(_, MENU_SELECT_SETTINGS) => {
                     Some(MenuPick::Settings)
                 }
@@ -407,11 +412,11 @@ fn adjust_scroll(cell: &Cell<u16>, delta: i32) {
 fn perform_reset(game: &GameChoice) {
     #[cfg(target_arch = "wasm32")]
     match game {
-        GameChoice::Cookie => games::cookie::save::delete_save(),
-        GameChoice::Abyss => games::abyss::save::delete_save(),
-        GameChoice::Metropolis => games::metropolis::save::delete_save(),
-        GameChoice::LoopMarch => games::loopmarch::save::delete_save(),
-        GameChoice::Everlight => games::everlight::save::delete_save(),
+        GameChoice::Cookie => cli_sim_game_escape::games::cookie::save::delete_save(),
+        GameChoice::Abyss => cli_sim_game_escape::games::abyss::save::delete_save(),
+        GameChoice::Metropolis => cli_sim_game_escape::games::metropolis::save::delete_save(),
+        GameChoice::LoopMarch => cli_sim_game_escape::games::loopmarch::save::delete_save(),
+        GameChoice::Everlight => cli_sim_game_escape::games::everlight::save::delete_save(),
         _ => {}
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -620,6 +625,7 @@ fn render_menu(
         ('6', "Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶', theme::accent(&GameChoice::Metropolis)),
         ('7', "周回討伐", "地形を配置し勇者が自動周回するローグライト", MENU_SELECT_LOOPMARCH, '▶', theme::accent(&GameChoice::LoopMarch)),
         ('8', "常夜灯", "降り注ぐ魔物から灯を守る縦画面バレットヘヴン", MENU_SELECT_EVERLIGHT, '▶', theme::accent(&GameChoice::Everlight)),
+        ('9', "破壊VFXラボ", "破壊表現の試作を並べて見比べる（本編ではない）", MENU_SELECT_SHATTERLAB, '▶', theme::accent(&GameChoice::ShatterLab)),
         ('0', "設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 
@@ -1097,7 +1103,7 @@ mod tests {
         // 幅依存のレイアウトを一通り踏む。selected は先頭・中間・末尾
         // (= 設定, 数字キー無しの ⚙ マーカー) を網羅する。
         for &(w, h) in &[(40u16, 30u16), (60, 30), (100, 40)] {
-            for selected in [0u8, 4, 8] {
+            for selected in [0u8, 4, 9] {
                 render_menu_to_test_backend(w, h, selected);
             }
         }
@@ -1107,12 +1113,12 @@ mod tests {
     /// 組み替えたので、`ClickableList` の wrap-aware クリック登録が依然
     /// 全カードで機能していることを確認する回帰テスト。
     ///
-    /// 「9枚全部が常に同時に画面内にある」とは限らない (説明文の折り返しで
+    /// 「全カードが常に同時に画面内にある」とは限らない (説明文の折り返しで
     /// 縦に溢れればスクロールされ、後方のカードは一時的に隠れる) ので、
     /// 「selected=i で描画した時、そのカード自身のタップ対象は必ず見える
     /// 範囲に入る」という auto-scroll の契約を検証する。
     fn assert_selected_card_is_always_reachable(width: u16, height: u16) {
-        const ACTION_IDS: [u16; 9] = [
+        const ACTION_IDS: [u16; 10] = [
             MENU_SELECT_COOKIE,
             MENU_SELECT_FACTORY,
             MENU_SELECT_RPG,
@@ -1121,6 +1127,7 @@ mod tests {
             MENU_SELECT_METROPOLIS,
             MENU_SELECT_LOOPMARCH,
             MENU_SELECT_EVERLIGHT,
+            MENU_SELECT_SHATTERLAB,
             MENU_SELECT_SETTINGS,
         ];
         for (i, &action_id) in ACTION_IDS.iter().enumerate() {
@@ -1147,8 +1154,8 @@ mod tests {
     /// 折り返し幅がワイド時と変わるだけで panic しないことを確認する。
     #[test]
     fn render_menu_orbit_panel_does_not_panic_for_various_selections() {
-        let entries: Vec<(Color, &str)> = (0..9).map(|_| (Color::LightMagenta, "x")).collect();
-        for selected in 0u8..9 {
+        let entries: Vec<(Color, &str)> = (0..10).map(|_| (Color::LightMagenta, "x")).collect();
+        for selected in 0u8..10 {
             let mut terminal = Terminal::new(TestBackend::new(22, 20)).unwrap();
             terminal
                 .draw(|f| {
