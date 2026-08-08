@@ -3,7 +3,7 @@
 use super::state::{
     Layer, Ore, OreKind, OreMotion, Particle, ParticleKind, Projectile, PulseRing, RingUpgrade,
     StarRingState, WeaponKind, WeaponStat, BOOST_DURATION, CX, CY, INNER_RADIUS, LAYER_FLASH_TICKS,
-    ORBIT_Y_SQUASH, SPAWN_RADIUS, WORLD_H, WORLD_W,
+    LAYER_READY_FLASH_TICKS, ORBIT_Y_SQUASH, SPAWN_RADIUS, WORLD_H, WORLD_W,
 };
 
 /// ダメージの出どころ。殻石の耐性計算に使う。
@@ -121,6 +121,54 @@ pub fn select_weapon(state: &mut StarRingState, weapon: WeaponKind) -> bool {
     true
 }
 
+/// 次層を開放するのに必要な星屑。次閾値が無い場合は 0。
+pub fn layer_unlock_cost(state: &StarRingState) -> f64 {
+    Layer::unlock_cost(state.layer() + 1)
+}
+
+pub fn can_unlock_next_layer(state: &StarRingState) -> bool {
+    if !state.kills_ready_for_next_layer() {
+        return false;
+    }
+    let cost = layer_unlock_cost(state);
+    state.shards + 1e-9 >= cost
+}
+
+/// 撃破条件と星屑を満たしていれば次層を開放する。進行リセットはしない。
+pub fn unlock_next_layer(state: &mut StarRingState) -> bool {
+    if !can_unlock_next_layer(state) {
+        return false;
+    }
+    let cost = layer_unlock_cost(state);
+    state.shards -= cost;
+    state.current_layer = state.current_layer.saturating_add(1);
+    play_layer_unlock_ceremony(state);
+    true
+}
+
+fn play_layer_unlock_ceremony(state: &mut StarRingState) {
+    let layer = state.layer();
+    state.layer_flash_ticks = LAYER_FLASH_TICKS;
+    state.layer_ready_flash_ticks = 0;
+    state.layer_ready_latched = false;
+    state.shake_ticks = state.shake_ticks.max(16);
+    state.core_flash_ticks = state.core_flash_ticks.max(22);
+    burst(state, CX, CY, 22, 2.8, ParticleKind::Spark, 28);
+    burst(state, CX, CY, 14, 2.0, ParticleKind::Shard, 24);
+    burst(state, CX, CY, 10, 1.4, ParticleKind::Ember, 20);
+    state.pulse_rings.push(PulseRing {
+        radius: INNER_RADIUS,
+        life: 16,
+        max_life: 16,
+    });
+    for w in WeaponKind::ALL {
+        if w.unlock_layer() == layer {
+            state.selected_weapon = w;
+            break;
+        }
+    }
+}
+
 /// 手動タップ: 近傍1体にダメージ + 一時火力ブースト。
 /// 核脈動を解放済みなら小さな核波も添える。
 pub fn manual_strike(state: &mut StarRingState) {
@@ -169,6 +217,9 @@ pub fn tick(state: &mut StarRingState, delta_ticks: u32) {
         if state.layer_flash_ticks > 0 {
             state.layer_flash_ticks -= 1;
         }
+        if state.layer_ready_flash_ticks > 0 {
+            state.layer_ready_flash_ticks -= 1;
+        }
 
         step_particles(state);
         step_pulse_rings(state);
@@ -178,30 +229,24 @@ pub fn tick(state: &mut StarRingState, delta_ticks: u32) {
         spawn_ores(state);
         fire_weapons(state);
         fire_core_pulse(state);
-        check_layer_advance(state);
+        check_layer_ready(state);
 
         state.recent_gain[state.recent_gain_idx] = state.tick_gain;
         state.recent_gain_idx = (state.recent_gain_idx + 1) % state.recent_gain.len();
     }
 }
 
-fn check_layer_advance(state: &mut StarRingState) {
-    let layer = state.layer();
-    if layer > state.last_layer {
-        state.layer_flash_ticks = LAYER_FLASH_TICKS;
-        state.shake_ticks = state.shake_ticks.max(10);
-        state.core_flash_ticks = state.core_flash_ticks.max(14);
-        burst(state, CX, CY, 16, 2.2, ParticleKind::Spark, 22);
-        burst(state, CX, CY, 10, 1.6, ParticleKind::Shard, 18);
-        for w in WeaponKind::ALL {
-            if w.unlock_layer() == layer {
-                state.selected_weapon = w;
-                break;
-            }
-        }
-        state.last_layer = layer;
-    } else if layer < state.last_layer {
-        state.last_layer = layer;
+/// 撃破条件を満たした瞬間だけ「開放可」パルスを立てる。層自体は自動では進まない。
+fn check_layer_ready(state: &mut StarRingState) {
+    let ready = state.kills_ready_for_next_layer();
+    if ready && !state.layer_ready_latched {
+        state.layer_ready_flash_ticks = LAYER_READY_FLASH_TICKS;
+        state.core_flash_ticks = state.core_flash_ticks.max(8);
+        state.shake_ticks = state.shake_ticks.max(6);
+        burst(state, CX, CY, 8, 1.4, ParticleKind::Spark, 14);
+        state.layer_ready_latched = true;
+    } else if !ready {
+        state.layer_ready_latched = false;
     }
 }
 
@@ -889,6 +934,7 @@ mod tests {
         state.shards = 1e9;
         assert!(!purchase_ring_upgrade(&mut state, RingUpgrade::CorePulse));
         state.total_kills = Layer::THRESHOLDS[1];
+        assert!(unlock_next_layer(&mut state));
         assert!(purchase_ring_upgrade(&mut state, RingUpgrade::CorePulse));
         assert_eq!(state.ring_level(RingUpgrade::CorePulse), 1);
         assert!(state.pulse_interval().is_some());
@@ -949,19 +995,77 @@ mod tests {
     }
 
     #[test]
-    fn layer_advances_with_kills_and_unlocks_weapons() {
+    fn kills_alone_do_not_advance_layer() {
         let mut state = StarRingState::new();
         assert_eq!(state.layer(), 1);
         assert!(state.is_weapon_unlocked(WeaponKind::Pulse));
         assert!(!state.is_weapon_unlocked(WeaponKind::Ray));
 
         state.total_kills = Layer::THRESHOLDS[1];
+        assert_eq!(state.layer(), 1);
+        assert!(state.kills_ready_for_next_layer());
+        assert!(!state.is_weapon_unlocked(WeaponKind::Ray));
+    }
+
+    #[test]
+    fn unlock_next_layer_spends_shards_and_unlocks_weapons() {
+        let mut state = StarRingState::new();
+        state.total_kills = Layer::THRESHOLDS[1];
+        state.shards = 1e9;
+        let before = state.shards;
+        let cost = layer_unlock_cost(&state);
+        assert!(unlock_next_layer(&mut state));
         assert_eq!(state.layer(), 2);
+        assert!((state.shards - (before - cost)).abs() < 1e-6);
         assert!(state.is_weapon_unlocked(WeaponKind::Ray));
         assert!(state.unlocked_ore_kinds().contains(&OreKind::Rock));
+        assert!(state.layer_flash_ticks > 0);
+    }
 
-        state.total_kills = Layer::THRESHOLDS[4];
-        assert_eq!(state.layer(), 5);
+    #[test]
+    fn unlock_next_layer_requires_kills_and_shards() {
+        let mut state = StarRingState::new();
+        state.shards = 1e9;
+        assert!(!unlock_next_layer(&mut state), "撃破不足では開放できない");
+
+        state.total_kills = Layer::THRESHOLDS[1];
+        state.shards = 1.0;
+        assert!(!unlock_next_layer(&mut state), "星屑不足では開放できない");
+        assert_eq!(state.layer(), 1);
+
+        state.shards = layer_unlock_cost(&state);
+        assert!(unlock_next_layer(&mut state));
+        assert_eq!(state.layer(), 2);
+    }
+
+    #[test]
+    fn unlock_does_not_reset_progress() {
+        let mut state = StarRingState::new();
+        state.total_kills = Layer::THRESHOLDS[1];
+        state.shards = 500.0;
+        state.shards_earned = 800.0;
+        state.weapon_levels[0] = [2, 3, 1];
+        state.ring_levels[0] = 2;
+        assert!(unlock_next_layer(&mut state));
+        assert_eq!(state.total_kills, Layer::THRESHOLDS[1]);
+        assert_eq!(state.shards_earned, 800.0);
+        assert_eq!(state.weapon_levels[0], [2, 3, 1]);
+        assert_eq!(state.ring_levels[0], 2);
+        assert!(state.shards > 0.0);
+    }
+
+    #[test]
+    fn sequential_unlocks_open_deeper_weapons() {
+        let mut state = StarRingState::new();
+        state.shards = 1e9;
+        for target in 2u32..=5 {
+            state.total_kills = Layer::entry_threshold(target);
+            assert!(
+                unlock_next_layer(&mut state),
+                "第{target}層へ開放できるはず"
+            );
+            assert_eq!(state.layer(), target);
+        }
         assert_eq!(state.unlocked_weapons().len(), 5);
         assert!(state.unlocked_ore_kinds().contains(&OreKind::Shell));
     }
@@ -1018,7 +1122,10 @@ mod tests {
     #[test]
     fn cycle_weapon_skips_locked() {
         let mut state = StarRingState::new();
+        state.shards = 1e9;
         state.total_kills = Layer::THRESHOLDS[2];
+        assert!(unlock_next_layer(&mut state));
+        assert!(unlock_next_layer(&mut state));
         state.selected_weapon = WeaponKind::Pulse;
         cycle_selected_weapon(&mut state, 1);
         assert_eq!(state.selected_weapon, WeaponKind::Ray);
@@ -1029,10 +1136,9 @@ mod tests {
     }
 
     #[test]
-    fn layer_flash_triggers_on_advance() {
+    fn layer_ready_pulse_triggers_when_kills_met() {
         let mut state = StarRingState::new();
         state.total_kills = Layer::THRESHOLDS[1] - 1;
-        state.last_layer = 1;
         state.ores.push(Ore {
             x: CX + 12.0,
             y: CY,
@@ -1048,19 +1154,28 @@ mod tests {
         state.weapon_levels[0][WeaponStat::Power.index()] = 8;
         for _ in 0..50 {
             tick(&mut state, 1);
-            if state.layer_flash_ticks > 0 {
+            if state.layer_ready_flash_ticks > 0 {
                 break;
             }
         }
         assert!(
-            state.layer() >= 2,
-            "撃破で層が進むはず layer={}",
-            state.layer()
+            state.kills_ready_for_next_layer(),
+            "撃破条件を満たすはず kills={}",
+            state.total_kills
         );
+        assert_eq!(state.layer(), 1, "自動では層が進まない");
         assert!(
-            state.layer_flash_ticks > 0 || state.last_layer >= 2,
-            "層到達フラッシュが走るはず"
+            state.layer_ready_flash_ticks > 0 || state.layer_ready_latched,
+            "開放可パルスが走るはず"
         );
+        assert_eq!(state.layer_flash_ticks, 0, "到達演出は開放操作後だけ");
+    }
+
+    #[test]
+    fn layer_unlock_cost_scales_with_depth() {
+        assert!(Layer::unlock_cost(2) > 0.0);
+        assert!(Layer::unlock_cost(3) > Layer::unlock_cost(2));
+        assert!(Layer::unlock_cost(5) > Layer::unlock_cost(3) * 2.0);
     }
 
     #[test]
@@ -1068,6 +1183,7 @@ mod tests {
         let mut state = StarRingState::new();
         state.total_kills = Layer::THRESHOLDS[1];
         state.shards = 1e9;
+        assert!(unlock_next_layer(&mut state));
         assert!(purchase_ring_upgrade(&mut state, RingUpgrade::CorePulse));
         // 追加で威力を上げる
         assert!(purchase_ring_upgrade(&mut state, RingUpgrade::CorePulse));

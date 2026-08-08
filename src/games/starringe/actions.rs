@@ -10,6 +10,11 @@ pub const TAB_RING: u16 = 2;
 pub const TAB_CODEX: u16 = 3;
 /// コア / 情景タップ (手動火力ブースト)
 pub const TAP_STRIKE: u16 = 4;
+/// 次層を星屑で開放
+pub const OPEN_LAYER: u16 = 5;
+/// 環タブの縦スクロール (狭い画面で強化行へ届ける)
+pub const RING_SCROLL_UP: u16 = 6;
+pub const RING_SCROLL_DOWN: u16 = 7;
 /// 武装選択: 前へ / 次へ
 pub const WEAPON_PREV: u16 = 10;
 pub const WEAPON_NEXT: u16 = 11;

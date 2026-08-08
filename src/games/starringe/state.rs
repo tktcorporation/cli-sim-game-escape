@@ -2,7 +2,9 @@
 //!
 //! 外周を螺旋漂流する鉱石を、公転する武装の連射で砕いて星屑を稼ぐ放置ゲーム。
 //! 「守る」ではなく「刈り取る」——中心の星は採掘の核であり、防衛対象ではない。
-//! 脅威の増加はプレイヤー強化ではなく「層」進行が担う。
+//! 脅威の増加はプレイヤー強化ではなく「層」開放が担う。
+
+use std::cell::Cell;
 
 /// ワールド幅 (Canvas x_bounds)。
 pub const WORLD_W: f64 = 60.0;
@@ -28,8 +30,10 @@ pub const BOOST_DURATION: u32 = 40;
 pub const WEAPON_COUNT: usize = 5;
 /// 環強化スロット数。
 pub const RING_UPGRADE_COUNT: usize = 2;
-/// 層到達フラッシュの長さ (tick)。
-pub const LAYER_FLASH_TICKS: u32 = 28;
+/// 層開放フラッシュの長さ (tick)。到達を「感じる」ためにやや長め。
+pub const LAYER_FLASH_TICKS: u32 = 45;
+/// 撃破条件を満たした直後の「開放可」パルス長さ (tick)。
+pub const LAYER_READY_FLASH_TICKS: u32 = 18;
 
 /// 武装の種類。層進行で解放され、解放後は個別に強化できる。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -237,7 +241,7 @@ impl RingUpgrade {
     }
 }
 
-/// 採掘の層。累計撃破で進み、敵構成・報酬・武装解放が段で切り替わる。
+/// 採掘の層。撃破条件＋星屑コストで手動開放し、敵構成・報酬・武装解放が段で切り替わる。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Layer;
 
@@ -245,6 +249,7 @@ impl Layer {
     /// 各層の開始に必要な累計撃破 (index 0 = 第1層)。
     pub const THRESHOLDS: [u64; 8] = [0, 80, 250, 600, 1400, 3000, 6000, 12000];
 
+    /// 撃破数だけで到達しうる最大層 (コスト支払い前の上限)。セーブ移行・検証用。
     pub fn from_kills(kills: u64) -> u32 {
         let mut layer = 1u32;
         for (i, &th) in Self::THRESHOLDS.iter().enumerate() {
@@ -259,6 +264,7 @@ impl Layer {
         layer
     }
 
+    /// 現在層から次層へ進むために必要な累計撃破。
     pub fn next_threshold(layer: u32) -> Option<u64> {
         let idx = layer as usize;
         if idx < Self::THRESHOLDS.len() {
@@ -268,6 +274,25 @@ impl Layer {
             let past = layer - Self::THRESHOLDS.len() as u32;
             Some(base + (past as u64 + 1) * 8000)
         }
+    }
+
+    /// その層に入るために必要な累計撃破 (第1層は 0)。
+    pub fn entry_threshold(layer: u32) -> u64 {
+        if layer <= 1 {
+            0
+        } else {
+            Self::next_threshold(layer - 1).unwrap_or(0)
+        }
+    }
+
+    /// 次層 (next_layer) を開放する星屑コスト。
+    /// 武器強化と競合する「少し貯めてから押す」判断になるよう、層ごとに約 2.15 倍で伸びる。
+    pub fn unlock_cost(next_layer: u32) -> f64 {
+        if next_layer <= 1 {
+            return 0.0;
+        }
+        let tier = next_layer.saturating_sub(2) as f64;
+        48.0 * 2.15f64.powf(tier)
     }
 
     pub fn title(layer: u32) -> &'static str {
@@ -536,6 +561,8 @@ pub struct StarRingState {
     pub total_kills: u64,
     /// 中心まで達して逸失した数 (ペナルティなし、統計のみ)。
     pub missed_count: u64,
+    /// 現在いる層。撃破だけでは進まず、星屑で開放して初めて上がる。
+    pub current_layer: u32,
     /// 武器ごとの [Count, Rate, Power] レベル。
     pub weapon_levels: [[u32; 3]; WEAPON_COUNT],
     /// 環強化レベル [Yield, CorePulse]。
@@ -549,13 +576,17 @@ pub struct StarRingState {
     pub shake_ticks: u32,
     pub core_flash_ticks: u32,
     pub boost_ticks: u32,
-    /// 層到達時の演出残り。
+    /// 層開放時の到達演出残り。
     pub layer_flash_ticks: u32,
-    /// 前回 tick 時点の層 (進行検知用)。
-    pub last_layer: u32,
+    /// 次層の撃破条件を満たした直後の「開放可」パルス残り。
+    pub layer_ready_flash_ticks: u32,
+    /// 前回 tick で次層の撃破条件を満たしていたか (ready パルスの立ち上がり検知用)。
+    pub layer_ready_latched: bool,
     pub tab: Tab,
     /// 武装タブで選択中の武器。
     pub selected_weapon: WeaponKind,
+    /// 環タブの縦スクロール位置。セーブしない (リロード時は先頭へ戻す)。
+    pub ring_scroll: Cell<u16>,
     /// 直近の星屑獲得量 (shards/sec 表示用、リングバッファ)。
     pub recent_gain: [f64; 20],
     pub recent_gain_idx: usize,
@@ -570,6 +601,7 @@ impl StarRingState {
             shards_earned: 0.0,
             total_kills: 0,
             missed_count: 0,
+            current_layer: 1,
             weapon_levels: [[0; 3]; WEAPON_COUNT],
             ring_levels: [0; RING_UPGRADE_COUNT],
             ores: Vec::new(),
@@ -582,17 +614,32 @@ impl StarRingState {
             core_flash_ticks: 0,
             boost_ticks: 0,
             layer_flash_ticks: 0,
-            last_layer: 1,
+            layer_ready_flash_ticks: 0,
+            layer_ready_latched: false,
             tab: Tab::Armory,
             selected_weapon: WeaponKind::Pulse,
+            ring_scroll: Cell::new(0),
             recent_gain: [0.0; 20],
             recent_gain_idx: 0,
             tick_gain: 0.0,
         }
     }
 
+    pub fn scroll_ring(&self, delta: i32) {
+        let cur = self.ring_scroll.get() as i32;
+        self.ring_scroll.set(cur.saturating_add(delta).max(0) as u16);
+    }
+
     pub fn layer(&self) -> u32 {
-        Layer::from_kills(self.total_kills)
+        self.current_layer.max(1)
+    }
+
+    /// 次層への撃破条件を満たしているか (コストは別)。
+    pub fn kills_ready_for_next_layer(&self) -> bool {
+        match Layer::next_threshold(self.layer()) {
+            Some(th) => self.total_kills >= th,
+            None => false,
+        }
     }
 
     pub fn weapon_stat(&self, weapon: WeaponKind, stat: WeaponStat) -> u32 {

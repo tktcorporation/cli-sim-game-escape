@@ -13,15 +13,15 @@ use ratzilla::ratatui::Frame;
 
 use crate::canvas_fx;
 use crate::input::{is_narrow_layout, ClickState};
-use crate::widgets::{Clickable, ClickableList, TabBar};
+use crate::widgets::{Clickable, ClickableList, ScrollableTab, TabBar};
 
 use super::actions::{
-    buy_ring_id, buy_weapon_stat_id, select_weapon_id, TAB_ARMORY, TAB_CODEX, TAB_RING, TAP_STRIKE,
-    WEAPON_NEXT, WEAPON_PREV,
+    buy_ring_id, buy_weapon_stat_id, select_weapon_id, OPEN_LAYER, RING_SCROLL_DOWN, RING_SCROLL_UP,
+    TAB_ARMORY, TAB_CODEX, TAB_RING, TAP_STRIKE, WEAPON_NEXT, WEAPON_PREV,
 };
 use super::logic::{
-    can_upgrade_ring, can_upgrade_weapon_stat, ring_upgrade_cost, turret_positions,
-    weapon_stat_cost,
+    can_unlock_next_layer, can_upgrade_ring, can_upgrade_weapon_stat, layer_unlock_cost,
+    ring_upgrade_cost, turret_positions, weapon_stat_cost,
 };
 use super::state::{
     Layer, OreKind, ParticleKind, RingUpgrade, StarRingState, Tab, WeaponKind, WeaponStat, CX, CY,
@@ -102,7 +102,13 @@ fn render_header(state: &StarRingState, f: &mut Frame, area: Rect, borders: Bord
         ""
     };
     let layer_fx = if state.layer_flash_ticks > 0 {
-        " ◆層到達"
+        " ◆層開放"
+    } else if can_unlock_next_layer(state) {
+        " ◆開放可[!]"
+    } else if state.kills_ready_for_next_layer() {
+        " ◆星屑不足"
+    } else if state.layer_ready_flash_ticks > 0 {
+        " ◆条件達成"
     } else {
         ""
     };
@@ -345,7 +351,7 @@ fn render_weapon_showcase(state: &StarRingState, f: &mut Frame, area: Rect) {
     } else {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "  層を進めて手札を増やそう",
+            "  次層を開放して手札を増やそう",
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -474,14 +480,7 @@ fn render_ring(
     let next = Layer::next_threshold(layer);
     let progress = match next {
         Some(th) => {
-            let prev = if layer <= 1 {
-                0
-            } else {
-                Layer::THRESHOLDS
-                    .get((layer as usize).saturating_sub(2))
-                    .copied()
-                    .unwrap_or(0)
-            };
+            let prev = Layer::entry_threshold(layer);
             let span = th.saturating_sub(prev).max(1);
             let done = state.total_kills.saturating_sub(prev);
             ((done * 10) / span).min(10)
@@ -506,33 +505,80 @@ fn render_ring(
             .fg(layer_color(layer))
             .add_modifier(Modifier::BOLD),
     )));
+    // 撃破進捗と湧き倍率を1行にまとめ、狭い画面で強化行が押し出されないようにする。
     cl.push(Line::from(Span::styled(
         match next {
             Some(th) => format!(
-                " 次層まで 撃破 {} / {}",
-                state.total_kills, th
+                " 撃破{}/{}  湧き×{} HP×{:.1} ✦×{:.1}",
+                state.total_kills,
+                th,
+                Layer::spawn_batch(layer),
+                Layer::hp_mult(layer),
+                Layer::value_mult(layer)
             ),
-            None => format!(" 撃破 {}", state.total_kills),
+            None => format!(
+                " 撃破{}  湧き×{} HP×{:.1} ✦×{:.1}",
+                state.total_kills,
+                Layer::spawn_batch(layer),
+                Layer::hp_mult(layer),
+                Layer::value_mult(layer)
+            ),
         },
         Style::default().fg(Color::DarkGray),
     )));
-    cl.push(Line::from(Span::styled(
-        format!(
-            " 湧き×{}  HP×{:.1}  星屑×{:.1}",
-            Layer::spawn_batch(layer),
-            Layer::hp_mult(layer),
-            Layer::value_mult(layer)
-        ),
-        Style::default().fg(Color::Gray),
-    )));
-    cl.push(Line::from(""));
+
+    if let Some(th) = next {
+        let next_layer = layer + 1;
+        let cost = layer_unlock_cost(state);
+        let kills_ready = state.total_kills >= th;
+        let can = can_unlock_next_layer(state);
+        if kills_ready {
+            let style = if can {
+                Style::default()
+                    .fg(Color::LightMagenta)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let label = if can {
+                format!(
+                    " [!] 第{}層「{}」を開放 ✦{}",
+                    next_layer,
+                    Layer::title(next_layer),
+                    format_shards(cost)
+                )
+            } else {
+                format!(
+                    " [!] 第{}層「{}」 要✦{} (不足)",
+                    next_layer,
+                    Layer::title(next_layer),
+                    format_shards(cost)
+                )
+            };
+            if can {
+                cl.push_clickable(Line::from(Span::styled(label, style)), OPEN_LAYER);
+            } else {
+                cl.push(Line::from(Span::styled(label, style)));
+            }
+        } else {
+            cl.push(Line::from(Span::styled(
+                format!(
+                    " 次層「{}」 撃破{} ✦{}",
+                    Layer::title(next_layer),
+                    th,
+                    format_shards(cost)
+                ),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
     cl.push(Line::from(Span::styled(
         " 環の強化",
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
     )));
-    cl.push(Line::from(""));
 
     let keys = ['1', '2'];
     for (i, kind) in RingUpgrade::ALL.iter().copied().enumerate() {
@@ -578,7 +624,6 @@ fn render_ring(
             format!("      {}", kind.blurb()),
             Style::default().fg(Color::DarkGray),
         )));
-        cl.push(Line::from(""));
     }
 
     let block = Block::default()
@@ -586,7 +631,10 @@ fn render_ring(
         .border_style(Style::default().fg(Color::Yellow))
         .title(" 環 ");
     let mut cs = click_state.borrow_mut();
-    cl.render(f, area, block, &mut cs, false, 0);
+    ScrollableTab::new(cl, &state.ring_scroll, RING_SCROLL_UP, RING_SCROLL_DOWN)
+        .block(block)
+        .arrow_color(Color::Yellow)
+        .render(f, area, &mut cs);
 }
 
 fn render_codex(state: &StarRingState, f: &mut Frame, area: Rect, borders: Borders) {
@@ -705,9 +753,13 @@ fn render_stage(
     }
 
     let core_scale = if state.layer_flash_ticks > 0 {
-        1.45
+        1.55
+    } else if state.layer_ready_flash_ticks > 0 {
+        1.30
     } else if state.core_flash_ticks > 0 {
         1.25
+    } else if can_unlock_next_layer(state) && state.elapsed_ticks % 20 < 10 {
+        1.12
     } else {
         1.0 + (layer.saturating_sub(1) as f64) * 0.04
     };
@@ -842,6 +894,8 @@ fn render_stage(
 
     let core_color = if state.layer_flash_ticks > 0 {
         layer_color(layer)
+    } else if state.layer_ready_flash_ticks > 0 || can_unlock_next_layer(state) {
+        Color::LightMagenta
     } else if state.boost_ticks > 0 {
         Color::LightYellow
     } else {
@@ -857,7 +911,14 @@ fn render_stage(
     let layer_ring_color = layer_color(layer);
 
     let title = if state.layer_flash_ticks > 0 {
-        format!(" 第{}層 {} ", layer, Layer::title(layer))
+        format!(" ◆開放 第{}層 {} ", layer, Layer::title(layer))
+    } else if can_unlock_next_layer(state) {
+        format!(
+            " 次層開放可「{}」[!]",
+            Layer::title(layer + 1)
+        )
+    } else if state.layer_ready_flash_ticks > 0 {
+        " 撃破条件達成 — 星屑で開放 ".to_string()
     } else {
         format!(" 情景 砲×{} ", state.turret_count())
     };
@@ -989,8 +1050,8 @@ const SPAWN_RING_VISUAL: f64 = 30.0;
 fn render_footer(state: &StarRingState, f: &mut Frame, area: Rect, borders: Borders) {
     let hint = match state.tab {
         Tab::Armory => "[◀▶]武装  [A/S/D]弾数/連射/威力  情景タップでブースト  [Q]戻る",
-        Tab::Ring => "[1-2]収率/核脈動  層は撃破で進む  [Q]戻る",
-        Tab::Codex => "図鑑: 層で鉱石と武装が増える  [Q]戻る",
+        Tab::Ring => "[!]次層開放  [1-2]収率/核脈動  [J/K]スクロール  [Q]戻る",
+        Tab::Codex => "図鑑: 層開放で鉱石と武装が増える  [Q]戻る",
     };
     let p = Paragraph::new(Line::from(Span::styled(
         hint,
@@ -1002,4 +1063,93 @@ fn render_footer(state: &StarRingState, f: &mut Frame, area: Rect, borders: Bord
             .border_style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(p, area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratzilla::ratatui::backend::TestBackend;
+    use ratzilla::ratatui::Terminal;
+
+    use crate::games::starringe::actions::buy_ring_id;
+    use crate::games::starringe::logic::unlock_next_layer;
+    use crate::games::starringe::state::{Layer, RingUpgrade, Tab};
+
+    fn render_ring_tab(state: &StarRingState, width: u16, height: u16) -> Rc<RefCell<ClickState>> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = width;
+        cs.borrow_mut().terminal_rows = height;
+        terminal
+            .draw(|f| render(state, f, f.area(), &cs))
+            .unwrap();
+        cs
+    }
+
+    fn has_action(cs: &Rc<RefCell<ClickState>>, width: u16, height: u16, action_id: u16) -> bool {
+        let guard = cs.borrow();
+        for y in 0..height {
+            for x in 0..width {
+                if guard.hit_test(x, y) == Some(action_id) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn narrow_ring_tab_exposes_scroll_when_layer_unlock_rows_are_present() {
+        // 40×30 の狭い画面では環ペインが短く、層開放行を足すと核脈動が
+        // はみ出す。ScrollableTab により ▼ が出てスクロールできることを見る。
+        let mut state = StarRingState::new();
+        state.tab = Tab::Ring;
+        state.total_kills = Layer::THRESHOLDS[1];
+        state.shards = 1e9;
+        assert!(unlock_next_layer(&mut state));
+        state.layer_flash_ticks = 0;
+
+        let (w, h) = (40u16, 30u16);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = w;
+        cs.borrow_mut().terminal_rows = h;
+        terminal
+            .draw(|f| render(&state, f, f.area(), &cs))
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let row_text = |y: u16| -> String {
+            (0..w)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect()
+        };
+        let has_scroll = (0..h).any(|y| {
+            let t = row_text(y);
+            t.contains('▼') || t.contains('▲')
+        });
+        assert!(
+            has_scroll
+                || has_action(&cs, w, h, RING_SCROLL_DOWN)
+                || has_action(&cs, w, h, buy_ring_id(RingUpgrade::CorePulse)),
+            "狭い画面でも核脈動へ届く手段 (スクロール or 直接表示) があるはず"
+        );
+    }
+
+    #[test]
+    fn scrolled_ring_tab_keeps_core_pulse_clickable_on_short_viewport() {
+        let mut state = StarRingState::new();
+        state.tab = Tab::Ring;
+        state.total_kills = Layer::THRESHOLDS[1];
+        state.shards = 1e9;
+        assert!(unlock_next_layer(&mut state));
+        state.layer_flash_ticks = 0;
+        // 先頭の層情報を送って核脈動行を可視領域へ入れる。
+        state.ring_scroll.set(4);
+
+        let cs = render_ring_tab(&state, 40, 30);
+        assert!(
+            has_action(&cs, 40, 30, buy_ring_id(RingUpgrade::CorePulse)),
+            "スクロール後は核脈動の購入行がクリックできるはず"
+        );
+    }
 }
