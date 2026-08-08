@@ -16,12 +16,12 @@ use crate::input::{is_narrow_layout, ClickState};
 use crate::widgets::{Clickable, ClickableList, TabBar};
 
 use super::actions::{
-    buy_ring_id, buy_weapon_stat_id, select_weapon_id, TAB_ARMORY, TAB_CODEX, TAB_RING, TAP_STRIKE,
-    WEAPON_NEXT, WEAPON_PREV,
+    buy_ring_id, buy_weapon_stat_id, select_weapon_id, OPEN_LAYER, TAB_ARMORY, TAB_CODEX, TAB_RING,
+    TAP_STRIKE, WEAPON_NEXT, WEAPON_PREV,
 };
 use super::logic::{
-    can_upgrade_ring, can_upgrade_weapon_stat, ring_upgrade_cost, turret_positions,
-    weapon_stat_cost,
+    can_unlock_next_layer, can_upgrade_ring, can_upgrade_weapon_stat, layer_unlock_cost,
+    ring_upgrade_cost, turret_positions, weapon_stat_cost,
 };
 use super::state::{
     Layer, OreKind, ParticleKind, RingUpgrade, StarRingState, Tab, WeaponKind, WeaponStat, CX, CY,
@@ -102,7 +102,13 @@ fn render_header(state: &StarRingState, f: &mut Frame, area: Rect, borders: Bord
         ""
     };
     let layer_fx = if state.layer_flash_ticks > 0 {
-        " ◆層到達"
+        " ◆層開放"
+    } else if can_unlock_next_layer(state) {
+        " ◆開放可[!]"
+    } else if state.kills_ready_for_next_layer() {
+        " ◆星屑不足"
+    } else if state.layer_ready_flash_ticks > 0 {
+        " ◆条件達成"
     } else {
         ""
     };
@@ -345,7 +351,7 @@ fn render_weapon_showcase(state: &StarRingState, f: &mut Frame, area: Rect) {
     } else {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "  層を進めて手札を増やそう",
+            "  次層を開放して手札を増やそう",
             Style::default().fg(Color::DarkGray),
         )));
     }
@@ -474,14 +480,7 @@ fn render_ring(
     let next = Layer::next_threshold(layer);
     let progress = match next {
         Some(th) => {
-            let prev = if layer <= 1 {
-                0
-            } else {
-                Layer::THRESHOLDS
-                    .get((layer as usize).saturating_sub(2))
-                    .copied()
-                    .unwrap_or(0)
-            };
+            let prev = Layer::entry_threshold(layer);
             let span = th.saturating_sub(prev).max(1);
             let done = state.total_kills.saturating_sub(prev);
             ((done * 10) / span).min(10)
@@ -526,6 +525,58 @@ fn render_ring(
         Style::default().fg(Color::Gray),
     )));
     cl.push(Line::from(""));
+
+    if let Some(th) = next {
+        let next_layer = layer + 1;
+        let cost = layer_unlock_cost(state);
+        let kills_ready = state.total_kills >= th;
+        let can = can_unlock_next_layer(state);
+        if kills_ready {
+            let style = if can {
+                Style::default()
+                    .fg(Color::LightMagenta)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            let label = if can {
+                format!(
+                    " [!] 第{}層「{}」を開放  ✦{}",
+                    next_layer,
+                    Layer::title(next_layer),
+                    format_shards(cost)
+                )
+            } else {
+                format!(
+                    " [!] 第{}層「{}」 要✦{} (不足)",
+                    next_layer,
+                    Layer::title(next_layer),
+                    format_shards(cost)
+                )
+            };
+            if can {
+                cl.push_clickable(Line::from(Span::styled(label, style)), OPEN_LAYER);
+            } else {
+                cl.push(Line::from(Span::styled(label, style)));
+            }
+            cl.push(Line::from(Span::styled(
+                "      撃破条件達成 — 星屑を払って層を開く",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            cl.push(Line::from(Span::styled(
+                format!(
+                    " 次層「{}」 開放条件: 撃破{}  費用✦{}",
+                    Layer::title(next_layer),
+                    th,
+                    format_shards(cost)
+                ),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        cl.push(Line::from(""));
+    }
+
     cl.push(Line::from(Span::styled(
         " 環の強化",
         Style::default()
@@ -705,9 +756,13 @@ fn render_stage(
     }
 
     let core_scale = if state.layer_flash_ticks > 0 {
-        1.45
+        1.55
+    } else if state.layer_ready_flash_ticks > 0 {
+        1.30
     } else if state.core_flash_ticks > 0 {
         1.25
+    } else if can_unlock_next_layer(state) && state.elapsed_ticks % 20 < 10 {
+        1.12
     } else {
         1.0 + (layer.saturating_sub(1) as f64) * 0.04
     };
@@ -842,6 +897,8 @@ fn render_stage(
 
     let core_color = if state.layer_flash_ticks > 0 {
         layer_color(layer)
+    } else if state.layer_ready_flash_ticks > 0 || can_unlock_next_layer(state) {
+        Color::LightMagenta
     } else if state.boost_ticks > 0 {
         Color::LightYellow
     } else {
@@ -857,7 +914,14 @@ fn render_stage(
     let layer_ring_color = layer_color(layer);
 
     let title = if state.layer_flash_ticks > 0 {
-        format!(" 第{}層 {} ", layer, Layer::title(layer))
+        format!(" ◆開放 第{}層 {} ", layer, Layer::title(layer))
+    } else if can_unlock_next_layer(state) {
+        format!(
+            " 次層開放可「{}」[!]",
+            Layer::title(layer + 1)
+        )
+    } else if state.layer_ready_flash_ticks > 0 {
+        " 撃破条件達成 — 星屑で開放 ".to_string()
     } else {
         format!(" 情景 砲×{} ", state.turret_count())
     };
@@ -989,8 +1053,8 @@ const SPAWN_RING_VISUAL: f64 = 30.0;
 fn render_footer(state: &StarRingState, f: &mut Frame, area: Rect, borders: Borders) {
     let hint = match state.tab {
         Tab::Armory => "[◀▶]武装  [A/S/D]弾数/連射/威力  情景タップでブースト  [Q]戻る",
-        Tab::Ring => "[1-2]収率/核脈動  層は撃破で進む  [Q]戻る",
-        Tab::Codex => "図鑑: 層で鉱石と武装が増える  [Q]戻る",
+        Tab::Ring => "[!]次層開放  [1-2]収率/核脈動  [Q]戻る",
+        Tab::Codex => "図鑑: 層開放で鉱石と武装が増える  [Q]戻る",
     };
     let p = Paragraph::new(Line::from(Span::styled(
         hint,

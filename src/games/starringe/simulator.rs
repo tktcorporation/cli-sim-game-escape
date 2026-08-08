@@ -1,14 +1,14 @@
 //! 星環 (Star Ring) の自動プレイシミュレーター。
 //!
 //! 解放済み武装の強化と環強化を買い続ける bot で長期運転し、panic なし・
-//! 撃破進行・層進行・星屑の長期増加を不変条件として検証する。
+//! 撃破進行・層開放・星屑の長期増加を不変条件として検証する。
 //!
 //! 感度レポート:
 //!
 //! - **収率の寄与**: 収率強化の有無で獲得がどう変わるか
 //! - **核脈動の寄与**: 環武装 (コア AOE) の有無で撃破がどう変わるか
 //! - **武装ステの寄与**: 弾数 / 連射 / 威力の優先比較
-//! - **層進行カーブ**: 撃破閾値で武装・鉱石種が解放されるペース
+//! - **層進行カーブ**: 撃破＋星屑開放で武装・鉱石種が解放されるペース
 //! - **逸失率**: 中心到達で報酬を逃す割合
 //!
 //! `cargo test starringe::simulator -- --nocapture` でレポートを確認できる。
@@ -16,8 +16,8 @@
 #![cfg(test)]
 
 use super::logic::{
-    can_upgrade_ring, can_upgrade_weapon_stat, purchase_ring_upgrade, purchase_weapon_stat,
-    ring_upgrade_cost, tick, weapon_stat_cost,
+    can_unlock_next_layer, can_upgrade_ring, can_upgrade_weapon_stat, purchase_ring_upgrade,
+    purchase_weapon_stat, ring_upgrade_cost, tick, unlock_next_layer, weapon_stat_cost,
 };
 use super::state::{
     Layer, OreKind, RingUpgrade, StarRingState, WeaponKind, WeaponStat, RING_UPGRADE_COUNT,
@@ -86,6 +86,13 @@ fn try_buy_ring(state: &mut StarRingState, kind: RingUpgrade) -> bool {
 }
 
 fn bot_buy_once(state: &mut StarRingState, policy: BuyPolicy) -> bool {
+    // 層開放は進行の閘門。撃破条件を満たしたら費用を貯めて開く（強化で食いつぶさない）。
+    if state.kills_ready_for_next_layer() {
+        if can_unlock_next_layer(state) {
+            return unlock_next_layer(state);
+        }
+        return false;
+    }
     if let Some(pref) = preferred_ring(policy) {
         if ring_allowed(policy, pref) && try_buy_ring(state, pref) {
             return true;
@@ -333,7 +340,7 @@ fn bot_purchases_upgrades_and_advances_layers() {
     assert!(late.layer >= early.layer);
     assert!(
         late.layer >= 2,
-        "4500tick で少なくとも第2層に届くはず layer={}",
+        "4500tick で少なくとも第2層を開放しているはず layer={}",
         late.layer
     );
     assert!(

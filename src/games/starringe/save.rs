@@ -1,16 +1,16 @@
 //! 星環 セーブ/ロード。
 //!
-//! 永続対象: shards・武器/環レベル・累計撃破・rng・層同期。
+//! 永続対象: shards・武器/環レベル・累計撃破・現在層・rng。
 //! 一時演出 (鉱石・弾・パーティクル・ブースト) は保存しない。
 
 #[cfg(any(target_arch = "wasm32", test))]
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
-use super::state::{StarRingState, WeaponKind, RING_UPGRADE_COUNT, WEAPON_COUNT};
+use super::state::{Layer, StarRingState, WeaponKind, RING_UPGRADE_COUNT, WEAPON_COUNT};
 
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 3;
+const SAVE_VERSION: u32 = 4;
 
 #[cfg(any(target_arch = "wasm32", test))]
 const MIN_COMPATIBLE_VERSION: u32 = 3;
@@ -36,6 +36,8 @@ struct GameSave {
     shards_earned: f64,
     total_kills: u64,
     missed_count: u64,
+    /// v4 で追加。旧セーブは 0 のまま来るので撃破数から復元する。
+    current_layer: u32,
     weapon_levels: [[u32; 3]; WEAPON_COUNT],
     ring_levels: [u32; RING_UPGRADE_COUNT],
     selected_weapon: u8,
@@ -51,6 +53,7 @@ fn extract_save(state: &StarRingState) -> SaveData {
             shards_earned: state.shards_earned,
             total_kills: state.total_kills,
             missed_count: state.missed_count,
+            current_layer: state.layer(),
             weapon_levels: state.weapon_levels,
             ring_levels: state.ring_levels,
             selected_weapon: state.selected_weapon.index() as u8,
@@ -65,6 +68,15 @@ fn apply_save(state: &mut StarRingState, save: &GameSave) {
     state.shards_earned = save.shards_earned.max(0.0);
     state.total_kills = save.total_kills;
     state.missed_count = save.missed_count;
+    // 旧セーブ (自動層進行) は current_layer=0。撃破数から当時の層を復元する。
+    let max_by_kills = Layer::from_kills(save.total_kills).max(1);
+    let layer = if save.current_layer >= 1 {
+        save.current_layer.min(max_by_kills)
+    } else {
+        max_by_kills
+    };
+    state.current_layer = layer.max(1);
+    state.layer_ready_latched = state.kills_ready_for_next_layer();
     state.weapon_levels = save.weapon_levels;
     state.ring_levels = save.ring_levels;
     state.selected_weapon =
@@ -72,7 +84,6 @@ fn apply_save(state: &mut StarRingState, save: &GameSave) {
     if !state.is_weapon_unlocked(state.selected_weapon) {
         state.selected_weapon = WeaponKind::Pulse;
     }
-    state.last_layer = state.layer();
     state.rng_state = if save.rng_state == 0 {
         0xC0FFEE42
     } else {
@@ -150,6 +161,7 @@ mod tests {
         original.shards_earned = 5000.0;
         original.total_kills = 300;
         original.missed_count = 7;
+        original.current_layer = 3;
         original.weapon_levels[0] = [2, 3, 1];
         original.weapon_levels[1] = [1, 0, 2];
         original.ring_levels = [2, 4];
@@ -168,6 +180,7 @@ mod tests {
         assert!((restored.shards_earned - 5000.0).abs() < 0.001);
         assert_eq!(restored.total_kills, 300);
         assert_eq!(restored.missed_count, 7);
+        assert_eq!(restored.current_layer, 3);
         assert_eq!(
             restored.weapon_stat(WeaponKind::Pulse, WeaponStat::Count),
             2
@@ -175,7 +188,29 @@ mod tests {
         assert_eq!(restored.ring_levels, [2, 4]);
         assert_eq!(restored.selected_weapon, WeaponKind::Ray);
         assert_eq!(restored.rng_state, 42);
-        assert_eq!(restored.last_layer, restored.layer());
+    }
+
+    #[test]
+    fn legacy_save_without_current_layer_uses_kills() {
+        let json = r#"{
+            "version": 3,
+            "game": {
+                "shards": 100.0,
+                "shards_earned": 200.0,
+                "total_kills": 250,
+                "missed_count": 0,
+                "weapon_levels": [[0,0,0],[0,0,0],[0,0,0],[0,0,0],[0,0,0]],
+                "ring_levels": [0,0],
+                "selected_weapon": 0,
+                "rng_state": 1
+            }
+        }"#;
+        let loaded: SaveData = serde_json::from_str(json).unwrap();
+        assert_eq!(loaded.game.current_layer, 0);
+        let mut restored = StarRingState::new();
+        apply_save(&mut restored, &loaded.game);
+        assert_eq!(restored.layer(), Layer::from_kills(250));
+        assert!(restored.layer() >= 3);
     }
 
     #[test]
@@ -188,6 +223,7 @@ mod tests {
         apply_save(&mut restored, &loaded.game);
         assert!((restored.shards - state.shards).abs() < 0.001);
         assert_eq!(restored.total_kills, 0);
+        assert_eq!(restored.current_layer, 1);
     }
 
     #[test]

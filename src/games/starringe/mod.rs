@@ -1,7 +1,8 @@
 //! 星環 — 螺旋漂流する鉱石を公転武装の連射で砕く放置ゲーム。
 //!
 //! 外周を漂う鉱石を軌道上の武装で刈り取り、星屑を得る。
-//! 層が進むと敵の数・強さ・報酬が段で切り替わり、新しい武装と環武装が解放される。
+//! 層は撃破条件を満たしたうえで星屑を払って開放する。進むと敵の数・強さ・報酬が
+//! 段で切り替わり、新しい武装と環武装が解放される。
 //! 各武装は弾数・連射・威力を個別に強化できる。
 
 pub mod actions;
@@ -23,8 +24,8 @@ use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
 use actions::{
-    ring_for_buy_id, weapon_for_select_id, weapon_stat_for_buy_id, TAB_ARMORY, TAB_CODEX, TAB_RING,
-    TAP_STRIKE, WEAPON_NEXT, WEAPON_PREV,
+    ring_for_buy_id, weapon_for_select_id, weapon_stat_for_buy_id, OPEN_LAYER, TAB_ARMORY,
+    TAB_CODEX, TAB_RING, TAP_STRIKE, WEAPON_NEXT, WEAPON_PREV,
 };
 use state::{RingUpgrade, StarRingState, Tab, WeaponKind, WeaponStat};
 
@@ -112,6 +113,7 @@ impl StarRingGame {
             '2' if self.state.tab == Tab::Ring => {
                 logic::purchase_ring_upgrade(&mut self.state, RingUpgrade::CorePulse)
             }
+            '!' => logic::unlock_next_layer(&mut self.state),
             _ => false,
         }
     }
@@ -134,6 +136,7 @@ impl StarRingGame {
                 logic::manual_strike(&mut self.state);
                 true
             }
+            OPEN_LAYER => logic::unlock_next_layer(&mut self.state),
             WEAPON_PREV => {
                 logic::cycle_selected_weapon(&mut self.state, -1);
                 true
@@ -242,9 +245,26 @@ mod tests {
     #[test]
     fn weapon_cycle_via_brackets() {
         let mut game = StarRingGame::new();
+        game.state.shards = 1e9;
         game.state.total_kills = state::Layer::THRESHOLDS[2];
+        assert!(logic::unlock_next_layer(&mut game.state));
+        assert!(logic::unlock_next_layer(&mut game.state));
         game.state.selected_weapon = WeaponKind::Pulse;
         game.handle_input(&InputEvent::Key(']'));
         assert_eq!(game.state.selected_weapon, WeaponKind::Ray);
+    }
+
+    #[test]
+    fn open_layer_via_key_and_click() {
+        let mut game = StarRingGame::new();
+        game.state.total_kills = state::Layer::THRESHOLDS[1];
+        game.state.shards = 1e9;
+        assert!(game.handle_input(&InputEvent::Key('!')));
+        assert_eq!(game.state.layer(), 2);
+
+        game.state.total_kills = state::Layer::THRESHOLDS[2];
+        game.state.shards = 1e9;
+        assert!(game.handle_input(&click(OPEN_LAYER)));
+        assert_eq!(game.state.layer(), 3);
     }
 }
