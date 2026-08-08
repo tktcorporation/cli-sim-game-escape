@@ -27,7 +27,7 @@ pub const fn accent(choice: &GameChoice) -> Color {
         GameChoice::Metropolis => Color::LightCyan,
         GameChoice::LoopMarch => Color::LightGreen,
         GameChoice::Everlight => Color::LightMagenta,
-        GameChoice::ShatterLab => Color::Yellow,
+        GameChoice::StarRing => Color::Yellow,
     }
 }
 
@@ -111,7 +111,7 @@ mod tests {
             GameChoice::Metropolis,
             GameChoice::LoopMarch,
             GameChoice::Everlight,
-            GameChoice::ShatterLab,
+            GameChoice::StarRing,
         ];
         let colors: Vec<Color> = choices.iter().map(accent).collect();
         for i in 0..colors.len() {

@@ -41,7 +41,7 @@ pub const MENU_SCROLL_DOWN: u16 = 9;
 // 追加者が採番に迷わないよう連続させている。
 pub const MENU_SELECT_LOOPMARCH: u16 = 16;
 pub const MENU_SELECT_EVERLIGHT: u16 = 19;
-pub const MENU_SELECT_SHATTERLAB: u16 = 21;
+pub const MENU_SELECT_STARRINGE: u16 = 21;
 
 /// Last valid index of the main menu cards (9 games + settings → 0..=9).
 const MENU_LAST_INDEX: u8 = 9;
@@ -62,7 +62,7 @@ fn menu_pick_for(idx: u8) -> MenuPick {
         5 => MenuPick::Game(GameChoice::Metropolis),
         6 => MenuPick::Game(GameChoice::LoopMarch),
         7 => MenuPick::Game(GameChoice::Everlight),
-        8 => MenuPick::Game(GameChoice::ShatterLab),
+        8 => MenuPick::Game(GameChoice::StarRing),
         _ => MenuPick::Settings,
     }
 }
@@ -77,6 +77,7 @@ const SETTINGS_RESET_LOOPMARCH: u16 = 15;
 const SETTINGS_SCROLL_UP: u16 = 17;
 const SETTINGS_SCROLL_DOWN: u16 = 18;
 const SETTINGS_RESET_EVERLIGHT: u16 = 20;
+const SETTINGS_RESET_STARRINGE: u16 = 22;
 /// 1クリック/1行キー入力あたりのスクロール量。
 const SETTINGS_SCROLL_STEP: i32 = 3;
 
@@ -285,8 +286,8 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 InputEvent::Key('8') | InputEvent::Click(_, MENU_SELECT_EVERLIGHT) => {
                     Some(MenuPick::Game(GameChoice::Everlight))
                 }
-                InputEvent::Key('9') | InputEvent::Click(_, MENU_SELECT_SHATTERLAB) => {
-                    Some(MenuPick::Game(GameChoice::ShatterLab))
+                InputEvent::Key('9') | InputEvent::Click(_, MENU_SELECT_STARRINGE) => {
+                    Some(MenuPick::Game(GameChoice::StarRing))
                 }
                 InputEvent::Key('0') | InputEvent::Click(_, MENU_SELECT_SETTINGS) => {
                     Some(MenuPick::Settings)
@@ -372,6 +373,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     InputEvent::Key('5') | InputEvent::Click(_, SETTINGS_RESET_EVERLIGHT) => {
                         *confirm_reset = Some(GameChoice::Everlight);
                     }
+                    InputEvent::Key('6') | InputEvent::Click(_, SETTINGS_RESET_STARRINGE) => {
+                        *confirm_reset = Some(GameChoice::StarRing);
+                    }
                     InputEvent::Key('k') | InputEvent::Click(_, SETTINGS_SCROLL_UP) => {
                         adjust_scroll(scroll, -SETTINGS_SCROLL_STEP);
                     }
@@ -417,6 +421,7 @@ fn perform_reset(game: &GameChoice) {
         GameChoice::Metropolis => cli_sim_game_escape::games::metropolis::save::delete_save(),
         GameChoice::LoopMarch => cli_sim_game_escape::games::loopmarch::save::delete_save(),
         GameChoice::Everlight => cli_sim_game_escape::games::everlight::save::delete_save(),
+        GameChoice::StarRing => cli_sim_game_escape::games::starringe::save::delete_save(),
         _ => {}
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -625,7 +630,7 @@ fn render_menu(
         ('6', "Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶', theme::accent(&GameChoice::Metropolis)),
         ('7', "周回討伐", "地形を配置し勇者が自動周回するローグライト", MENU_SELECT_LOOPMARCH, '▶', theme::accent(&GameChoice::LoopMarch)),
         ('8', "常夜灯", "降り注ぐ魔物から灯を守る縦画面バレットヘヴン", MENU_SELECT_EVERLIGHT, '▶', theme::accent(&GameChoice::Everlight)),
-        ('9', "破壊VFXラボ", "強化しがいのある破壊舞台を比較する試作（本編ではない）", MENU_SELECT_SHATTERLAB, '▶', theme::accent(&GameChoice::ShatterLab)),
+        ('9', "星環", "迫る鉱石を回る砲台で砕く放置ゲーム", MENU_SELECT_STARRINGE, '▶', theme::accent(&GameChoice::StarRing)),
         ('0', "設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 
@@ -995,6 +1000,18 @@ fn render_settings_main(
     );
 
     cl.push(Line::from(""));
+
+    // 星環
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
+            Span::styled("星環", Style::default().fg(Color::White)),
+            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
+        ]),
+        SETTINGS_RESET_STARRINGE,
+    );
+
+    cl.push(Line::from(""));
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
         " ※ Tiny Factory / Dungeon Dive / God Field は",
@@ -1029,6 +1046,7 @@ fn render_confirm_dialog(
         GameChoice::Metropolis => "Idle Metropolis",
         GameChoice::LoopMarch => "周回討伐",
         GameChoice::Everlight => "常夜灯",
+        GameChoice::StarRing => "星環",
         _ => "Unknown",
     };
 
@@ -1127,7 +1145,7 @@ mod tests {
             MENU_SELECT_METROPOLIS,
             MENU_SELECT_LOOPMARCH,
             MENU_SELECT_EVERLIGHT,
-            MENU_SELECT_SHATTERLAB,
+            MENU_SELECT_STARRINGE,
             MENU_SELECT_SETTINGS,
         ];
         for (i, &action_id) in ACTION_IDS.iter().enumerate() {
