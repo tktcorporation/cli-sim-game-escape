@@ -1,0 +1,17 @@
+{
+  "name": "cli-sim-game-escape",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "trunk serve",
+      "command": "NO_COLOR=true trunk serve --address 0.0.0.0 --port 8080",
+      "description": "Trunk dev server (WASM を自動リビルドして http://localhost:8080 で配信)。ブラウザでの手動テスト用。"
+    }
+  ],
+  "ports": [
+    {
+      "name": "trunk dev server",
+      "port": 8080
+    }
+  ]
+}
