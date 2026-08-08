@@ -8,6 +8,7 @@ pub mod godfield;
 pub mod loopmarch;
 pub mod metropolis;
 pub mod rpg;
+pub mod starringe;
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -50,6 +51,8 @@ pub enum GameChoice {
     Metropolis,
     LoopMarch,
     Everlight,
+    /// 星環 — 迫る鉱石を公転砲台で砕く放置ゲーム
+    StarRing,
 }
 
 /// Top-level application state.
@@ -88,5 +91,6 @@ pub fn create_game(choice: &GameChoice) -> Box<dyn Game> {
         GameChoice::Metropolis => Box::new(metropolis::MetropolisGame::new()),
         GameChoice::LoopMarch => Box::new(loopmarch::LoopMarchGame::new()),
         GameChoice::Everlight => Box::new(everlight::EverlightGame::new()),
+        GameChoice::StarRing => Box::new(starringe::StarRingGame::new()),
     }
 }

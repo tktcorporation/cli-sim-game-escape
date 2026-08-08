@@ -16,6 +16,7 @@ Ratzilla (ratatui wrapper) を使用し、10 ticks/sec の固定タイムステ�
 - `src/games/mod.rs` — Game trait (handle_input, tick, render)
 - `src/games/cookie/` — Cookie Factory ゲーム
 - `src/games/factory/` — Tiny Factory ゲーム
+- `src/games/starringe/` — 星環ゲーム
 - `src/input.rs` — クリック/タップ座標変換
 - `src/time.rs` — 固定タイムステップ (10 ticks/sec)
 
