@@ -333,6 +333,8 @@ fn render_stage(
     }
 
     let mut ore_groups: Vec<(Vec<(f64, f64)>, Color)> = Vec::new();
+    // 迫ってくる感: 進行方向と逆側に短い尾を引く
+    let mut approach_trails: Vec<(f64, f64, f64, f64, Color)> = Vec::new();
     for ore in &state.ores {
         let color = ore_color(ore.kind);
         let pts = canvas_fx::filled_ellipse_points(
@@ -347,6 +349,15 @@ fn render_stage(
         } else {
             ore_groups.push((pts, color));
         }
+        let speed = ore.vx.hypot(ore.vy).max(0.01);
+        let trail = ore.radius * 2.8 + speed * 3.0;
+        approach_trails.push((
+            ore.x + shake_x,
+            ore.y + shake_y,
+            ore.x - ore.vx / speed * trail + shake_x,
+            ore.y - ore.vy / speed * trail + shake_y,
+            color,
+        ));
     }
 
     let beam_lines: Vec<(f64, f64, f64, f64)> = state
@@ -422,6 +433,15 @@ fn render_stage(
                 ctx.draw(&Points {
                     coords: &gun_far,
                     color: Color::Gray,
+                });
+            }
+            for &(x1, y1, x2, y2, color) in &approach_trails {
+                ctx.draw(&CanvasLine {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    color,
                 });
             }
             for (pts, color) in &ore_groups {
