@@ -41,14 +41,10 @@
         touch-action: manipulation;
         -webkit-tap-highlight-color: transparent;
       }
-      /* フォスファーグロー: currentColor なので各 span が自分の文字色で発光し、
-         色のハードコードなしに全ゲームへ効く。text-shadow は文字数比例で
-         paint コストが嵩むため、モバイル (coarse pointer) では無効化する。 */
-      @media (hover: hover) and (pointer: fine) {
-        pre {
-          text-shadow: 0 0 3px currentColor;
-        }
-      }
+      /* 全文字への text-shadow (フォスファーグロー) は付けない。
+         以前は CRT 感を出すため `0 0 3px currentColor` を pre 全体に掛けていたが、
+         UI 文字まで滲んで可読性が落ちる。意図的な発光は各ゲームの
+         canvas_fx (灯のグロー等) 側で描画する。 */
       body > div {
         margin: 0;
         width: 100%;
