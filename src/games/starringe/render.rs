@@ -18,8 +18,8 @@ use crate::widgets::{Clickable, ClickableList, TabBar};
 use super::actions::{buy_upgrade_id, TAB_CODEX, TAB_UPGRADES, TAP_STRIKE};
 use super::logic::{can_upgrade_further, turret_positions, upgrade_cost};
 use super::state::{
-    OreKind, ParticleKind, StarRingState, Tab, UpgradeKind, CX, CY, ORBIT_Y_SQUASH, WORLD_H,
-    WORLD_W,
+    BeamKind, OreKind, ParticleKind, StarRingState, Tab, UpgradeKind, CX, CY, ORBIT_Y_SQUASH,
+    WORLD_H, WORLD_W,
 };
 
 pub fn render(
@@ -97,12 +97,30 @@ fn render_header(state: &StarRingState, f: &mut Frame, area: Rect, borders: Bord
     } else {
         ""
     };
+    let depth_mark = if state.depth_flash_ticks > 0 {
+        " ◆層到達"
+    } else {
+        ""
+    };
+    let need = state.kills_to_next_depth();
+    let progress = state.depth_kills.min(need);
     let p = Paragraph::new(Line::from(vec![
         Span::styled(
             "星環",
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("層{}", state.depth),
+            Style::default()
+                .fg(Color::LightMagenta)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" ({progress}/{need})"),
+            Style::default().fg(Color::DarkGray),
         ),
         Span::raw("  "),
         Span::styled(
@@ -114,13 +132,9 @@ fn render_header(state: &StarRingState, f: &mut Frame, area: Rect, borders: Bord
             format!("{:.1}/秒", sps),
             Style::default().fg(Color::Cyan),
         ),
-        Span::raw("  "),
-        Span::styled(
-            format!("撃破 {}", state.total_kills),
-            Style::default().fg(Color::LightCyan),
-        ),
         Span::styled(boost, Style::default().fg(Color::LightRed)),
         Span::styled(leak, Style::default().fg(Color::Red)),
+        Span::styled(depth_mark, Style::default().fg(Color::LightMagenta)),
     ]))
     .block(
         Block::default()
@@ -164,23 +178,22 @@ fn render_upgrades(
     click_state: &Rc<RefCell<ClickState>>,
 ) {
     let mut cl = ClickableList::new();
+    let pulse_lv = state.level(UpgradeKind::Pulse);
+    let lance_lv = state.level(UpgradeKind::Lance);
     cl.push(Line::from(Span::styled(
         format!(
-            " 砲{}  速Lv{}  火力{:.1}  間隔{}",
+            " 砲{}  火力{:.1}  間隔{}  脈{}  穿{}",
             state.turret_count(),
-            state.level(UpgradeKind::OrbitSpeed),
             state.damage(),
-            state.fire_interval()
+            state.fire_interval(),
+            pulse_lv,
+            lance_lv
         ),
         Style::default().fg(Color::DarkGray),
     )));
     cl.push(Line::from(""));
 
     for kind in UpgradeKind::ALL {
-        let lv = state.level(kind);
-        let maxed = !can_upgrade_further(state, kind);
-        let cost = upgrade_cost(state, kind);
-        let can = !maxed && state.shards + 1e-9 >= cost;
         let key = match kind.index() {
             0 => '1',
             1 => '2',
@@ -189,6 +202,27 @@ fn render_upgrades(
             4 => '5',
             _ => '6',
         };
+
+        if !state.upgrade_unlocked(kind) {
+            let line = Line::from(vec![
+                Span::styled(format!("[{key}] "), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{} ", kind.label()),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    format!("層{}で解放", kind.unlock_depth()),
+                    Style::default().fg(Color::Indexed(240)),
+                ),
+            ]);
+            cl.push(line);
+            continue;
+        }
+
+        let lv = state.level(kind);
+        let maxed = !can_upgrade_further(state, kind);
+        let cost = upgrade_cost(state, kind);
+        let can = !maxed && state.shards + 1e-9 >= cost;
         let cost_label = if maxed {
             "MAX".to_string()
         } else {
@@ -226,7 +260,10 @@ fn render_upgrades(
 fn render_codex(state: &StarRingState, f: &mut Frame, area: Rect, borders: Borders) {
     let unlocked = state.unlocked_ore_kinds();
     let mut lines = vec![Line::from(Span::styled(
-        format!(" 累計撃破 {} / 漏洩 {}", state.total_kills, state.leak_count),
+        format!(
+            " 層{} (最深{})  撃破{}  漏洩{}",
+            state.depth, state.best_depth, state.total_kills, state.leak_count
+        ),
         Style::default().fg(Color::DarkGray),
     ))];
     lines.push(Line::from(""));
@@ -242,13 +279,17 @@ fn render_codex(state: &StarRingState, f: &mut Frame, area: Rect, borders: Borde
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("価値{} HP{}", kind.base_value(), kind.base_hp()),
+                    format!(
+                        "価値{} HP{:.0}",
+                        kind.base_value(),
+                        kind.base_hp() * state.depth_hp_mult()
+                    ),
                     Style::default().fg(Color::Gray),
                 ),
             ]));
         } else {
             lines.push(Line::from(Span::styled(
-                format!(" ？ 撃破{}で解放", kind.unlock_kills()),
+                format!(" ？ 層{}で出現", kind.unlock_depth()),
                 Style::default().fg(Color::DarkGray),
             )));
         }
@@ -276,7 +317,10 @@ fn ore_color(kind: OreKind) -> Color {
         OreKind::Dust => Color::Gray,
         OreKind::Rock => Color::Yellow,
         OreKind::Crystal => Color::LightCyan,
+        OreKind::Wisp => Color::Cyan,
         OreKind::Prism => Color::LightMagenta,
+        OreKind::Shell => Color::Indexed(180),
+        OreKind::Splitter => Color::LightGreen,
         OreKind::Nova => Color::LightRed,
     }
 }
@@ -309,7 +353,11 @@ fn render_stage(
         ));
     }
 
-    let core_scale = if state.core_flash_ticks > 0 { 1.35 } else { 1.0 };
+    let core_scale = if state.core_flash_ticks > 0 || state.depth_flash_ticks > 0 {
+        1.35
+    } else {
+        1.0
+    };
     let core_pts = canvas_fx::filled_ellipse_points(
         CX + shake_x,
         CY + shake_y,
@@ -333,8 +381,8 @@ fn render_stage(
     }
 
     let mut ore_groups: Vec<(Vec<(f64, f64)>, Color)> = Vec::new();
-    // 迫ってくる感: 進行方向と逆側に短い尾を引く
-    let mut approach_trails: Vec<(f64, f64, f64, f64, Color)> = Vec::new();
+    // 漂流の軌跡 (進行方向と逆側に短い尾)
+    let mut drift_trails: Vec<(f64, f64, f64, f64, Color)> = Vec::new();
     for ore in &state.ores {
         let color = ore_color(ore.kind);
         let pts = canvas_fx::filled_ellipse_points(
@@ -349,29 +397,60 @@ fn render_stage(
         } else {
             ore_groups.push((pts, color));
         }
-        let speed = ore.vx.hypot(ore.vy).max(0.01);
-        let trail = ore.radius * 2.8 + speed * 3.0;
-        approach_trails.push((
-            ore.x + shake_x,
-            ore.y + shake_y,
-            ore.x - ore.vx / speed * trail + shake_x,
-            ore.y - ore.vy / speed * trail + shake_y,
-            color,
-        ));
+        let speed = ore.vx.hypot(ore.vy);
+        if speed > 0.02 {
+            let trail = ore.radius * 2.2 + speed * 2.5;
+            drift_trails.push((
+                ore.x + shake_x,
+                ore.y + shake_y,
+                ore.x - ore.vx / speed * trail + shake_x,
+                ore.y - ore.vy / speed * trail + shake_y,
+                color,
+            ));
+        }
     }
 
-    let beam_lines: Vec<(f64, f64, f64, f64)> = state
-        .beams
-        .iter()
-        .map(|b| {
-            (
-                b.x0 + shake_x,
-                b.y0 + shake_y,
-                b.x1 + shake_x,
-                b.y1 + shake_y,
-            )
-        })
-        .collect();
+    let mut laser_beams = Vec::new();
+    let mut lance_beams = Vec::new();
+    for b in &state.beams {
+        let line = (
+            b.x0 + shake_x,
+            b.y0 + shake_y,
+            b.x1 + shake_x,
+            b.y1 + shake_y,
+        );
+        match b.kind {
+            BeamKind::Laser => laser_beams.push(line),
+            BeamKind::Lance => lance_beams.push(line),
+        }
+    }
+
+    let mut pulse_rings: Vec<(Vec<(f64, f64)>, Color)> = Vec::new();
+    for ring in &state.pulse_rings {
+        let t = ring.life as f64 / ring.max_life.max(1) as f64;
+        let color = if t > 0.55 {
+            Color::LightYellow
+        } else if t > 0.25 {
+            Color::Yellow
+        } else {
+            Color::DarkGray
+        };
+        let pts = canvas_fx::ring_points(
+            CX + shake_x,
+            CY + shake_y,
+            ring.radius,
+            0.22 + t * 0.15,
+        );
+        // Y squash を軽くかけるため再配置
+        let squashed: Vec<(f64, f64)> = pts
+            .into_iter()
+            .map(|(x, y)| {
+                let dy = y - (CY + shake_y);
+                (x, CY + shake_y + dy * ORBIT_Y_SQUASH.max(0.7))
+            })
+            .collect();
+        pulse_rings.push((squashed, color));
+    }
 
     let mut sparks = Vec::new();
     let mut dust = Vec::new();
@@ -395,13 +474,18 @@ fn render_stage(
         stars.push((x, y));
     }
 
-    let core_color = if state.core_flash_ticks > 0 {
+    let core_color = if state.depth_flash_ticks > 0 {
+        Color::LightMagenta
+    } else if state.core_flash_ticks > 0 {
         Color::LightRed
     } else if state.boost_ticks > 0 {
         Color::LightYellow
     } else {
         Color::Yellow
     };
+
+    let depth_title = state.depth;
+    let turret_n = state.turret_count();
 
     let canvas = Canvas::default()
         .x_bounds([0.0, WORLD_W])
@@ -420,7 +504,15 @@ fn render_stage(
                     color: Color::Indexed(240),
                 });
             }
-            for &(x1, y1, x2, y2) in &beam_lines {
+            for (pts, color) in &pulse_rings {
+                if !pts.is_empty() {
+                    ctx.draw(&Points {
+                        coords: pts,
+                        color: *color,
+                    });
+                }
+            }
+            for &(x1, y1, x2, y2) in &laser_beams {
                 ctx.draw(&CanvasLine {
                     x1,
                     y1,
@@ -429,13 +521,22 @@ fn render_stage(
                     color: Color::LightCyan,
                 });
             }
+            for &(x1, y1, x2, y2) in &lance_beams {
+                ctx.draw(&CanvasLine {
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    color: Color::LightMagenta,
+                });
+            }
             if !gun_far.is_empty() {
                 ctx.draw(&Points {
                     coords: &gun_far,
                     color: Color::Gray,
                 });
             }
-            for &(x1, y1, x2, y2, color) in &approach_trails {
+            for &(x1, y1, x2, y2, color) in &drift_trails {
                 ctx.draw(&CanvasLine {
                     x1,
                     y1,
@@ -500,12 +601,11 @@ fn render_stage(
                 .borders(borders)
                 .border_style(Style::default().fg(Color::DarkGray))
                 .title(Span::styled(
-                    format!(" 情景 砲×{} ", state.turret_count()),
+                    format!(" 情景 層{depth_title} 砲×{turret_n} "),
                     Style::default().fg(Color::Yellow),
                 )),
         );
 
-    // 情景全体をタップ可能にして手動ブースト
     Clickable::new(canvas, TAP_STRIKE).render(f, area, &mut click_state.borrow_mut());
 }
 
@@ -513,7 +613,7 @@ fn render_footer(state: &StarRingState, f: &mut Frame, area: Rect, borders: Bord
     let hint = if state.tab == Tab::Upgrades {
         "[1-6]強化  情景タップで火力ブースト  [Q]戻る"
     } else {
-        "図鑑: 撃破で鉱石種が増える  [Q]戻る"
+        "図鑑: 深い層で鉱石種が増える  [Q]戻る"
     };
     let p = Paragraph::new(Line::from(Span::styled(
         hint,

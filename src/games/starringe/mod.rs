@@ -1,8 +1,8 @@
-//! 星環 — 迫る鉱石を公転砲台で砕く放置ゲーム。
+//! 星環 — 漂う鉱石を公転砲台と武装で砕く放置ゲーム。
 //!
-//! 中心の採掘コアを囲む砲台が楕円軌道を回り、外周から接近する鉱石を
-//! レーザーで砕いて星屑を得る。強化で砲台数・速度・火力・連射・密度・
-//! 収率が伸び、画面上に「多い・速い・強い・大きい・種類」が見える。
+//! 中心の採掘コアを囲む砲台が楕円軌道を回り、外周を螺旋漂流する鉱石を
+//! レーザー・脈動・穿光で砕いて星屑を得る。脅威の増加は層 (depth) 進行が
+//! 担い、プレイヤー強化は純粋な火力・武装・収率に寄せる。
 
 pub mod actions;
 pub mod logic;
@@ -53,10 +53,10 @@ impl StarRingGame {
     fn handle_key(&mut self, key: char) -> bool {
         match key {
             '1' => logic::purchase_upgrade(&mut self.state, UpgradeKind::Turrets),
-            '2' => logic::purchase_upgrade(&mut self.state, UpgradeKind::OrbitSpeed),
-            '3' => logic::purchase_upgrade(&mut self.state, UpgradeKind::Damage),
-            '4' => logic::purchase_upgrade(&mut self.state, UpgradeKind::FireRate),
-            '5' => logic::purchase_upgrade(&mut self.state, UpgradeKind::Density),
+            '2' => logic::purchase_upgrade(&mut self.state, UpgradeKind::Damage),
+            '3' => logic::purchase_upgrade(&mut self.state, UpgradeKind::FireRate),
+            '4' => logic::purchase_upgrade(&mut self.state, UpgradeKind::Pulse),
+            '5' => logic::purchase_upgrade(&mut self.state, UpgradeKind::Lance),
             '6' => logic::purchase_upgrade(&mut self.state, UpgradeKind::Yield),
             '{' | 'u' | 'U' => {
                 self.state.tab = Tab::Upgrades;
@@ -145,7 +145,8 @@ mod tests {
     fn buy_upgrade_via_key() {
         let mut game = StarRingGame::new();
         game.state.shards = 1000.0;
-        assert!(game.handle_input(&InputEvent::Key('3')));
+        // 2 = 火力
+        assert!(game.handle_input(&InputEvent::Key('2')));
         assert_eq!(game.state.level(UpgradeKind::Damage), 1);
     }
 

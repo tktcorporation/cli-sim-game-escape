@@ -1,6 +1,6 @@
 //! 星環のセマンティックアクション ID。
 
-use super::state::UpgradeKind;
+use super::state::{UpgradeKind, UPGRADE_COUNT};
 
 /// タブ: 強化
 pub const TAB_UPGRADES: u16 = 1;
@@ -16,7 +16,7 @@ pub fn buy_upgrade_id(kind: UpgradeKind) -> u16 {
 }
 
 pub fn upgrade_for_buy_id(action_id: u16) -> Option<UpgradeKind> {
-    if (BUY_UPGRADE_BASE..BUY_UPGRADE_BASE + 6).contains(&action_id) {
+    if (BUY_UPGRADE_BASE..BUY_UPGRADE_BASE + UPGRADE_COUNT as u16).contains(&action_id) {
         UpgradeKind::from_index((action_id - BUY_UPGRADE_BASE) as usize)
     } else {
         None
