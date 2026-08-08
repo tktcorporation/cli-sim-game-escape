@@ -1,7 +1,7 @@
-//! 星環 — 迫る鉱石を公転武装の連射で砕く放置ゲーム。
+//! 星環 — 螺旋漂流する鉱石を公転武装の連射で砕く放置ゲーム。
 //!
-//! 外周から流れる鉱石を軌道上の武装で刈り取り、星屑を得る。
-//! 層が進むと敵の数・強さ・報酬が段で切り替わり、新しい武装が解放される。
+//! 外周を漂う鉱石を軌道上の武装で刈り取り、星屑を得る。
+//! 層が進むと敵の数・強さ・報酬が段で切り替わり、新しい武装と環武装が解放される。
 //! 各武装は弾数・連射・威力を個別に強化できる。
 
 pub mod actions;
@@ -107,10 +107,10 @@ impl StarRingGame {
                 logic::select_weapon(&mut self.state, WeaponKind::Nova)
             }
             '1' if self.state.tab == Tab::Ring => {
-                logic::purchase_ring_upgrade(&mut self.state, RingUpgrade::OrbitSpeed)
+                logic::purchase_ring_upgrade(&mut self.state, RingUpgrade::Yield)
             }
             '2' if self.state.tab == Tab::Ring => {
-                logic::purchase_ring_upgrade(&mut self.state, RingUpgrade::Yield)
+                logic::purchase_ring_upgrade(&mut self.state, RingUpgrade::CorePulse)
             }
             _ => false,
         }

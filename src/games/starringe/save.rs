@@ -7,13 +7,13 @@
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
-use super::state::{StarRingState, WeaponKind, WEAPON_COUNT};
+use super::state::{StarRingState, WeaponKind, RING_UPGRADE_COUNT, WEAPON_COUNT};
 
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 2;
+const SAVE_VERSION: u32 = 3;
 
 #[cfg(any(target_arch = "wasm32", test))]
-const MIN_COMPATIBLE_VERSION: u32 = 2;
+const MIN_COMPATIBLE_VERSION: u32 = 3;
 
 #[cfg(target_arch = "wasm32")]
 const STORAGE_KEY: &str = "starringe_save";
@@ -37,7 +37,7 @@ struct GameSave {
     total_kills: u64,
     missed_count: u64,
     weapon_levels: [[u32; 3]; WEAPON_COUNT],
-    ring_levels: [u32; 2],
+    ring_levels: [u32; RING_UPGRADE_COUNT],
     selected_weapon: u8,
     rng_state: u32,
 }
@@ -123,7 +123,7 @@ pub fn load_game(state: &mut StarRingState) -> bool {
         }
     };
     if save_data.version < MIN_COMPATIBLE_VERSION {
-        // v1 (漏洩・共通強化) はスキーマ非互換のため破棄
+        // v1/v2 はスキーマ非互換のため破棄
         let _ = storage.remove_item(STORAGE_KEY);
         return false;
     }

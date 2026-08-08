@@ -1,7 +1,8 @@
 //! 星環 (Star Ring) の状態定義。
 //!
-//! 外周から流れてくる鉱石を、公転する武装の連射で砕いて星屑を稼ぐ放置ゲーム。
+//! 外周を螺旋漂流する鉱石を、公転する武装の連射で砕いて星屑を稼ぐ放置ゲーム。
 //! 「守る」ではなく「刈り取る」——中心の星は採掘の核であり、防衛対象ではない。
+//! 脅威の増加はプレイヤー強化ではなく「層」進行が担う。
 
 /// ワールド幅 (Canvas x_bounds)。
 pub const WORLD_W: f64 = 60.0;
@@ -25,6 +26,8 @@ pub const SPAWN_RADIUS: f64 = 36.0;
 pub const BOOST_DURATION: u32 = 40;
 /// 武器種数。
 pub const WEAPON_COUNT: usize = 5;
+/// 環強化スロット数。
+pub const RING_UPGRADE_COUNT: usize = 2;
 /// 層到達フラッシュの長さ (tick)。
 pub const LAYER_FLASH_TICKS: u32 = 28;
 
@@ -100,7 +103,6 @@ impl WeaponKind {
             WeaponKind::Nova => 5,
         }
     }
-
 }
 
 /// 武器ごとの強化項目。
@@ -167,16 +169,21 @@ impl WeaponStat {
 }
 
 /// 環全体の強化 (武装とは別タブ)。
+/// 脅威 (出現数) を増やす強化は持たない — それは層進行の役割。
+/// 公転速度/軌道拡大のような寄与の薄いレバーは置かない。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RingUpgrade {
-    /// 公転速度
-    OrbitSpeed = 0,
     /// 収率 (撃破時の星屑倍率)
-    Yield = 1,
+    Yield = 0,
+    /// 核脈動 — 中心から周期 AOE (第2層で解放)
+    CorePulse = 1,
 }
 
 impl RingUpgrade {
-    pub const ALL: [RingUpgrade; 2] = [RingUpgrade::OrbitSpeed, RingUpgrade::Yield];
+    pub const ALL: [RingUpgrade; RING_UPGRADE_COUNT] = [
+        RingUpgrade::Yield,
+        RingUpgrade::CorePulse,
+    ];
 
     pub fn index(self) -> usize {
         self as usize
@@ -188,29 +195,44 @@ impl RingUpgrade {
 
     pub fn label(self) -> &'static str {
         match self {
-            RingUpgrade::OrbitSpeed => "公転速度",
             RingUpgrade::Yield => "収率",
+            RingUpgrade::CorePulse => "核脈動",
         }
     }
 
     pub fn blurb(self) -> &'static str {
         match self {
-            RingUpgrade::OrbitSpeed => "武装の軌道が速く回る",
             RingUpgrade::Yield => "砕いた星屑が増える",
+            RingUpgrade::CorePulse => "核が波打って近くの鉱石を削る",
         }
     }
 
     pub fn base_cost(self) -> f64 {
         match self {
-            RingUpgrade::OrbitSpeed => 18.0,
             RingUpgrade::Yield => 40.0,
+            RingUpgrade::CorePulse => 32.0,
         }
     }
 
     pub fn growth(self) -> f64 {
         match self {
-            RingUpgrade::OrbitSpeed => 1.75,
             RingUpgrade::Yield => 2.00,
+            RingUpgrade::CorePulse => 1.80,
+        }
+    }
+
+    /// 店に並ぶ最低層。
+    pub fn unlock_layer(self) -> u32 {
+        match self {
+            RingUpgrade::Yield => 1,
+            RingUpgrade::CorePulse => 2,
+        }
+    }
+
+    pub fn max_level(self) -> Option<u32> {
+        match self {
+            RingUpgrade::Yield => None,
+            RingUpgrade::CorePulse => Some(12),
         }
     }
 }
@@ -221,7 +243,6 @@ pub struct Layer;
 
 impl Layer {
     /// 各層の開始に必要な累計撃破 (index 0 = 第1層)。
-    /// ぬるっと上がらず、到達ごとに場面が切り替わる間隔を取る。
     pub const THRESHOLDS: [u64; 8] = [0, 80, 250, 600, 1400, 3000, 6000, 12000];
 
     pub fn from_kills(kills: u64) -> u32 {
@@ -231,7 +252,6 @@ impl Layer {
                 layer = (i as u32) + 1;
             }
         }
-        // 最終閾値以降はゆるやかに延長
         if kills >= *Self::THRESHOLDS.last().unwrap() {
             let extra = kills - Self::THRESHOLDS.last().unwrap();
             layer += (extra / 8000) as u32;
@@ -240,7 +260,7 @@ impl Layer {
     }
 
     pub fn next_threshold(layer: u32) -> Option<u64> {
-        let idx = layer as usize; // 次の層の index
+        let idx = layer as usize;
         if idx < Self::THRESHOLDS.len() {
             Some(Self::THRESHOLDS[idx])
         } else {
@@ -265,11 +285,12 @@ impl Layer {
 
     pub fn spawn_interval_ticks(layer: u32) -> u64 {
         let l = layer.saturating_sub(1) as u64;
-        (14u64.saturating_sub(l)).max(4)
+        (13u64.saturating_sub(l)).max(3)
     }
 
     pub fn spawn_batch(layer: u32) -> usize {
-        1 + ((layer.saturating_sub(1) / 2) as usize).min(5)
+        // 物量は層が進むほど増える。購入レバーでは増やさない。
+        1 + ((layer.saturating_sub(1)) as usize).min(6)
     }
 
     pub fn hp_mult(layer: u32) -> f64 {
@@ -280,8 +301,9 @@ impl Layer {
         1.0 + (layer.saturating_sub(1) as f64) * 0.50
     }
 
-    pub fn speed_mult(layer: u32) -> f64 {
-        1.0 + (layer.saturating_sub(1) as f64) * 0.06
+    /// 螺旋の沈み速度倍率 (層が深いほどわずかに速い)。
+    pub fn radial_mult(layer: u32) -> f64 {
+        1.0 + (layer.saturating_sub(1) as f64) * 0.05
     }
 }
 
@@ -291,16 +313,22 @@ pub enum OreKind {
     Dust = 0,
     Rock = 1,
     Crystal = 2,
-    Prism = 3,
-    Nova = 4,
+    Wisp = 3,
+    Prism = 4,
+    Shell = 5,
+    Splitter = 6,
+    Nova = 7,
 }
 
 impl OreKind {
-    pub const ALL: [OreKind; 5] = [
+    pub const ALL: [OreKind; 8] = [
         OreKind::Dust,
         OreKind::Rock,
         OreKind::Crystal,
+        OreKind::Wisp,
         OreKind::Prism,
+        OreKind::Shell,
+        OreKind::Splitter,
         OreKind::Nova,
     ];
 
@@ -309,7 +337,10 @@ impl OreKind {
             OreKind::Dust => "星塵",
             OreKind::Rock => "岩石",
             OreKind::Crystal => "結晶",
+            OreKind::Wisp => "浮遊片",
             OreKind::Prism => "輝晶",
+            OreKind::Shell => "殻石",
+            OreKind::Splitter => "裂片",
             OreKind::Nova => "新星核",
         }
     }
@@ -319,7 +350,10 @@ impl OreKind {
             OreKind::Dust => 1.0,
             OreKind::Rock => 3.0,
             OreKind::Crystal => 8.0,
+            OreKind::Wisp => 6.0,
             OreKind::Prism => 20.0,
+            OreKind::Shell => 28.0,
+            OreKind::Splitter => 14.0,
             OreKind::Nova => 55.0,
         }
     }
@@ -329,7 +363,10 @@ impl OreKind {
             OreKind::Dust => 1.0,
             OreKind::Rock => 2.8,
             OreKind::Crystal => 5.5,
+            OreKind::Wisp => 3.2,
             OreKind::Prism => 11.0,
+            OreKind::Shell => 18.0,
+            OreKind::Splitter => 7.5,
             OreKind::Nova => 24.0,
         }
     }
@@ -339,42 +376,102 @@ impl OreKind {
             OreKind::Dust => 1.4,
             OreKind::Rock => 1.9,
             OreKind::Crystal => 2.3,
+            OreKind::Wisp => 1.7,
             OreKind::Prism => 2.8,
+            OreKind::Shell => 3.0,
+            OreKind::Splitter => 2.4,
             OreKind::Nova => 3.4,
         }
     }
 
-    pub fn speed(self) -> f64 {
+    /// 軌道上の角速度 (rad/tick)。符号はスポーン時に決める。
+    pub fn ang_speed(self) -> f64 {
         match self {
-            OreKind::Dust => 0.55,
-            OreKind::Rock => 0.48,
-            OreKind::Crystal => 0.40,
-            OreKind::Prism => 0.32,
-            OreKind::Nova => 0.26,
+            OreKind::Dust => 0.035,
+            OreKind::Rock => 0.028,
+            OreKind::Crystal => 0.022,
+            OreKind::Wisp => 0.042,
+            OreKind::Prism => 0.030,
+            OreKind::Shell => 0.016,
+            OreKind::Splitter => 0.026,
+            OreKind::Nova => 0.014,
         }
     }
 
-    /// 出現に必要な層。
+    /// 内側へ沈む速度 (負 = 中心方向)。一直線突進ではなくゆるい螺旋。
+    pub fn radial_speed(self) -> f64 {
+        match self {
+            OreKind::Dust => -0.22,
+            OreKind::Rock => -0.17,
+            OreKind::Crystal => -0.12,
+            OreKind::Wisp => -0.040,
+            OreKind::Prism => -0.14,
+            OreKind::Shell => -0.085,
+            OreKind::Splitter => -0.13,
+            OreKind::Nova => -0.07,
+        }
+    }
+
     pub fn unlock_layer(self) -> u32 {
         match self {
             OreKind::Dust => 1,
             OreKind::Rock => 2,
             OreKind::Crystal => 3,
+            OreKind::Wisp => 3,
             OreKind::Prism => 4,
-            OreKind::Nova => 5,
+            OreKind::Shell => 5,
+            OreKind::Splitter => 6,
+            OreKind::Nova => 7,
         }
     }
+
+    /// 殻石は通常弾に耐性を持つ (光線・新星・核脈動は通しやすい)。
+    pub fn armored(self) -> bool {
+        matches!(self, OreKind::Shell)
+    }
+
+    pub fn splits_on_death(self) -> bool {
+        matches!(self, OreKind::Splitter)
+    }
+
+    pub fn default_motion(self) -> OreMotion {
+        match self {
+            OreKind::Wisp => OreMotion::Orbit,
+            OreKind::Prism => OreMotion::Zigzag,
+            OreKind::Shell | OreKind::Nova => OreMotion::Heavy,
+            _ => OreMotion::Spiral,
+        }
+    }
+}
+
+/// 鉱石の軌道パターン。どれも「外周を漂いながらゆっくり沈む」系で、
+/// 中心への一直線ミサイルにはしない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OreMotion {
+    /// 螺旋漂流 (基本)
+    Spiral,
+    /// ほぼ周回、沈みはごく遅い
+    Orbit,
+    /// 螺旋 + 半径の呼吸
+    Zigzag,
+    /// 重く遅い螺旋
+    Heavy,
 }
 
 #[derive(Clone, Debug)]
 pub struct Ore {
     pub x: f64,
     pub y: f64,
+    /// 描画用の直前変位 (軌跡)。
     pub vx: f64,
     pub vy: f64,
     pub hp: f64,
     pub kind: OreKind,
     pub radius: f64,
+    pub motion: OreMotion,
+    /// 角速度 (符号付き)。
+    pub ang_vel: f64,
+    pub age: u32,
 }
 
 /// 飛翔弾。武装から飛び、鉱石に当たって消える (または貫通する)。
@@ -412,6 +509,14 @@ pub struct Particle {
     pub kind: ParticleKind,
 }
 
+/// 核脈動の波紋演出。
+#[derive(Clone, Debug)]
+pub struct PulseRing {
+    pub radius: f64,
+    pub life: u32,
+    pub max_life: u32,
+}
+
 /// UI タブ。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -433,11 +538,12 @@ pub struct StarRingState {
     pub missed_count: u64,
     /// 武器ごとの [Count, Rate, Power] レベル。
     pub weapon_levels: [[u32; 3]; WEAPON_COUNT],
-    /// 環強化レベル [OrbitSpeed, Yield]。
-    pub ring_levels: [u32; 2],
+    /// 環強化レベル [Yield, CorePulse]。
+    pub ring_levels: [u32; RING_UPGRADE_COUNT],
     pub ores: Vec<Ore>,
     pub projectiles: Vec<Projectile>,
     pub particles: Vec<Particle>,
+    pub pulse_rings: Vec<PulseRing>,
     pub elapsed_ticks: u64,
     pub rng_state: u32,
     pub shake_ticks: u32,
@@ -465,10 +571,11 @@ impl StarRingState {
             total_kills: 0,
             missed_count: 0,
             weapon_levels: [[0; 3]; WEAPON_COUNT],
-            ring_levels: [0; 2],
+            ring_levels: [0; RING_UPGRADE_COUNT],
             ores: Vec::new(),
             projectiles: Vec::new(),
             particles: Vec::new(),
+            pulse_rings: Vec::new(),
             elapsed_ticks: 0,
             rng_state: 0xC0FFEE42,
             shake_ticks: 0,
@@ -500,6 +607,10 @@ impl StarRingState {
         self.layer() >= weapon.unlock_layer()
     }
 
+    pub fn is_ring_unlocked(&self, kind: RingUpgrade) -> bool {
+        self.layer() >= kind.unlock_layer()
+    }
+
     pub fn unlocked_weapons(&self) -> Vec<WeaponKind> {
         WeaponKind::ALL
             .iter()
@@ -518,8 +629,9 @@ impl StarRingState {
         max_count.min(MAX_TURRETS)
     }
 
+    /// 見た目・配置用の公転速度。購入レバーにはしない (砲台数に軽く連動)。
     pub fn orbit_speed(&self) -> f64 {
-        0.028 * (1.0 + 0.22 * self.ring_level(RingUpgrade::OrbitSpeed) as f64)
+        0.028 * (1.0 + 0.08 * self.turret_count().saturating_sub(1) as f64)
     }
 
     pub fn ring_radius(&self) -> f64 {
@@ -528,6 +640,30 @@ impl StarRingState {
 
     pub fn yield_mult(&self) -> f64 {
         (1.0 + self.ring_level(RingUpgrade::Yield) as f64 * 0.40) * Layer::value_mult(self.layer())
+    }
+
+    /// 核脈動の発射間隔。未購入なら None。
+    pub fn pulse_interval(&self) -> Option<u64> {
+        let lv = self.ring_level(RingUpgrade::CorePulse);
+        if lv == 0 || !self.is_ring_unlocked(RingUpgrade::CorePulse) {
+            return None;
+        }
+        Some((22u64.saturating_sub(lv as u64)).max(8))
+    }
+
+    pub fn pulse_radius(&self) -> f64 {
+        let lv = self.ring_level(RingUpgrade::CorePulse) as f64;
+        8.5 + lv * 1.10
+    }
+
+    pub fn pulse_damage(&self) -> f64 {
+        let lv = self.ring_level(RingUpgrade::CorePulse) as f64;
+        let base = 0.85 + lv * 0.40;
+        if self.boost_ticks > 0 {
+            base * 1.5
+        } else {
+            base
+        }
     }
 
     /// 武器の1発ダメージ (ブースト込み)。
