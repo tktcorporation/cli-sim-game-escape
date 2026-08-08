@@ -24,9 +24,11 @@ use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
 use actions::{
-    ring_for_buy_id, weapon_for_select_id, weapon_stat_for_buy_id, OPEN_LAYER, TAB_ARMORY,
-    TAB_CODEX, TAB_RING, TAP_STRIKE, WEAPON_NEXT, WEAPON_PREV,
+    ring_for_buy_id, weapon_for_select_id, weapon_stat_for_buy_id, OPEN_LAYER, RING_SCROLL_DOWN,
+    RING_SCROLL_UP, TAB_ARMORY, TAB_CODEX, TAB_RING, TAP_STRIKE, WEAPON_NEXT, WEAPON_PREV,
 };
+
+const RING_SCROLL_STEP: i32 = 3;
 use state::{RingUpgrade, StarRingState, Tab, WeaponKind, WeaponStat};
 
 pub struct StarRingGame {
@@ -62,10 +64,19 @@ impl StarRingGame {
             }
             '|' | 'r' | 'R' => {
                 self.state.tab = Tab::Ring;
+                self.state.ring_scroll.set(0);
                 true
             }
             '}' | 'c' | 'C' => {
                 self.state.tab = Tab::Codex;
+                true
+            }
+            'k' | 'K' if self.state.tab == Tab::Ring => {
+                self.state.scroll_ring(-RING_SCROLL_STEP);
+                true
+            }
+            'j' | 'J' if self.state.tab == Tab::Ring => {
+                self.state.scroll_ring(RING_SCROLL_STEP);
                 true
             }
             ' ' | 't' | 'T' => {
@@ -126,6 +137,7 @@ impl StarRingGame {
             }
             TAB_RING => {
                 self.state.tab = Tab::Ring;
+                self.state.ring_scroll.set(0);
                 true
             }
             TAB_CODEX => {
@@ -137,6 +149,14 @@ impl StarRingGame {
                 true
             }
             OPEN_LAYER => logic::unlock_next_layer(&mut self.state),
+            RING_SCROLL_UP => {
+                self.state.scroll_ring(-RING_SCROLL_STEP);
+                true
+            }
+            RING_SCROLL_DOWN => {
+                self.state.scroll_ring(RING_SCROLL_STEP);
+                true
+            }
             WEAPON_PREV => {
                 logic::cycle_selected_weapon(&mut self.state, -1);
                 true

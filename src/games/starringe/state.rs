@@ -4,6 +4,8 @@
 //! 「守る」ではなく「刈り取る」——中心の星は採掘の核であり、防衛対象ではない。
 //! 脅威の増加はプレイヤー強化ではなく「層」開放が担う。
 
+use std::cell::Cell;
+
 /// ワールド幅 (Canvas x_bounds)。
 pub const WORLD_W: f64 = 60.0;
 /// ワールド高さ (Canvas y_bounds)。
@@ -583,6 +585,8 @@ pub struct StarRingState {
     pub tab: Tab,
     /// 武装タブで選択中の武器。
     pub selected_weapon: WeaponKind,
+    /// 環タブの縦スクロール位置。セーブしない (リロード時は先頭へ戻す)。
+    pub ring_scroll: Cell<u16>,
     /// 直近の星屑獲得量 (shards/sec 表示用、リングバッファ)。
     pub recent_gain: [f64; 20],
     pub recent_gain_idx: usize,
@@ -614,10 +618,16 @@ impl StarRingState {
             layer_ready_latched: false,
             tab: Tab::Armory,
             selected_weapon: WeaponKind::Pulse,
+            ring_scroll: Cell::new(0),
             recent_gain: [0.0; 20],
             recent_gain_idx: 0,
             tick_gain: 0.0,
         }
+    }
+
+    pub fn scroll_ring(&self, delta: i32) {
+        let cur = self.ring_scroll.get() as i32;
+        self.ring_scroll.set(cur.saturating_add(delta).max(0) as u16);
     }
 
     pub fn layer(&self) -> u32 {
