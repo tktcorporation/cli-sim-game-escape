@@ -51,7 +51,7 @@ pub fn buy_ring_id(kind: RingUpgrade) -> u16 {
 }
 
 pub fn ring_for_buy_id(action_id: u16) -> Option<RingUpgrade> {
-    if (BUY_RING_BASE..BUY_RING_BASE + 2).contains(&action_id) {
+    if (BUY_RING_BASE..BUY_RING_BASE + RingUpgrade::ALL.len() as u16).contains(&action_id) {
         RingUpgrade::from_index((action_id - BUY_RING_BASE) as usize)
     } else {
         None

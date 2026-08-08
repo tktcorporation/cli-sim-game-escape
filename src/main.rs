@@ -630,7 +630,7 @@ fn render_menu(
         ('6', "Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶', theme::accent(&GameChoice::Metropolis)),
         ('7', "周回討伐", "地形を配置し勇者が自動周回するローグライト", MENU_SELECT_LOOPMARCH, '▶', theme::accent(&GameChoice::LoopMarch)),
         ('8', "常夜灯", "降り注ぐ魔物から灯を守る縦画面バレットヘヴン", MENU_SELECT_EVERLIGHT, '▶', theme::accent(&GameChoice::Everlight)),
-        ('9', "星環", "流れる鉱石を連射武装で刈り取る軌道採掘", MENU_SELECT_STARRINGE, '▶', theme::accent(&GameChoice::StarRing)),
+        ('9', "星環", "螺旋漂流する鉱石を連射武装で刈り取る軌道採掘", MENU_SELECT_STARRINGE, '▶', theme::accent(&GameChoice::StarRing)),
         ('0', "設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 

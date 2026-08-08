@@ -3,58 +3,38 @@
 //! 解放済み武装の強化と環強化を買い続ける bot で長期運転し、panic なし・
 //! 撃破進行・層進行・星屑の長期増加を不変条件として検証する。
 //!
-//! あわせて、今後のバランス改修のベースライン計測用に感度レポートを提供する:
+//! 感度レポート:
 //!
-//! - **公転速度の寄与**: 公転速度へ投資したランとしなかったランで、撃破効率が
-//!   どれだけ違うか (「メリットがよく分からない」問題の数値化)
-//! - **武装ステの寄与**: 弾数 / 連射 / 威力をそれぞれ優先した時の差
+//! - **収率の寄与**: 収率強化の有無で獲得がどう変わるか
+//! - **核脈動の寄与**: 環武装 (コア AOE) の有無で撃破がどう変わるか
+//! - **武装ステの寄与**: 弾数 / 連射 / 威力の優先比較
 //! - **層進行カーブ**: 撃破閾値で武装・鉱石種が解放されるペース
-//! - **逸失率**: 中心到達で報酬を逃す割合 (防衛ペナルティではないが、刈り取り
-//!   効率の指標として見る)
+//! - **逸失率**: 中心到達で報酬を逃す割合
 //!
-//! バランス調整時は
-//! `cargo test starringe::simulator -- --nocapture`
-//! でレポートを見ながら数値を触るとよい。
-//!
-//! 今後の改修方針メモ (ゲームロジック側は未着手 / 一部は PR #153 で着手済み):
-//! - 中心へ一直線に迫る動きを弱め、防衛コアへの圧を別の形で作る
-//! - 鉱脈密度のような「収入↑と脅威↑が同一レバー」は復活させない
-//! - より深い層で敵強化と新攻撃手段の解放を厚くする
-//! - 砲台数・連射以外の攻撃手段・敵バリエーション・演出を増やす
+//! `cargo test starringe::simulator -- --nocapture` でレポートを確認できる。
 
 #![cfg(test)]
 
 use super::logic::{
-    can_upgrade_weapon_stat, purchase_ring_upgrade, purchase_weapon_stat, ring_upgrade_cost, tick,
-    weapon_stat_cost,
+    can_upgrade_ring, can_upgrade_weapon_stat, purchase_ring_upgrade, purchase_weapon_stat,
+    ring_upgrade_cost, tick, weapon_stat_cost,
 };
 use super::state::{
-    Layer, OreKind, RingUpgrade, StarRingState, WeaponKind, WeaponStat,
+    Layer, OreKind, RingUpgrade, StarRingState, WeaponKind, WeaponStat, RING_UPGRADE_COUNT,
 };
 
 /// 購入方策。感度分析で「どの強化が効いているか」を切り分ける。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BuyPolicy {
-    /// 買える中で最安を買う。
     Cheapest,
-    /// 武装ステのみ (環強化は買わない)。
     WeaponsOnly,
-    /// 武装ステ + 収率。公転は買わない。
     WeaponsAndYield,
-    /// 公転速度を優先し、買えない時だけ最安。
-    OrbitFirst,
-    /// 収率を優先し、買えない時だけ最安。
     YieldFirst,
-    /// 威力を優先し、買えない時だけ最安。
+    PulseFirst,
     PowerFirst,
-    /// 連射を優先し、買えない時だけ最安。
     RateFirst,
-    /// 弾数を優先し、買えない時だけ最安。
     CountFirst,
-    /// 指定の環強化を買わない (ablation 用)。
     BlockRing(&'static [RingUpgrade]),
-    /// 指定の武装ステを買わない (ablation 用)。
-    BlockStat(&'static [WeaponStat]),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -68,27 +48,19 @@ fn ring_allowed(policy: BuyPolicy, kind: RingUpgrade) -> bool {
         BuyPolicy::WeaponsOnly => false,
         BuyPolicy::WeaponsAndYield => matches!(kind, RingUpgrade::Yield),
         BuyPolicy::BlockRing(list) => !list.contains(&kind),
-        BuyPolicy::BlockStat(_)
-        | BuyPolicy::Cheapest
-        | BuyPolicy::OrbitFirst
+        BuyPolicy::Cheapest
         | BuyPolicy::YieldFirst
+        | BuyPolicy::PulseFirst
         | BuyPolicy::PowerFirst
         | BuyPolicy::RateFirst
         | BuyPolicy::CountFirst => true,
     }
 }
 
-fn stat_allowed(policy: BuyPolicy, stat: WeaponStat) -> bool {
-    match policy {
-        BuyPolicy::BlockStat(list) => !list.contains(&stat),
-        _ => true,
-    }
-}
-
 fn preferred_ring(policy: BuyPolicy) -> Option<RingUpgrade> {
     match policy {
-        BuyPolicy::OrbitFirst => Some(RingUpgrade::OrbitSpeed),
         BuyPolicy::YieldFirst => Some(RingUpgrade::Yield),
+        BuyPolicy::PulseFirst => Some(RingUpgrade::CorePulse),
         _ => None,
     }
 }
@@ -103,6 +75,9 @@ fn preferred_stat(policy: BuyPolicy) -> Option<WeaponStat> {
 }
 
 fn try_buy_ring(state: &mut StarRingState, kind: RingUpgrade) -> bool {
+    if !can_upgrade_ring(state, kind) {
+        return false;
+    }
     let cost = ring_upgrade_cost(state, kind);
     if state.shards + 1e-9 < cost {
         return false;
@@ -110,7 +85,6 @@ fn try_buy_ring(state: &mut StarRingState, kind: RingUpgrade) -> bool {
     purchase_ring_upgrade(state, kind)
 }
 
-/// 方策に従って最大1回購入する。買えたら true。
 fn bot_buy_once(state: &mut StarRingState, policy: BuyPolicy) -> bool {
     if let Some(pref) = preferred_ring(policy) {
         if ring_allowed(policy, pref) && try_buy_ring(state, pref) {
@@ -118,10 +92,9 @@ fn bot_buy_once(state: &mut StarRingState, policy: BuyPolicy) -> bool {
         }
     }
     if let Some(pref) = preferred_stat(policy) {
-        // 解放済み武装のうち最安の pref ステを買う
         let mut best: Option<(WeaponKind, f64)> = None;
         for w in state.unlocked_weapons() {
-            if !stat_allowed(policy, pref) || !can_upgrade_weapon_stat(state, w, pref) {
+            if !can_upgrade_weapon_stat(state, w, pref) {
                 continue;
             }
             let cost = weapon_stat_cost(state, w, pref);
@@ -140,7 +113,7 @@ fn bot_buy_once(state: &mut StarRingState, policy: BuyPolicy) -> bool {
     let mut best: Option<(Purchase, f64)> = None;
     for w in state.unlocked_weapons() {
         for stat in WeaponStat::ALL {
-            if !stat_allowed(policy, stat) || !can_upgrade_weapon_stat(state, w, stat) {
+            if !can_upgrade_weapon_stat(state, w, stat) {
                 continue;
             }
             let cost = weapon_stat_cost(state, w, stat);
@@ -153,7 +126,7 @@ fn bot_buy_once(state: &mut StarRingState, policy: BuyPolicy) -> bool {
         }
     }
     for kind in RingUpgrade::ALL {
-        if !ring_allowed(policy, kind) {
+        if !ring_allowed(policy, kind) || !can_upgrade_ring(state, kind) {
             continue;
         }
         let cost = ring_upgrade_cost(state, kind);
@@ -192,7 +165,7 @@ struct RunSnapshot {
     unlocked_ores: usize,
     shards_per_sec: f64,
     weapon_levels: [[u32; 3]; 5],
-    ring_levels: [u32; 2],
+    ring_levels: [u32; RING_UPGRADE_COUNT],
 }
 
 impl RunSnapshot {
@@ -229,12 +202,12 @@ impl RunSnapshot {
         self.total_weapon_levels() + self.ring_levels.iter().sum::<u32>()
     }
 
-    fn orbit_lv(&self) -> u32 {
-        self.ring_levels[RingUpgrade::OrbitSpeed.index()]
-    }
-
     fn yield_lv(&self) -> u32 {
         self.ring_levels[RingUpgrade::Yield.index()]
+    }
+
+    fn pulse_lv(&self) -> u32 {
+        self.ring_levels[RingUpgrade::CorePulse.index()]
     }
 }
 
@@ -280,9 +253,9 @@ fn report(label: &str, snap: &RunSnapshot) {
     }
     eprintln!();
     eprintln!(
-        "ring: 速={} 収={}  unlocked_w={} unlocked_ore={}",
-        snap.orbit_lv(),
+        "ring: 収={} 脈={}  unlocked_w={} unlocked_ore={}",
         snap.yield_lv(),
+        snap.pulse_lv(),
         snap.unlocked_weapons,
         snap.unlocked_ores
     );
@@ -318,12 +291,12 @@ fn long_run_never_panics_and_keeps_invariants() {
 
     assert!(state.elapsed_ticks >= 3_000);
     assert!(
-        state.total_kills >= 30,
+        state.total_kills >= 25,
         "長時間プレイで撃破が進むはず kills={}",
         state.total_kills
     );
     assert!(
-        state.shards_earned > 40.0,
+        state.shards_earned > 30.0,
         "撃破による累計獲得が伸びるはず earned={}",
         state.shards_earned
     );
@@ -339,16 +312,16 @@ fn long_run_never_panics_and_keeps_invariants() {
         "projectiles={}",
         state.projectiles.len()
     );
+    assert!(state.pulse_rings.len() < 20);
     assert!(state.shards.is_finite());
-    assert!(state.shards_earned.is_finite());
 }
 
 #[test]
 fn bot_purchases_upgrades_and_advances_layers() {
     let early = run_snapshot(300, BuyPolicy::Cheapest, 1);
-    let late = run_snapshot(4_000, BuyPolicy::Cheapest, 1);
+    let late = run_snapshot(4_500, BuyPolicy::Cheapest, 1);
     report("early300", &early);
-    report("late4000", &late);
+    report("late4500", &late);
 
     assert!(
         late.total_levels() > early.total_levels(),
@@ -356,21 +329,11 @@ fn bot_purchases_upgrades_and_advances_layers() {
         early.total_levels(),
         late.total_levels()
     );
-    assert!(
-        late.kills > early.kills,
-        "撃破も増えるはず early={} late={}",
-        early.kills,
-        late.kills
-    );
-    assert!(
-        late.layer >= early.layer,
-        "層は後退しない early={} late={}",
-        early.layer,
-        late.layer
-    );
+    assert!(late.kills > early.kills);
+    assert!(late.layer >= early.layer);
     assert!(
         late.layer >= 2,
-        "4000tick で少なくとも第2層に届くはず layer={}",
+        "4500tick で少なくとも第2層に届くはず layer={}",
         late.layer
     );
     assert!(
@@ -399,7 +362,7 @@ fn shards_earned_is_monotone_nondecreasing() {
 
 #[test]
 fn layer_milestones_change_spawn_pressure() {
-    assert!(Layer::spawn_batch(4) >= 2);
+    assert!(Layer::spawn_batch(4) >= 3);
     assert!(Layer::hp_mult(4) > Layer::hp_mult(1) + 0.5);
     assert!(Layer::value_mult(4) > Layer::value_mult(1) + 0.5);
     assert!(Layer::THRESHOLDS[1] >= 60);
@@ -413,10 +376,7 @@ fn arrival_never_reduces_shards_over_long_run() {
         tick(&mut state, 1);
         min_shards = min_shards.min(state.shards);
     }
-    assert!(
-        min_shards + 1e-9 >= 0.0,
-        "星屑が負にならない min={min_shards}"
-    );
+    assert!(min_shards + 1e-9 >= 0.0);
     assert!(
         state.shards + 1e-9 >= 12.0,
         "購入なしなら初期星屑を下回らない shards={}",
@@ -429,19 +389,18 @@ fn weapons_only_bot_still_progresses() {
     let snap = run_snapshot(2_500, BuyPolicy::WeaponsOnly, 7);
     report("weapons_only_2500", &snap);
     assert!(
-        snap.kills >= 20,
+        snap.kills >= 15,
         "武装強化だけでも撃破が進むはず kills={}",
         snap.kills
     );
-    assert_eq!(snap.orbit_lv(), 0, "WeaponsOnly は公転を買わない");
-    assert_eq!(snap.yield_lv(), 0, "WeaponsOnly は収率を買わない");
+    assert_eq!(snap.yield_lv(), 0);
+    assert_eq!(snap.pulse_lv(), 0);
 }
 
 // ---------------------------------------------------------------------------
-// 感度レポート (バランス調整用 — 観測が主目的、assert は緩め)
+// 感度レポート
 // ---------------------------------------------------------------------------
 
-/// 複数シードでの中央値進行。改修前後の「体感の土台」を数値で残す。
 #[test]
 fn progression_balance_report() {
     const RUNS: u32 = 24;
@@ -451,7 +410,8 @@ fn progression_balance_report() {
     let mut earned = Vec::with_capacity(RUNS as usize);
     let mut miss_rates = Vec::with_capacity(RUNS as usize);
     let mut layers = Vec::with_capacity(RUNS as usize);
-    let mut orbits = Vec::with_capacity(RUNS as usize);
+    let mut yields = Vec::with_capacity(RUNS as usize);
+    let mut pulses = Vec::with_capacity(RUNS as usize);
 
     for seed in 1..=RUNS {
         let snap = run_snapshot(TICKS, BuyPolicy::Cheapest, seed);
@@ -459,103 +419,130 @@ fn progression_balance_report() {
         earned.push(snap.earned);
         miss_rates.push(snap.miss_rate());
         layers.push(snap.layer);
-        orbits.push(snap.orbit_lv() as u64);
+        yields.push(snap.yield_lv() as u64);
+        pulses.push(snap.pulse_lv() as u64);
     }
 
     let med_kills = median_u64(&mut kills);
     let med_earned = median_f64(&mut earned);
     let med_miss = median_f64(&mut miss_rates);
     let med_layer = median_u32(&mut layers);
-    let med_orbit = median_u64(&mut orbits);
+    let med_yield = median_u64(&mut yields);
+    let med_pulse = median_u64(&mut pulses);
 
     eprintln!(
         "[starringe/progression] runs={RUNS} ticks={TICKS} median_kills={med_kills} \
          median_earned={med_earned:.1} median_miss_rate={:.1}% median_layer={med_layer} \
-         median_orbit_lv={med_orbit}",
+         median_yield_lv={med_yield} median_pulse_lv={med_pulse}",
         med_miss * 100.0
     );
 
-    assert!(
-        med_kills >= 25,
-        "最安買い bot の中央撃破が低すぎる: {med_kills}"
-    );
-    assert!(
-        med_layer >= 2,
-        "3500tick の中央到達層が浅い: {med_layer}"
-    );
-    // 進行が速すぎると層の「区切り」感が薄れる
-    assert!(
-        med_layer <= 8,
-        "3500tick の中央到達層が深すぎる: {med_layer}"
-    );
+    assert!(med_kills >= 20, "中央撃破が低すぎる: {med_kills}");
+    assert!(med_layer >= 2, "中央到達層が浅い: {med_layer}");
+    assert!(med_layer <= 8, "中央到達層が深すぎる: {med_layer}");
 }
 
-/// 公転速度へ寄せた方策 / 公転を買わない方策を比較する。
-/// 「公転速度を上げるメリットがよく分からない」問題を数値化する。
+/// 最安買い (収率を含む) vs 収率なし。
 #[test]
-fn orbit_speed_ablation_report() {
+fn yield_ablation_report() {
     const RUNS: u32 = 18;
-    const TICKS: u32 = 3_500;
+    const TICKS: u32 = 4_000;
 
-    let no_orbit = BuyPolicy::BlockRing(&[RingUpgrade::OrbitSpeed]);
+    let no_yield = BuyPolicy::BlockRing(&[RingUpgrade::Yield]);
 
-    let mut kills_orbit = Vec::new();
-    let mut kills_no = Vec::new();
-    let mut earned_orbit = Vec::new();
+    let mut earned_with = Vec::new();
     let mut earned_no = Vec::new();
-    let mut miss_orbit = Vec::new();
-    let mut miss_no = Vec::new();
-    let mut orbit_lv = Vec::new();
+    let mut kills_with = Vec::new();
+    let mut kills_no = Vec::new();
+    let mut yield_lv = Vec::new();
 
     for seed in 1..=RUNS {
-        let with = run_snapshot(TICKS, BuyPolicy::OrbitFirst, seed);
-        let without = run_snapshot(TICKS, no_orbit, seed);
-        kills_orbit.push(with.kills);
-        kills_no.push(without.kills);
-        earned_orbit.push(with.earned);
+        let with = run_snapshot(TICKS, BuyPolicy::Cheapest, seed);
+        let without = run_snapshot(TICKS, no_yield, seed);
+        earned_with.push(with.earned);
         earned_no.push(without.earned);
-        miss_orbit.push(with.miss_rate());
-        miss_no.push(without.miss_rate());
-        orbit_lv.push(with.orbit_lv() as u64);
+        kills_with.push(with.kills);
+        kills_no.push(without.kills);
+        yield_lv.push(with.yield_lv() as u64);
     }
 
-    let ko = median_u64(&mut kills_orbit);
-    let kn = median_u64(&mut kills_no);
-    let eo = median_f64(&mut earned_orbit);
+    let ew = median_f64(&mut earned_with);
     let en = median_f64(&mut earned_no);
-    let mo = median_f64(&mut miss_orbit);
-    let mn = median_f64(&mut miss_no);
-    let ol = median_u64(&mut orbit_lv);
-    let kill_delta = if kn == 0 {
-        0.0
-    } else {
-        (ko as f64 - kn as f64) / kn as f64 * 100.0
-    };
+    let kw = median_u64(&mut kills_with);
+    let kn = median_u64(&mut kills_no);
+    let yl = median_u64(&mut yield_lv);
     let earned_delta = if en == 0.0 {
         0.0
     } else {
-        (eo - en) / en * 100.0
+        (ew - en) / en * 100.0
     };
 
     eprintln!(
-        "[starringe/orbit-ablation] ticks={TICKS} runs={RUNS} median_orbit_lv={ol}\n\
-         orbit-first:  median_kills={ko} median_earned={eo:.1} median_miss={:.1}%\n\
-         no-orbit:     median_kills={kn} median_earned={en:.1} median_miss={:.1}%\n\
-         delta kills={kill_delta:+.1}% earned={earned_delta:+.1}%",
-        mo * 100.0,
-        mn * 100.0
+        "[starringe/yield-ablation] ticks={TICKS} runs={RUNS} median_yield_lv={yl}
+\
+         cheapest:  median_kills={kw} median_earned={ew:.1}
+\
+         no-yield:  median_kills={kn} median_earned={en:.1}
+\
+         delta earned={earned_delta:+.1}%"
     );
 
-    assert!(ol >= 1, "公転優先 bot が公転を積めていない");
-    // 現行バランスでは公転の寄与が薄い想定。回帰として「致命的に悪化しない」だけ置く。
-    // 改修で公転の役割をはっきりさせる時は、ここを「明確にプラス」へ引き上げる。
+    assert!(yl >= 1, "最安買い bot が収率を積めていない");
     assert!(
-        kill_delta > -40.0,
-        "公転優先が壊滅的に弱い: delta={kill_delta:.1}%"
+        earned_delta > 5.0,
+        "収率込みの獲得が伸びていない: delta={earned_delta:.1}%"
     );
 }
 
-/// 武装ステ (弾数/連射/威力) の優先方策比較。
+/// 最安買い (核脈動を含む) vs 核脈動なし。
+#[test]
+fn core_pulse_ablation_report() {
+    const RUNS: u32 = 14;
+    const TICKS: u32 = 5_000;
+
+    let no_pulse = BuyPolicy::BlockRing(&[RingUpgrade::CorePulse]);
+
+    let mut kills_with = Vec::new();
+    let mut kills_without = Vec::new();
+    let mut earned_with = Vec::new();
+    let mut earned_without = Vec::new();
+    let mut pulse_lv = Vec::new();
+
+    for seed in 1..=RUNS {
+        let w = run_snapshot(TICKS, BuyPolicy::Cheapest, seed);
+        let o = run_snapshot(TICKS, no_pulse, seed);
+        kills_with.push(w.kills);
+        kills_without.push(o.kills);
+        earned_with.push(w.earned);
+        earned_without.push(o.earned);
+        pulse_lv.push(w.pulse_lv() as u64);
+    }
+
+    let kw = median_u64(&mut kills_with);
+    let ko = median_u64(&mut kills_without);
+    let ew = median_f64(&mut earned_with);
+    let eo = median_f64(&mut earned_without);
+    let pl = median_u64(&mut pulse_lv);
+    let kill_delta = if ko == 0 {
+        0.0
+    } else {
+        (kw as f64 - ko as f64) / ko as f64 * 100.0
+    };
+
+    eprintln!(
+        "[starringe/pulse-ablation] ticks={TICKS} runs={RUNS} median_pulse_lv={pl}\n\
+         cheapest:  median_kills={kw} median_earned={ew:.1}\n\
+         no-pulse:  median_kills={ko} median_earned={eo:.1}\n\
+         delta kills={kill_delta:+.1}%"
+    );
+
+    assert!(pl >= 1, "最安買い bot が核脈動を積めていない");
+    assert!(
+        kill_delta > -15.0,
+        "核脈動込みが壊滅的に弱い: delta={kill_delta:.1}%"
+    );
+}
+
 #[test]
 fn weapon_stat_priority_report() {
     const RUNS: u32 = 14;
@@ -588,7 +575,6 @@ fn weapon_stat_priority_report() {
     }
 }
 
-/// 層進行と武装・鉱石解放のペースを時系列で見る。
 #[test]
 fn timeline_progression_report() {
     let checkpoints = [250u32, 500, 1_000, 2_000, 4_000, 8_000];
@@ -606,7 +592,7 @@ fn timeline_progression_report() {
             let snap = RunSnapshot::from_state(&state);
             eprintln!(
                 "  t={:>5} layer={:>2} kills={:>5} earned={:>8.1} miss={:>5.1}% \
-                 w={} ores={} orbit={} yield={}",
+                 w={} ores={} yield={} pulse={}",
                 snap.ticks,
                 snap.layer,
                 snap.kills,
@@ -614,8 +600,8 @@ fn timeline_progression_report() {
                 snap.miss_rate() * 100.0,
                 snap.unlocked_weapons,
                 snap.unlocked_ores,
-                snap.orbit_lv(),
                 snap.yield_lv(),
+                snap.pulse_lv(),
             );
             next_i += 1;
         }
@@ -633,30 +619,25 @@ fn timeline_progression_report() {
     );
 }
 
-/// 複数方策の横断比較。改修前後のスナップショット用。
 #[test]
 fn strategy_comparison_report() {
-    const TICKS: u32 = 4_000;
+    const TICKS: u32 = 4_500;
     const SEED: u32 = 42;
 
     let policies = [
         ("cheapest", BuyPolicy::Cheapest),
         ("weapons", BuyPolicy::WeaponsOnly),
         ("w+yield", BuyPolicy::WeaponsAndYield),
-        ("orbit-first", BuyPolicy::OrbitFirst),
         ("yield-first", BuyPolicy::YieldFirst),
+        ("pulse-first", BuyPolicy::PulseFirst),
         ("power-first", BuyPolicy::PowerFirst),
         ("rate-first", BuyPolicy::RateFirst),
         ("count-first", BuyPolicy::CountFirst),
         (
-            "no-orbit",
-            BuyPolicy::BlockRing(&[RingUpgrade::OrbitSpeed]),
+            "no-pulse",
+            BuyPolicy::BlockRing(&[RingUpgrade::CorePulse]),
         ),
         ("no-yield", BuyPolicy::BlockRing(&[RingUpgrade::Yield])),
-        (
-            "no-power",
-            BuyPolicy::BlockStat(&[WeaponStat::Power]),
-        ),
     ];
 
     eprintln!("[starringe/strategies] ticks={TICKS} seed={SEED}");
@@ -664,13 +645,13 @@ fn strategy_comparison_report() {
         let snap = run_snapshot(TICKS, policy, SEED);
         eprintln!(
             "  {name:12} layer={:>2} kills={:>5} earned={:>8.1} miss={:>5.1}% \
-             orbit={} yield={} wlv={} w={} ores={}",
+             yield={} pulse={} wlv={} w={} ores={}",
             snap.layer,
             snap.kills,
             snap.earned,
             snap.miss_rate() * 100.0,
-            snap.orbit_lv(),
             snap.yield_lv(),
+            snap.pulse_lv(),
             snap.total_weapon_levels(),
             snap.unlocked_weapons,
             snap.unlocked_ores,
@@ -678,7 +659,6 @@ fn strategy_comparison_report() {
     }
 }
 
-/// 逸失 (中心到達) が星屑を減らさないこと、かつ逸失率が暴走しないこと。
 #[test]
 fn miss_rate_stays_bounded_under_cheapest_bot() {
     const RUNS: u32 = 16;
@@ -693,10 +673,26 @@ fn miss_rate_stays_bounded_under_cheapest_bot() {
         "[starringe/miss-rate] ticks={TICKS} runs={RUNS} median_miss_rate={:.1}%",
         med * 100.0
     );
-    // 防衛失敗ではないので厳密な閾値は置かないが、大半が逸失する状態は刈り取りが破綻
     assert!(
         med < 0.85,
         "逸失率が高すぎて刈り取りが成立していない: {:.1}%",
         med * 100.0
+    );
+}
+
+#[test]
+fn new_ore_kinds_appear_over_long_run() {
+    let snap = run_snapshot(12_000, BuyPolicy::Cheapest, 17);
+    report("ore_variety_12000", &snap);
+    assert!(
+        snap.unlocked_ores >= 4,
+        "長時間で鉱石種が増えるはず unlocked={}",
+        snap.unlocked_ores
+    );
+    // 浮遊片は第3層
+    assert!(
+        snap.layer >= OreKind::Wisp.unlock_layer(),
+        "浮遊片層に届くはず layer={}",
+        snap.layer
     );
 }

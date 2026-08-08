@@ -20,7 +20,8 @@ use super::actions::{
     WEAPON_NEXT, WEAPON_PREV,
 };
 use super::logic::{
-    can_upgrade_weapon_stat, ring_upgrade_cost, turret_positions, weapon_stat_cost,
+    can_upgrade_ring, can_upgrade_weapon_stat, ring_upgrade_cost, turret_positions,
+    weapon_stat_cost,
 };
 use super::state::{
     Layer, OreKind, ParticleKind, RingUpgrade, StarRingState, Tab, WeaponKind, WeaponStat, CX, CY,
@@ -533,29 +534,46 @@ fn render_ring(
     )));
     cl.push(Line::from(""));
 
+    let keys = ['1', '2'];
     for (i, kind) in RingUpgrade::ALL.iter().copied().enumerate() {
+        let unlocked = state.is_ring_unlocked(kind);
         let lv = state.ring_level(kind);
+        let maxed = unlocked && !can_upgrade_ring(state, kind);
         let cost = ring_upgrade_cost(state, kind);
-        let can = state.shards + 1e-9 >= cost;
-        let key = if i == 0 { '1' } else { '2' };
-        let style = if can {
+        let can = unlocked && !maxed && state.shards + 1e-9 >= cost;
+        let key = keys.get(i).copied().unwrap_or('?');
+        let style = if !unlocked {
+            Style::default().fg(Color::DarkGray)
+        } else if can {
             Style::default()
                 .fg(Color::LightYellow)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::Gray)
         };
-        cl.push_clickable(
-            Line::from(vec![
-                Span::styled(format!(" [{key}] "), Style::default().fg(Color::Yellow)),
-                Span::styled(format!("{} Lv.{} ", kind.label(), lv), style),
-                Span::styled(
-                    format!("✦{}", format_shards(cost)),
-                    Style::default().fg(Color::Cyan),
-                ),
-            ]),
-            buy_ring_id(kind),
-        );
+        let cost_label = if !unlocked {
+            format!("L{}", kind.unlock_layer())
+        } else if maxed {
+            "MAX".to_string()
+        } else {
+            format!("✦{}", format_shards(cost))
+        };
+        if unlocked {
+            cl.push_clickable(
+                Line::from(vec![
+                    Span::styled(format!(" [{key}] "), Style::default().fg(Color::Yellow)),
+                    Span::styled(format!("{} Lv.{} ", kind.label(), lv), style),
+                    Span::styled(cost_label, Style::default().fg(Color::Cyan)),
+                ]),
+                buy_ring_id(kind),
+            );
+        } else {
+            cl.push(Line::from(vec![
+                Span::styled(format!(" [{key}] "), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{}  ", kind.label()), style),
+                Span::styled(cost_label, Style::default().fg(Color::DarkGray)),
+            ]));
+        }
         cl.push(Line::from(Span::styled(
             format!("      {}", kind.blurb()),
             Style::default().fg(Color::DarkGray),
@@ -649,7 +667,10 @@ fn ore_color(kind: OreKind) -> Color {
         OreKind::Dust => Color::Gray,
         OreKind::Rock => Color::Yellow,
         OreKind::Crystal => Color::LightCyan,
+        OreKind::Wisp => Color::White,
         OreKind::Prism => Color::LightMagenta,
+        OreKind::Shell => Color::DarkGray,
+        OreKind::Splitter => Color::LightYellow,
         OreKind::Nova => Color::LightRed,
     }
 }
@@ -796,6 +817,20 @@ fn render_stage(
         }
     }
 
+    // 核脈動の波紋
+    let mut pulse_ring_pts: Vec<(f64, f64)> = Vec::new();
+    for ring in &state.pulse_rings {
+        let alpha = ring.life as f64 / ring.max_life.max(1) as f64;
+        let step = if alpha > 0.5 { 20 } else { 14 };
+        for i in 0..step {
+            let a = i as f64 * std::f64::consts::TAU / step as f64;
+            pulse_ring_pts.push((
+                CX + a.cos() * ring.radius + shake_x,
+                CY + a.sin() * ring.radius * ORBIT_Y_SQUASH.max(0.55) + shake_y,
+            ));
+        }
+    }
+
     let star_count = 16 + layer as usize * 4;
     let mut stars = Vec::new();
     for i in 0..star_count {
@@ -890,6 +925,12 @@ fn render_stage(
                     });
                 }
             }
+            if !pulse_ring_pts.is_empty() {
+                ctx.draw(&Points {
+                    coords: &pulse_ring_pts,
+                    color: Color::LightCyan,
+                });
+            }
             if !core_ring.is_empty() {
                 ctx.draw(&Points {
                     coords: &core_ring,
@@ -948,7 +989,7 @@ const SPAWN_RING_VISUAL: f64 = 30.0;
 fn render_footer(state: &StarRingState, f: &mut Frame, area: Rect, borders: Borders) {
     let hint = match state.tab {
         Tab::Armory => "[◀▶]武装  [A/S/D]弾数/連射/威力  情景タップでブースト  [Q]戻る",
-        Tab::Ring => "[1-2]環強化  層は撃破で進む  [Q]戻る",
+        Tab::Ring => "[1-2]収率/核脈動  層は撃破で進む  [Q]戻る",
         Tab::Codex => "図鑑: 層で鉱石と武装が増える  [Q]戻る",
     };
     let p = Paragraph::new(Line::from(Span::styled(
