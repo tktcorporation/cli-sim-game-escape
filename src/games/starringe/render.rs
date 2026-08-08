@@ -3,7 +3,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ratzilla::ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratzilla::ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::symbols::Marker;
 use ratzilla::ratatui::text::{Line, Span};
@@ -15,11 +15,16 @@ use crate::canvas_fx;
 use crate::input::{is_narrow_layout, ClickState};
 use crate::widgets::{Clickable, ClickableList, TabBar};
 
-use super::actions::{buy_upgrade_id, TAB_CODEX, TAB_UPGRADES, TAP_STRIKE};
-use super::logic::{can_upgrade_further, turret_positions, upgrade_cost};
+use super::actions::{
+    buy_ring_id, buy_weapon_stat_id, select_weapon_id, TAB_ARMORY, TAB_CODEX, TAB_RING, TAP_STRIKE,
+    WEAPON_NEXT, WEAPON_PREV,
+};
+use super::logic::{
+    can_upgrade_weapon_stat, ring_upgrade_cost, turret_positions, weapon_stat_cost,
+};
 use super::state::{
-    OreKind, ParticleKind, StarRingState, Tab, UpgradeKind, CX, CY, ORBIT_Y_SQUASH, WORLD_H,
-    WORLD_W,
+    Layer, OreKind, ParticleKind, RingUpgrade, StarRingState, Tab, WeaponKind, WeaponStat, CX, CY,
+    ORBIT_Y_SQUASH, WORLD_H, WORLD_W,
 };
 
 pub fn render(
@@ -51,20 +56,22 @@ pub fn render(
     if is_narrow {
         let body = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+            .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
             .split(chunks[2]);
         render_stage(state, f, body[0], borders, click_state);
         match state.tab {
-            Tab::Upgrades => render_upgrades(state, f, body[1], borders, click_state),
+            Tab::Armory => render_armory(state, f, body[1], borders, click_state),
+            Tab::Ring => render_ring(state, f, body[1], borders, click_state),
             Tab::Codex => render_codex(state, f, body[1], borders),
         }
     } else {
         let body = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
+            .constraints([Constraint::Percentage(46), Constraint::Percentage(54)])
             .split(chunks[2]);
         match state.tab {
-            Tab::Upgrades => render_upgrades(state, f, body[0], borders, click_state),
+            Tab::Armory => render_armory(state, f, body[0], borders, click_state),
+            Tab::Ring => render_ring(state, f, body[0], borders, click_state),
             Tab::Codex => render_codex(state, f, body[0], borders),
         }
         render_stage(state, f, body[1], borders, click_state);
@@ -87,13 +94,14 @@ fn format_shards(n: f64) -> String {
 
 fn render_header(state: &StarRingState, f: &mut Frame, area: Rect, borders: Borders) {
     let sps = state.shards_per_sec();
+    let layer = state.layer();
     let boost = if state.boost_ticks > 0 {
-        " ⚡火力ブースト"
+        " ⚡ブースト"
     } else {
         ""
     };
-    let leak = if state.core_flash_ticks > 0 {
-        " ⚠漏洩"
+    let layer_fx = if state.layer_flash_ticks > 0 {
+        " ◆層到達"
     } else {
         ""
     };
@@ -106,6 +114,13 @@ fn render_header(state: &StarRingState, f: &mut Frame, area: Rect, borders: Bord
         ),
         Span::raw("  "),
         Span::styled(
+            format!("第{layer}層 {}", Layer::title(layer)),
+            Style::default()
+                .fg(layer_color(layer))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(
             format!("✦{}", format_shards(state.shards)),
             Style::default().fg(Color::LightYellow),
         ),
@@ -114,13 +129,8 @@ fn render_header(state: &StarRingState, f: &mut Frame, area: Rect, borders: Bord
             format!("{:.1}/秒", sps),
             Style::default().fg(Color::Cyan),
         ),
-        Span::raw("  "),
-        Span::styled(
-            format!("撃破 {}", state.total_kills),
-            Style::default().fg(Color::LightCyan),
-        ),
         Span::styled(boost, Style::default().fg(Color::LightRed)),
-        Span::styled(leak, Style::default().fg(Color::Red)),
+        Span::styled(layer_fx, Style::default().fg(Color::LightMagenta)),
     ]))
     .block(
         Block::default()
@@ -129,6 +139,19 @@ fn render_header(state: &StarRingState, f: &mut Frame, area: Rect, borders: Bord
             .title(" 軌道採掘 "),
     );
     f.render_widget(p, area);
+}
+
+fn layer_color(layer: u32) -> Color {
+    match layer {
+        1 => Color::Gray,
+        2 => Color::Yellow,
+        3 => Color::LightCyan,
+        4 => Color::LightMagenta,
+        5 => Color::LightRed,
+        6 => Color::Cyan,
+        7 => Color::Magenta,
+        _ => Color::White,
+    }
 }
 
 fn render_tabs(
@@ -151,48 +174,249 @@ fn render_tabs(
     };
     TabBar::new("│")
         .block(Block::default().borders(borders).title(" 画面 "))
-        .tab("強化", sel(state.tab == Tab::Upgrades), TAB_UPGRADES)
+        .tab("武装", sel(state.tab == Tab::Armory), TAB_ARMORY)
+        .tab("環", sel(state.tab == Tab::Ring), TAB_RING)
         .tab("図鑑", sel(state.tab == Tab::Codex), TAB_CODEX)
         .render(f, area, &mut cs);
 }
 
-fn render_upgrades(
+/// 武装タブ: 武器ピッカー + ビジュアル説明 + 個別強化 (余白多め)。
+fn render_armory(
     state: &StarRingState,
     f: &mut Frame,
     area: Rect,
     borders: Borders,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let mut cl = ClickableList::new();
-    cl.push(Line::from(Span::styled(
-        format!(
-            " 砲{}  速Lv{}  火力{:.1}  間隔{}",
-            state.turret_count(),
-            state.level(UpgradeKind::OrbitSpeed),
-            state.damage(),
-            state.fire_interval()
-        ),
-        Style::default().fg(Color::DarkGray),
-    )));
-    cl.push(Line::from(""));
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" 武装 ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
 
-    for kind in UpgradeKind::ALL {
-        let lv = state.level(kind);
-        let maxed = !can_upgrade_further(state, kind);
-        let cost = upgrade_cost(state, kind);
-        let can = !maxed && state.shards + 1e-9 >= cost;
-        let key = match kind.index() {
-            0 => '1',
-            1 => '2',
-            2 => '3',
-            3 => '4',
-            4 => '5',
-            _ => '6',
+    if inner.height < 6 || inner.width < 12 {
+        return;
+    }
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // 武器ピッカー
+            Constraint::Length(5), // ビジュアル + 説明
+            Constraint::Min(6),    // 強化3種
+        ])
+        .split(inner);
+
+    render_weapon_picker(state, f, chunks[0], click_state);
+    render_weapon_showcase(state, f, chunks[1]);
+    render_weapon_upgrades(state, f, chunks[2], click_state);
+}
+
+fn render_weapon_picker(
+    state: &StarRingState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(3),
+        ])
+        .split(area);
+
+    let prev = Paragraph::new(Line::from(Span::styled(
+        "◀",
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )))
+    .alignment(Alignment::Center)
+    .block(Block::default().borders(Borders::NONE));
+    Clickable::new(prev, WEAPON_PREV).render(f, chunks[0], &mut click_state.borrow_mut());
+
+    let next = Paragraph::new(Line::from(Span::styled(
+        "▶",
+        Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    )))
+    .alignment(Alignment::Center);
+    Clickable::new(next, WEAPON_NEXT).render(f, chunks[2], &mut click_state.borrow_mut());
+
+    // 中央: 解放済み武器を横並びで選択
+    let mut spans = Vec::new();
+    for w in WeaponKind::ALL {
+        let unlocked = state.is_weapon_unlocked(w);
+        let selected = state.selected_weapon == w;
+        let style = if !unlocked {
+            Style::default().fg(Color::DarkGray)
+        } else if selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(weapon_color(w))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(weapon_color(w))
         };
+        let label = if unlocked {
+            format!(" {}{} ", w.glyph(), w.label())
+        } else {
+            format!(" ？L{} ", w.unlock_layer())
+        };
+        spans.push((label, style, unlocked, w));
+    }
+
+    // クリック可能な武器チップを等分
+    let n = spans.len().max(1) as u16;
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(vec![Constraint::Ratio(1, n as u32); spans.len()])
+        .split(chunks[1]);
+
+    for (i, (label, style, unlocked, w)) in spans.into_iter().enumerate() {
+        let p = Paragraph::new(Line::from(Span::styled(label, style))).alignment(Alignment::Center);
+        if unlocked {
+            Clickable::new(p, select_weapon_id(w)).render(
+                f,
+                cols[i],
+                &mut click_state.borrow_mut(),
+            );
+        } else {
+            f.render_widget(p, cols[i]);
+        }
+    }
+}
+
+fn render_weapon_showcase(state: &StarRingState, f: &mut Frame, area: Rect) {
+    let w = state.selected_weapon;
+    let unlocked = state.is_weapon_unlocked(w);
+    let art = weapon_art(w);
+    let dmg = state.weapon_damage(w);
+    let interval = state.fire_interval(w);
+    let volley = state.volley_count(w);
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                format!(" {}  {}", w.glyph(), w.label()),
+                Style::default()
+                    .fg(weapon_color(w))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("   "),
+            Span::styled(art, Style::default().fg(weapon_color(w))),
+        ]),
+        Line::from(Span::styled(
+            if unlocked {
+                format!("  {}", w.blurb())
+            } else {
+                format!("  第{}層で解放", w.unlock_layer())
+            },
+            Style::default().fg(Color::Gray),
+        )),
+    ];
+    if unlocked {
+        lines.push(Line::from(Span::styled(
+            format!("  威力{dmg:.2}  間隔{interval}  斉射×{volley}"),
+            Style::default().fg(Color::DarkGray),
+        )));
+        // 簡易ステータスバー
+        let power_lv = state.weapon_stat(w, WeaponStat::Power);
+        let rate_lv = state.weapon_stat(w, WeaponStat::Rate);
+        let count_lv = state.weapon_stat(w, WeaponStat::Count);
+        lines.push(Line::from(vec![
+            Span::styled("  ", Style::default()),
+            Span::styled(
+                format!("弾{}", bar(count_lv, 7)),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("連{}", bar(rate_lv, 8)),
+                Style::default().fg(Color::LightYellow),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                format!("威{}", bar(power_lv.min(8), 8)),
+                Style::default().fg(Color::LightRed),
+            ),
+        ]));
+    } else {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  層を進めて手札を増やそう",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+fn bar(lv: u32, width: u32) -> String {
+    let filled = lv.min(width) as usize;
+    let empty = width as usize - filled;
+    format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+}
+
+fn weapon_art(w: WeaponKind) -> &'static str {
+    match w {
+        WeaponKind::Pulse => "· › · › · ›",
+        WeaponKind::Ray => "════════▷",
+        WeaponKind::Scatter => "  ※ ※ ※",
+        WeaponKind::Arc => "  ☾  ～▷",
+        WeaponKind::Nova => "  ·→✸←·",
+    }
+}
+
+fn weapon_color(w: WeaponKind) -> Color {
+    match w {
+        WeaponKind::Pulse => Color::Cyan,
+        WeaponKind::Ray => Color::White,
+        WeaponKind::Scatter => Color::Yellow,
+        WeaponKind::Arc => Color::LightMagenta,
+        WeaponKind::Nova => Color::LightRed,
+    }
+}
+
+fn render_weapon_upgrades(
+    state: &StarRingState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let w = state.selected_weapon;
+    if !state.is_weapon_unlocked(w) {
+        let p = Paragraph::new(Line::from(Span::styled(
+            "  (解放後に強化できます)",
+            Style::default().fg(Color::DarkGray),
+        )));
+        f.render_widget(p, area);
+        return;
+    }
+
+    // 3強化を縦に余白付きで配置
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Length(3),
+            Constraint::Min(0),
+        ])
+        .split(area);
+
+    let keys = ['A', 'S', 'D'];
+    for (i, stat) in WeaponStat::ALL.iter().copied().enumerate() {
+        if i >= rows.len() {
+            break;
+        }
+        let lv = state.weapon_stat(w, stat);
+        let maxed = !can_upgrade_weapon_stat(state, w, stat);
+        let cost = weapon_stat_cost(state, w, stat);
+        let can = !maxed && state.shards + 1e-9 >= cost;
         let cost_label = if maxed {
             "MAX".to_string()
         } else {
-            format_shards(cost)
+            format!("✦{}", format_shards(cost))
         };
         let style = if maxed {
             Style::default().fg(Color::DarkGray)
@@ -203,33 +427,163 @@ fn render_upgrades(
         } else {
             Style::default().fg(Color::Gray)
         };
-        let line = Line::from(vec![
-            Span::styled(format!("[{key}] "), Style::default().fg(Color::Yellow)),
-            Span::styled(format!("{} Lv.{} ", kind.label(), lv), style),
-            Span::styled(format!("✦{cost_label}"), Style::default().fg(Color::Cyan)),
-            Span::styled(
-                format!("  {}", kind.blurb()),
+        let lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    format!(" [{}] ", keys[i]),
+                    Style::default().fg(Color::Yellow),
+                ),
+                Span::styled(
+                    format!("{}  Lv.{}", stat.label(), lv),
+                    style.add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(cost_label, Style::default().fg(Color::Cyan)),
+            ]),
+            Line::from(Span::styled(
+                format!("      {}", stat.blurb()),
                 Style::default().fg(Color::DarkGray),
+            )),
+        ];
+        let p = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::LEFT)
+                .border_style(Style::default().fg(if can {
+                    weapon_color(w)
+                } else {
+                    Color::DarkGray
+                })),
+        );
+        Clickable::new(p, buy_weapon_stat_id(w, stat)).render(
+            f,
+            rows[i],
+            &mut click_state.borrow_mut(),
+        );
+    }
+}
+
+fn render_ring(
+    state: &StarRingState,
+    f: &mut Frame,
+    area: Rect,
+    borders: Borders,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let layer = state.layer();
+    let next = Layer::next_threshold(layer);
+    let progress = match next {
+        Some(th) => {
+            let prev = if layer <= 1 {
+                0
+            } else {
+                Layer::THRESHOLDS
+                    .get((layer as usize).saturating_sub(2))
+                    .copied()
+                    .unwrap_or(0)
+            };
+            let span = th.saturating_sub(prev).max(1);
+            let done = state.total_kills.saturating_sub(prev);
+            ((done * 10) / span).min(10)
+        }
+        None => 10,
+    };
+    let bar = format!(
+        "{}{}",
+        "█".repeat(progress as usize),
+        "░".repeat(10 - progress as usize)
+    );
+
+    let mut cl = ClickableList::new();
+    cl.push(Line::from(Span::styled(
+        format!(
+            " 第{}層 {}  {}",
+            layer,
+            Layer::title(layer),
+            bar
+        ),
+        Style::default()
+            .fg(layer_color(layer))
+            .add_modifier(Modifier::BOLD),
+    )));
+    cl.push(Line::from(Span::styled(
+        match next {
+            Some(th) => format!(
+                " 次層まで 撃破 {} / {}",
+                state.total_kills, th
             ),
-        ]);
-        cl.push_clickable(line, buy_upgrade_id(kind));
+            None => format!(" 撃破 {}", state.total_kills),
+        },
+        Style::default().fg(Color::DarkGray),
+    )));
+    cl.push(Line::from(Span::styled(
+        format!(
+            " 湧き×{}  HP×{:.1}  星屑×{:.1}",
+            Layer::spawn_batch(layer),
+            Layer::hp_mult(layer),
+            Layer::value_mult(layer)
+        ),
+        Style::default().fg(Color::Gray),
+    )));
+    cl.push(Line::from(""));
+    cl.push(Line::from(Span::styled(
+        " 環の強化",
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )));
+    cl.push(Line::from(""));
+
+    for (i, kind) in RingUpgrade::ALL.iter().copied().enumerate() {
+        let lv = state.ring_level(kind);
+        let cost = ring_upgrade_cost(state, kind);
+        let can = state.shards + 1e-9 >= cost;
+        let key = if i == 0 { '1' } else { '2' };
+        let style = if can {
+            Style::default()
+                .fg(Color::LightYellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        cl.push_clickable(
+            Line::from(vec![
+                Span::styled(format!(" [{key}] "), Style::default().fg(Color::Yellow)),
+                Span::styled(format!("{} Lv.{} ", kind.label(), lv), style),
+                Span::styled(
+                    format!("✦{}", format_shards(cost)),
+                    Style::default().fg(Color::Cyan),
+                ),
+            ]),
+            buy_ring_id(kind),
+        );
+        cl.push(Line::from(Span::styled(
+            format!("      {}", kind.blurb()),
+            Style::default().fg(Color::DarkGray),
+        )));
+        cl.push(Line::from(""));
     }
 
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(Color::Yellow))
-        .title(" 強化 ");
+        .title(" 環 ");
     let mut cs = click_state.borrow_mut();
     cl.render(f, area, block, &mut cs, false, 0);
 }
 
 fn render_codex(state: &StarRingState, f: &mut Frame, area: Rect, borders: Borders) {
     let unlocked = state.unlocked_ore_kinds();
-    let mut lines = vec![Line::from(Span::styled(
-        format!(" 累計撃破 {} / 漏洩 {}", state.total_kills, state.leak_count),
-        Style::default().fg(Color::DarkGray),
-    ))];
-    lines.push(Line::from(""));
+    let layer = state.layer();
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!(
+                " 第{}層  累計撃破 {}  逸失 {}",
+                layer, state.total_kills, state.missed_count
+            ),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(""),
+    ];
     for kind in OreKind::ALL {
         let open = unlocked.contains(&kind);
         if open {
@@ -242,31 +596,50 @@ fn render_codex(state: &StarRingState, f: &mut Frame, area: Rect, borders: Borde
                         .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    format!("価値{} HP{}", kind.base_value(), kind.base_hp()),
+                    format!(
+                        "価値{} HP{:.0}",
+                        kind.base_value(),
+                        kind.base_hp() * Layer::hp_mult(layer)
+                    ),
                     Style::default().fg(Color::Gray),
                 ),
             ]));
         } else {
             lines.push(Line::from(Span::styled(
-                format!(" ？ 撃破{}で解放", kind.unlock_kills()),
+                format!(" ？ 第{}層で出現", kind.unlock_layer()),
                 Style::default().fg(Color::DarkGray),
             )));
         }
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        format!(
-            " 獲得累計 ✦{} / 漏洩損失 ✦{}",
-            format_shards(state.shards_earned),
-            format_shards(state.shards_leaked)
-        ),
+        format!(" 獲得累計 ✦{}", format_shards(state.shards_earned)),
         Style::default().fg(Color::DarkGray),
     )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        " 武装解放",
+        Style::default().fg(Color::Yellow),
+    )));
+    for w in WeaponKind::ALL {
+        let open = state.is_weapon_unlocked(w);
+        if open {
+            lines.push(Line::from(Span::styled(
+                format!("  {} {} 解放済", w.glyph(), w.label()),
+                Style::default().fg(weapon_color(w)),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                format!("  ？ {}  第{}層", w.label(), w.unlock_layer()),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
     let p = Paragraph::new(lines).block(
         Block::default()
             .borders(borders)
             .border_style(Style::default().fg(Color::Yellow))
-            .title(" 鉱石図鑑 "),
+            .title(" 図鑑 "),
     );
     f.render_widget(p, area);
 }
@@ -299,6 +672,7 @@ fn render_stage(
         0.0
     };
 
+    let layer = state.layer();
     let ring_r = state.ring_radius();
     let mut orbit_pts = Vec::new();
     for i in 0..48 {
@@ -309,7 +683,13 @@ fn render_stage(
         ));
     }
 
-    let core_scale = if state.core_flash_ticks > 0 { 1.35 } else { 1.0 };
+    let core_scale = if state.layer_flash_ticks > 0 {
+        1.45
+    } else if state.core_flash_ticks > 0 {
+        1.25
+    } else {
+        1.0 + (layer.saturating_sub(1) as f64) * 0.04
+    };
     let core_pts = canvas_fx::filled_ellipse_points(
         CX + shake_x,
         CY + shake_y,
@@ -318,6 +698,17 @@ fn render_stage(
         0.45,
     );
     let core_ring = canvas_fx::ring_points(CX + shake_x, CY + shake_y, 4.2 * core_scale, 0.28);
+
+    // 層の外縁リング (場面転換の視覚アンカー)
+    let mut layer_ring = Vec::new();
+    let lr = SPAWN_RING_VISUAL + layer as f64 * 0.8;
+    for i in 0..36 {
+        let a = i as f64 * std::f64::consts::TAU / 36.0;
+        layer_ring.push((
+            CX + a.cos() * lr + shake_x,
+            CY + a.sin() * lr * ORBIT_Y_SQUASH.max(0.5) + shake_y,
+        ));
+    }
 
     let turrets = turret_positions(state);
     let mut gun_near = Vec::new();
@@ -333,7 +724,6 @@ fn render_stage(
     }
 
     let mut ore_groups: Vec<(Vec<(f64, f64)>, Color)> = Vec::new();
-    // 迫ってくる感: 進行方向と逆側に短い尾を引く
     let mut approach_trails: Vec<(f64, f64, f64, f64, Color)> = Vec::new();
     for ore in &state.ores {
         let color = ore_color(ore.kind);
@@ -360,18 +750,37 @@ fn render_stage(
         ));
     }
 
-    let beam_lines: Vec<(f64, f64, f64, f64)> = state
-        .beams
-        .iter()
-        .map(|b| {
-            (
-                b.x0 + shake_x,
-                b.y0 + shake_y,
-                b.x1 + shake_x,
-                b.y1 + shake_y,
-            )
-        })
-        .collect();
+    // 飛翔弾を武器色で描画
+    let mut proj_groups: Vec<(Vec<(f64, f64)>, Color)> = Vec::new();
+    let mut proj_trails: Vec<(f64, f64, f64, f64, Color)> = Vec::new();
+    for p in &state.projectiles {
+        let color = weapon_color(p.kind);
+        let pts = canvas_fx::filled_ellipse_points(
+            p.x + shake_x,
+            p.y + shake_y,
+            p.radius.max(0.4),
+            p.radius.max(0.4) * 0.8,
+            0.5,
+        );
+        if let Some(g) = proj_groups.iter_mut().find(|(_, c)| *c == color) {
+            g.0.extend(pts);
+        } else {
+            proj_groups.push((pts, color));
+        }
+        let speed = p.vx.hypot(p.vy).max(0.01);
+        let len = match p.kind {
+            WeaponKind::Ray => 4.5,
+            WeaponKind::Pulse => 1.8,
+            _ => 2.4,
+        };
+        proj_trails.push((
+            p.x + shake_x,
+            p.y + shake_y,
+            p.x - p.vx / speed * len + shake_x,
+            p.y - p.vy / speed * len + shake_y,
+            color,
+        ));
+    }
 
     let mut sparks = Vec::new();
     let mut dust = Vec::new();
@@ -387,20 +796,35 @@ fn render_stage(
         }
     }
 
+    let star_count = 16 + layer as usize * 4;
     let mut stars = Vec::new();
-    for i in 0..20 {
+    for i in 0..star_count {
         let seed = i as f64 * 7.13 + (state.elapsed_ticks as f64 * 0.01);
         let x = ((seed * 11.0) % WORLD_W).abs();
         let y = ((seed * 3.7 + state.elapsed_ticks as f64 * 0.02) % WORLD_H).abs();
         stars.push((x, y));
     }
 
-    let core_color = if state.core_flash_ticks > 0 {
-        Color::LightRed
+    let core_color = if state.layer_flash_ticks > 0 {
+        layer_color(layer)
     } else if state.boost_ticks > 0 {
         Color::LightYellow
     } else {
         Color::Yellow
+    };
+    let star_color = match layer {
+        1 => Color::DarkGray,
+        2 => Color::Indexed(240),
+        3 => Color::Indexed(81),
+        4 => Color::Indexed(177),
+        _ => Color::Indexed(210),
+    };
+    let layer_ring_color = layer_color(layer);
+
+    let title = if state.layer_flash_ticks > 0 {
+        format!(" 第{}層 {} ", layer, Layer::title(layer))
+    } else {
+        format!(" 情景 砲×{} ", state.turret_count())
     };
 
     let canvas = Canvas::default()
@@ -411,7 +835,13 @@ fn render_stage(
             if !stars.is_empty() {
                 ctx.draw(&Points {
                     coords: &stars,
-                    color: Color::DarkGray,
+                    color: star_color,
+                });
+            }
+            if !layer_ring.is_empty() {
+                ctx.draw(&Points {
+                    coords: &layer_ring,
+                    color: layer_ring_color,
                 });
             }
             if !orbit_pts.is_empty() {
@@ -420,14 +850,22 @@ fn render_stage(
                     color: Color::Indexed(240),
                 });
             }
-            for &(x1, y1, x2, y2) in &beam_lines {
+            for &(x1, y1, x2, y2, color) in &proj_trails {
                 ctx.draw(&CanvasLine {
                     x1,
                     y1,
                     x2,
                     y2,
-                    color: Color::LightCyan,
+                    color,
                 });
+            }
+            for (pts, color) in &proj_groups {
+                if !pts.is_empty() {
+                    ctx.draw(&Points {
+                        coords: pts,
+                        color: *color,
+                    });
+                }
             }
             if !gun_far.is_empty() {
                 ctx.draw(&Points {
@@ -498,22 +936,20 @@ fn render_stage(
         .block(
             Block::default()
                 .borders(borders)
-                .border_style(Style::default().fg(Color::DarkGray))
-                .title(Span::styled(
-                    format!(" 情景 砲×{} ", state.turret_count()),
-                    Style::default().fg(Color::Yellow),
-                )),
+                .border_style(Style::default().fg(layer_color(layer)))
+                .title(Span::styled(title, Style::default().fg(Color::Yellow))),
         );
 
-    // 情景全体をタップ可能にして手動ブースト
     Clickable::new(canvas, TAP_STRIKE).render(f, area, &mut click_state.borrow_mut());
 }
 
+const SPAWN_RING_VISUAL: f64 = 30.0;
+
 fn render_footer(state: &StarRingState, f: &mut Frame, area: Rect, borders: Borders) {
-    let hint = if state.tab == Tab::Upgrades {
-        "[1-6]強化  情景タップで火力ブースト  [Q]戻る"
-    } else {
-        "図鑑: 撃破で鉱石種が増える  [Q]戻る"
+    let hint = match state.tab {
+        Tab::Armory => "[◀▶]武装  [A/S/D]弾数/連射/威力  情景タップでブースト  [Q]戻る",
+        Tab::Ring => "[1-2]環強化  層は撃破で進む  [Q]戻る",
+        Tab::Codex => "図鑑: 層で鉱石と武装が増える  [Q]戻る",
     };
     let p = Paragraph::new(Line::from(Span::styled(
         hint,

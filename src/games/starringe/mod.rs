@@ -1,8 +1,8 @@
-//! 星環 — 迫る鉱石を公転砲台で砕く放置ゲーム。
+//! 星環 — 迫る鉱石を公転武装の連射で砕く放置ゲーム。
 //!
-//! 中心の採掘コアを囲む砲台が楕円軌道を回り、外周から接近する鉱石を
-//! レーザーで砕いて星屑を得る。強化で砲台数・速度・火力・連射・密度・
-//! 収率が伸び、画面上に「多い・速い・強い・大きい・種類」が見える。
+//! 外周から流れる鉱石を軌道上の武装で刈り取り、星屑を得る。
+//! 層が進むと敵の数・強さ・報酬が段で切り替わり、新しい武装が解放される。
+//! 各武装は弾数・連射・威力を個別に強化できる。
 
 pub mod actions;
 pub mod logic;
@@ -22,8 +22,11 @@ use ratzilla::ratatui::Frame;
 use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
-use actions::{upgrade_for_buy_id, TAB_CODEX, TAB_UPGRADES, TAP_STRIKE};
-use state::{StarRingState, Tab, UpgradeKind};
+use actions::{
+    ring_for_buy_id, weapon_for_select_id, weapon_stat_for_buy_id, TAB_ARMORY, TAB_CODEX, TAB_RING,
+    TAP_STRIKE, WEAPON_NEXT, WEAPON_PREV,
+};
+use state::{RingUpgrade, StarRingState, Tab, WeaponKind, WeaponStat};
 
 pub struct StarRingGame {
     pub state: StarRingState,
@@ -52,23 +55,62 @@ impl StarRingGame {
 
     fn handle_key(&mut self, key: char) -> bool {
         match key {
-            '1' => logic::purchase_upgrade(&mut self.state, UpgradeKind::Turrets),
-            '2' => logic::purchase_upgrade(&mut self.state, UpgradeKind::OrbitSpeed),
-            '3' => logic::purchase_upgrade(&mut self.state, UpgradeKind::Damage),
-            '4' => logic::purchase_upgrade(&mut self.state, UpgradeKind::FireRate),
-            '5' => logic::purchase_upgrade(&mut self.state, UpgradeKind::Density),
-            '6' => logic::purchase_upgrade(&mut self.state, UpgradeKind::Yield),
             '{' | 'u' | 'U' => {
-                self.state.tab = Tab::Upgrades;
+                self.state.tab = Tab::Armory;
                 true
             }
-            '|' | 'c' | 'C' => {
+            '|' | 'r' | 'R' => {
+                self.state.tab = Tab::Ring;
+                true
+            }
+            '}' | 'c' | 'C' => {
                 self.state.tab = Tab::Codex;
                 true
             }
-            ' ' | 'a' | 'A' => {
+            ' ' | 't' | 'T' => {
                 logic::manual_strike(&mut self.state);
                 true
+            }
+            '[' | ',' => {
+                logic::cycle_selected_weapon(&mut self.state, -1);
+                true
+            }
+            ']' | '.' => {
+                logic::cycle_selected_weapon(&mut self.state, 1);
+                true
+            }
+            'a' | 'A' if self.state.tab == Tab::Armory => {
+                let w = self.state.selected_weapon;
+                logic::purchase_weapon_stat(&mut self.state, w, WeaponStat::Count)
+            }
+            's' | 'S' if self.state.tab == Tab::Armory => {
+                let w = self.state.selected_weapon;
+                logic::purchase_weapon_stat(&mut self.state, w, WeaponStat::Rate)
+            }
+            'd' | 'D' if self.state.tab == Tab::Armory => {
+                let w = self.state.selected_weapon;
+                logic::purchase_weapon_stat(&mut self.state, w, WeaponStat::Power)
+            }
+            '1' if self.state.tab == Tab::Armory => {
+                logic::select_weapon(&mut self.state, WeaponKind::Pulse)
+            }
+            '2' if self.state.tab == Tab::Armory => {
+                logic::select_weapon(&mut self.state, WeaponKind::Ray)
+            }
+            '3' if self.state.tab == Tab::Armory => {
+                logic::select_weapon(&mut self.state, WeaponKind::Scatter)
+            }
+            '4' if self.state.tab == Tab::Armory => {
+                logic::select_weapon(&mut self.state, WeaponKind::Arc)
+            }
+            '5' if self.state.tab == Tab::Armory => {
+                logic::select_weapon(&mut self.state, WeaponKind::Nova)
+            }
+            '1' if self.state.tab == Tab::Ring => {
+                logic::purchase_ring_upgrade(&mut self.state, RingUpgrade::OrbitSpeed)
+            }
+            '2' if self.state.tab == Tab::Ring => {
+                logic::purchase_ring_upgrade(&mut self.state, RingUpgrade::Yield)
             }
             _ => false,
         }
@@ -76,8 +118,12 @@ impl StarRingGame {
 
     fn handle_click(&mut self, action_id: u16) -> bool {
         match action_id {
-            TAB_UPGRADES => {
-                self.state.tab = Tab::Upgrades;
+            TAB_ARMORY => {
+                self.state.tab = Tab::Armory;
+                true
+            }
+            TAB_RING => {
+                self.state.tab = Tab::Ring;
                 true
             }
             TAB_CODEX => {
@@ -88,9 +134,23 @@ impl StarRingGame {
                 logic::manual_strike(&mut self.state);
                 true
             }
+            WEAPON_PREV => {
+                logic::cycle_selected_weapon(&mut self.state, -1);
+                true
+            }
+            WEAPON_NEXT => {
+                logic::cycle_selected_weapon(&mut self.state, 1);
+                true
+            }
             id => {
-                if let Some(kind) = upgrade_for_buy_id(id) {
-                    logic::purchase_upgrade(&mut self.state, kind);
+                if let Some(w) = weapon_for_select_id(id) {
+                    logic::select_weapon(&mut self.state, w);
+                    true
+                } else if let Some((w, s)) = weapon_stat_for_buy_id(id) {
+                    logic::purchase_weapon_stat(&mut self.state, w, s);
+                    true
+                } else if let Some(kind) = ring_for_buy_id(id) {
+                    logic::purchase_ring_upgrade(&mut self.state, kind);
                     true
                 } else {
                     false
@@ -142,21 +202,27 @@ mod tests {
     }
 
     #[test]
-    fn buy_upgrade_via_key() {
+    fn buy_weapon_stat_via_key() {
         let mut game = StarRingGame::new();
         game.state.shards = 1000.0;
-        assert!(game.handle_input(&InputEvent::Key('3')));
-        assert_eq!(game.state.level(UpgradeKind::Damage), 1);
+        game.state.tab = Tab::Armory;
+        assert!(game.handle_input(&InputEvent::Key('d')));
+        assert_eq!(
+            game.state.weapon_stat(WeaponKind::Pulse, WeaponStat::Power),
+            1
+        );
     }
 
     #[test]
     fn tab_switch_via_click() {
         let mut game = StarRingGame::new();
-        assert_eq!(game.state.tab, Tab::Upgrades);
+        assert_eq!(game.state.tab, Tab::Armory);
         game.handle_input(&click(TAB_CODEX));
         assert_eq!(game.state.tab, Tab::Codex);
-        game.handle_input(&click(TAB_UPGRADES));
-        assert_eq!(game.state.tab, Tab::Upgrades);
+        game.handle_input(&click(TAB_RING));
+        assert_eq!(game.state.tab, Tab::Ring);
+        game.handle_input(&click(TAB_ARMORY));
+        assert_eq!(game.state.tab, Tab::Armory);
     }
 
     #[test]
@@ -171,5 +237,14 @@ mod tests {
         let mut game = StarRingGame::new();
         game.tick(50);
         assert_eq!(game.state.elapsed_ticks, 50);
+    }
+
+    #[test]
+    fn weapon_cycle_via_brackets() {
+        let mut game = StarRingGame::new();
+        game.state.total_kills = state::Layer::THRESHOLDS[2];
+        game.state.selected_weapon = WeaponKind::Pulse;
+        game.handle_input(&InputEvent::Key(']'));
+        assert_eq!(game.state.selected_weapon, WeaponKind::Ray);
     }
 }
