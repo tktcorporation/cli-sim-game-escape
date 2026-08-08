@@ -1,5 +1,5 @@
-//! 破壊VFX比較ラボ — 放置ゲーム本編ではなく、破壊表現の手触りを
-//! 並べて見比べるための試作画面。Everlight と同じ Canvas+Braille を使う。
+//! 破壊VFX比較ラボ — 放置ゲーム本編ではなく、
+//! 「強化しがいが見える破壊舞台」を並べて見比べる試作。
 
 mod actions;
 mod logic;
@@ -15,8 +15,8 @@ use ratzilla::ratatui::Frame;
 use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
-use actions::style_for_tab;
-use state::{DemoStyle, ShatterLabState};
+use actions::{power_for_tab, style_for_tab, TAB_POWER_AUTO};
+use state::{DemoStyle, PowerLevel, ShatterLabState};
 
 pub struct ShatterLabGame {
     state: ShatterLabState,
@@ -44,28 +44,51 @@ impl Game for ShatterLabGame {
     fn handle_input(&mut self, event: &InputEvent) -> bool {
         match event {
             InputEvent::Key('1') => {
-                self.state.set_style(DemoStyle::OreBomb);
+                self.state.set_style(DemoStyle::SpaceCruise);
                 true
             }
             InputEvent::Key('2') => {
-                self.state.set_style(DemoStyle::PressCrush);
+                self.state.set_style(DemoStyle::OrbitMine);
                 true
             }
             InputEvent::Key('3') => {
-                self.state.set_style(DemoStyle::PlanetPeel);
+                self.state.set_style(DemoStyle::RailBreak);
                 true
             }
             InputEvent::Key('4') => {
-                self.state.set_style(DemoStyle::CityCollapse);
+                self.state.set_style(DemoStyle::SatDefense);
+                true
+            }
+            InputEvent::Key('q') | InputEvent::Key('Q') => {
+                self.state.set_power(PowerLevel::Low);
+                true
+            }
+            InputEvent::Key('w') | InputEvent::Key('W') => {
+                self.state.set_power(PowerLevel::Mid);
+                true
+            }
+            InputEvent::Key('e') | InputEvent::Key('E') => {
+                self.state.set_power(PowerLevel::High);
+                true
+            }
+            InputEvent::Key('a') | InputEvent::Key('A') => {
+                self.state.enable_auto_power();
                 true
             }
             InputEvent::Click(_, id) => {
+                if *id == TAB_POWER_AUTO {
+                    self.state.enable_auto_power();
+                    return true;
+                }
+                if let Some(power) = power_for_tab(*id) {
+                    self.state.set_power(power);
+                    return true;
+                }
                 if let Some(style) = style_for_tab(*id) {
                     self.state.set_style(style);
-                    true
-                } else {
-                    false
+                    return true;
                 }
+                false
             }
             _ => false,
         }

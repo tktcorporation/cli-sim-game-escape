@@ -625,7 +625,7 @@ fn render_menu(
         ('6', "Idle Metropolis", "AIが街を建てるのを眺める放置シティビルダー", MENU_SELECT_METROPOLIS, '▶', theme::accent(&GameChoice::Metropolis)),
         ('7', "周回討伐", "地形を配置し勇者が自動周回するローグライト", MENU_SELECT_LOOPMARCH, '▶', theme::accent(&GameChoice::LoopMarch)),
         ('8', "常夜灯", "降り注ぐ魔物から灯を守る縦画面バレットヘヴン", MENU_SELECT_EVERLIGHT, '▶', theme::accent(&GameChoice::Everlight)),
-        ('9', "破壊VFXラボ", "破壊表現の試作を並べて見比べる（本編ではない）", MENU_SELECT_SHATTERLAB, '▶', theme::accent(&GameChoice::ShatterLab)),
+        ('9', "破壊VFXラボ", "強化しがいのある破壊舞台を比較する試作（本編ではない）", MENU_SELECT_SHATTERLAB, '▶', theme::accent(&GameChoice::ShatterLab)),
         ('0', "設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 

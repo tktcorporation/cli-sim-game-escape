@@ -1,4 +1,4 @@
-//! 破壊VFXラボの描画。Everlight と同じ Canvas+Braille を使う。
+//! 破壊VFXラボの描画。威力Lvで船体・砲門・デブリ密度が変わる。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -15,13 +15,14 @@ use crate::canvas_fx;
 use crate::input::{is_narrow_layout, ClickState};
 use crate::widgets::TabBar;
 
-use super::actions::tab_for_style;
+use super::actions::{
+    tab_for_power, tab_for_style, TAB_POWER_AUTO, TAB_POWER_HIGH, TAB_POWER_LOW, TAB_POWER_MID,
+};
 use super::state::{
-    DemoStyle, ParticleKind, Scene, ShatterLabState, WORLD_H, WORLD_W,
+    DemoStyle, ParticleKind, PowerLevel, ShatterLabState, WORLD_H, WORLD_W,
 };
 
 const CX: f64 = WORLD_W * 0.5;
-const GROUND_Y: f64 = 12.0;
 
 pub fn render(
     state: &ShatterLabState,
@@ -41,19 +42,30 @@ pub fn render(
         .constraints([
             Constraint::Length(3),
             Constraint::Length(3),
+            Constraint::Length(3),
             Constraint::Min(8),
             Constraint::Length(2),
         ])
         .split(area);
 
     render_header(state, f, chunks[0], borders);
-    render_tabs(state, f, chunks[1], borders, click_state);
-    render_stage(state, f, chunks[2], borders);
-    render_footer(state, f, chunks[3], borders);
+    render_style_tabs(state, f, chunks[1], borders, click_state);
+    render_power_tabs(state, f, chunks[2], borders, click_state);
+    render_stage(state, f, chunks[3], borders);
+    render_footer(state, f, chunks[4], borders);
 }
 
 fn render_header(state: &ShatterLabState, f: &mut Frame, area: Rect, borders: Borders) {
-    let title = format!("破壊VFXラボ — {}", state.style.label());
+    let power_tag = if state.auto_power {
+        format!("AUTO→{}", state.power.label())
+    } else {
+        state.power.label().to_string()
+    };
+    let title = format!(
+        "破壊VFXラボ — {} [{}]",
+        state.style.label(),
+        power_tag
+    );
     let p = Paragraph::new(Line::from(vec![
         Span::styled(
             title,
@@ -63,12 +75,17 @@ fn render_header(state: &ShatterLabState, f: &mut Frame, area: Rect, borders: Bo
         ),
         Span::raw("  "),
         Span::styled(state.style.blurb(), Style::default().fg(Color::Gray)),
+        Span::raw("  "),
+        Span::styled(
+            format!("撃破 {}", state.cleared),
+            Style::default().fg(Color::Cyan),
+        ),
     ]))
-    .block(Block::default().borders(borders).title(" 試作比較 "));
+    .block(Block::default().borders(borders).title(" 強化しがい比較 "));
     f.render_widget(p, area);
 }
 
-fn render_tabs(
+fn render_style_tabs(
     state: &ShatterLabState,
     f: &mut Frame,
     area: Rect,
@@ -76,10 +93,10 @@ fn render_tabs(
     click_state: &Rc<RefCell<ClickState>>,
 ) {
     let mut cs = click_state.borrow_mut();
-    let mut bar = TabBar::new("│").block(Block::default().borders(borders));
+    let mut bar = TabBar::new("│").block(Block::default().borders(borders).title(" 舞台 "));
     for style in DemoStyle::ALL {
         let selected = style == state.style;
-        let style_fg = if selected {
+        let st = if selected {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::LightYellow)
@@ -87,13 +104,57 @@ fn render_tabs(
         } else {
             Style::default().fg(Color::Gray)
         };
-        bar = bar.tab(style.label(), style_fg, tab_for_style(style));
+        bar = bar.tab(style.label(), st, tab_for_style(style));
     }
     bar.render(f, area, &mut cs);
 }
 
+fn render_power_tabs(
+    state: &ShatterLabState,
+    f: &mut Frame,
+    area: Rect,
+    borders: Borders,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let mut cs = click_state.borrow_mut();
+    let mut bar = TabBar::new("│").block(
+        Block::default()
+            .borders(borders)
+            .title(" 威力 (多い/速い/大きい/種類) "),
+    );
+    for power in PowerLevel::ALL {
+        let selected = !state.auto_power && power == state.power;
+        let st = if selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let label = match power {
+            PowerLevel::Low => "弱:砲1",
+            PowerLevel::Mid => "中:砲3",
+            PowerLevel::High => "強:砲6",
+        };
+        bar = bar.tab(label, st, tab_for_power(power));
+    }
+    let auto_st = if state.auto_power {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    bar = bar.tab("自動強化", auto_st, TAB_POWER_AUTO);
+    // silence unused import warnings for direct constants used via tab_for_power
+    let _ = (TAB_POWER_LOW, TAB_POWER_MID, TAB_POWER_HIGH);
+    bar.render(f, area, &mut cs);
+}
+
 fn render_footer(state: &ShatterLabState, f: &mut Frame, area: Rect, borders: Borders) {
-    let hint = "[1]鉱石 [2]油圧 [3]惑星 [4]都市  /  自動ループ再生中";
+    let hint = "[1-4]舞台  [Q/W/E]弱中強  [A]自動強化ループ";
     let shake = if state.shake_ticks > 0 { "  ※衝撃" } else { "" };
     let p = Paragraph::new(Line::from(Span::styled(
         format!("{hint}{shake}"),
@@ -103,27 +164,32 @@ fn render_footer(state: &ShatterLabState, f: &mut Frame, area: Rect, borders: Bo
     f.render_widget(p, area);
 }
 
-fn render_stage(state: &ShatterLabState, f: &mut Frame, area: Rect, borders: Borders) {
+pub fn render_stage(state: &ShatterLabState, f: &mut Frame, area: Rect, borders: Borders) {
     let shake_x = if state.shake_ticks > 0 {
-        (((state.elapsed_ticks % 4) as f64) - 1.5) * 0.6
+        (((state.elapsed_ticks % 4) as f64) - 1.5) * 0.55
     } else {
         0.0
     };
     let shake_y = if state.shake_ticks > 0 {
-        ((((state.elapsed_ticks / 2) % 3) as f64) - 1.0) * 0.4
+        ((((state.elapsed_ticks / 2) % 3) as f64) - 1.0) * 0.35
     } else {
         0.0
     };
 
-    // 静物・動体を先に組み立てて paint に move
-    let ground = canvas_fx::filled_rect_points(4.0, 2.0, WORLD_W - 4.0, GROUND_Y - 2.0, 1.2);
-    let (solids, accents, rings, lines) = build_scene_geometry(state);
+    let (ship_pts, gun_pts, star_pts) = build_ship_and_bg(state);
+    let target_groups = build_targets(state);
+    let beam_lines: Vec<(f64, f64, f64, f64)> = state
+        .beams
+        .iter()
+        .map(|b| (b.x0 + shake_x, b.y0 + shake_y, b.x1 + shake_x, b.y1 + shake_y))
+        .collect();
 
     let mut debris = Vec::new();
     let mut sparks = Vec::new();
     let mut dust = Vec::new();
     let mut embers = Vec::new();
     let mut shards = Vec::new();
+    let mut beams = Vec::new();
     for p in &state.particles {
         let pt = (p.x + shake_x, p.y + shake_y);
         match p.kind {
@@ -132,6 +198,7 @@ fn render_stage(state: &ShatterLabState, f: &mut Frame, area: Rect, borders: Bor
             ParticleKind::Dust => dust.push(pt),
             ParticleKind::Ember => embers.push(pt),
             ParticleKind::Shard => shards.push(pt),
+            ParticleKind::Beam => beams.push(pt),
         }
     }
 
@@ -140,43 +207,45 @@ fn render_stage(state: &ShatterLabState, f: &mut Frame, area: Rect, borders: Bor
         .y_bounds([0.0, WORLD_H])
         .marker(Marker::Braille)
         .paint(move |ctx| {
-            if !ground.is_empty() {
+            if !star_pts.is_empty() {
                 ctx.draw(&Points {
-                    coords: &ground,
+                    coords: &star_pts,
                     color: Color::DarkGray,
                 });
             }
-            for (pts, color) in &solids {
-                if !pts.is_empty() {
-                    ctx.draw(&Points {
-                        coords: pts,
-                        color: *color,
-                    });
-                }
-            }
-            for (pts, color) in &accents {
-                if !pts.is_empty() {
-                    ctx.draw(&Points {
-                        coords: pts,
-                        color: *color,
-                    });
-                }
-            }
-            for (pts, color) in &rings {
-                if !pts.is_empty() {
-                    ctx.draw(&Points {
-                        coords: pts,
-                        color: *color,
-                    });
-                }
-            }
-            for &(x1, y1, x2, y2, color) in &lines {
+            for &(x1, y1, x2, y2) in &beam_lines {
                 ctx.draw(&CanvasLine {
-                    x1: x1 + shake_x,
-                    y1: y1 + shake_y,
-                    x2: x2 + shake_x,
-                    y2: y2 + shake_y,
-                    color,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    color: Color::LightCyan,
+                });
+            }
+            if !beams.is_empty() {
+                ctx.draw(&Points {
+                    coords: &beams,
+                    color: Color::Cyan,
+                });
+            }
+            for (pts, color) in &target_groups {
+                if !pts.is_empty() {
+                    ctx.draw(&Points {
+                        coords: pts,
+                        color: *color,
+                    });
+                }
+            }
+            if !ship_pts.is_empty() {
+                ctx.draw(&Points {
+                    coords: &ship_pts,
+                    color: Color::LightYellow,
+                });
+            }
+            if !gun_pts.is_empty() {
+                ctx.draw(&Points {
+                    coords: &gun_pts,
+                    color: Color::White,
                 });
             }
             if !dust.is_empty() {
@@ -194,7 +263,7 @@ fn render_stage(state: &ShatterLabState, f: &mut Frame, area: Rect, borders: Bor
             if !shards.is_empty() {
                 ctx.draw(&Points {
                     coords: &shards,
-                    color: Color::LightCyan,
+                    color: Color::LightMagenta,
                 });
             }
             if !embers.is_empty() {
@@ -215,246 +284,173 @@ fn render_stage(state: &ShatterLabState, f: &mut Frame, area: Rect, borders: Bor
                 .borders(borders)
                 .border_style(Style::default().fg(Color::DarkGray))
                 .title(Span::styled(
-                    " 情景 ",
+                    format!(" 情景 Lv.{} ", state.power.label()),
                     Style::default().fg(Color::LightYellow),
                 )),
         );
     f.render_widget(canvas, area);
 }
 
-type Geom = (
-    Vec<(Vec<(f64, f64)>, Color)>,
-    Vec<(Vec<(f64, f64)>, Color)>,
-    Vec<(Vec<(f64, f64)>, Color)>,
-    Vec<(f64, f64, f64, f64, Color)>,
-);
-
-fn build_scene_geometry(state: &ShatterLabState) -> Geom {
-    match &state.scene {
-        Scene::OreBomb {
-            phase,
-            bomb_y,
-            rock_hp_frac,
-            ..
-        } => geom_ore_bomb(*phase, *bomb_y, *rock_hp_frac, state.elapsed_ticks),
-        Scene::PressCrush {
-            press_y,
-            rock_squash,
-            phase,
-            ..
-        } => geom_press(*phase, *press_y, *rock_squash),
-        Scene::PlanetPeel {
-            layers_left,
-            crack,
-            ..
-        } => geom_planet(*layers_left, *crack, state.elapsed_ticks),
-        Scene::CityCollapse {
-            floors_left,
-            falling_y,
-            ..
-        } => geom_city(*floors_left, *falling_y),
+fn variety_color(v: u8) -> Color {
+    match v % 5 {
+        0 => Color::Gray,
+        1 => Color::Yellow,
+        2 => Color::LightRed,
+        3 => Color::LightCyan,
+        _ => Color::LightMagenta,
     }
 }
 
-fn geom_ore_bomb(phase: u8, bomb_y: f64, rock_hp: f64, ticks: u64) -> Geom {
-    let mut solids = Vec::new();
-    let mut accents = Vec::new();
-    let mut rings = Vec::new();
-    let lines = Vec::new();
-
-    if rock_hp > 0.05 {
-        let wobble = if phase == 0 {
-            ((ticks as f64) * 0.35).sin() * 0.4
+fn build_targets(state: &ShatterLabState) -> Vec<(Vec<(f64, f64)>, Color)> {
+    let mut groups: Vec<(Vec<(f64, f64)>, Color)> = Vec::new();
+    for t in &state.targets {
+        let color = variety_color(t.variety);
+        let pts = canvas_fx::filled_ellipse_points(t.x, t.y, t.radius, t.radius * 0.85, 0.7);
+        if let Some(g) = groups.iter_mut().find(|(_, c)| *c == color) {
+            g.0.extend(pts);
         } else {
-            0.0
-        };
-        let rx = 9.0 * rock_hp.sqrt();
-        let ry = 7.0 * rock_hp.sqrt();
-        solids.push((
-            canvas_fx::filled_ellipse_points(CX + wobble, GROUND_Y + 8.0, rx, ry, 0.7),
-            Color::Magenta,
-        ));
-        accents.push((
-            canvas_fx::filled_ellipse_points(CX + wobble - 2.0, GROUND_Y + 10.0, 2.2, 1.6, 0.5),
-            Color::LightMagenta,
-        ));
+            groups.push((pts, color));
+        }
     }
-
-    if phase == 1 {
-        accents.push((
-            canvas_fx::filled_ellipse_points(CX, bomb_y, 2.0, 2.4, 0.5),
-            Color::Red,
-        ));
-        // 導火線っぽい点
-        accents.push((
-            canvas_fx::filled_ellipse_points(CX, bomb_y + 3.2, 0.8, 0.8, 0.4),
-            Color::Yellow,
-        ));
-    }
-
-    if phase >= 2 {
-        let t = (ticks % 20) as f64 / 20.0;
-        let r = 3.0 + t * 14.0;
-        rings.push((
-            canvas_fx::ring_points(CX, GROUND_Y + 10.0, r, 0.25),
-            Color::LightYellow,
-        ));
-        rings.push((
-            canvas_fx::ring_points(CX, GROUND_Y + 10.0, r * 0.55, 0.35),
-            Color::Red,
-        ));
-    }
-
-    (solids, accents, rings, lines)
+    groups
 }
 
-fn geom_press(phase: u8, press_y: f64, squash: f64) -> Geom {
-    let mut solids = Vec::new();
-    let mut accents = Vec::new();
-    let rings = Vec::new();
-    let mut lines = Vec::new();
-
-    // 台座
-    solids.push((
-        canvas_fx::filled_rect_points(CX - 14.0, GROUND_Y, CX + 14.0, GROUND_Y + 3.0, 0.8),
-        Color::DarkGray,
-    ));
-
-    // 岩 (潰れる)
-    let rock_h = 10.0 * (1.0 - squash * 0.75);
-    let rock_w = 8.0 + squash * 10.0;
-    if phase < 3 || squash < 1.0 {
-        solids.push((
-            canvas_fx::filled_ellipse_points(CX, GROUND_Y + 3.0 + rock_h * 0.45, rock_w * 0.5, rock_h * 0.45, 0.65),
-            Color::Cyan,
-        ));
+fn build_ship_and_bg(state: &ShatterLabState) -> (Vec<(f64, f64)>, Vec<(f64, f64)>, Vec<(f64, f64)>) {
+    let scale = state.power.ship_scale();
+    let mut stars = Vec::new();
+    // スクロールする星 / レール
+    for i in 0..24 {
+        let seed = i as f64 * 7.13;
+        let x = ((seed * 11.0) % WORLD_W).abs();
+        let y = (seed * 3.0 + state.scroll * 2.0) % WORLD_H;
+        stars.extend(canvas_fx::filled_ellipse_points(x, y, 0.35, 0.35, 0.3));
     }
 
-    // プレス板
-    solids.push((
-        canvas_fx::filled_rect_points(CX - 12.0, press_y, CX + 12.0, press_y + 3.5, 0.7),
-        Color::Gray,
-    ));
-    accents.push((
-        canvas_fx::filled_rect_points(CX - 2.0, press_y + 3.5, CX + 2.0, WORLD_H - 4.0, 1.0),
-        Color::DarkGray,
-    ));
-
-    // ガイド柱
-    lines.push((CX - 13.0, GROUND_Y + 3.0, CX - 13.0, WORLD_H - 6.0, Color::DarkGray));
-    lines.push((CX + 13.0, GROUND_Y + 3.0, CX + 13.0, WORLD_H - 6.0, Color::DarkGray));
-
-    (solids, accents, rings, lines)
-}
-
-fn geom_planet(layers_left: u8, crack: f64, ticks: u64) -> Geom {
-    let mut solids = Vec::new();
-    let mut accents = Vec::new();
-    let mut rings = Vec::new();
-    let mut lines = Vec::new();
-    let cy = WORLD_H * 0.48;
-
-    if layers_left >= 3 {
-        solids.push((
-            canvas_fx::filled_ellipse_points(CX, cy, 14.0, 14.0, 0.85),
-            Color::Green,
-        ));
-    }
-    if layers_left >= 2 {
-        solids.push((
-            canvas_fx::filled_ellipse_points(CX, cy, 10.0, 10.0, 0.75),
-            Color::Yellow,
-        ));
-    }
-    if layers_left >= 1 {
-        solids.push((
-            canvas_fx::filled_ellipse_points(CX, cy, 6.0, 6.0, 0.65),
-            Color::LightRed,
-        ));
-        accents.push((
-            canvas_fx::filled_ellipse_points(CX, cy, 2.2, 2.2, 0.45),
-            Color::White,
-        ));
-    }
-
-    if layers_left > 0 && crack > 0.0 {
-        let r = match layers_left {
-            3 => 14.0,
-            2 => 10.0,
-            _ => 6.0,
-        };
-        // 亀裂ラジアル
-        for i in 0..5 {
-            let a = (i as f64) * std::f64::consts::TAU / 5.0 + ticks as f64 * 0.01;
-            let len = r * (0.35 + crack * 0.65);
-            lines.push((
-                CX + a.cos() * (r * 0.2),
-                cy + a.sin() * (r * 0.2),
-                CX + a.cos() * len,
-                cy + a.sin() * len,
-                Color::White,
+    let (mut ship, mut guns) = match state.style {
+        DemoStyle::SpaceCruise => {
+            let sy = 14.0;
+            let body = canvas_fx::filled_ellipse_points(CX, sy, 5.0 * scale, 3.5 * scale, 0.55);
+            let nose = canvas_fx::filled_ellipse_points(CX, sy + 5.0 * scale, 2.2 * scale, 2.8 * scale, 0.5);
+            let mut s = body;
+            s.extend(nose);
+            // エンジン噴射
+            s.extend(canvas_fx::filled_ellipse_points(
+                CX,
+                sy - 4.0 * scale,
+                1.5 * scale,
+                2.0 * scale,
+                0.45,
             ));
+            let g = gun_points_for(state);
+            (s, g)
         }
-        rings.push((
-            canvas_fx::ring_points(CX, cy, r * (0.7 + crack * 0.35), 0.28),
-            Color::LightYellow,
-        ));
-    }
+        DemoStyle::OrbitMine => {
+            let sx = 12.0;
+            let sy = WORLD_H * 0.5;
+            let body = canvas_fx::filled_rect_points(
+                sx - 4.0 * scale,
+                sy - 6.0 * scale,
+                sx + 3.0 * scale,
+                sy + 6.0 * scale,
+                0.7,
+            );
+            let dish = canvas_fx::ring_points(sx + 2.0 * scale, sy, 4.0 * scale, 0.35);
+            let mut s = body;
+            s.extend(dish);
+            (s, gun_points_for(state))
+        }
+        DemoStyle::RailBreak => {
+            let sy = 16.0;
+            let body = canvas_fx::filled_rect_points(
+                CX - 4.0 * scale,
+                sy,
+                CX + 4.0 * scale,
+                sy + 14.0 * scale,
+                0.65,
+            );
+            let nose = canvas_fx::filled_ellipse_points(CX, sy + 16.0 * scale, 3.5 * scale, 3.0 * scale, 0.55);
+            // レール
+            for i in 0..8 {
+                let y = (i as f64 * 10.0 + state.scroll * 1.5) % WORLD_H;
+                stars.extend(canvas_fx::filled_rect_points(CX - 12.0, y, CX - 11.0, y + 4.0, 0.8));
+                stars.extend(canvas_fx::filled_rect_points(CX + 11.0, y, CX + 12.0, y + 4.0, 0.8));
+            }
+            let mut s = body;
+            s.extend(nose);
+            (s, gun_points_for(state))
+        }
+        DemoStyle::SatDefense => {
+            // 拠点コア
+            let core = canvas_fx::filled_ellipse_points(CX, 22.0, 3.0 * scale, 3.0 * scale, 0.5);
+            let ring = canvas_fx::ring_points(CX, 22.0, 6.0 * scale, 0.25);
+            let mut s = core;
+            s.extend(ring);
+            // 地面
+            stars.extend(canvas_fx::filled_rect_points(4.0, 2.0, WORLD_W - 4.0, 8.0, 1.0));
+            (s, gun_points_for(state))
+        }
+    };
 
-    if layers_left == 0 {
-        let t = ((ticks % 24) as f64) / 24.0;
-        rings.push((
-            canvas_fx::ring_points(CX, cy, 4.0 + t * 22.0, 0.22),
-            Color::LightYellow,
-        ));
-        rings.push((
-            canvas_fx::ring_points(CX, cy, 2.0 + t * 12.0, 0.3),
-            Color::LightRed,
-        ));
+    // 砲門を大きめの点で
+    let gpts = gun_points_for(state);
+    for &(gx, gy) in &gpts {
+        guns.extend(canvas_fx::filled_ellipse_points(gx, gy, 1.1, 1.1, 0.45));
     }
-
-    (solids, accents, rings, lines)
+    let _ = &mut ship;
+    (ship, guns, stars)
 }
 
-fn geom_city(floors_left: u8, falling_y: f64) -> Geom {
-    let mut solids = Vec::new();
-    let accents = Vec::new();
-    let rings = Vec::new();
-    let lines = Vec::new();
-    let floor_h = 7.0;
-    let width = 18.0;
-
-    for i in 0..floors_left {
-        let y0 = GROUND_Y + i as f64 * floor_h;
-        let y1 = y0 + floor_h - 0.8;
-        let is_top = i + 1 == floors_left;
-        let y_off = if is_top { falling_y } else { 0.0 };
-        let color = if i % 2 == 0 {
-            Color::LightCyan
-        } else {
-            Color::Cyan
-        };
-        solids.push((
-            canvas_fx::filled_rect_points(
-                CX - width * 0.5,
-                y0 - y_off,
-                CX + width * 0.5,
-                y1 - y_off,
-                0.85,
-            ),
-            color,
-        ));
-        // 窓の点
-        let mut windows = Vec::new();
-        for wx in 0..4 {
-            for wy in 0..2 {
-                let x = CX - 6.0 + wx as f64 * 4.0;
-                let y = y0 + 1.5 + wy as f64 * 2.5 - y_off;
-                windows.extend(canvas_fx::filled_ellipse_points(x, y, 0.7, 0.7, 0.4));
-            }
+fn gun_points_for(state: &ShatterLabState) -> Vec<(f64, f64)> {
+    let scale = state.power.ship_scale();
+    let n = state.power.gun_count();
+    match state.style {
+        DemoStyle::SpaceCruise => {
+            let sy = 14.0;
+            let spread = 8.0 * scale;
+            (0..n)
+                .map(|i| {
+                    let t = if n == 1 {
+                        0.5
+                    } else {
+                        i as f64 / (n - 1) as f64
+                    };
+                    (CX - spread + spread * 2.0 * t, sy + 6.0 * scale)
+                })
+                .collect()
         }
-        solids.push((windows, Color::Yellow));
+        DemoStyle::OrbitMine => {
+            let sx = 12.0;
+            let sy = WORLD_H * 0.5;
+            (0..n)
+                .map(|i| {
+                    let t = if n == 1 {
+                        0.5
+                    } else {
+                        i as f64 / (n - 1) as f64
+                    };
+                    (sx + 5.0 * scale, sy - 10.0 * scale + 20.0 * scale * t)
+                })
+                .collect()
+        }
+        DemoStyle::RailBreak => {
+            let sy = 18.0;
+            let mut v = vec![(CX, sy + 10.0 * scale)];
+            for i in 1..n {
+                let side = if i % 2 == 0 { -1.0 } else { 1.0 };
+                v.push((CX + side * (3.0 + i as f64), sy + 4.0 * scale));
+            }
+            v
+        }
+        DemoStyle::SatDefense => {
+            let orbit_r = 10.0 + scale * 6.0;
+            let cy = 22.0;
+            (0..n)
+                .map(|i| {
+                    let a = state.elapsed_ticks as f64 * 0.04
+                        + i as f64 * std::f64::consts::TAU / n.max(1) as f64;
+                    (CX + a.cos() * orbit_r, cy + a.sin() * orbit_r * 0.45)
+                })
+                .collect()
+        }
     }
-
-    (solids, accents, rings, lines)
 }
