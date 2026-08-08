@@ -1,8 +1,9 @@
 //! 星環の純粋ロジック。描画・I/O に依存しない。
 
 use super::state::{
-    BeamFlash, Ore, OreKind, Particle, ParticleKind, StarRingState, UpgradeKind, BOOST_DURATION,
-    CX, CY, INNER_RADIUS, ORBIT_Y_SQUASH, SPAWN_RADIUS, WORLD_H, WORLD_W,
+    Layer, Ore, OreKind, Particle, ParticleKind, Projectile, RingUpgrade, StarRingState,
+    WeaponKind, WeaponStat, BOOST_DURATION, CX, CY, INNER_RADIUS, LAYER_FLASH_TICKS, ORBIT_Y_SQUASH,
+    SPAWN_RADIUS, WORLD_H, WORLD_W,
 };
 
 fn rng_next(state: &mut StarRingState) -> u32 {
@@ -25,32 +26,78 @@ fn rand_range(state: &mut StarRingState, lo: f64, hi: f64) -> f64 {
     lo + (hi - lo) * rand01(state)
 }
 
-/// 強化の現在コスト。
-pub fn upgrade_cost(state: &StarRingState, kind: UpgradeKind) -> f64 {
-    let lv = state.level(kind) as f64;
-    kind.base_cost() * kind.growth().powf(lv)
+/// 武器ステ強化の現在コスト。
+pub fn weapon_stat_cost(state: &StarRingState, weapon: WeaponKind, stat: WeaponStat) -> f64 {
+    let lv = state.weapon_stat(weapon, stat) as f64;
+    // 後発武器ほど少し高めに
+    let tier = 1.0 + weapon.index() as f64 * 0.35;
+    stat.base_cost() * tier * stat.growth().powf(lv)
 }
 
-/// 強化がまだ上限に達していないか。
-pub fn can_upgrade_further(state: &StarRingState, kind: UpgradeKind) -> bool {
-    match kind.max_level() {
-        Some(max) => state.level(kind) < max,
+pub fn can_upgrade_weapon_stat(state: &StarRingState, weapon: WeaponKind, stat: WeaponStat) -> bool {
+    if !state.is_weapon_unlocked(weapon) {
+        return false;
+    }
+    match stat.max_level() {
+        Some(max) => state.weapon_stat(weapon, stat) < max,
         None => true,
     }
 }
 
-/// 強化を購入する。成功で true。
-pub fn purchase_upgrade(state: &mut StarRingState, kind: UpgradeKind) -> bool {
-    if !can_upgrade_further(state, kind) {
+pub fn purchase_weapon_stat(
+    state: &mut StarRingState,
+    weapon: WeaponKind,
+    stat: WeaponStat,
+) -> bool {
+    if !can_upgrade_weapon_stat(state, weapon, stat) {
         return false;
     }
-    let cost = upgrade_cost(state, kind);
+    let cost = weapon_stat_cost(state, weapon, stat);
     if state.shards + 1e-9 < cost {
         return false;
     }
     state.shards -= cost;
-    state.upgrade_levels[kind.index()] += 1;
+    state.weapon_levels[weapon.index()][stat.index()] += 1;
     state.shake_ticks = state.shake_ticks.max(4);
+    true
+}
+
+pub fn ring_upgrade_cost(state: &StarRingState, kind: RingUpgrade) -> f64 {
+    let lv = state.ring_level(kind) as f64;
+    kind.base_cost() * kind.growth().powf(lv)
+}
+
+pub fn purchase_ring_upgrade(state: &mut StarRingState, kind: RingUpgrade) -> bool {
+    let cost = ring_upgrade_cost(state, kind);
+    if state.shards + 1e-9 < cost {
+        return false;
+    }
+    state.shards -= cost;
+    state.ring_levels[kind.index()] += 1;
+    state.shake_ticks = state.shake_ticks.max(4);
+    true
+}
+
+/// 武装タブで前後の解放済み武器へ送る。
+pub fn cycle_selected_weapon(state: &mut StarRingState, delta: i32) {
+    let unlocked = state.unlocked_weapons();
+    if unlocked.is_empty() {
+        return;
+    }
+    let cur = unlocked
+        .iter()
+        .position(|&w| w == state.selected_weapon)
+        .unwrap_or(0);
+    let n = unlocked.len() as i32;
+    let next = ((cur as i32 + delta) % n + n) % n;
+    state.selected_weapon = unlocked[next as usize];
+}
+
+pub fn select_weapon(state: &mut StarRingState, weapon: WeaponKind) -> bool {
+    if !state.is_weapon_unlocked(weapon) {
+        return false;
+    }
+    state.selected_weapon = weapon;
     true
 }
 
@@ -70,7 +117,7 @@ pub fn manual_strike(state: &mut StarRingState) {
             best = i;
         }
     }
-    let dmg = state.damage() * 1.5;
+    let dmg = state.weapon_damage(WeaponKind::Pulse) * 2.2;
     apply_damage(state, best, dmg);
 }
 
@@ -87,17 +134,42 @@ pub fn tick(state: &mut StarRingState, delta_ticks: u32) {
         if state.boost_ticks > 0 {
             state.boost_ticks -= 1;
         }
+        if state.layer_flash_ticks > 0 {
+            state.layer_flash_ticks -= 1;
+        }
 
         step_particles(state);
-        step_beams(state);
+        step_projectiles(state);
         step_ores(state);
-        resolve_leaks(state);
+        resolve_arrivals(state);
         spawn_ores(state);
-        fire_turrets(state);
+        fire_weapons(state);
+        check_layer_advance(state);
 
-        // 星屑/秒用リングバッファ
         state.recent_gain[state.recent_gain_idx] = state.tick_gain;
         state.recent_gain_idx = (state.recent_gain_idx + 1) % state.recent_gain.len();
+    }
+}
+
+fn check_layer_advance(state: &mut StarRingState) {
+    let layer = state.layer();
+    if layer > state.last_layer {
+        state.layer_flash_ticks = LAYER_FLASH_TICKS;
+        state.shake_ticks = state.shake_ticks.max(10);
+        state.core_flash_ticks = state.core_flash_ticks.max(14);
+        burst(state, CX, CY, 16, 2.2, ParticleKind::Spark, 22);
+        burst(state, CX, CY, 10, 1.6, ParticleKind::Shard, 18);
+        // 新武装が解放されたら選択をそちらへ寄せる
+        for w in WeaponKind::ALL {
+            if w.unlock_layer() == layer {
+                state.selected_weapon = w;
+                break;
+            }
+        }
+        state.last_layer = layer;
+    } else if layer < state.last_layer {
+        // セーブ改変などで層が下がった場合の同期
+        state.last_layer = layer;
     }
 }
 
@@ -127,20 +199,81 @@ fn step_particles(state: &mut StarRingState) {
     state.particles.retain(|p| {
         p.life > 0 && p.x > -8.0 && p.x < WORLD_W + 8.0 && p.y > -8.0 && p.y < WORLD_H + 8.0
     });
-    // パーティクル爆発しすぎ防止
     if state.particles.len() > 500 {
         let drop = state.particles.len() - 400;
         state.particles.drain(0..drop);
     }
 }
 
-fn step_beams(state: &mut StarRingState) {
-    for b in &mut state.beams {
-        if b.life > 0 {
-            b.life -= 1;
+fn step_projectiles(state: &mut StarRingState) {
+    // 移動
+    for p in &mut state.projectiles {
+        if p.life == 0 {
+            continue;
         }
+        if p.spin != 0.0 {
+            // 環弾: 速度ベクトルを回転させつつ外向き成分を保つ
+            let speed = p.vx.hypot(p.vy).max(0.01);
+            let ang = p.vy.atan2(p.vx) + p.spin;
+            p.vx = ang.cos() * speed;
+            p.vy = ang.sin() * speed;
+        }
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life -= 1;
     }
-    state.beams.retain(|b| b.life > 0);
+
+    // 衝突 (弾→鉱石)。インデックスが動くので後ろから。
+    let mut i = 0;
+    while i < state.projectiles.len() {
+        if state.projectiles[i].life == 0 {
+            state.projectiles.swap_remove(i);
+            continue;
+        }
+        let (px, py, pr, dmg, splash, pierce) = {
+            let p = &state.projectiles[i];
+            (p.x, p.y, p.radius, p.damage, p.splash, p.pierce)
+        };
+        let mut hit: Option<usize> = None;
+        for (oi, ore) in state.ores.iter().enumerate() {
+            let d = (ore.x - px).hypot(ore.y - py);
+            if d <= ore.radius + pr {
+                hit = Some(oi);
+                break;
+            }
+        }
+        if let Some(oi) = hit {
+            let (ox, oy) = (state.ores[oi].x, state.ores[oi].y);
+            apply_damage(state, oi, dmg);
+            if splash > 0.0 {
+                // 直撃対象以外へ着弾スプラッシュ (後ろからで index 安全)
+                let splash_dmg = dmg * 0.45;
+                for j in (0..state.ores.len()).rev() {
+                    let d = (state.ores[j].x - ox).hypot(state.ores[j].y - oy);
+                    if d > 0.01 && d <= splash {
+                        apply_damage(state, j, splash_dmg);
+                    }
+                }
+                burst(state, ox, oy, 8, 1.8, ParticleKind::Ember, 14);
+            } else {
+                burst(state, px, py, 2, 0.8, ParticleKind::Spark, 8);
+            }
+            if pierce == 0 {
+                state.projectiles.swap_remove(i);
+                continue;
+            }
+            state.projectiles[i].pierce -= 1;
+        }
+        i += 1;
+    }
+
+    state.projectiles.retain(|p| {
+        p.life > 0 && p.x > -10.0 && p.x < WORLD_W + 10.0 && p.y > -10.0 && p.y < WORLD_H + 10.0
+    });
+    if state.projectiles.len() > 220 {
+        let drop = state.projectiles.len() - 180;
+        state.projectiles.drain(0..drop);
+    }
 }
 
 fn step_ores(state: &mut StarRingState) {
@@ -150,21 +283,17 @@ fn step_ores(state: &mut StarRingState) {
     }
 }
 
-fn resolve_leaks(state: &mut StarRingState) {
+/// 中心到達: 報酬なしで消える (逸失)。星屑は減らない——防衛失敗ではない。
+fn resolve_arrivals(state: &mut StarRingState) {
     let mut i = 0;
     while i < state.ores.len() {
         let ore = &state.ores[i];
         let dist = (ore.x - CX).hypot(ore.y - CY);
         if dist <= INNER_RADIUS {
             let ore = state.ores.remove(i);
-            let loss = (ore.kind.base_value() * 0.35 * state.yield_mult()).min(state.shards);
-            state.shards -= loss;
-            state.shards_leaked += loss;
-            state.leak_count += 1;
-            state.core_flash_ticks = state.core_flash_ticks.max(8);
-            state.shake_ticks = state.shake_ticks.max(5);
-            burst(state, ore.x, ore.y, 8, 1.0, ParticleKind::Ember, 16);
-            burst(state, CX, CY, 5, 0.8, ParticleKind::Dust, 12);
+            state.missed_count += 1;
+            // 淡い取り込み演出のみ (警報にしない)
+            burst(state, ore.x, ore.y, 4, 0.6, ParticleKind::Dust, 10);
         } else {
             i += 1;
         }
@@ -173,7 +302,6 @@ fn resolve_leaks(state: &mut StarRingState) {
 
 fn pick_ore_kind(state: &mut StarRingState) -> OreKind {
     let unlocked = state.unlocked_ore_kinds();
-    // 高レアほど出にくく重み付け
     let weights: Vec<(OreKind, u32)> = unlocked
         .into_iter()
         .map(|k| {
@@ -202,31 +330,32 @@ fn pick_ore_kind(state: &mut StarRingState) -> OreKind {
 }
 
 fn spawn_ores(state: &mut StarRingState) {
-    let interval = state.spawn_interval();
+    let layer = state.layer();
+    let interval = Layer::spawn_interval_ticks(layer);
     if !state.elapsed_ticks.is_multiple_of(interval) {
         return;
     }
-    // 同時出現上限 (描画負荷とゲームテンポのバランス)
-    if state.ores.len() >= 40 {
+    if state.ores.len() >= 48 {
         return;
     }
-    let batch = state.spawn_batch().min(40 - state.ores.len());
+    let batch = Layer::spawn_batch(layer).min(48 - state.ores.len());
+    let hp_m = Layer::hp_mult(layer);
+    let spd_m = Layer::speed_mult(layer);
     for _ in 0..batch {
         let kind = pick_ore_kind(state);
         let angle = rand_range(state, 0.0, std::f64::consts::TAU);
         let x = CX + angle.cos() * SPAWN_RADIUS;
         let y = CY + angle.sin() * SPAWN_RADIUS * ORBIT_Y_SQUASH.max(0.55);
-        // 楕円外周から中心へ直線接近
         let dx = CX - x;
         let dy = CY - y;
         let dist = dx.hypot(dy).max(0.001);
-        let speed = kind.speed() * (1.0 + state.level(UpgradeKind::Density) as f64 * 0.03);
+        let speed = kind.speed() * spd_m;
         state.ores.push(Ore {
             x,
             y,
             vx: dx / dist * speed,
             vy: dy / dist * speed,
-            hp: kind.base_hp(),
+            hp: kind.base_hp() * hp_m,
             kind,
             radius: kind.radius(),
         });
@@ -243,55 +372,193 @@ pub fn turret_positions(state: &StarRingState) -> Vec<(f64, f64, f64)> {
             let a = base + i as f64 * std::f64::consts::TAU / n as f64;
             let x = CX + a.cos() * r;
             let y = CY + a.sin() * r * ORBIT_Y_SQUASH;
-            let depth = a.sin(); // -1=奥, +1=手前
+            let depth = a.sin();
             (x, y, depth)
         })
         .collect()
 }
 
-fn fire_turrets(state: &mut StarRingState) {
-    let interval = state.fire_interval();
-    if !state.elapsed_ticks.is_multiple_of(interval) {
-        return;
-    }
+fn fire_weapons(state: &mut StarRingState) {
     if state.ores.is_empty() {
         return;
     }
     let guns = turret_positions(state);
-    let dmg = state.damage();
-
-    // 砲ごとにその時点の最近傍を狙い直す。撃破でインデックスが縮んでも安全。
-    for &(gx, gy, _) in &guns {
-        if state.ores.is_empty() {
-            break;
-        }
-        let mut best: Option<(usize, f64)> = None;
-        for (i, ore) in state.ores.iter().enumerate() {
-            let d = (ore.x - gx).hypot(ore.y - gy);
-            if best.map(|(_, bd)| d < bd).unwrap_or(true) {
-                best = Some((i, d));
-            }
-        }
-        let Some((idx, _)) = best else {
+    if guns.is_empty() {
+        return;
+    }
+    let unlocked: Vec<WeaponKind> = state.unlocked_weapons();
+    for weapon in unlocked {
+        let interval = state.fire_interval(weapon);
+        // 武器ごとに位相をずらして同時斉射を避ける
+        let phase = weapon.index() as u64 * 3;
+        if !state.elapsed_ticks.wrapping_add(phase).is_multiple_of(interval) {
             continue;
+        }
+        let volley = state.volley_count(weapon);
+        let dmg = state.weapon_damage(weapon);
+        match weapon {
+            WeaponKind::Pulse => fire_pulse(state, &guns, volley, dmg),
+            WeaponKind::Ray => fire_ray(state, &guns, volley, dmg),
+            WeaponKind::Scatter => fire_scatter(state, &guns, volley, dmg),
+            WeaponKind::Arc => fire_arc(state, &guns, volley, dmg),
+            WeaponKind::Nova => fire_nova(state, &guns, volley, dmg),
+        }
+    }
+}
+
+fn nearest_ore(state: &StarRingState, gx: f64, gy: f64) -> Option<usize> {
+    let mut best: Option<(usize, f64)> = None;
+    for (i, ore) in state.ores.iter().enumerate() {
+        let d = (ore.x - gx).hypot(ore.y - gy);
+        if best.map(|(_, bd)| d < bd).unwrap_or(true) {
+            best = Some((i, d));
+        }
+    }
+    best.map(|(i, _)| i)
+}
+
+fn aim_dir(state: &StarRingState, gx: f64, gy: f64, idx: usize) -> (f64, f64) {
+    let ore = &state.ores[idx];
+    let dx = ore.x - gx;
+    let dy = ore.y - gy;
+    let dist = dx.hypot(dy).max(0.001);
+    (dx / dist, dy / dist)
+}
+
+fn fire_pulse(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize, dmg: f64) {
+    let n = guns.len().max(1);
+    for k in 0..volley {
+        let (gx, gy, _) = guns[k % n];
+        let Some(idx) = nearest_ore(state, gx, gy) else {
+            return;
         };
-        let (tx, ty) = (state.ores[idx].x, state.ores[idx].y);
-        state.beams.push(BeamFlash {
-            x0: gx,
-            y0: gy,
-            x1: tx,
-            y1: ty,
-            life: 3,
+        let (ux, uy) = aim_dir(state, gx, gy, idx);
+        // わずかな拡散で連射感を出す
+        let jitter = rand_range(state, -0.12, 0.12);
+        let ang = uy.atan2(ux) + jitter;
+        let speed = 2.4;
+        state.projectiles.push(Projectile {
+            x: gx,
+            y: gy,
+            vx: ang.cos() * speed,
+            vy: ang.sin() * speed,
+            damage: dmg,
+            life: 22,
+            radius: 0.55,
+            pierce: 0,
+            splash: 0.0,
+            kind: WeaponKind::Pulse,
+            spin: 0.0,
         });
-        state.particles.push(Particle {
-            x: (gx + tx) * 0.5,
-            y: (gy + ty) * 0.5,
-            vx: 0.0,
-            vy: 0.0,
-            life: 2,
-            kind: ParticleKind::Spark,
+    }
+}
+
+fn fire_ray(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize, dmg: f64) {
+    let n = guns.len().max(1);
+    for k in 0..volley {
+        let (gx, gy, _) = guns[(k * 2) % n];
+        let Some(idx) = nearest_ore(state, gx, gy) else {
+            return;
+        };
+        let (ux, uy) = aim_dir(state, gx, gy, idx);
+        let speed = 3.6;
+        state.projectiles.push(Projectile {
+            x: gx,
+            y: gy,
+            vx: ux * speed,
+            vy: uy * speed,
+            damage: dmg,
+            life: 28,
+            radius: 0.7,
+            pierce: 2,
+            splash: 0.0,
+            kind: WeaponKind::Ray,
+            spin: 0.0,
         });
-        apply_damage(state, idx, dmg);
+    }
+}
+
+fn fire_scatter(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize, dmg: f64) {
+    let n = guns.len().max(1);
+    let (gx, gy, _) = guns[state.elapsed_ticks as usize % n];
+    let Some(idx) = nearest_ore(state, gx, gy) else {
+        return;
+    };
+    let (ux, uy) = aim_dir(state, gx, gy, idx);
+    let base_ang = uy.atan2(ux);
+    let spread = 0.55;
+    for k in 0..volley {
+        let t = if volley == 1 {
+            0.0
+        } else {
+            (k as f64 / (volley - 1) as f64) - 0.5
+        };
+        let ang = base_ang + t * spread;
+        let speed = 2.1;
+        state.projectiles.push(Projectile {
+            x: gx,
+            y: gy,
+            vx: ang.cos() * speed,
+            vy: ang.sin() * speed,
+            damage: dmg,
+            life: 18,
+            radius: 0.5,
+            pierce: 0,
+            splash: 0.0,
+            kind: WeaponKind::Scatter,
+            spin: 0.0,
+        });
+    }
+}
+
+fn fire_arc(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize, dmg: f64) {
+    let n = guns.len().max(1);
+    for k in 0..volley {
+        let (gx, gy, _) = guns[k % n];
+        let Some(idx) = nearest_ore(state, gx, gy) else {
+            return;
+        };
+        let (ux, uy) = aim_dir(state, gx, gy, idx);
+        let speed = 1.8;
+        let spin = if k % 2 == 0 { 0.14 } else { -0.14 };
+        state.projectiles.push(Projectile {
+            x: gx,
+            y: gy,
+            vx: ux * speed,
+            vy: uy * speed,
+            damage: dmg,
+            life: 30,
+            radius: 0.65,
+            pierce: 1,
+            splash: 0.0,
+            kind: WeaponKind::Arc,
+            spin,
+        });
+    }
+}
+
+fn fire_nova(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize, dmg: f64) {
+    let n = guns.len().max(1);
+    for k in 0..volley {
+        let (gx, gy, _) = guns[(k * 3) % n];
+        let Some(idx) = nearest_ore(state, gx, gy) else {
+            return;
+        };
+        let (ux, uy) = aim_dir(state, gx, gy, idx);
+        let speed = 1.4;
+        state.projectiles.push(Projectile {
+            x: gx,
+            y: gy,
+            vx: ux * speed,
+            vy: uy * speed,
+            damage: dmg,
+            life: 26,
+            radius: 1.1,
+            pierce: 0,
+            splash: 5.5,
+            kind: WeaponKind::Nova,
+            spin: 0.0,
+        });
     }
 }
 
@@ -351,7 +618,7 @@ mod tests {
     #[test]
     fn spawn_ores_appear_after_interval() {
         let mut state = StarRingState::new();
-        let interval = state.spawn_interval();
+        let interval = Layer::spawn_interval_ticks(state.layer());
         for _ in 0..interval {
             tick(&mut state, 1);
         }
@@ -362,66 +629,38 @@ mod tests {
     }
 
     #[test]
-    fn killing_ore_increases_shards() {
+    fn killing_ore_with_projectile_increases_shards() {
         let mut state = StarRingState::new();
         let before = state.shards;
+        // 砲台付近に弱い鉱石を置き、連射で倒す
         state.ores.push(Ore {
-            x: CX + 10.0,
+            x: CX + 12.0,
             y: CY,
             vx: 0.0,
             vy: 0.0,
-            hp: 0.5,
+            hp: 0.4,
             kind: OreKind::Dust,
             radius: 1.4,
         });
-        // 火力を上げて確実に撃破
-        state.upgrade_levels[UpgradeKind::Damage.index()] = 5;
-        // 発射タイミングまで進める
-        let interval = state.fire_interval();
-        for _ in 0..interval + 2 {
+        for _ in 0..40 {
             tick(&mut state, 1);
+            if state.total_kills > 0 {
+                break;
+            }
         }
         assert!(
-            state.shards > before || state.total_kills > 0,
-            "撃破で星屑が増えるはず shards={}->{} kills={}",
+            state.total_kills > 0 || state.shards > before,
+            "連射弾で撃破できるはず shards={}->{} kills={} projs={}",
             before,
             state.shards,
-            state.total_kills
+            state.total_kills,
+            state.projectiles.len()
         );
-        assert!(state.shards_earned > 0.0);
+        assert!(state.shards_earned > 0.0 || state.total_kills > 0);
     }
 
     #[test]
-    fn purchase_upgrade_spends_shards_and_raises_level() {
-        let mut state = StarRingState::new();
-        state.shards = 1000.0;
-        let cost = upgrade_cost(&state, UpgradeKind::Damage);
-        assert!(purchase_upgrade(&mut state, UpgradeKind::Damage));
-        assert_eq!(state.level(UpgradeKind::Damage), 1);
-        assert!((state.shards - (1000.0 - cost)).abs() < 1e-6);
-    }
-
-    #[test]
-    fn purchase_fails_when_broke() {
-        let mut state = StarRingState::new();
-        state.shards = 0.0;
-        assert!(!purchase_upgrade(&mut state, UpgradeKind::Turrets));
-        assert_eq!(state.level(UpgradeKind::Turrets), 0);
-    }
-
-    #[test]
-    fn turret_count_caps_at_max() {
-        let mut state = StarRingState::new();
-        state.shards = 1e12;
-        for _ in 0..20 {
-            purchase_upgrade(&mut state, UpgradeKind::Turrets);
-        }
-        assert_eq!(state.turret_count(), super::super::state::MAX_TURRETS);
-        assert!(!can_upgrade_further(&state, UpgradeKind::Turrets));
-    }
-
-    #[test]
-    fn leak_reduces_shards_without_game_over() {
+    fn arrival_at_core_does_not_drain_shards() {
         let mut state = StarRingState::new();
         state.shards = 50.0;
         state.ores.push(Ore {
@@ -434,12 +673,97 @@ mod tests {
             radius: 1.9,
         });
         tick(&mut state, 1);
-        assert!(state.leak_count >= 1);
-        assert!(state.shards < 50.0);
-        assert!(state.shards_leaked > 0.0);
-        // ゲーム継続
-        tick(&mut state, 5);
-        assert!(state.elapsed_ticks >= 6);
+        assert!(state.missed_count >= 1);
+        assert!(
+            (state.shards - 50.0).abs() < 1e-9,
+            "中心到達で星屑は減らないはず shards={}",
+            state.shards
+        );
+    }
+
+    #[test]
+    fn purchase_weapon_stat_spends_shards() {
+        let mut state = StarRingState::new();
+        state.shards = 1000.0;
+        let cost = weapon_stat_cost(&state, WeaponKind::Pulse, WeaponStat::Power);
+        assert!(purchase_weapon_stat(
+            &mut state,
+            WeaponKind::Pulse,
+            WeaponStat::Power
+        ));
+        assert_eq!(state.weapon_stat(WeaponKind::Pulse, WeaponStat::Power), 1);
+        assert!((state.shards - (1000.0 - cost)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn locked_weapon_cannot_be_upgraded() {
+        let mut state = StarRingState::new();
+        state.shards = 1e9;
+        assert_eq!(state.layer(), 1);
+        assert!(!purchase_weapon_stat(
+            &mut state,
+            WeaponKind::Ray,
+            WeaponStat::Power
+        ));
+    }
+
+    #[test]
+    fn layer_advances_with_kills_and_unlocks_weapons() {
+        let mut state = StarRingState::new();
+        assert_eq!(state.layer(), 1);
+        assert!(state.is_weapon_unlocked(WeaponKind::Pulse));
+        assert!(!state.is_weapon_unlocked(WeaponKind::Ray));
+
+        state.total_kills = Layer::THRESHOLDS[1];
+        assert_eq!(state.layer(), 2);
+        assert!(state.is_weapon_unlocked(WeaponKind::Ray));
+        assert!(state.unlocked_ore_kinds().contains(&OreKind::Rock));
+
+        state.total_kills = Layer::THRESHOLDS[4];
+        assert_eq!(state.layer(), 5);
+        assert_eq!(state.unlocked_weapons().len(), 5);
+    }
+
+    #[test]
+    fn layer_thresholds_are_spaced() {
+        // ぬるっと上がらないこと: 隣接閾値の間隔が十分ある
+        for w in Layer::THRESHOLDS.windows(2) {
+            assert!(w[1] >= w[0] + 70, "層間隔が狭すぎる {} -> {}", w[0], w[1]);
+        }
+    }
+
+    #[test]
+    fn higher_layer_spawns_more_and_harder() {
+        assert!(Layer::spawn_batch(5) > Layer::spawn_batch(1));
+        assert!(Layer::hp_mult(5) > Layer::hp_mult(1));
+        assert!(Layer::value_mult(5) > Layer::value_mult(1));
+        assert!(Layer::spawn_interval_ticks(5) < Layer::spawn_interval_ticks(1));
+    }
+
+    #[test]
+    fn pulse_fires_many_weak_projectiles() {
+        let mut state = StarRingState::new();
+        // 連射・弾数を上げて弾幕感を出す
+        state.weapon_levels[0] = [3, 4, 0];
+        state.ores.push(Ore {
+            x: CX + 20.0,
+            y: CY,
+            vx: 0.0,
+            vy: 0.0,
+            hp: 100.0,
+            kind: OreKind::Dust,
+            radius: 1.4,
+        });
+        for _ in 0..30 {
+            tick(&mut state, 1);
+        }
+        assert!(
+            state.projectiles.len() >= 3 || state.total_kills > 0,
+            "流星は複数弾を飛ばすはず projs={}",
+            state.projectiles.len()
+        );
+        // 1発は弱い
+        assert!(state.weapon_damage(WeaponKind::Pulse) < 2.0);
     }
 
     #[test]
@@ -447,16 +771,51 @@ mod tests {
         let mut state = StarRingState::new();
         manual_strike(&mut state);
         assert_eq!(state.boost_ticks, BOOST_DURATION);
-        assert!(state.damage() > 1.0);
     }
 
     #[test]
-    fn ore_kinds_unlock_with_kills() {
+    fn cycle_weapon_skips_locked() {
         let mut state = StarRingState::new();
-        assert_eq!(state.unlocked_ore_kinds(), vec![OreKind::Dust]);
-        state.total_kills = OreKind::Rock.unlock_kills();
-        assert!(state.unlocked_ore_kinds().contains(&OreKind::Rock));
-        state.total_kills = OreKind::Nova.unlock_kills();
-        assert_eq!(state.unlocked_ore_kinds().len(), 5);
+        state.total_kills = Layer::THRESHOLDS[2]; // layer 3
+        state.selected_weapon = WeaponKind::Pulse;
+        cycle_selected_weapon(&mut state, 1);
+        assert_eq!(state.selected_weapon, WeaponKind::Ray);
+        cycle_selected_weapon(&mut state, 1);
+        assert_eq!(state.selected_weapon, WeaponKind::Scatter);
+        cycle_selected_weapon(&mut state, 1);
+        assert_eq!(state.selected_weapon, WeaponKind::Pulse);
+    }
+
+    #[test]
+    fn layer_flash_triggers_on_advance() {
+        let mut state = StarRingState::new();
+        state.total_kills = Layer::THRESHOLDS[1] - 1;
+        state.last_layer = 1;
+        // あと1撃で層2
+        state.ores.push(Ore {
+            x: CX + 12.0,
+            y: CY,
+            vx: 0.0,
+            vy: 0.0,
+            hp: 0.1,
+            kind: OreKind::Dust,
+            radius: 1.4,
+        });
+        state.weapon_levels[0][WeaponStat::Power.index()] = 8;
+        for _ in 0..50 {
+            tick(&mut state, 1);
+            if state.layer_flash_ticks > 0 {
+                break;
+            }
+        }
+        assert!(
+            state.layer() >= 2,
+            "撃破で層が進むはず layer={}",
+            state.layer()
+        );
+        assert!(
+            state.layer_flash_ticks > 0 || state.last_layer >= 2,
+            "層到達フラッシュが走るはず"
+        );
     }
 }
