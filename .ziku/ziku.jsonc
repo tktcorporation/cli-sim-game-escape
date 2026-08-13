@@ -41,17 +41,17 @@
     ".claude/hooks/record-pr-review.sh",
     ".claude/hooks/require-pr-self-review.sh",
     ".claude/rules/ci-workflow.md",
-    ".claude/rules/code-intent-documentation.md",
     ".claude/rules/codex-pairing.md",
-    ".claude/rules/parallel-work.md",
     ".claude/rules/pr-self-review.md",
-    ".claude/rules/pr-workflow.md",
-    ".claude/rules/pre-push-verification.md",
     ".claude/rules/robustness.md",
     ".claude/rules/worktree.md",
     ".claude/rules/conclusion-only-output.md",
     ".claude/rules/agent-work-discipline.md",
     ".claude/rules/pr-writing-style.md",
     ".claude/rules/template-sync-boundary.md"
-  ]
+  ],
+  // custom-id-design.md は Discord Bot 向けルールで、Discord Bot を持たないこのリポジトリには
+  // 適用対象が存在しない。`.claude/rules/*.md` の wildcard include に巻き込まれて取り込まれた
+  // ため、明示的に除外する。
+  "exclude": [".claude/rules/custom-id-design.md"]
 }

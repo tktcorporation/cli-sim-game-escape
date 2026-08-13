@@ -2,7 +2,7 @@
 
 Discord は同一メッセージ内で `custom_id` が重複していると `COMPONENT_CUSTOM_ID_DUPLICATED` でレスポンス全体を拒否する。これを設計で防ぐためのルール。
 
-詳細: `docs/design/custom-id-scope.md`
+このリポジトリは Discord Bot を持たないため、本ルールは適用対象を持たない。Discord Bot を含む別リポジトリでのみ意味を持つ。
 
 ## 必須
 
@@ -29,7 +29,4 @@ const cancel = idScope.exact('cancel', CUSTOM_ID_EVENT_LIST_CANCEL);
 
 ## 関連ファイル
 
-- `worker/src/utils/response-builders/custom-id-scope.ts` — scope 実装
-- `worker/src/errors/validation.ts` — `DuplicateCustomIdAllocationError`
-- `.ast-grep/rules/no-direct-build-custom-id.yml` — CI 強制
-- `docs/design/custom-id-scope.md` — 設計の詳細と背景
+Discord Bot を持つリポジトリでの参照先（`worker/src/utils/response-builders/custom-id-scope.ts` 等）はこのリポジトリには存在しない。
