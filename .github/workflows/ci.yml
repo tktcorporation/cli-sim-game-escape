@@ -47,6 +47,26 @@ jobs:
       - run: cargo install trunk --locked
       - run: trunk build
 
+  docs-lint:
+    name: Docs Lifecycle Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 鮮度チェックはコミット日時を使うため、shallow clone だと機能しない
+          # （scripts/lib/docs-lifecycle 側は shallow を検知して警告付きスキップに倒すが、
+          # CI では検知自体を有効にするためフル履歴を取得する）。
+          fetch-depth: 0
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "10"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run lint:docs
+
   e2e:
     # Metropolis AI Web Worker が「沈黙」せず実際に応答することを検証する。
     # tests/lint_worker_entry.rs (静的 lint) と Playwright (実 chromium で
