@@ -8,13 +8,14 @@
 # 「リンターの設定をLLMに触らせるな」。設定ファイルは不変（immutable）とする。
 set -euo pipefail
 
-input="${CLAUDE_TOOL_INPUT:-}"
+# Claude Code hook はイベント JSON を stdin で渡す（環境変数ではない）。
+input="$(cat)"
 if [[ -z "$input" ]]; then
   exit 0
 fi
 
-# Write/Edit ツールの file_path を取得
-file="$(echo "$input" | jq -r '.file_path // .path // empty' 2>/dev/null || true)"
+# Write/Edit ツールの file_path は tool_input 配下にある。
+file="$(echo "$input" | jq -r '.tool_input.file_path // .tool_input.path // empty' 2>/dev/null || true)"
 if [[ -z "$file" ]]; then
   exit 0
 fi
