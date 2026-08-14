@@ -7,7 +7,6 @@ pub mod factory;
 pub mod godfield;
 pub mod loopmarch;
 pub mod metropolis;
-pub mod pachinko;
 pub mod rpg;
 pub mod starringe;
 
