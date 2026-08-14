@@ -12,9 +12,9 @@
 //!
 //! - `machines` (釘配置) — 来店ごとにホールの並びが変わる方が「今日はどの台が
 //!   回るか」を毎回読む体験になる。読み込み後に `logic::generate_hall` が作り直す。
-//! - `balls` / `digit` / `last_reels` / `pending` / `mode` / `history` / `chain` /
-//!   `has_seated` / 演出の残り tick — 台に着いている間だけの一時状態。
-//!   席を立てば消えるものをリロードで残さない。
+//! - `balls` / `digit` / `last_reels` / `pending` (保留とそのランク) / `mode` /
+//!   `history` / `chain` / `has_seated` / 演出の残り tick / 出玉カウンタ —
+//!   台に着いている間だけの一時状態。席を立てば消えるものをリロードで残さない。
 //! - `invested` — この来店での投資額。来店ごとに 0 から数え直す
 //!   (累計は `record.total_invested` が持つ)。
 

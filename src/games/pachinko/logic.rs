@@ -10,10 +10,11 @@
 
 use super::state::{
     Ball, Digit, HistoryEntry, JackpotState, Machine, MachineSpec, Mode, Nail, PachinkoState,
-    Phase, ReachKind, SpinOutcome, ATTACKER_HALF_W, ATTACKER_PAYOUT, ATTACKER_X, ATTACKER_Y,
-    BALL_LOAN_COUNT, BALL_LOAN_YEN, BALL_R, BOARD_H, BOARD_W, FIRE_INTERVAL_TICKS, HALL_SIZE,
-    HISTORY_LEN, HIT_GLOW_TICKS, INITIAL_REELS, LAUNCH_X, LAUNCH_Y, MACHINE_SPECS, MAX_BALLS,
-    MAX_PENDING, NAIL_R, REACH_FLASH_TICKS, ROUND_COUNT, ROUND_LIMIT_TICKS, SIDE_PAYOUT,
+    Pending, PendingRank, Phase, ReachKind, SpinOutcome, StopStyle, ATTACKER_HALF_W,
+    ATTACKER_PAYOUT, ATTACKER_X, ATTACKER_Y, BALL_LOAN_COUNT, BALL_LOAN_YEN, BALL_R, BOARD_H,
+    BOARD_W, FIRE_INTERVAL_TICKS, HALL_SIZE, HISTORY_LEN, HIT_GLOW_TICKS, INITIAL_REELS, LAUNCH_X,
+    LAUNCH_Y, MACHINE_SPECS, MAX_BALLS, MAX_PENDING, NAIL_R, PENDING_PROMOTE_FLASH_TICKS,
+    RANK_WEIGHT_TOTAL, REACH_FLASH_TICKS, ROUND_COUNT, ROUND_LIMIT_TICKS, SIDE_PAYOUT,
     SIDE_POCKET_HALF_W, SIDE_POCKET_LEFT_X, SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y, START_FLASH_TICKS,
     START_PAYOUT, START_POCKET_BASE_HALF_W, START_POCKET_X, START_POCKET_Y,
 };
@@ -200,6 +201,7 @@ fn step_balls(state: &mut PachinkoState) {
         add_balls(state, ATTACKER_PAYOUT);
         if let Mode::Jackpot(mut j) = state.mode {
             j.count += 1;
+            j.payout += ATTACKER_PAYOUT;
             state.mode = Mode::Jackpot(j);
         }
     }
@@ -282,7 +284,7 @@ fn resolve_start_pocket(state: &mut PachinkoState) {
         return;
     }
     let outcome = roll_outcome(state);
-    state.pending.push(outcome);
+    state.pending.push(Pending::new(outcome));
     if let Some(machine) = state.seated_machine_mut() {
         machine.spins_seen += 1;
     }
@@ -295,25 +297,35 @@ fn seated_spec(state: &PachinkoState) -> MachineSpec {
         .unwrap_or(MACHINE_SPECS[0].1)
 }
 
-/// ヘソ入賞時に当落を確定させる。演出 (リーチ) もここで一緒に決める
-/// (実機と同じく「先に当落が決まり、演出が後から説明する」構造)。
+/// ヘソ入賞時に当落を確定させる。演出 (リーチ・保留ランク・停止の型・確定
+/// シグナル) もここで一緒に決める。演出は当落を決めるのではなく、決まった
+/// 当落を何段階に分けて小出しにするかだけを決める — 実機の「先に当落が
+/// 決まり、演出が後から説明する」構造をそのまま写している。
 pub fn roll_outcome(state: &mut PachinkoState) -> SpinOutcome {
     let spec = seated_spec(state);
     let odds = match state.mode {
         Mode::Kakuhen { .. } => spec.kakuhen_odds,
         _ => spec.normal_odds,
     };
+    let assisted = state.mode.is_assisted();
     let seed = &mut state.rng_state;
     let hit = rng_below(seed, odds.max(1)) == 0;
     let reach = pick_reach(hit, seed);
     let rounds = if hit { pick_rounds(spec, seed) } else { 0 };
     let kakuhen = hit && rng_below(seed, 100) < spec.kakuhen_rate;
+    let rank = pick_rank(hit, seed);
+    let stop = pick_stop_style(hit, reach, rank, seed);
+    let confirmed = pick_confirmed(hit, rank, seed);
     let reels = pick_reels(hit, reach, seed);
     SpinOutcome {
         hit,
         rounds,
         kakuhen,
         reach,
+        rank,
+        stop,
+        confirmed,
+        assisted,
         reels,
     }
 }
@@ -336,6 +348,77 @@ fn pick_reach(hit: bool, seed: &mut u32) -> ReachKind {
             _ => ReachKind::Super,
         }
     }
+}
+
+/// 保留が最終的に到達するランクを引く。当たり側とハズレ側で別の重み表を
+/// 使い、その比が信頼度を決める (`PendingRank::weight_on_hit` 参照)。
+fn pick_rank(hit: bool, seed: &mut u32) -> PendingRank {
+    let weight = |rank: PendingRank| {
+        if hit {
+            rank.weight_on_hit()
+        } else {
+            rank.weight_on_miss()
+        }
+    };
+    let mut roll = rng_below(seed, RANK_WEIGHT_TOTAL);
+    for rank in PendingRank::ALL {
+        let w = weight(rank);
+        if roll < w {
+            return rank;
+        }
+        roll -= w;
+    }
+    PendingRank::White
+}
+
+/// 復活が出る当たりの割合 (%)。稀であることそのものが効き目なので、ここを
+/// 上げると「復活したのに当たり前」になって演出が死ぬ。
+const REVIVAL_PERCENT: u32 = 3;
+/// 惜しいハズレを出す割合 (%)。条件を満たすハズレの中での割合。
+const NEAR_MISS_PERCENT: u32 = 35;
+/// 滑りが出る割合 (%)。当たり/ハズレどちらでも起きるので、滑った時点では
+/// まだ何も分からない — この「分からなさ」が期待を延ばす。
+const SLIP_PERCENT: u32 = 10;
+/// 虹以外の当たりで確定シグナルが立つ割合 (%)。
+const CONFIRMED_PERCENT: u32 = 6;
+
+/// 惜しいハズレを出してよい状況か。無条件に出すと「またか」で慣れてしまい、
+/// 惜しさが情報を運ばなくなる。熱い保留かスーパーリーチ以上に限ることで、
+/// 「期待した上で惜しかった」という筋書きが成り立つ場面だけに絞る。
+fn near_miss_ready(reach: ReachKind, rank: PendingRank) -> bool {
+    rank >= PendingRank::Green || reach >= ReachKind::Super
+}
+
+/// デジタルの止まり方を引く。当落は既に決まっているので、ここは「決まった
+/// 結果をどう見せるか」だけを選ぶ。
+fn pick_stop_style(
+    hit: bool,
+    reach: ReachKind,
+    rank: PendingRank,
+    seed: &mut u32,
+) -> StopStyle {
+    if hit {
+        if rng_below(seed, 100) < REVIVAL_PERCENT {
+            return StopStyle::Revival;
+        }
+    } else if near_miss_ready(reach, rank) && rng_below(seed, 100) < NEAR_MISS_PERCENT {
+        return StopStyle::NearMiss;
+    }
+    if rng_below(seed, 100) < SLIP_PERCENT {
+        StopStyle::Slip
+    } else {
+        StopStyle::Plain
+    }
+}
+
+/// 確定シグナルを立てるか。虹保留は信頼度 100% なので必ず立て、それ以外の
+/// 当たりでは稀に立てる。「確定が存在する」ことが、確定ではない他の全ての
+/// 演出に天井を与える — 期待の階段は、上り切れる場所があって初めて階段になる。
+fn pick_confirmed(hit: bool, rank: PendingRank, seed: &mut u32) -> bool {
+    if !hit {
+        return false;
+    }
+    rank == PendingRank::Rainbow || rng_below(seed, 100) < CONFIRMED_PERCENT
 }
 
 fn pick_rounds(spec: MachineSpec, seed: &mut u32) -> u32 {
@@ -373,6 +456,10 @@ fn pick_reels(hit: bool, reach: ReachKind, seed: &mut u32) -> [u8; 3] {
     }
 }
 
+/// 変動1回ごとに保留が1段昇格する確率 (%)。毎回上がると最終ランクへ数変動で
+/// 着いてしまい、待つ時間が情報を運ばなくなる。
+const PROMOTE_PERCENT: u32 = 50;
+
 /// 保留を1つ消化してデジタルを回し始める。
 fn start_spin_if_idle(state: &mut PachinkoState) {
     if state.digit != Digit::Idle || state.pending.is_empty() {
@@ -382,15 +469,45 @@ fn start_spin_if_idle(state: &mut PachinkoState) {
         // 大当たり中は保留を溜めるだけ。消化はラウンド消化の後に回る。
         return;
     }
-    let outcome = state.pending.remove(0);
+    let outcome = state.pending.remove(0).outcome;
+    promote_pending(state);
     if outcome.reach != ReachKind::None {
         state.reach_flash = REACH_FLASH_TICKS;
         state.reach_flash_kind = outcome.reach;
     }
     state.digit = Digit::Spinning {
-        ticks_left: outcome.reach.spin_ticks(),
+        ticks_left: outcome.reach.spin_ticks() + outcome.stop.extra_ticks(),
         outcome,
     };
+}
+
+/// 待っている保留のランクを最終ランクへ1段ずつ近づける。
+///
+/// 変動の開始ごとに引き直すことで、保留1個から複数回の情報イベントを取り出す。
+/// 「今回っているのはハズレでも、2個先に赤がある」という状態が、当落と無関係な
+/// 通常変動を期待の時間に変える。
+///
+/// 先頭 (次の変動で消化される保留) だけは抽選せず最終ランクまで押し上げる。
+/// 消化されると保留は画面から消えるので、そこで昇格の余地を残すと最終ランクが
+/// 一度も見られないまま終わる。1変動でも待った保留は必ず最終ランクを見せてから
+/// 消化される、というのがここの不変条件になる。
+fn promote_pending(state: &mut PachinkoState) {
+    let seed = &mut state.rng_state;
+    for (index, pending) in state.pending.iter_mut().enumerate() {
+        let target = pending.outcome.rank;
+        if pending.rank >= target {
+            continue;
+        }
+        let next = if index == 0 {
+            target
+        } else if rng_below(seed, 100) < PROMOTE_PERCENT {
+            pending.rank.promoted()
+        } else {
+            continue;
+        };
+        pending.rank = next;
+        pending.promote_flash = PENDING_PROMOTE_FLASH_TICKS;
+    }
 }
 
 fn advance_digit(state: &mut PachinkoState) {
@@ -422,10 +539,13 @@ fn resolve_spin(state: &mut PachinkoState, outcome: SpinOutcome) {
     state.spins_since_jackpot = state.spins_since_jackpot.saturating_add(1);
     if !outcome.hit {
         decay_assist(state);
+        end_chain_if_back_to_normal(state, outcome);
         return;
     }
-    let assisted = state.mode.is_assisted();
-    state.chain = if assisted { state.chain + 1 } else { 1 };
+    // 連チャンの継続は消化時点のモードではなく抽選時点の状態で決める。保留は
+    // 抽選から消化まで時間差があり、その間に電サポが切れることがある —
+    // 消化時点で見ると、電サポ中に引いた当たりが初当たりに化ける。
+    state.chain = if outcome.assisted { state.chain + 1 } else { 1 };
     state.record.best_chain = state.record.best_chain.max(state.chain);
     state.record.total_jackpots += 1;
     state.history.insert(
@@ -445,6 +565,7 @@ fn resolve_spin(state: &mut PachinkoState, outcome: SpinOutcome) {
         count: 0,
         ticks_left: ROUND_LIMIT_TICKS,
         kakuhen: outcome.kakuhen,
+        payout: 0,
     });
     state.add_log(format!("{}Rの大当たり！", outcome.rounds));
 }
@@ -473,14 +594,26 @@ fn decay_assist(state: &mut PachinkoState) {
     }
 }
 
-/// 電サポを終えて通常時へ戻す。連チャンは電サポが続いている間だけ伸びる
-/// ものなので、ここで数え直しに戻す — 残したままだと通常時の画面が
-/// 終わった連チャンを続いているものとして出し続ける。自己記録
-/// (`record.best_chain`) は当たりのたびに更新済みなので失われない。
+/// 電サポを終えて通常時へ戻す。
 fn end_assist(state: &mut PachinkoState, reason: &str) {
     state.mode = Mode::Normal;
-    state.chain = 0;
     state.add_log(reason);
+}
+
+/// 連チャンを数え直しに戻す。残したままだと通常時の画面が終わった連チャンを
+/// 続いているものとして出し続ける。自己記録 (`record.best_chain`) は当たりの
+/// たびに更新済みなので失われない。
+///
+/// 電サポが切れた瞬間ではなく、電サポ中に引いた抽選を消化し尽くしてから戻す。
+/// 保留は抽選から消化まで時間差があり、電サポ切れの直後に残った保留で当たる
+/// (引き戻す) ことがある — その当たりは電サポ中の抽選なので連チャンの一部で、
+/// そこで数え直すと表示も自己記録も過少になる。保留は先入れ先出しなので、
+/// 電サポの外で引いた抽選が通常時に消化された時点で、それより前の抽選は
+/// 全て消化済みだと分かる。
+fn end_chain_if_back_to_normal(state: &mut PachinkoState, outcome: SpinOutcome) {
+    if !outcome.assisted && !state.mode.is_assisted() {
+        state.chain = 0;
+    }
 }
 
 /// 大当たりのラウンド進行。玉が入らないまま時間切れになったラウンドも
@@ -511,6 +644,9 @@ fn advance_jackpot(state: &mut PachinkoState) {
 /// 出揃った」唯一の地点で、保存の契機を待たせたくない瞬間にあたる。
 fn end_jackpot(state: &mut PachinkoState, jackpot: JackpotState) {
     state.jackpot_end_seq = state.jackpot_end_seq.wrapping_add(1);
+    // 出玉は `Mode::Jackpot` が抱えているので、モードを移す前に取り出す。
+    // 終了後のサマリはこの値を読む。
+    state.last_jackpot_payout = jackpot.payout;
     let spec = seated_spec(state);
     if jackpot.kakuhen {
         state.mode = Mode::Kakuhen { spins_left: 0 };
@@ -542,6 +678,7 @@ pub fn tick(state: &mut PachinkoState) {
     advance_digit(state);
     start_spin_if_idle(state);
     auto_reload(state);
+    ease_jackpot_payout(state);
 }
 
 fn decay_glow(state: &mut PachinkoState) {
@@ -550,6 +687,27 @@ fn decay_glow(state: &mut PachinkoState) {
     }
     state.start_flash = state.start_flash.saturating_sub(1);
     state.reach_flash = state.reach_flash.saturating_sub(1);
+    for pending in &mut state.pending {
+        pending.promote_flash = pending.promote_flash.saturating_sub(1);
+    }
+}
+
+/// 出玉カウンタの表示値が実際の値へ 1 tick で詰める割合。
+pub const PAYOUT_EASE_RATE: f64 = 0.20;
+/// 表示値を実際の値へ一致させる差の下限。等比で寄せるだけでは端数が残り続け、
+/// 数字が止まったのに桁の下が揺れる。
+const PAYOUT_SNAP_DIFF: f64 = 0.5;
+
+/// 表示用の出玉を実際の値へ追いつかせる。差の一定割合ずつ詰めるので、内部値が
+/// 一度に跳ねても表示は数 tick かけて登り、数字が動いている時間が伸びる。
+fn ease_jackpot_payout(state: &mut PachinkoState) {
+    let target = state.jackpot_payout() as f64;
+    let diff = target - state.jackpot_payout_shown;
+    if diff.abs() < PAYOUT_SNAP_DIFF {
+        state.jackpot_payout_shown = target;
+    } else {
+        state.jackpot_payout_shown += diff * PAYOUT_EASE_RATE;
+    }
 }
 
 fn try_fire(state: &mut PachinkoState) {
@@ -672,6 +830,9 @@ fn reset_seat(state: &mut PachinkoState) {
     state.spins_since_jackpot = 0;
     state.start_flash = 0;
     state.reach_flash = 0;
+    // 出玉のサマリも前の台で起きた事実なので、移った先へ持ち込まない。
+    state.last_jackpot_payout = 0;
+    state.jackpot_payout_shown = 0.0;
 }
 
 /// 持ち玉を換金して記録へ確定させる。
@@ -1042,6 +1203,7 @@ mod tests {
             count: 0,
             ticks_left: ROUND_LIMIT_TICKS,
             kakuhen: true,
+            payout: 0,
         });
         assert!(!leave_seat(&mut state), "大当たり中に席を立てている");
         assert_eq!(state.phase, Phase::Playing);
@@ -1076,6 +1238,7 @@ mod tests {
             count: 0,
             ticks_left: ROUND_LIMIT_TICKS,
             kakuhen: false,
+            payout: 0,
         });
         tick_n(&mut state, ROUND_LIMIT_TICKS * 4);
         assert!(
@@ -1109,11 +1272,47 @@ mod tests {
     }
 
     fn miss(reach: ReachKind) -> SpinOutcome {
-        SpinOutcome { hit: false, rounds: 0, kakuhen: false, reach, reels: [1, 2, 3] }
+        SpinOutcome {
+            hit: false,
+            rounds: 0,
+            kakuhen: false,
+            reach,
+            rank: PendingRank::White,
+            stop: StopStyle::Plain,
+            confirmed: false,
+            assisted: false,
+            reels: [1, 2, 3],
+        }
     }
 
     fn jackpot(rounds: u32) -> SpinOutcome {
-        SpinOutcome { hit: true, rounds, kakuhen: false, reach: ReachKind::Super, reels: [7, 7, 7] }
+        SpinOutcome {
+            hit: true,
+            rounds,
+            kakuhen: false,
+            reach: ReachKind::Super,
+            rank: PendingRank::Red,
+            stop: StopStyle::Plain,
+            confirmed: false,
+            assisted: false,
+            reels: [7, 7, 7],
+        }
+    }
+
+    /// 電サポ中に引いた当たり。連チャンが伸びるのはこちらだけ。
+    fn assisted_jackpot(rounds: u32) -> SpinOutcome {
+        SpinOutcome {
+            assisted: true,
+            ..jackpot(rounds)
+        }
+    }
+
+    /// 電サポ中に引いたハズレ。
+    fn assisted_miss(reach: ReachKind) -> SpinOutcome {
+        SpinOutcome {
+            assisted: true,
+            ..miss(reach)
+        }
     }
 
     #[test]
@@ -1122,7 +1321,7 @@ mod tests {
         // 時短つきの当たりを引き、電サポ中にもう1回当てて連チャンを伸ばす。
         resolve_spin(&mut state, jackpot(5));
         state.mode = Mode::Jitan { spins_left: 2 };
-        resolve_spin(&mut state, jackpot(5));
+        resolve_spin(&mut state, assisted_jackpot(5));
         state.mode = Mode::Jitan { spins_left: 2 };
         assert_eq!(state.chain, 2);
 
@@ -1250,7 +1449,7 @@ mod tests {
     #[test]
     fn entering_a_reach_lights_the_board_with_its_own_kind() {
         let mut state = seated_state();
-        state.pending.push(miss(ReachKind::Super));
+        state.pending.push(Pending::new(miss(ReachKind::Super)));
         start_spin_if_idle(&mut state);
         assert_eq!(state.reach_flash, REACH_FLASH_TICKS);
         assert_eq!(state.reach_flash_kind, ReachKind::Super);
@@ -1259,7 +1458,7 @@ mod tests {
         // リーチの合図でなくなる。
         state.digit = Digit::Idle;
         state.reach_flash = 0;
-        state.pending.push(miss(ReachKind::None));
+        state.pending.push(Pending::new(miss(ReachKind::None)));
         start_spin_if_idle(&mut state);
         assert_eq!(state.reach_flash, 0);
     }
@@ -1279,6 +1478,317 @@ mod tests {
         tick_n(&mut state, REACH_FLASH_TICKS as u32);
         assert_eq!(state.start_flash, 0, "ヘソの光が消えない");
         assert_eq!(state.reach_flash, 0, "リーチの光が消えない");
+    }
+
+    /// 最終ランクだけを指定したハズレ。ランクは抽選の産物なので、昇格の
+    /// 段取りだけを見たいテストでは直接置く。
+    fn ranked_miss(rank: PendingRank) -> SpinOutcome {
+        SpinOutcome {
+            rank,
+            ..miss(ReachKind::None)
+        }
+    }
+
+    #[test]
+    fn a_new_pending_starts_white_however_hot_it_ends_up() {
+        // 入賞と同時に最終ランクを見せると、待つ間に情報が増えるという体験
+        // そのものが消える。
+        let mut state = seated_state();
+        let mut saw_a_hot_final = false;
+        for _ in 0..2_000 {
+            state.pending.clear();
+            resolve_start_pocket(&mut state);
+            let pending = state.pending[0];
+            assert_eq!(
+                pending.rank,
+                PendingRank::White,
+                "積まれた直後の保留が最終ランク ({}) で現れた",
+                pending.final_rank().label()
+            );
+            saw_a_hot_final |= pending.final_rank() > PendingRank::White;
+        }
+        assert!(
+            saw_a_hot_final,
+            "最終ランクが白の保留しか出ず、飛ばないことの検証になっていない"
+        );
+    }
+
+    #[test]
+    fn a_waiting_pending_climbs_one_rank_at_a_time() {
+        let mut state = seated_state();
+        // 先頭は次の変動で消化されるため最終ランクまで押し上げられる。1段ずつ
+        // 上る様子は、その後ろで待つ保留で見る。
+        state.pending.push(Pending::new(ranked_miss(PendingRank::White)));
+        state.pending.push(Pending::new(ranked_miss(PendingRank::Rainbow)));
+        let mut rank = PendingRank::White;
+        let mut steps = 0;
+        for _ in 0..500 {
+            promote_pending(&mut state);
+            let now = state.pending[1].rank;
+            if now != rank {
+                assert_eq!(
+                    now,
+                    rank.promoted(),
+                    "昇格が段を飛ばした ({} → {})",
+                    rank.label(),
+                    now.label()
+                );
+                rank = now;
+                steps += 1;
+            }
+            if rank == PendingRank::Rainbow {
+                break;
+            }
+        }
+        assert_eq!(steps, 5, "白から虹まで5段を1段ずつ上っていない");
+    }
+
+    #[test]
+    fn a_pending_reaches_its_final_rank_before_it_is_consumed() {
+        // 消化されると保留は画面から消える。最終ランクを一度も見せないまま
+        // 消えると、昇格という情報イベントが最後まで届かない。
+        let mut state = seated_state();
+        for _ in 0..MAX_PENDING {
+            state
+                .pending
+                .push(Pending::new(ranked_miss(PendingRank::Gold)));
+        }
+        while state.pending.len() > 1 {
+            state.digit = Digit::Idle;
+            start_spin_if_idle(&mut state);
+            assert_eq!(
+                state.pending[0].rank,
+                PendingRank::Gold,
+                "次の変動で消化される保留が最終ランクに届いていない"
+            );
+        }
+    }
+
+    #[test]
+    fn a_promotion_flash_survives_a_batched_tick() {
+        // `delta_ticks` は最大5までまとめて来るので、それ未満の長さの
+        // カウンタは一度も描画されないまま消える (`HIT_GLOW_TICKS` 参照)。
+        const { assert!(PENDING_PROMOTE_FLASH_TICKS >= HIT_GLOW_TICKS) };
+        let mut state = seated_state();
+        // 回転中にしておくと保留が消化されず、光の寿命だけを見られる。
+        state.digit = Digit::Spinning {
+            ticks_left: 1_000,
+            outcome: miss(ReachKind::None),
+        };
+        state
+            .pending
+            .push(Pending::new(ranked_miss(PendingRank::Gold)));
+        promote_pending(&mut state);
+        assert_eq!(state.pending[0].promote_flash, PENDING_PROMOTE_FLASH_TICKS);
+        tick_n(&mut state, HIT_GLOW_TICKS as u32);
+        assert!(
+            state.pending[0].promote_flash > 0,
+            "昇格の光が描画される前に消えている"
+        );
+        tick_n(&mut state, PENDING_PROMOTE_FLASH_TICKS as u32);
+        assert_eq!(state.pending[0].promote_flash, 0, "昇格の光が消えない");
+    }
+
+    #[test]
+    fn a_rainbow_pending_never_appears_on_a_loss() {
+        let mut state = seated_state();
+        let mut rainbows = 0;
+        for _ in 0..200_000 {
+            let outcome = roll_outcome(&mut state);
+            if outcome.rank == PendingRank::Rainbow {
+                rainbows += 1;
+                assert!(
+                    outcome.hit,
+                    "虹保留がハズレで出た。出れば当たりという関係が壊れる"
+                );
+            }
+        }
+        assert!(rainbows > 0, "虹保留が一度も出ず、検証になっていない");
+    }
+
+    #[test]
+    fn a_near_miss_needs_a_hot_pending_or_a_super_reach() {
+        // 条件無しに出すと「またか」で慣れ、惜しさが情報を運ばなくなる。
+        let mut state = seated_state();
+        let mut near_misses = 0;
+        for _ in 0..200_000 {
+            let outcome = roll_outcome(&mut state);
+            if outcome.stop != StopStyle::NearMiss {
+                continue;
+            }
+            near_misses += 1;
+            assert!(!outcome.hit, "当たりが惜しいハズレとして止まった");
+            assert!(
+                near_miss_ready(outcome.reach, outcome.rank),
+                "熱くもない回転が惜しいハズレになった (保留={} リーチ={})",
+                outcome.rank.label(),
+                outcome.reach.label()
+            );
+        }
+        assert!(near_misses > 0, "惜しいハズレが一度も出ず、検証になっていない");
+    }
+
+    #[test]
+    fn a_revival_never_appears_on_a_loss() {
+        let mut state = seated_state();
+        let mut revivals = 0;
+        for _ in 0..200_000 {
+            let outcome = roll_outcome(&mut state);
+            if outcome.stop == StopStyle::Revival {
+                revivals += 1;
+                assert!(outcome.hit, "ハズレが復活して揃った");
+            }
+        }
+        assert!(revivals > 0, "復活が一度も出ず、検証になっていない");
+    }
+
+    #[test]
+    fn a_confirmed_signal_always_means_a_hit() {
+        // 確定が嘘をつくと、確定ではない他の全ての演出の意味まで一緒に失われる。
+        let mut state = seated_state();
+        let mut confirmed = 0;
+        let mut rainbows = 0;
+        for _ in 0..200_000 {
+            let outcome = roll_outcome(&mut state);
+            if outcome.confirmed {
+                confirmed += 1;
+                assert!(outcome.hit, "ハズレに確定シグナルが立った");
+            }
+            if outcome.rank == PendingRank::Rainbow {
+                rainbows += 1;
+                assert!(
+                    outcome.confirmed,
+                    "信頼度100%の虹保留に確定シグナルが立っていない"
+                );
+            }
+        }
+        assert!(confirmed > 0, "確定シグナルが一度も立たず、検証になっていない");
+        assert!(rainbows > 0, "虹保留が一度も出ず、検証になっていない");
+    }
+
+    #[test]
+    fn the_stop_style_lengthens_the_spin_it_belongs_to() {
+        let mut state = seated_state();
+        let mut spin_ticks = |stop: StopStyle| {
+            state.digit = Digit::Idle;
+            state.pending.clear();
+            state.pending.push(Pending::new(SpinOutcome {
+                stop,
+                ..miss(ReachKind::None)
+            }));
+            start_spin_if_idle(&mut state);
+            match state.digit {
+                Digit::Spinning { ticks_left, .. } => ticks_left,
+                Digit::Idle => panic!("回転が始まっていない"),
+            }
+        };
+        let plain = spin_ticks(StopStyle::Plain);
+        let slip = spin_ticks(StopStyle::Slip);
+        let revival = spin_ticks(StopStyle::Revival);
+        assert_eq!(plain, ReachKind::None.spin_ticks());
+        assert!(slip > plain, "滑りで回転が伸びていない (滑り={slip} 素={plain})");
+        assert!(
+            revival > slip,
+            "復活が滑りより短い (復活={revival} 滑り={slip})"
+        );
+    }
+
+    #[test]
+    fn a_hit_drawn_during_assistance_keeps_the_chain_after_the_assistance_ends() {
+        // 保留は抽選から消化まで時間差がある。電サポ切れの直後に残保留で
+        // 当たると、消化時点のモードで見た場合だけ初当たりへ化ける。
+        let mut state = seated_state();
+        resolve_spin(&mut state, jackpot(5));
+        assert_eq!(state.chain, 1);
+
+        // 電サポ中に「ハズレ → 当たり」の順で積んだ保留をそのまま消化する。
+        state.mode = Mode::Jitan { spins_left: 1 };
+        resolve_spin(&mut state, assisted_miss(ReachKind::None));
+        assert_eq!(state.mode, Mode::Normal, "時短が切れていない");
+        resolve_spin(&mut state, assisted_jackpot(5));
+
+        assert_eq!(
+            state.chain, 2,
+            "電サポ中に引いた当たりが初当たり扱いになり、連チャンが数え直された"
+        );
+        assert_eq!(state.record.best_chain, 2);
+    }
+
+    #[test]
+    fn the_payout_counter_closes_in_on_the_actual_ball_count() {
+        // 内部値が一度に跳ねても表示は数 tick かけて登る。差が縮み続けること
+        // (＝止まらない・追い越さない) がカウンタの見え方を支える。
+        let mut state = seated_state();
+        state.mode = Mode::Jackpot(JackpotState {
+            round: 1,
+            total_rounds: 16,
+            count: 0,
+            ticks_left: ROUND_LIMIT_TICKS,
+            kakuhen: false,
+            payout: 1_200,
+        });
+        let target = 1_200.0;
+        let mut prev = target - state.jackpot_payout_shown;
+        let mut ticks = 0;
+        for _ in 0..200 {
+            ease_jackpot_payout(&mut state);
+            let diff = target - state.jackpot_payout_shown;
+            assert!(diff >= 0.0, "表示値が実際の値を追い越した ({diff})");
+            assert!(diff < prev, "表示値が実際の値へ近づいていない ({prev} → {diff})");
+            prev = diff;
+            ticks += 1;
+            if diff == 0.0 {
+                break;
+            }
+        }
+        assert_eq!(
+            state.jackpot_payout_shown, target,
+            "表示値が実際の値に追いつかない"
+        );
+        assert!(ticks > 1, "1 tick で追いついてしまい、数字が動く時間がない");
+    }
+
+    #[test]
+    fn the_payout_of_a_finished_jackpot_stays_readable() {
+        // 終了後のサマリはこの値を読む。モードが移った瞬間に消えると、
+        // 「何発出たか」を見せる相手が居なくなる。
+        let mut state = seated_state();
+        state.mode = Mode::Jackpot(JackpotState {
+            round: 1,
+            total_rounds: 1,
+            count: 0,
+            ticks_left: 1,
+            kakuhen: false,
+            payout: 320,
+        });
+        tick(&mut state);
+        assert!(
+            !matches!(state.mode, Mode::Jackpot(_)),
+            "大当たりが終わっていない"
+        );
+        assert_eq!(state.jackpot_payout(), 320);
+    }
+
+    #[test]
+    fn attacker_entries_add_up_into_the_jackpot_payout() {
+        let mut state = state_with_nails(Vec::new());
+        state.mode = Mode::Jackpot(JackpotState {
+            round: 1,
+            total_rounds: 16,
+            count: 0,
+            ticks_left: ROUND_LIMIT_TICKS,
+            kakuhen: false,
+            payout: 0,
+        });
+        state.balls.push(Ball {
+            x: ATTACKER_X,
+            y: ATTACKER_Y - 0.5,
+            vx: 0.0,
+            vy: MAX_SPEED,
+            hit_glow: 0,
+        });
+        step_balls(&mut state);
+        assert_eq!(state.jackpot_payout(), ATTACKER_PAYOUT);
     }
 
     #[test]

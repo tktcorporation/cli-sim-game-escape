@@ -69,6 +69,9 @@ pub const START_FLASH_TICKS: u8 = 6;
 /// リーチに入った瞬間に盤面を光らせる長さ (tick)。1回転につき一度しか
 /// 起きない事象なので、何度も起きるヘソ入賞より長く残す。
 pub const REACH_FLASH_TICKS: u8 = 10;
+/// 保留のランクが上がった瞬間を光らせる長さ (tick)。下限の理由は
+/// `HIT_GLOW_TICKS` と同じ。
+pub const PENDING_PROMOTE_FLASH_TICKS: u8 = 6;
 
 // ── フェーズ ───────────────────────────────────────────────────
 
@@ -183,7 +186,9 @@ pub struct Ball {
 
 /// リーチ (演出) の格。格が上がるほど当たりの割合が高いが、その対応は
 /// プレイヤーが観察して掴むもので、UI では信頼度を明示しない。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// バリアントの並びは格の昇順で、`Ord` はその順序をそのまま表す。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ReachKind {
     /// リーチにならない通常ハズレ。
     None,
@@ -248,6 +253,173 @@ impl ReachKind {
     }
 }
 
+// ── 保留のランク ───────────────────────────────────────────────
+
+/// 保留の熱さ。色と形の二重符号化で見せる (色覚多様性への配慮と、
+/// 16色端末で色が潰れた場合の保険)。信頼度は UI では明かさない。
+///
+/// バリアントの並びは熱さの昇順で、`Ord` はその順序をそのまま表す。保留の
+/// 昇格はこの並びを1段ずつ上る。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PendingRank {
+    White,
+    Blue,
+    Green,
+    Red,
+    Gold,
+    Rainbow,
+}
+
+/// ランク抽選の重みの分母。`weight_on_hit` / `weight_on_miss` はそれぞれ
+/// この値を合計に持つ。百分率では刻めない細かさ (金はハズレ 4000 回に 1 回)
+/// を扱うため、分母を大きく取る。
+pub const RANK_WEIGHT_TOTAL: u32 = 100_000;
+
+impl PendingRank {
+    /// 熱さの昇順。昇格の1段上を引くのと、テストでランク全種を舐めるのに使う。
+    pub const ALL: [PendingRank; 6] = [
+        PendingRank::White,
+        PendingRank::Blue,
+        PendingRank::Green,
+        PendingRank::Red,
+        PendingRank::Gold,
+        PendingRank::Rainbow,
+    ];
+
+    /// 当たりを引いた抽選のうち、このランクへ到達する割合 (`RANK_WEIGHT_TOTAL` 分の)。
+    ///
+    /// 信頼度 `P(当たり | ランク)` は当たり時とハズレ時の出現率の**比**が決める。
+    /// 大当たり確率 p のとき `p·a / (p·a + (1-p)·b)` で、a がここ、b が
+    /// `weight_on_miss`。この台の確率 (1/45〜1/105) は実機より甘いので、
+    /// 実機の比をそのまま持ち込むと全ランクが当たり確定に近づいてしまう。
+    /// 1/80 の台で 白<1% / 青5% / 緑18% / 赤45% / 金80% / 虹100% になる比に
+    /// 合わせてある (`simulator::pending_rank_reliability_report` が実測する)。
+    pub fn weight_on_hit(self) -> u32 {
+        match self {
+            PendingRank::White => 30_000,
+            PendingRank::Blue => 24_000,
+            PendingRank::Green => 22_000,
+            PendingRank::Red => 14_000,
+            PendingRank::Gold => 8_000,
+            PendingRank::Rainbow => 2_000,
+        }
+    }
+
+    /// ハズレを引いた抽選のうち、このランクへ到達する割合 (`RANK_WEIGHT_TOTAL` 分の)。
+    ///
+    /// 虹だけ 0 にしてあり、出れば当たりになる。白がハズレのほぼ全てを占める
+    /// ことが、上のランクの希少さ (＝出たときの意味) を支える。
+    pub fn weight_on_miss(self) -> u32 {
+        match self {
+            PendingRank::White => 92_718,
+            PendingRank::Blue => 5_770,
+            PendingRank::Green => 1_270,
+            PendingRank::Red => 217,
+            PendingRank::Gold => 25,
+            PendingRank::Rainbow => 0,
+        }
+    }
+
+    /// 1段上のランク。虹より上は無いので虹はそのまま返す。
+    pub fn promoted(self) -> PendingRank {
+        match self {
+            PendingRank::White => PendingRank::Blue,
+            PendingRank::Blue => PendingRank::Green,
+            PendingRank::Green => PendingRank::Red,
+            PendingRank::Red => PendingRank::Gold,
+            PendingRank::Gold => PendingRank::Rainbow,
+            PendingRank::Rainbow => PendingRank::Rainbow,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PendingRank::White => "白",
+            PendingRank::Blue => "青",
+            PendingRank::Green => "緑",
+            PendingRank::Red => "赤",
+            PendingRank::Gold => "金",
+            PendingRank::Rainbow => "虹",
+        }
+    }
+
+    /// 保留玉として並べる記号。中抜き→塗り潰し、円→菱形→星と、色を見なくても
+    /// 熱さの順序が読める並びにしてある。
+    pub fn mark(self) -> char {
+        match self {
+            PendingRank::White => '○',
+            PendingRank::Blue => '●',
+            PendingRank::Green => '◇',
+            PendingRank::Red => '◆',
+            PendingRank::Gold => '☆',
+            PendingRank::Rainbow => '★',
+        }
+    }
+
+    pub fn color(self) -> Color {
+        match self {
+            PendingRank::White => Color::White,
+            PendingRank::Blue => Color::LightBlue,
+            PendingRank::Green => Color::LightGreen,
+            PendingRank::Red => Color::LightRed,
+            PendingRank::Gold => Color::LightYellow,
+            PendingRank::Rainbow => Color::LightMagenta,
+        }
+    }
+}
+
+// ── 図柄の止まり方 ─────────────────────────────────────────────
+
+/// デジタルの停止の型。当落そのものは変えず、確定済みの結果をどう小出しに
+/// するかだけを決める。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopStyle {
+    /// 素直に止まる。
+    Plain,
+    /// ハズレ位置で一度止まりかけてから1コマ滑って動く。当たり/ハズレ両方で起きる。
+    Slip,
+    /// 当たり目の隣で止まる惜しいハズレ。
+    NearMiss,
+    /// 完全に停止した後、間を置いて中桁が逆回転して揃う (当たり限定・稀)。
+    Revival,
+}
+
+impl StopStyle {
+    /// 描画側の演出リストが全種を網羅しているかをテストで突き合わせるために持つ。
+    pub const ALL: [StopStyle; 4] = [
+        StopStyle::Plain,
+        StopStyle::Slip,
+        StopStyle::NearMiss,
+        StopStyle::Revival,
+    ];
+
+    /// `ReachKind::spin_ticks` へ上乗せする回転時間 (tick)。滑りや復活は
+    /// 「止まったと思わせてから動かす」演出なので、その間を確保しないと
+    /// 結果と同時にしか見えない。
+    ///
+    /// ここを伸ばすほど1回転が長くなり、保留が詰まって抽選を受けられない
+    /// ヘソ入賞が増える (＝実効回転率が落ちる)。
+    /// `simulator::stop_style_report` が遊技時間への影響を実測する。
+    pub fn extra_ticks(self) -> u32 {
+        match self {
+            StopStyle::Plain => 0,
+            StopStyle::Slip => 3,
+            StopStyle::NearMiss => 5,
+            StopStyle::Revival => 20,
+        }
+    }
+
+    /// 型の名前。履歴・記録のような「起きた事実」の表示に使う。
+    pub fn label(self) -> &'static str {
+        match self {
+            StopStyle::Plain => "通常停止",
+            StopStyle::Slip => "滑り",
+            StopStyle::NearMiss => "惜しいハズレ",
+            StopStyle::Revival => "復活",
+        }
+    }
+}
+
 /// 1回転の結果。ヘソ入賞の時点で確定させ、演出はこの結果に沿って分岐する
 /// (実機と同じく「先に当落が決まり、演出が後から説明する」構造)。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -259,8 +431,48 @@ pub struct SpinOutcome {
     pub kakuhen: bool,
     /// 演出の格。ハズレでもリーチにはなる。
     pub reach: ReachKind,
+    /// この抽選を保留として待たせる間に到達するランク。抽選と同時に決まり、
+    /// 表示は白から段階的にここへ近づく (`Pending::rank`)。
+    pub rank: PendingRank,
+    /// デジタルの止まり方。
+    pub stop: StopStyle,
+    /// 大当たり確定を告げる演出を出すか。ハズレでは決して立たない。
+    pub confirmed: bool,
+    /// 抽選を引いた時点で電サポ中だったか。保留は抽選から消化まで時間差が
+    /// あり、その間に電サポが切れて `Mode::Normal` へ戻ることがある。連チャン
+    /// は「電サポが続いている間に引いた当たり」の連なりなので、消化時点の
+    /// モードで判断すると電サポ切れ直後の残保留での当たりが初当たり扱いになる。
+    pub assisted: bool,
     /// 停止出目 (3桁)。当たりならゾロ目、リーチならリーチ目になる。
     pub reels: [u8; 3],
+}
+
+/// 消化を待っている保留1個。抽選結果 (`outcome`) は入賞時に確定済みで、
+/// 表示ランクだけが変動のたびに最終ランクへ近づいていく。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pending {
+    pub outcome: SpinOutcome,
+    /// 今この保留として見えているランク。
+    pub rank: PendingRank,
+    /// ランクが上がった瞬間を光らせる残り tick。
+    pub promote_flash: u8,
+}
+
+impl Pending {
+    /// 積まれたばかりの保留。表示は必ず白から始める — 入賞と同時に最終ランクを
+    /// 見せてしまうと、待っている間に情報が増えるという体験そのものが消える。
+    pub fn new(outcome: SpinOutcome) -> Self {
+        Self {
+            outcome,
+            rank: PendingRank::White,
+            promote_flash: 0,
+        }
+    }
+
+    /// この保留が最終的に到達するランク。
+    pub fn final_rank(self) -> PendingRank {
+        self.outcome.rank
+    }
 }
 
 /// 台に着いた直後に表示しておく出目。ゾロ目にすると、まだ一度も回して
@@ -306,6 +518,8 @@ pub struct JackpotState {
     pub ticks_left: u32,
     /// 大当たり終了後に確変へ入るか。
     pub kakuhen: bool,
+    /// この大当たりでアタッカーから得た賞球の累計。ラウンドをまたいで積み上がる。
+    pub payout: u32,
 }
 
 /// 現在の遊技状態。確変・時短は「ヘソが広がる / 確率が上がる」形で盤面に効く。
@@ -444,7 +658,7 @@ pub struct PachinkoState {
     /// 台の当たり状況が液晶から読めるのと同じ見え方になる。
     pub last_reels: [u8; 3],
     /// 保留 (最大 `MAX_PENDING`)。ヘソ入賞のたびに積まれ、順に消化される。
-    pub pending: Vec<SpinOutcome>,
+    pub pending: Vec<Pending>,
     pub mode: Mode,
     /// 直近の大当たり履歴 (新しい順、最大 `HISTORY_LEN` 件)。
     pub history: Vec<HistoryEntry>,
@@ -467,6 +681,14 @@ pub struct PachinkoState {
     /// `reach_flash` で光らせる色を決める格。光の有無と色を1組で持つことで、
     /// 描画側は `Digit` の中身を辿らずに枠を塗れる。
     pub reach_flash_kind: ReachKind,
+    /// 直近に終わった大当たりの獲得玉数。終了後のサマリ表示が参照するので、
+    /// 大当たりが終わっても消さない。進行中の値は `Mode::Jackpot` が持つ
+    /// (`jackpot_payout` が両者を1つの読み口にまとめる)。
+    pub last_jackpot_payout: u32,
+    /// 出玉カウンタの表示値。`jackpot_payout` へ毎 tick 少しずつ寄せることで、
+    /// 内部値が一度に跳ねても数字は数 tick かけて追いつく — 「増え続けている」
+    /// 手応えは、増えた事実より数字が動いている時間の長さが作る。
+    pub jackpot_payout_shown: f64,
     /// 前回の大当たりから消化したデジタル回転数 (ハマり回数)。大当たりの
     /// たびに 0 へ戻す。`jackpot_seq` とは別に持つ — あちらは「増えたか」
     /// しか見ない約束なので、0 へ戻す値を兼ねさせられない。
@@ -513,6 +735,8 @@ impl PachinkoState {
             start_flash: 0,
             reach_flash: 0,
             reach_flash_kind: ReachKind::None,
+            last_jackpot_payout: 0,
+            jackpot_payout_shown: 0.0,
             spins_since_jackpot: 0,
             record: Record::default(),
             hall_scroll: Cell::new(0),
@@ -567,6 +791,16 @@ impl PachinkoState {
     pub fn seated_machine_mut(&mut self) -> Option<&mut Machine> {
         self.machines.get_mut(self.seat)
     }
+
+    /// 出玉カウンタが目指す値。大当たり中は進行中の獲得数、終わった後は
+    /// 直近の大当たりの獲得数。読み手が「今どちらを見るべきか」を判断せずに
+    /// 済むよう、1つの読み口にまとめる。
+    pub fn jackpot_payout(&self) -> u32 {
+        match self.mode {
+            Mode::Jackpot(jackpot) => jackpot.payout,
+            _ => self.last_jackpot_payout,
+        }
+    }
 }
 
 impl Default for PachinkoState {
@@ -606,6 +840,67 @@ mod tests {
                 pair[0].label()
             );
         }
+    }
+
+    #[test]
+    fn rank_weights_add_up_on_both_sides() {
+        // 抽選 (`logic` のランク抽選) は重みの合計が `RANK_WEIGHT_TOTAL` である
+        // ことを前提に 1 回の乱数で引く。合計がずれると末尾のランクだけが
+        // 出なくなったり、逆に取りこぼしの受け皿になったりする。
+        let sum = |f: fn(PendingRank) -> u32| -> u32 { PendingRank::ALL.iter().map(|&r| f(r)).sum() };
+        assert_eq!(sum(PendingRank::weight_on_hit), RANK_WEIGHT_TOTAL);
+        assert_eq!(sum(PendingRank::weight_on_miss), RANK_WEIGHT_TOTAL);
+    }
+
+    #[test]
+    fn rank_reliability_climbs_with_the_rank() {
+        // 信頼度は当たり時とハズレ時の出現率の比が決める。比が単調に上がって
+        // いないと、上のランクほど熱いという関係そのものが崩れる。虹は
+        // ハズレ側が 0 なので比が定義できず、末尾で別に見る。
+        let ratio = |rank: PendingRank| {
+            rank.weight_on_hit() as f64 / rank.weight_on_miss().max(1) as f64
+        };
+        for pair in PendingRank::ALL.windows(2) {
+            if pair[1] == PendingRank::Rainbow {
+                continue;
+            }
+            assert!(
+                ratio(pair[0]) < ratio(pair[1]),
+                "{} より {} の方が当たりから遠い",
+                pair[1].label(),
+                pair[0].label()
+            );
+        }
+        assert_eq!(
+            PendingRank::Rainbow.weight_on_miss(),
+            0,
+            "虹がハズレでも出る。出れば当たりという関係が壊れる"
+        );
+    }
+
+    #[test]
+    fn promoted_walks_the_rank_order_and_stops_at_the_top() {
+        for pair in PendingRank::ALL.windows(2) {
+            assert_eq!(pair[0].promoted(), pair[1]);
+        }
+        assert_eq!(PendingRank::Rainbow.promoted(), PendingRank::Rainbow);
+    }
+
+    #[test]
+    fn a_slipping_or_reviving_stop_holds_the_reels_longer() {
+        // 「止まったと思わせてから動かす」演出は、その間を確保しないと結果と
+        // 同時にしか見えない。素直な停止より必ず長く回る必要がある。
+        for stop in [StopStyle::Slip, StopStyle::NearMiss, StopStyle::Revival] {
+            assert!(
+                stop.extra_ticks() > StopStyle::Plain.extra_ticks(),
+                "{} が素直な停止と同じ長さで終わっている",
+                stop.label()
+            );
+        }
+        assert!(
+            StopStyle::Revival.extra_ticks() > StopStyle::Slip.extra_ticks(),
+            "復活が滑りより短い。完全停止からの間が取れない"
+        );
     }
 
     #[test]

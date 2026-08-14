@@ -306,6 +306,7 @@ mod tests {
             count: 0,
             ticks_left: state::ROUND_LIMIT_TICKS,
             kakuhen: true,
+            payout: 0,
         });
         assert!(game.handle_input(&InputEvent::Key('q')));
         assert_eq!(game.state.phase, Phase::Playing);
@@ -327,6 +328,7 @@ mod tests {
             count: 0,
             ticks_left: state::ROUND_LIMIT_TICKS,
             kakuhen: true,
+            payout: 0,
         });
         assert!(game.handle_input(&click(crate::BACK_TO_MENU)));
         assert_eq!(game.state.phase, Phase::Playing);
@@ -507,6 +509,7 @@ mod tests {
             count: 0,
             ticks_left: 1,
             kakuhen: false,
+            payout: 0,
         })
     }
 
@@ -546,6 +549,7 @@ mod tests {
             count: 0,
             ticks_left: state::ROUND_LIMIT_TICKS,
             kakuhen: true,
+            payout: 0,
         });
         let countdown_before = game.save_countdown;
         game.tick(1);
@@ -572,6 +576,7 @@ mod tests {
             count: 0,
             ticks_left: state::ROUND_LIMIT_TICKS,
             kakuhen: true,
+            payout: 0,
         });
         game.save_countdown = 1;
         game.tick(5);

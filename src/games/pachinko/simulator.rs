@@ -19,8 +19,9 @@
 
 use super::logic::{self, NAIL_SPREAD_RANGE, RAIL_BIAS_RANGE};
 use super::state::{
-    Digit, Machine, Mode, PachinkoState, ReachKind, BALL_LOAN_COUNT, BALL_LOAN_YEN, BALL_R, BOARD_H,
-    BOARD_W, FIRE_INTERVAL_TICKS, HALL_SIZE, HIT_GLOW_TICKS, MACHINE_SPECS, MAX_BALLS, MAX_PENDING,
+    Digit, Machine, Mode, PachinkoState, PendingRank, ReachKind, StopStyle, BALL_LOAN_COUNT,
+    BALL_LOAN_YEN, BALL_R, BOARD_H, BOARD_W, FIRE_INTERVAL_TICKS, HALL_SIZE, HIT_GLOW_TICKS,
+    MACHINE_SPECS, MAX_BALLS, MAX_PENDING,
 };
 
 // ── 自動プレイ ─────────────────────────────────────────────────
@@ -334,6 +335,68 @@ fn reach_tally(spec_index: usize, trials: u32) -> ([u32; 4], [u32; 4]) {
     (seen, hits)
 }
 
+fn rank_index(rank: PendingRank) -> usize {
+    PendingRank::ALL
+        .iter()
+        .position(|&r| r == rank)
+        .expect("PendingRank::ALL に無いランク")
+}
+
+fn stop_index(stop: StopStyle) -> usize {
+    StopStyle::ALL
+        .iter()
+        .position(|&s| s == stop)
+        .expect("StopStyle::ALL に無い停止型")
+}
+
+/// 1台につき `trials` 回抽選を引いた集計。演出の設計は「決まった結果を
+/// どう小出しにするか」なので、確かめたいのは出現率そのものではなく、
+/// 出現率と当たり率の対応関係になる。
+struct EffectTally {
+    /// ランクごとの (出現数, 当たり数)。
+    rank_seen: [u32; 6],
+    rank_hits: [u32; 6],
+    /// 停止の型ごとの出現数。
+    stop_seen: [u32; 4],
+    /// 停止の型による回転時間の上乗せ (tick) の合計。
+    extra_ticks: u64,
+    /// 素の回転時間 (`ReachKind::spin_ticks`) の合計。
+    base_ticks: u64,
+    hits: u32,
+    confirmed: u32,
+}
+
+fn effect_tally(spec_index: usize, trials: u32) -> EffectTally {
+    let mut nail_seed = 0x0F0F_0F0F;
+    let machine = machine_with(spec_index, 0.5, 0.0, &mut nail_seed);
+    let mut state = seated_state(0x1234_ABCD, machine);
+    let mut tally = EffectTally {
+        rank_seen: [0; 6],
+        rank_hits: [0; 6],
+        stop_seen: [0; 4],
+        extra_ticks: 0,
+        base_ticks: 0,
+        hits: 0,
+        confirmed: 0,
+    };
+    for _ in 0..trials {
+        let outcome = logic::roll_outcome(&mut state);
+        let slot = rank_index(outcome.rank);
+        tally.rank_seen[slot] += 1;
+        tally.stop_seen[stop_index(outcome.stop)] += 1;
+        tally.extra_ticks += outcome.stop.extra_ticks() as u64;
+        tally.base_ticks += outcome.reach.spin_ticks() as u64;
+        if outcome.hit {
+            tally.hits += 1;
+            tally.rank_hits[slot] += 1;
+        }
+        if outcome.confirmed {
+            tally.confirmed += 1;
+        }
+    }
+    tally
+}
+
 // ── レポート ───────────────────────────────────────────────────
 
 /// 玉の動きが目で追える速さかを測る。10 ticks/sec で描画するので、1 tick の
@@ -552,6 +615,66 @@ fn reach_reliability_report() {
             eprint!(" {}={rate:5.1}%({}回)", kind.label(), seen[slot]);
         }
         eprintln!();
+    }
+}
+
+/// 保留のランクごとの実際の当たり率 (＝信頼度) と出現率。
+///
+/// 信頼度は当たり時とハズレ時の出現率の比が決めるので、狙った値になっている
+/// かは実測でしか読めない (`PendingRank::weight_on_hit` 参照)。狙いは 1/80 の
+/// 花火繚乱で 白<1% / 青5% / 緑18% / 赤45% / 金80% / 虹100%。
+#[test]
+fn pending_rank_reliability_report() {
+    const TRIALS: u32 = 400_000;
+    eprintln!("[pachinko/rank] 保留ランクごとの当たり率と出現率 (試行={TRIALS}/機種)");
+    for (index, (name, spec)) in MACHINE_SPECS.iter().enumerate() {
+        let tally = effect_tally(index, TRIALS);
+        eprintln!("  {name:8} 1/{}", spec.normal_odds);
+        for rank in PendingRank::ALL {
+            let slot = rank_index(rank);
+            let seen = tally.rank_seen[slot];
+            let rate = if seen == 0 {
+                0.0
+            } else {
+                tally.rank_hits[slot] as f64 / seen as f64 * 100.0
+            };
+            eprintln!(
+                "    {} 信頼度={rate:6.2}%  出現={:6.3}% ({seen}回 / 当たり{}回)",
+                rank.label(),
+                seen as f64 / TRIALS as f64 * 100.0,
+                tally.rank_hits[slot],
+            );
+        }
+    }
+}
+
+/// 停止の型ごとの発生率と、それが遊技時間へ与える影響。
+///
+/// 上乗せ tick は1回転を長くする。回転が長いほど保留が詰まり、抽選を受け
+/// られないヘソ入賞が増える (＝実効回転率が落ちる) ので、演出の見応えと
+/// 遊技のテンポはここでトレードオフになる。
+#[test]
+fn stop_style_report() {
+    const TRIALS: u32 = 400_000;
+    eprintln!("[pachinko/stop] 停止の型の発生率と回転時間への影響 (試行={TRIALS}/機種)");
+    for (index, (name, _)) in MACHINE_SPECS.iter().enumerate() {
+        let tally = effect_tally(index, TRIALS);
+        eprint!("  {name:8}");
+        for stop in StopStyle::ALL {
+            eprint!(
+                " {}={:.3}%",
+                stop.label(),
+                tally.stop_seen[stop_index(stop)] as f64 / TRIALS as f64 * 100.0
+            );
+        }
+        eprintln!(
+            " | 平均変動={:.2}tick (素={:.2} 上乗せ={:.3} = {:+.2}%) 確定={:.4}%",
+            (tally.base_ticks + tally.extra_ticks) as f64 / TRIALS as f64,
+            tally.base_ticks as f64 / TRIALS as f64,
+            tally.extra_ticks as f64 / TRIALS as f64,
+            tally.extra_ticks as f64 / tally.base_ticks as f64 * 100.0,
+            tally.confirmed as f64 / TRIALS as f64 * 100.0,
+        );
     }
 }
 
@@ -840,12 +963,69 @@ fn higher_reach_kind_has_higher_hit_rate() {
     }
 }
 
+/// 保留のランクが上がるほど当たりが近いこと。ランクは「当たる確率を変える
+/// もの」ではなく「既に決まった当落を小出しにするもの」なので、この対応が
+/// 崩れると赤や金を見ても何も期待できなくなり、昇格という情報イベントが
+/// ただの色の変化に落ちる。
+#[test]
+fn a_hotter_pending_rank_hits_more_often() {
+    // 虹は当たりの2%にしか現れず、その当たり自体が最も重い台で1/105。
+    // 全ランクが順序を測れる本数に届くまで試行を積む。
+    const TRIALS: u32 = 800_000;
+    for (index, (name, _)) in MACHINE_SPECS.iter().enumerate() {
+        let tally = effect_tally(index, TRIALS);
+        let rate = |rank: PendingRank| {
+            let slot = rank_index(rank);
+            if tally.rank_seen[slot] == 0 {
+                0.0
+            } else {
+                tally.rank_hits[slot] as f64 / tally.rank_seen[slot] as f64
+            }
+        };
+        // 金は当たり8%対ハズレ0.025%と細いので、標本が薄いまま順序を見ると
+        // 揺らぎで簡単に逆転する。まず本数を確かめる。
+        for rank in PendingRank::ALL {
+            let slot = rank_index(rank);
+            assert!(
+                tally.rank_seen[slot] > 100,
+                "{name}: {} 保留が {}回しか出ておらず信頼度を測れない",
+                rank.label(),
+                tally.rank_seen[slot]
+            );
+        }
+        for pair in PendingRank::ALL.windows(2) {
+            assert!(
+                rate(pair[1]) > rate(pair[0]),
+                "{name}: {} 保留が {} 保留より当たらない — ランクと信頼度の対応が逆転している \
+                 ({}={:.2}% {}={:.2}%)",
+                pair[1].label(),
+                pair[0].label(),
+                pair[1].label(),
+                rate(pair[1]) * 100.0,
+                pair[0].label(),
+                rate(pair[0]) * 100.0,
+            );
+        }
+        assert_eq!(
+            rate(PendingRank::Rainbow),
+            1.0,
+            "{name}: 虹保留がハズレでも出ている"
+        );
+    }
+}
+
 /// 出玉率が 1.0 を割っていること。ここを超えると打つほど玉が増え、軍資金と
 /// いう制約が消えて「やめどき」という判断軸そのものが無くなる。
 ///
 /// ホールに並びうる最良の釘 (`NAIL_SPREAD_RANGE` の上限) を、寄り釘の傾きの
 /// 両端と組み合わせて確かめる。回転率は開きと傾きの両方で動くので、開きだけを
 /// 最大にしても最良の台にはならない。
+///
+/// 判定は釘1通りごとの最大値ではなく平均で行う。`TICKS` の間に引ける大当たり
+/// は荒い台で10回に満たず、1通りの実測値は台の性質より引きの強さで決まる —
+/// 素の分布でも3%前後の釘が 1.0 を超えるので、最大値で判定すると乱数列が
+/// ずれるだけで落ちる。平均なら標本のばらつきが `LAYOUTS` 分の1に縮み、
+/// 台そのものの出玉率を見られる。
 #[test]
 fn payout_ratio_stays_below_break_even() {
     const LAYOUTS: u32 = 6;
@@ -865,13 +1045,14 @@ fn payout_ratio_stays_below_break_even() {
                     )
                 })
                 .collect();
-            let worst = *sorted(ratios.clone()).last().expect("試行が0件");
+            let average = mean(&ratios);
             assert!(
-                worst < 1.0,
+                average < 1.0,
                 "{name}: ホールに並びうる最良の釘の長期出玉率が 1.0 を超えた — \
                  打つほど玉が増えて軍資金が尽きなくなる \
-                 (開き={spread:.2} 傾き={bias:+.2} 最大={worst:.3} 平均={:.3} 釘{LAYOUTS}通り)",
-                mean(&ratios)
+                 (開き={spread:.2} 傾き={bias:+.2} 平均={average:.3} \
+                 最大={:.3} 釘{LAYOUTS}通り)",
+                sorted(ratios).last().copied().unwrap_or(0.0)
             );
         }
     }
@@ -991,3 +1172,4 @@ fn the_ball_cap_does_not_throttle_the_firing_rate() {
          (最大={peak_on_board}/{MAX_BALLS})"
     );
 }
+
