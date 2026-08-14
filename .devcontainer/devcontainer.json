@@ -113,11 +113,31 @@
     "trust-mise": ["bash", "-lc", "mise trust"],
     "setup-git-user": ["bash", "-l", ".devcontainer/setup-git-user.sh"],
     // vite-plus (vp) CLI: Vite, Vitest, Oxlint, Oxfmt, Rolldown, tsdown を統合した開発ツールチェーン
-    // CI=true で Node.js 管理の対話プロンプトをスキップ
-    "install-vite-plus": ["bash", "-c", "CI=true curl -fsSL https://vite.plus | bash"]
+    // Node.js のバージョン管理は mise に一任するため vp に shim (node/npm/npx) を作らせない。
+    // VP_NODE_MANAGER=no は CI/devcontainer 自動有効化より優先されるオプトアウト。
+    // CI=true は失敗時にインストールログを標準出力にインライン出力させるため (devcontainer ビルドログで追跡しやすくする)。
+    // env はパイプ右の bash に付与する。インストーラはこの bash 内で走るため、左の curl に付けると bash へ届かず opt-out が無効化される。
+    "install-vite-plus": [
+      "bash",
+      "-c",
+      "curl -fsSL https://vite.plus | VP_NODE_MANAGER=no CI=true bash"
+    ]
   },
   "postCreateCommand": {
     "fix-pnpm-store-permissions": ["bash", "-lc", "sudo chown -R $(whoami) .pnpm-store"],
+    // vp の Node マネージャを system-first モードにする（Node/グローバルツールは mise に一任する方針）。
+    // 背景: vp には「パッケージ管理だけを切る」インストールオプション（VP_NODE_MANAGER=no の package 版）は
+    // 存在しない。一方で実際に mise を shadow し得るのは vp の node/npm/npx shim（= Node マネージャ管轄）であり、
+    // vp は既定で pnpm の shim は作らないため pnpm 自体は mise のまま奪われない。
+    // VP_NODE_MANAGER=no は「その 1 回の install 限り」の抑止なので、`vp install -g` 等で shim が再生成され得る。
+    // `vp env off` を入れておくと、shim が存在しても system(mise) の Node を優先し、無い時だけ vp 管理版へ fallback する。
+    // スコープ注意: `vp env off` が効くのは node/npm/npx shim の解決のみで、vp 自身のサブコマンド内部の
+    // Node 解決には及ばない（upstream の既知の制約）。`vp dev`/`build`/`test`/`lint`/`fmt` 用途では実害なし。
+    // 実行 Node が mise に切り替わるには mise-install 完了が前提。postCreate は object 形式で各ステップ並列実行
+    // だが、mise ツールは共有 volume(devcontainer-shared-mise-data)に永続するため初回以外は即時で競合しない。
+    // 注意: 再生成の主因である `vp install -g <pkg>` は使わず、グローバル CLI は .mise.toml に集約すること。
+    // vp が未導入/PATH 未解決でも postCreate 全体を止めないよう `|| true`。
+    "vp-env-system-first": ["bash", "-lc", "vp env off || true"],
     "git-performance": "git config status.submoduleSummary false && git config diff.ignoreSubmodules all && git config fetch.recurseSubmodules false && git config submodule.recurse false",
     "install-gh-extensions": "gh extension install agbiotech/gh-sub-issue 2>/dev/null || true",
     "mise-install": ["bash", "-lc", "mise install"],

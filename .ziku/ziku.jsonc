@@ -21,6 +21,37 @@
     ".github/workflows/label.yml",
     ".github/labeler.yml",
     ".mcp.json",
-    ".mise.toml"
-  ]
+    ".mise.toml",
+    ".claude/.gitignore",
+    ".claude/guides/tools/ziku.md",
+    ".claude/skills/package-upgrade/SKILL.md",
+    ".claude/skills/data-driven-prd",
+    ".claude/skills/evergreen-writing",
+    ".claude/skills/pr-deep-review",
+    ".claude/skills/pr-first-reader-check",
+    ".claude/skills/pr-impact-review",
+    ".claude/skills/pr-review-loop",
+    ".claude/skills/prd-review",
+    ".claude/skills/technical-writing-style",
+    ".claude/skills/upstream-fix",
+    ".config/mise/conf.d/shared.toml",
+    ".config/docs-lifecycle.json",
+    "scripts/docs-lifecycle.ts",
+    "scripts/lib/docs-lifecycle",
+    ".claude/hooks/record-pr-review.sh",
+    ".claude/hooks/require-pr-self-review.sh",
+    ".claude/rules/ci-workflow.md",
+    ".claude/rules/codex-pairing.md",
+    ".claude/rules/pr-self-review.md",
+    ".claude/rules/robustness.md",
+    ".claude/rules/worktree.md",
+    ".claude/rules/conclusion-only-output.md",
+    ".claude/rules/agent-work-discipline.md",
+    ".claude/rules/pr-writing-style.md",
+    ".claude/rules/template-sync-boundary.md"
+  ],
+  // custom-id-design.md は Discord Bot 向けルールで、Discord Bot を持たないこのリポジトリには
+  // 適用対象が存在しない。`.claude/rules/*.md` の wildcard include に巻き込まれて取り込まれた
+  // ため、明示的に除外する。
+  "exclude": [".claude/rules/custom-id-design.md"]
 }

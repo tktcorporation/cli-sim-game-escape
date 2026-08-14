@@ -1,0 +1,31 @@
+# Project 横断で共有する mise 設定。
+# project 固有の version pin (node / python / pnpm / rust) と、各 project 固有の
+# 依存 infra に紐付く tool は .mise.toml に置く。
+# このファイルは ziku で全 project に sync される (.ziku/ziku.jsonc 参照)。
+#
+# mise は同一ディレクトリ内で `.mise.toml` と `.config/mise/conf.d/*.toml`
+# を両方読み込み、`.mise.toml` が `conf.d/*.toml` を override する。tool /
+# setting / task の名前が衝突しなければ単純 merge される。
+
+[tools]
+# Python の polyglot pkg manager。`pipx.uvx` 経由でも使う。
+uv = "latest"
+# npm / yarn / pnpm を抽象化する pkg manager wrapper (`ni` / `nr` / `nx`)。
+"npm:@antfu/ni" = "latest"
+# AI CLI 群。
+"npm:@anthropic-ai/claude-code" = "latest"
+"npm:@openai/codex" = "latest"
+"npm:@google/gemini-cli" = "latest"
+
+[settings]
+experimental = true
+# .nvmrc ファイルを自動的に読み込む
+legacy_version_file = true
+# ディレクトリ移動時に自動的にツールをインストール
+auto_install = true
+# pipx バックエンドで uvx を使う
+pipx.uvx = true
+
+[tasks.ziku]
+run = "npx ziku@latest"
+description = "Run ziku CLI"

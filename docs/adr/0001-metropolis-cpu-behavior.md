@@ -1,3 +1,8 @@
+---
+review-by: 2027-02-13
+review-reason: Accepted 済みの設計判断の記録として長期保持する。Metropolis AI (src/games/metropolis/) の評価関数・pruning 方針が変わった場合に、この Decision が現行実装と一致しているか見直す。
+---
+
 # ADR 0001: Metropolis CPU の振る舞い — 評価関数主導 / ad-hoc ルール禁止 / 診断シミュレーター駆動
 
 - Status: Accepted
