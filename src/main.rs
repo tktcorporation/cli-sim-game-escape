@@ -42,9 +42,10 @@ pub const MENU_SCROLL_DOWN: u16 = 9;
 pub const MENU_SELECT_LOOPMARCH: u16 = 16;
 pub const MENU_SELECT_EVERLIGHT: u16 = 19;
 pub const MENU_SELECT_STARRINGE: u16 = 21;
+pub const MENU_SELECT_PACHINKO: u16 = 23;
 
-/// Last valid index of the main menu cards (9 games + settings → 0..=9).
-const MENU_LAST_INDEX: u8 = 9;
+/// Last valid index of the main menu cards (10 games + settings → 0..=10).
+const MENU_LAST_INDEX: u8 = 10;
 
 /// Cursor → menu action, used for the A button on the main menu.
 enum MenuPick {
@@ -63,6 +64,7 @@ fn menu_pick_for(idx: u8) -> MenuPick {
         6 => MenuPick::Game(GameChoice::LoopMarch),
         7 => MenuPick::Game(GameChoice::Everlight),
         8 => MenuPick::Game(GameChoice::StarRing),
+        9 => MenuPick::Game(GameChoice::Pachinko),
         _ => MenuPick::Settings,
     }
 }
@@ -78,6 +80,7 @@ const SETTINGS_SCROLL_UP: u16 = 17;
 const SETTINGS_SCROLL_DOWN: u16 = 18;
 const SETTINGS_RESET_EVERLIGHT: u16 = 20;
 const SETTINGS_RESET_STARRINGE: u16 = 22;
+const SETTINGS_RESET_PACHINKO: u16 = 24;
 /// 1クリック/1行キー入力あたりのスクロール量。
 const SETTINGS_SCROLL_STEP: i32 = 3;
 
@@ -289,7 +292,12 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 InputEvent::Key('9') | InputEvent::Click(_, MENU_SELECT_STARRINGE) => {
                     Some(MenuPick::Game(GameChoice::StarRing))
                 }
-                InputEvent::Key('0') | InputEvent::Click(_, MENU_SELECT_SETTINGS) => {
+                InputEvent::Key('0') | InputEvent::Click(_, MENU_SELECT_PACHINKO) => {
+                    Some(MenuPick::Game(GameChoice::Pachinko))
+                }
+                // 数字キーはゲームで使い切っているので、設定は `-` へ回す。
+                // `-` は index.html のタップ用正規表現が拾える文字。
+                InputEvent::Key('-') | InputEvent::Click(_, MENU_SELECT_SETTINGS) => {
                     Some(MenuPick::Settings)
                 }
                 // A button (' ' / Enter via main.rs key map) confirms the
@@ -376,6 +384,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     InputEvent::Key('6') | InputEvent::Click(_, SETTINGS_RESET_STARRINGE) => {
                         *confirm_reset = Some(GameChoice::StarRing);
                     }
+                    InputEvent::Key('7') | InputEvent::Click(_, SETTINGS_RESET_PACHINKO) => {
+                        *confirm_reset = Some(GameChoice::Pachinko);
+                    }
                     InputEvent::Key('k') | InputEvent::Click(_, SETTINGS_SCROLL_UP) => {
                         adjust_scroll(scroll, -SETTINGS_SCROLL_STEP);
                     }
@@ -422,6 +433,7 @@ fn perform_reset(game: &GameChoice) {
         GameChoice::LoopMarch => cli_sim_game_escape::games::loopmarch::save::delete_save(),
         GameChoice::Everlight => cli_sim_game_escape::games::everlight::save::delete_save(),
         GameChoice::StarRing => cli_sim_game_escape::games::starringe::save::delete_save(),
+        GameChoice::Pachinko => cli_sim_game_escape::games::pachinko::save::delete_save(),
         _ => {}
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -631,7 +643,8 @@ fn render_menu(
         ('7', "周回討伐", "地形を配置し勇者が自動周回するローグライト", MENU_SELECT_LOOPMARCH, '▶', theme::accent(&GameChoice::LoopMarch)),
         ('8', "常夜灯", "降り注ぐ魔物から灯を守る縦画面バレットヘヴン", MENU_SELECT_EVERLIGHT, '▶', theme::accent(&GameChoice::Everlight)),
         ('9', "星環", "上空から降る鉱石を公転武装で刈り取る放置採掘", MENU_SELECT_STARRINGE, '▶', theme::accent(&GameChoice::StarRing)),
-        ('0', "設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
+        ('0', "玉響", "釘を読んで台を選び玉の行方に祈るパチンコホール", MENU_SELECT_PACHINKO, '▶', theme::accent(&GameChoice::Pachinko)),
+        ('-', "設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 
     let menu_block = Block::default()
@@ -1012,6 +1025,18 @@ fn render_settings_main(
     );
 
     cl.push(Line::from(""));
+
+    // 玉響
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
+            Span::styled("玉響", Style::default().fg(Color::White)),
+            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
+        ]),
+        SETTINGS_RESET_PACHINKO,
+    );
+
+    cl.push(Line::from(""));
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
         " ※ Tiny Factory / Dungeon Dive / God Field は",
@@ -1047,6 +1072,7 @@ fn render_confirm_dialog(
         GameChoice::LoopMarch => "周回討伐",
         GameChoice::Everlight => "常夜灯",
         GameChoice::StarRing => "星環",
+        GameChoice::Pachinko => "玉響",
         _ => "Unknown",
     };
 
@@ -1119,9 +1145,9 @@ mod tests {
     fn render_menu_does_not_panic_narrow_and_wide() {
         // 軌道パネル (ワイドのみ) の有無、桁数バッジ・rail の折り返しなど
         // 幅依存のレイアウトを一通り踏む。selected は先頭・中間・末尾
-        // (= 設定, 数字キー無しの ⚙ マーカー) を網羅する。
+        // (= 設定, ⚙ マーカー) を網羅する。
         for &(w, h) in &[(40u16, 30u16), (60, 30), (100, 40)] {
-            for selected in [0u8, 4, 9] {
+            for selected in [0u8, 5, MENU_LAST_INDEX] {
                 render_menu_to_test_backend(w, h, selected);
             }
         }
@@ -1136,7 +1162,7 @@ mod tests {
     /// 「selected=i で描画した時、そのカード自身のタップ対象は必ず見える
     /// 範囲に入る」という auto-scroll の契約を検証する。
     fn assert_selected_card_is_always_reachable(width: u16, height: u16) {
-        const ACTION_IDS: [u16; 10] = [
+        const ACTION_IDS: [u16; 11] = [
             MENU_SELECT_COOKIE,
             MENU_SELECT_FACTORY,
             MENU_SELECT_RPG,
@@ -1146,6 +1172,7 @@ mod tests {
             MENU_SELECT_LOOPMARCH,
             MENU_SELECT_EVERLIGHT,
             MENU_SELECT_STARRINGE,
+            MENU_SELECT_PACHINKO,
             MENU_SELECT_SETTINGS,
         ];
         for (i, &action_id) in ACTION_IDS.iter().enumerate() {
@@ -1172,8 +1199,8 @@ mod tests {
     /// 折り返し幅がワイド時と変わるだけで panic しないことを確認する。
     #[test]
     fn render_menu_orbit_panel_does_not_panic_for_various_selections() {
-        let entries: Vec<(Color, &str)> = (0..10).map(|_| (Color::LightMagenta, "x")).collect();
-        for selected in 0u8..10 {
+        let entries: Vec<(Color, &str)> = (0..11).map(|_| (Color::LightMagenta, "x")).collect();
+        for selected in 0u8..11 {
             let mut terminal = Terminal::new(TestBackend::new(22, 20)).unwrap();
             terminal
                 .draw(|f| {
