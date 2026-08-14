@@ -523,7 +523,7 @@ fn render_weapon_picker(
         let candidates = if unlocked {
             [
                 format!(" {}{} ", w.glyph(), w.label()),
-                format!("{}{}", w.glyph(), w.label()),
+                format!(" {} ", w.label()),
                 w.label().to_string(),
             ]
         } else {
@@ -1623,7 +1623,7 @@ mod tests {
             .filter(|&y| (0..w).any(|x| guard.hit_test(x, y) == Some(wanted)))
             .count();
         assert!(
-            rows >= 1 + blurb_rows,
+            rows > blurb_rows,
             "折り返した説明行が当たり判定から漏れている ({rows} 行)"
         );
     }
@@ -1822,6 +1822,14 @@ mod tests {
             "ワイドではステージが左パネルより広いはず ({} vs {})",
             stage.width,
             tab.width
+        );
+        // 左パネルは説明文を折り返して幅を詰める前提なので、ステージが本体の
+        // 2/3 近くを取る。ここが痩せると鉱石の落下を追う面が削れる。
+        assert!(
+            stage.width * 100 >= body.width * 64,
+            "ワイドのステージが本体の 64% に届いていない ({} / {})",
+            stage.width,
+            body.width
         );
         assert_eq!(stage.height, body.height);
 
@@ -2065,4 +2073,3 @@ mod tests {
         }
     }
 }
-
