@@ -65,6 +65,42 @@ fn fill_step(inner: Rect) -> f64 {
     dot_x.min(dot_y) * FILL_STEP_MARGIN
 }
 
+/// 円を塗り潰した点列。間隔は `fill_step` が領域の解像度から決めるが、半径より
+/// 粗い間隔を渡すと `canvas_fx::filled_ellipse_points` は 1 点も返さない。
+/// 砲台や小さい弾のように半径がドット間隔を下回る円が消えないよう、間隔は
+/// 半径で頭打ちにする。
+fn filled_circle(cx: f64, cy: f64, r: f64, step: f64) -> Vec<(f64, f64)> {
+    canvas_fx::filled_ellipse_points(cx, cy, r, r, step.min(r))
+}
+
+/// 核脈動の波面を打つ点の弧長間隔 (ワールド単位)。
+const PULSE_ARC_STEP: f64 = 1.0;
+
+/// 核脈動の波面の色。
+const PULSE_WAVE_COLOR: Color = Color::LightCyan;
+
+/// 核脈動の波面の点を `out` へ積む。
+///
+/// 角度を一定間隔で刻むと、波が広がるほど点の間隔が円周に比例して開き、
+/// 上空へ届く頃には点がばらけて波に見えなくなる。弧長で刻んで密度を保ち、
+/// フィールドの外へ出た点は捨てる — 核は下端にあるので、円周の下半分は
+/// ほとんど画面の外に落ちる。
+fn push_pulse_wave_points(cx: f64, cy: f64, radius: f64, density: f64, out: &mut Vec<(f64, f64)>) {
+    if radius <= 0.0 || density <= 0.0 {
+        return;
+    }
+    let step = (PULSE_ARC_STEP * density / radius).clamp(0.02, 0.5);
+    let mut angle = 0.0;
+    while angle < std::f64::consts::TAU {
+        let (sin, cos) = angle.sin_cos();
+        let (x, y) = (cx + cos * radius, cy + sin * radius);
+        if (0.0..=WORLD_W).contains(&x) && (0.0..=WORLD_H).contains(&y) {
+            out.push((x, y));
+        }
+        angle += step;
+    }
+}
+
 /// 本体を (ステージ, タブ内容) へ分ける。
 ///
 /// ステージ側を過半にするのは、鉱石が降ってきて砕ける様子が主役だから。
@@ -904,6 +940,8 @@ fn render_stage(
         return;
     }
 
+    let sample_step = fill_step(inner);
+
     let shake_x = if state.shake_ticks > 0 {
         (((state.elapsed_ticks % 4) as f64) - 1.5) * 0.4
     } else {
@@ -937,12 +975,11 @@ fn render_stage(
     } else {
         1.0 + (layer.saturating_sub(1) as f64) * 0.04
     };
-    let core_pts = canvas_fx::filled_ellipse_points(
+    let core_pts = filled_circle(
         CX + shake_x,
         CORE_Y + shake_y,
         3.0 * core_scale,
-        3.0 * core_scale,
-        0.45,
+        sample_step,
     );
     let core_ring = canvas_fx::ring_points(CX + shake_x, CORE_Y + shake_y, 4.8 * core_scale, 0.26);
 
@@ -974,7 +1011,7 @@ fn render_stage(
     for &(gx, gy, depth) in &turrets {
         let near = depth <= 0.0;
         let size = if near { 1.6 } else { 1.0 };
-        let pts = canvas_fx::filled_ellipse_points(gx + shake_x, gy + shake_y, size, size, 0.4);
+        let pts = filled_circle(gx + shake_x, gy + shake_y, size, sample_step);
         if near {
             gun_near.extend(pts);
         } else {
@@ -982,19 +1019,11 @@ fn render_stage(
         }
     }
 
-    let sample_step = fill_step(inner);
-
     let mut ore_groups: Vec<(Vec<(f64, f64)>, Color)> = Vec::new();
     let mut approach_trails: Vec<(f64, f64, f64, f64, Color)> = Vec::new();
     for ore in &state.ores {
         let color = ore_color(ore.kind);
-        let pts = canvas_fx::filled_ellipse_points(
-            ore.x + shake_x,
-            ore.y + shake_y,
-            ore.radius,
-            ore.radius,
-            sample_step,
-        );
+        let pts = filled_circle(ore.x + shake_x, ore.y + shake_y, ore.radius, sample_step);
         if let Some(g) = ore_groups.iter_mut().find(|(_, c)| *c == color) {
             g.0.extend(pts);
         } else {
@@ -1016,13 +1045,7 @@ fn render_stage(
     let mut proj_trails: Vec<(f64, f64, f64, f64, Color)> = Vec::new();
     for p in &state.projectiles {
         let color = weapon_color(p.kind);
-        let pts = canvas_fx::filled_ellipse_points(
-            p.x + shake_x,
-            p.y + shake_y,
-            p.radius,
-            p.radius,
-            sample_step.min(p.radius),
-        );
+        let pts = filled_circle(p.x + shake_x, p.y + shake_y, p.radius, sample_step);
         if let Some(g) = proj_groups.iter_mut().find(|(_, c)| *c == color) {
             g.0.extend(pts);
         } else {
@@ -1063,17 +1086,19 @@ fn render_stage(
         }
     }
 
-    // 核脈動の波紋。判定はコアからの等方距離なので、描画も真円で描く。
+    // 核脈動の波面。判定 (`logic::pulse_wave_damage`) はコアからの等方距離なので
+    // 描画も真円で、削る半径そのものを描く。
     let mut pulse_ring_pts: Vec<(f64, f64)> = Vec::new();
     for ring in &state.pulse_rings {
         let alpha = ring.life as f64 / ring.max_life.max(1) as f64;
-        let step = if alpha > 0.5 { 0.26 } else { 0.38 };
-        pulse_ring_pts.extend(canvas_fx::ring_points(
+        let density = if alpha > 0.5 { 1.0 } else { 1.7 };
+        push_pulse_wave_points(
             CX + shake_x,
             CORE_Y + shake_y,
             ring.radius,
-            step,
-        ));
+            density,
+            &mut pulse_ring_pts,
+        );
     }
 
     // 背景星は上から下へ流れ、フィールド内に「降ってくる場」の向きを与える。
@@ -1140,7 +1165,7 @@ fn render_stage(
             if !pulse_ring_pts.is_empty() {
                 ctx.draw(&Points {
                     coords: &pulse_ring_pts,
-                    color: Color::LightCyan,
+                    color: PULSE_WAVE_COLOR,
                 });
             }
             if !orbit_pts.is_empty() {
@@ -1237,20 +1262,53 @@ fn render_stage(
     Clickable::new(canvas, TAP_STRIKE).render(f, area, &mut click_state.borrow_mut());
 }
 
-/// フッター。1 行しかないので、ナローでは末尾の `[Q]戻る` が切り落とされ
-/// ないところまで短縮する。
-fn render_footer(state: &StarRingState, f: &mut Frame, area: Rect, is_narrow: bool) {
-    let hint = match (state.tab, is_narrow) {
-        (Tab::Armory, false) => "[◀▶]武装  [A/S/D]弾数/連射/威力  情景タップでブースト  [Q]戻る",
-        (Tab::Armory, true) => "[A/S/D]強化  情景タップで加速  [Q]戻る",
-        (Tab::Ring, false) => "[!]次層開放  [1-2]収率/核脈動  [J/K]スクロール  [Q]戻る",
-        (Tab::Ring, true) => "[!]開放  [1-2]強化  [J/K]送り  [Q]戻る",
-        (Tab::Codex, false) => "図鑑: 層開放で鉱石と武装が増える  [Q]戻る",
-        (Tab::Codex, true) => "層開放で鉱石と武装が増える  [Q]戻る",
+/// フッターの案内は幅に入るぶんだけ前から採る。ここで区切りに使う空白。
+const FOOTER_GAP: &str = "  ";
+/// 幅がいくら狭くても残す案内。ここが切り落とされるとゲームから出られなくなる。
+const FOOTER_BACK: &str = "[Q]戻る";
+
+/// フッター 1 行の文言。優先度の高い順に並べた案内を、`width` 桁に収まるところ
+/// まで採用して連結する。
+///
+/// 端末幅は 38 桁ほどまで下がる一方、日本語は 1 文字 2 桁を食う。全部を並べると
+/// 末尾から溢れるので、落とす順序をこちらで決めて `[Q]戻る` を必ず残す。
+/// タブ送りは 3 タブとも `StarRingState::scroll_tab` で共通なので、どのタブでも
+/// 案内する。
+fn footer_hint(tab: Tab, is_narrow: bool, width: u16) -> String {
+    let parts: &[&str] = match (tab, is_narrow) {
+        (Tab::Armory, false) => &[
+            "[A/S/D]弾数/連射/威力",
+            "[J/K]送り",
+            "[T]/情景タップでブースト",
+            "[◀▶]武装",
+        ],
+        (Tab::Armory, true) => &["[A/S/D]強化", "[J/K]送り", "[T]ブースト"],
+        (Tab::Ring, false) => &["[!]次層開放", "[1-2]収率/核脈動", "[J/K]送り"],
+        (Tab::Ring, true) => &["[!]開放", "[1-2]強化", "[J/K]送り"],
+        (Tab::Codex, false) => &["[J/K]送り", "層開放で鉱石と武装が増える"],
+        (Tab::Codex, true) => &["[J/K]送り", "層開放で鉱石が増える"],
     };
+    let cells = |s: &str| Span::raw(s).width();
+    let gap = cells(FOOTER_GAP);
+    let mut used = cells(FOOTER_BACK);
+    let mut out = String::new();
+    for part in parts {
+        let cost = cells(part) + gap;
+        if used + cost > width as usize {
+            break;
+        }
+        used += cost;
+        out.push_str(part);
+        out.push_str(FOOTER_GAP);
+    }
+    out.push_str(FOOTER_BACK);
+    out
+}
+
+fn render_footer(state: &StarRingState, f: &mut Frame, area: Rect, is_narrow: bool) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            hint,
+            footer_hint(state.tab, is_narrow, area.width),
             Style::default().fg(Color::DarkGray),
         ))),
         area,
@@ -1372,6 +1430,59 @@ mod tests {
         }
     }
 
+    /// `sections_height` の見積もりと `build_list` の実際の行数が一致すること。
+    ///
+    /// この 2 つは空行の入れ方を別々に持っている。ずれると `spaced` の判定と
+    /// `ScrollableTab` のスクロール上限が同時に狂い、詰めれば入る内容にスクロールを
+    /// 生やしたり、逆に末尾へ届かなくなったりする。
+    #[test]
+    fn section_height_matches_the_list_it_builds() {
+        let mut state = StarRingState::new();
+        state.total_kills = Layer::THRESHOLDS[1];
+        state.shards = 1e9;
+        assert!(unlock_next_layer(&mut state));
+
+        for (label, make) in [
+            ("armory", armory_sections as fn(&StarRingState) -> Vec<Section>),
+            ("ring", ring_sections),
+            ("codex", codex_sections),
+        ] {
+            for spaced in [false, true] {
+                let sections = make(&state);
+                let expected = sections_height(&sections, spaced);
+                let actual = build_list(sections, spaced).lines().len();
+                assert_eq!(
+                    expected, actual,
+                    "{label} (spaced={spaced}): 見積もり {expected} 行 / 実際 {actual} 行"
+                );
+            }
+        }
+    }
+
+    /// フッターは幅が狭くても `[Q]戻る` を切り落とさず、スクロールできる 3 タブ
+    /// すべてで送りの案内を出すこと。
+    #[test]
+    fn footer_keeps_back_and_scroll_hints_within_width() {
+        for w in [38u16, 40, 60, 80, 100] {
+            for tab in [Tab::Armory, Tab::Ring, Tab::Codex] {
+                let hint = footer_hint(tab, is_narrow_layout(w), w);
+                let cells = Span::raw(hint.as_str()).width();
+                assert!(
+                    cells <= w as usize,
+                    "{w}桁 {tab:?}: フッターが幅を超えている ({cells}桁) {hint}"
+                );
+                assert!(
+                    hint.ends_with(FOOTER_BACK),
+                    "{w}桁 {tab:?}: 戻る案内が残っていない {hint}"
+                );
+                assert!(
+                    hint.contains("[J/K]"),
+                    "{w}桁 {tab:?}: 送りの案内が出ていない {hint}"
+                );
+            }
+        }
+    }
+
     /// ヘッダー・タブ・フッターの固定消費が 4 行に収まり、残りがすべて
     /// 本体へ回ること。30 行しかないモバイルでは、ここが 1 行増えるだけで
     /// ステージの情報量が直接削れる。
@@ -1433,7 +1544,10 @@ mod tests {
             });
         }
 
-        for (w, h, narrow) in [(100u16, 30u16, false), (40, 30, true), (38, 20, true)] {
+        for (w, h) in [(100u16, 30u16), (40, 30), (38, 20)] {
+            // レイアウトの分岐は render と同じ判定から引く。閾値が動いたときに
+            // 実描画と別の Rect を検査したまま通ることがないようにする。
+            let narrow = is_narrow_layout(w);
             let area = Rect::new(0, 0, w, h);
             let (stage, _) = split_body(split_frame(area)[2], narrow);
             let borders = if narrow {
@@ -1484,17 +1598,19 @@ mod tests {
         }
     }
 
-    /// 内側が数行しかない端末でも、各タブが先頭から描画され、購入行へ
-    /// 届く手段 (直接表示 or スクロール) が残ること。
+    /// 内側が数行しかない端末でも、3 タブとも先頭から描画され、購入行を持つタブは
+    /// そこへ届く手段 (直接表示 or スクロール) が残ること。
     #[test]
     fn short_viewport_keeps_tab_content_visible() {
         let (w, h) = (38u16, 20u16);
         for (tab, wanted) in [
             (
                 Tab::Armory,
-                buy_weapon_stat_id(WeaponKind::Pulse, WeaponStat::Count),
+                Some(buy_weapon_stat_id(WeaponKind::Pulse, WeaponStat::Count)),
             ),
-            (Tab::Ring, buy_ring_id(RingUpgrade::Yield)),
+            (Tab::Ring, Some(buy_ring_id(RingUpgrade::Yield))),
+            // 図鑑は購入行を持たないので、描画されていることだけを見る。
+            (Tab::Codex, None),
         ] {
             let mut state = StarRingState::new();
             state.tab = tab;
@@ -1506,7 +1622,8 @@ mod tests {
             terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
 
             let buf = terminal.backend().buffer();
-            let tab_area = split_body(split_frame(Rect::new(0, 0, w, h))[2], true).1;
+            let tab_area =
+                split_body(split_frame(Rect::new(0, 0, w, h))[2], is_narrow_layout(w)).1;
             let filled = (tab_area.y..tab_area.y + tab_area.height)
                 .filter(|&y| {
                     (tab_area.x..tab_area.x + tab_area.width)
@@ -1517,6 +1634,9 @@ mod tests {
                 filled >= 3,
                 "{tab:?}: タブ内側が空欄になっている (中身のある行 {filled})"
             );
+            let Some(wanted) = wanted else {
+                continue;
+            };
             // 先頭に出ていないなら、送り切った先で必ずクリックできること。
             let mut reached = has_action(&cs, w, h, wanted);
             for _ in 0..12 {
@@ -1537,13 +1657,27 @@ mod tests {
     }
 
     /// 上空の鉱石と、画面下部のコアが縦に分離して描かれること。
-    /// 色で見分ける — 結晶は LightCyan、コアは Yellow。
+    ///
+    /// 物体の同定は色で行うので、fixture 側で「その色が他の要素へ割り当たって
+    /// いない」ことを先に固定する。採掘境界は `layer_color`、核脈動の波面は
+    /// `PULSE_WAVE_COLOR` で描かれるため、層が進んだ state や脈動を積んだ state に
+    /// 差し替えると同じ色が別の場所に現れ、この検査は無関係な理由で落ちる。
     #[test]
     fn stage_separates_falling_ores_from_the_core() {
         use crate::games::starringe::state::{Ore, OreMotion};
         use ratzilla::ratatui::style::Color;
 
         let mut state = StarRingState::new();
+        const CORE: Color = Color::Yellow;
+        let ore = ore_color(OreKind::Crystal);
+        assert_ne!(layer_color(state.layer()), CORE, "採掘境界がコアと同色");
+        assert_ne!(layer_color(state.layer()), ore, "採掘境界が鉱石と同色");
+        assert_ne!(PULSE_WAVE_COLOR, CORE, "核脈動の波面がコアと同色");
+        assert!(
+            state.pulse_rings.is_empty(),
+            "波面は鉱石と同色 ({PULSE_WAVE_COLOR:?}) なので、波の出ていない state で見る"
+        );
+
         for (x, y) in [(20.0, 92.0), (52.0, 84.0), (78.0, 90.0)] {
             state.ores.push(Ore {
                 x,
@@ -1559,7 +1693,8 @@ mod tests {
             });
         }
 
-        for (w, h, narrow) in [(100u16, 30u16, false), (40, 30, true)] {
+        for (w, h) in [(100u16, 30u16), (40, 30)] {
+            let narrow = is_narrow_layout(w);
             let area = Rect::new(0, 0, w, h);
             let (stage, _) = split_body(split_frame(area)[2], narrow);
             let borders = if narrow {
@@ -1592,20 +1727,20 @@ mod tests {
             let bottom = (inner.y + inner.height - quarter, inner.y + inner.height);
 
             assert!(
-                count(top.0, top.1, ore_color(OreKind::Crystal)) > 0,
+                count(top.0, top.1, ore) > 0,
                 "{w}x{h}: 鉱石はステージ上部に見えるはず"
             );
             assert_eq!(
-                count(bottom.0, bottom.1, ore_color(OreKind::Crystal)),
+                count(bottom.0, bottom.1, ore),
                 0,
                 "{w}x{h}: 上空の鉱石が下部へ描かれてはいけない"
             );
             assert!(
-                count(bottom.0, bottom.1, Color::Yellow) > 0,
+                count(bottom.0, bottom.1, CORE) > 0,
                 "{w}x{h}: コアはステージ下部に見えるはず"
             );
             assert_eq!(
-                count(top.0, top.1, Color::Yellow),
+                count(top.0, top.1, CORE),
                 0,
                 "{w}x{h}: コアが上部へ描かれてはいけない"
             );

@@ -503,11 +503,39 @@ fn yield_ablation_report() {
     );
 }
 
-/// 最安買い (核脈動を含む) vs 核脈動なし。
+/// 湧きが刈り取りを上回る飽和状態を作り、核脈動のレベルだけを変えて撃破数を測る。
+///
+/// 武装を Lv1 に固定した第5層は湧き (`Layer::spawn_batch`) が砲台の火力を上回るので、
+/// 撃破数が湧き量へ張り付かない。核脈動が上空の降下レーンをどこまで舐められて
+/// いるかが、そのまま撃破数の差として出る。
+fn saturated_kills(pulse_lv: u32, seed: u32) -> u64 {
+    const TICKS: u32 = 3_000;
+    let mut state = StarRingState::new();
+    state.rng_state = seed;
+    state.current_layer = 5;
+    state.ring_levels[RingUpgrade::CorePulse.index()] = pulse_lv;
+    for w in state.unlocked_weapons() {
+        state.weapon_levels[w.index()] = [1, 1, 1];
+    }
+    for _ in 0..TICKS {
+        tick(&mut state, 1);
+    }
+    state.total_kills
+}
+
+/// 最安買い (核脈動を含む) vs 核脈動なし + 飽和状態での核脈動の寄与。
+///
+/// 通常進行の撃破数は湧き量に張り付く (`interception_pressure_over_time_report` の
+/// とおり t≈1200 以降の逸失はほぼ 0) ため、削る力を上げても最安買いの撃破数は
+/// ほとんど動かない。核脈動が実際に鉱石を砕けているかは、湧きが刈り取りを上回る
+/// 飽和状態を別に作らないと測れない。
 #[test]
 fn core_pulse_ablation_report() {
     const RUNS: u32 = 14;
     const TICKS: u32 = 5_000;
+    const SAT_RUNS: u32 = 10;
+    /// 飽和側で比較する核脈動レベル。最安買い bot が 5000tick で積む水準に合わせる。
+    const SAT_PULSE_LV: u32 = 6;
 
     let no_pulse = BuyPolicy::BlockRing(&[RingUpgrade::CorePulse]);
 
@@ -538,17 +566,36 @@ fn core_pulse_ablation_report() {
         (kw as f64 - ko as f64) / ko as f64 * 100.0
     };
 
+    let mut sat_with = Vec::with_capacity(SAT_RUNS as usize);
+    let mut sat_without = Vec::with_capacity(SAT_RUNS as usize);
+    for seed in 1..=SAT_RUNS {
+        sat_with.push(saturated_kills(SAT_PULSE_LV, seed));
+        sat_without.push(saturated_kills(0, seed));
+    }
+    let sw = median_u64(&mut sat_with);
+    let so = median_u64(&mut sat_without);
+    let sat_delta = (sw as f64 - so as f64) / so.max(1) as f64 * 100.0;
+
     eprintln!(
         "[starringe/pulse-ablation] ticks={TICKS} runs={RUNS} median_pulse_lv={pl}\n\
          cheapest:  median_kills={kw} median_earned={ew:.1}\n\
          no-pulse:  median_kills={ko} median_earned={eo:.1}\n\
-         delta kills={kill_delta:+.1}%"
+         delta kills={kill_delta:+.1}%\n\
+         saturated (第5層/武装Lv1固定, runs={SAT_RUNS}): 脈Lv{SAT_PULSE_LV} median_kills={sw} \
+         vs 脈なし {so}  delta kills={sat_delta:+.1}%"
     );
 
     assert!(pl >= 1, "最安買い bot が核脈動を積めていない");
     assert!(
         kill_delta > -15.0,
         "核脈動込みが壊滅的に弱い: delta={kill_delta:.1}%"
+    );
+    // 飽和状態での寄与は実測 +250% 前後。波が届く高さを縮めると、上空で降下する
+    // 鉱石を舐められなくなってここが落ちる — 核脈動が環強化として仕事をして
+    // いることの下限として置く。
+    assert!(
+        sat_delta > 150.0,
+        "核脈動が飽和状態でも鉱石を砕けていない: delta={sat_delta:.1}%"
     );
 }
 
@@ -669,27 +716,6 @@ fn strategy_comparison_report() {
 }
 
 #[test]
-fn miss_rate_stays_bounded_under_cheapest_bot() {
-    const RUNS: u32 = 16;
-    const TICKS: u32 = 4_000;
-    let mut rates = Vec::new();
-    for seed in 1..=RUNS {
-        let snap = run_snapshot(TICKS, BuyPolicy::Cheapest, seed);
-        rates.push(snap.miss_rate());
-    }
-    let med = median_f64(&mut rates);
-    eprintln!(
-        "[starringe/miss-rate] ticks={TICKS} runs={RUNS} median_miss_rate={:.1}%",
-        med * 100.0
-    );
-    assert!(
-        med < 0.85,
-        "逸失率が高すぎて刈り取りが成立していない: {:.1}%",
-        med * 100.0
-    );
-}
-
-#[test]
 fn new_ore_kinds_appear_over_long_run() {
     let snap = run_snapshot(12_000, BuyPolicy::Cheapest, 17);
     report("ore_variety_12000", &snap);
@@ -802,8 +828,8 @@ fn spawn_x_spreads_across_the_whole_width() {
 ///
 /// 逸失率は序盤に高く、強化が積み上がるほど下がる——「守る」ではなく
 /// 「刈り取る」ゲームなので、投資が実った終盤に取りこぼしが消えるのは設計どおり。
-/// 検証したいのは序盤に迎撃の駆け引きが成立していること (下限) と、
-/// 刈り取り自体が破綻していないこと (上限) の2点。
+/// 検証したいのは 3 点: 序盤に迎撃の駆け引きが成立していること (下限)、序盤でも
+/// 刈り取りが立ち上がること (上限)、そして終盤には取りこぼしが消えていること。
 #[test]
 fn interception_pressure_over_time_report() {
     const RUNS: u32 = 32;
@@ -867,6 +893,15 @@ fn interception_pressure_over_time_report() {
         opening < 0.19,
         "序盤の取りこぼしが多すぎて刈り取りが立ち上がらない: {:.1}%",
         opening * 100.0
+    );
+    // 終盤 (最後の窓) の逸失は実測 0%。刈り取りが実る終盤に取りこぼしが消えるのが
+    // このゲームの狙いなので、そこが崩れて「守る」ゲームへ寄り始めたら検知する。
+    let (late_k, late_m) = window[window.len() - 1];
+    let late_rate = late_m as f64 / (late_k + late_m).max(1) as f64;
+    assert!(
+        late_rate < 0.02,
+        "終盤に取りこぼしが残っている: {:.1}%",
+        late_rate * 100.0
     );
     // 同時存在数の中央値は 20 前後。上限 (`MAX_ORES`) へ張り付くのは湧きが
     // 刈り取りに勝っている状態なので、上限に届く手前で検知する。

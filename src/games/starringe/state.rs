@@ -184,7 +184,7 @@ impl WeaponStat {
 pub enum RingUpgrade {
     /// 収率 (撃破時の星屑倍率)
     Yield = 0,
-    /// 核脈動 — 中心から周期 AOE (第2層で解放)
+    /// 核脈動 — 核から上空へ広がる周期波 (第2層で解放)
     CorePulse = 1,
 }
 
@@ -212,7 +212,7 @@ impl RingUpgrade {
     pub fn blurb(self) -> &'static str {
         match self {
             RingUpgrade::Yield => "砕いた星屑が増える",
-            RingUpgrade::CorePulse => "核が波打って近くの鉱石を削る",
+            RingUpgrade::CorePulse => "核が波打ち、上空へ広がって鉱石を砕く",
         }
     }
 
@@ -487,7 +487,7 @@ pub enum OreMotion {
     Spiral,
     /// コア付近で横へ回り込み、一度旋回してから吸い込まれる
     Orbit,
-    /// 短い周期で細かく左右に振れる
+    /// 短い周期で鋭く左右へ振れる (振れ幅そのものは Spiral より狭い)
     Zigzag,
     /// 横揺れがほとんど無く、重くゆっくり降りる
     Heavy,
@@ -544,12 +544,14 @@ pub struct Particle {
     pub kind: ParticleKind,
 }
 
-/// 核脈動の波紋演出。
+/// 核脈動の波。核から外へ広がりながら、波面が通過した鉱石を削る。
 #[derive(Clone, Debug)]
 pub struct PulseRing {
     pub radius: f64,
     pub life: u32,
     pub max_life: u32,
+    /// 波面が通過した鉱石へ与えるダメージ。0 なら演出だけの波。
+    pub damage: f64,
 }
 
 /// UI タブ。
@@ -713,9 +715,12 @@ impl StarRingState {
         Some((22u64.saturating_sub(lv as u64)).max(8))
     }
 
-    pub fn pulse_radius(&self) -> f64 {
+    /// 核脈動の波が届く距離。核は画面下端に座っているので、この値がそのまま
+    /// 「上空のどの高さまで波が舐めるか」になる。鉱石は降下の大半を高い位置で
+    /// 過ごすため、届く高さが収穫量を決める。
+    pub fn pulse_reach(&self) -> f64 {
         let lv = self.ring_level(RingUpgrade::CorePulse) as f64;
-        21.25 + lv * 2.75
+        34.0 + lv * 4.5
     }
 
     pub fn pulse_damage(&self) -> f64 {
