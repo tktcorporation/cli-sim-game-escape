@@ -107,10 +107,13 @@ fn push_pulse_wave_points(cx: f64, cy: f64, radius: f64, density: f64, out: &mut
 /// タブ内容が溢れる分は `ScrollableTab` のスクロールで拾う。
 fn split_body(body: Rect, is_narrow: bool) -> (Rect, Rect) {
     // ナローは上がステージ、ワイドは左がタブ内容で右がステージ。
+    // ワイドの左パネルは、説明文を折り返して読ませる前提で幅を詰める。
+    // 折り返さない行 (強化バー・武器ピッカー・コスト表示) が読める下限が
+    // 34% で、それ以上をステージへ回す。
     let (dir, first, second) = if is_narrow {
         (Direction::Vertical, 58, 42)
     } else {
-        (Direction::Horizontal, 40, 60)
+        (Direction::Horizontal, 34, 66)
     };
     let parts = Layout::default()
         .direction(dir)
@@ -301,6 +304,74 @@ impl Section {
     }
 }
 
+/// 表示幅 (半角=1 / 全角=2)。ratatui の Buffer もこの幅でセルを埋めるため、
+/// 折り返しの計算は文字数ではなくこの幅で行う。
+fn display_width(s: &str) -> usize {
+    Span::raw(s).width()
+}
+
+/// `text` を表示幅 `budget` に収まる断片へ切り分ける。日本語は語の切れ目に
+/// 空白を持たないので、単語単位ではなく文字単位で折る。
+fn wrap_by_width(text: &str, budget: usize) -> Vec<String> {
+    if budget == 0 {
+        return vec![text.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut used = 0usize;
+    let mut buf = [0u8; 4];
+    for ch in text.chars() {
+        let cw = display_width(&*ch.encode_utf8(&mut buf));
+        if used + cw > budget && !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+            used = 0;
+        }
+        cur.push(ch);
+        used += cw;
+    }
+    if cur.is_empty() && out.is_empty() {
+        out.push(String::new());
+    } else if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// 説明文を `width` 桁に折り返した行。2 行目以降も `indent` で字下げを揃え、
+/// `rail` を渡した時は各行の先頭へ同じ縦棒を立てる。
+///
+/// 折り返した行はどれも `Section` へまとめて渡され、購入の当たり判定を
+/// 見出し行と共有する。
+fn blurb_lines(
+    rail: Option<Style>,
+    indent: usize,
+    text: &str,
+    width: u16,
+    style: Style,
+) -> Vec<Line<'static>> {
+    let rail_w = usize::from(rail.is_some());
+    // 全角 1 文字も置けない幅では折り返しても読めないので、下限を設けて
+    // はみ出しは描画側の切り詰めに任せる。
+    let budget = (width as usize).saturating_sub(rail_w + indent).max(2);
+    wrap_by_width(text, budget)
+        .into_iter()
+        .map(|chunk| {
+            let mut spans = Vec::new();
+            if let Some(st) = rail {
+                spans.push(Span::styled("│", st));
+            }
+            spans.push(Span::styled(
+                format!("{}{}", " ".repeat(indent), chunk),
+                style,
+            ));
+            Line::from(spans)
+        })
+        .collect()
+}
+
+/// 購入行の説明文の字下げ。見出しのキー表記 (` [A] `) の下へ揃える。
+const BLURB_INDENT: usize = 6;
+
 /// `spaced` を付けた時のかたまり間の空行を含む総行数。
 fn sections_height(sections: &[Section], spaced: bool) -> usize {
     let base: usize = sections.iter().map(|s| s.lines.len()).sum();
@@ -327,6 +398,27 @@ fn build_list(sections: Vec<Section>, spaced: bool) -> ClickableList<'static> {
         }
     }
     cl
+}
+
+/// 描画領域に合わせてかたまりを組み、空行を挟むかどうかを決める。
+///
+/// `make` は「この幅で説明文を折り返した行」を返す。`ScrollableTab` は内容が
+/// 溢れる時だけ右端 1 桁をスクロール列に使うので、溢れる場合は 1 桁狭い幅で
+/// 折り直す — 折り返し済みの行はスクロール列の下で切り詰められてしまうため。
+/// 幅を狭めれば行数は増えこそすれ減らないので、溢れる判定はそのまま成り立つ。
+fn fit_sections<F>(inner: Rect, make: F) -> (Vec<Section>, bool)
+where
+    F: Fn(u16) -> Vec<Section>,
+{
+    let sections = make(inner.width);
+    let height = inner.height as usize;
+    if sections_height(&sections, true) <= height {
+        return (sections, true);
+    }
+    if sections_height(&sections, false) <= height {
+        return (sections, false);
+    }
+    (make(inner.width.saturating_sub(1)), false)
 }
 
 /// 武装タブ: 先頭 1 行の武器ピッカー + 説明と強化のスクロール領域。
@@ -364,8 +456,7 @@ fn render_armory(
     }
 
     let body = Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1);
-    let sections = armory_sections(state);
-    let spaced = sections_height(&sections, true) <= body.height as usize;
+    let (sections, spaced) = fit_sections(body, |w| armory_sections(state, w));
     let mut cs = click_state.borrow_mut();
     ScrollableTab::new(
         build_list(sections, spaced),
@@ -408,8 +499,13 @@ fn render_weapon_picker(
     Clickable::new(next, WEAPON_NEXT).render(f, chunks[2], &mut click_state.borrow_mut());
 
     // 中央: 解放済み武器を横並びで選択
-    let mut spans = Vec::new();
-    for w in WeaponKind::ALL {
+    let n = WeaponKind::ALL.len().max(1) as u16;
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(vec![Constraint::Ratio(1, n as u32); WeaponKind::ALL.len()])
+        .split(chunks[1]);
+
+    for (i, w) in WeaponKind::ALL.into_iter().enumerate() {
         let unlocked = state.is_weapon_unlocked(w);
         let selected = state.selected_weapon == w;
         let style = if !unlocked {
@@ -422,22 +518,27 @@ fn render_weapon_picker(
         } else {
             Style::default().fg(weapon_color(w))
         };
-        let label = if unlocked {
-            format!(" {}{} ", w.glyph(), w.label())
+        // チップに割り当たった桁へ収まる表記を広い順に選ぶ。幅を無視して
+        // 長い表記を渡すと右端から切り詰められ、武器名が途中で消える。
+        let candidates = if unlocked {
+            [
+                format!(" {}{} ", w.glyph(), w.label()),
+                format!("{}{}", w.glyph(), w.label()),
+                w.label().to_string(),
+            ]
         } else {
-            format!(" ？L{} ", w.unlock_layer())
+            [
+                format!(" ？L{} ", w.unlock_layer()),
+                format!("？L{}", w.unlock_layer()),
+                format!("L{}", w.unlock_layer()),
+            ]
         };
-        spans.push((label, style, unlocked, w));
-    }
-
-    // クリック可能な武器チップを等分
-    let n = spans.len().max(1) as u16;
-    let cols = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(vec![Constraint::Ratio(1, n as u32); spans.len()])
-        .split(chunks[1]);
-
-    for (i, (label, style, unlocked, w)) in spans.into_iter().enumerate() {
+        let chip_w = cols[i].width as usize;
+        let label = candidates
+            .iter()
+            .find(|s| display_width(s) <= chip_w)
+            .unwrap_or(&candidates[2])
+            .clone();
         let p = Paragraph::new(Line::from(Span::styled(label, style))).alignment(Alignment::Center);
         if unlocked {
             Clickable::new(p, select_weapon_id(w)).render(
@@ -452,10 +553,13 @@ fn render_weapon_picker(
 }
 
 /// 武装タブ本文のかたまり: 選択中武器の説明 + 強化 3 種。
-fn armory_sections(state: &StarRingState) -> Vec<Section> {
+/// `width` は説明文を折り返す桁数。
+fn armory_sections(state: &StarRingState, width: u16) -> Vec<Section> {
     let w = state.selected_weapon;
     let unlocked = state.is_weapon_unlocked(w);
-    let mut sections = vec![Section::plain(weapon_showcase_lines(state, w, unlocked))];
+    let mut sections = vec![Section::plain(weapon_showcase_lines(
+        state, w, unlocked, width,
+    ))];
     if !unlocked {
         sections.push(Section::plain(vec![Line::from(Span::styled(
             "  解放後に強化できます",
@@ -492,28 +596,24 @@ fn armory_sections(state: &StarRingState) -> Vec<Section> {
             Color::DarkGray
         });
         let key = keys.get(i).copied().unwrap_or('?');
-        sections.push(Section::clickable(
-            vec![
-                Line::from(vec![
-                    Span::styled("│", rail),
-                    Span::styled(format!(" [{key}] "), Style::default().fg(Color::Yellow)),
-                    Span::styled(
-                        format!("{}  Lv.{}", stat.label(), lv),
-                        style.add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw("  "),
-                    Span::styled(cost_label, Style::default().fg(Color::Cyan)),
-                ]),
-                Line::from(vec![
-                    Span::styled("│", rail),
-                    Span::styled(
-                        format!("      {}", stat.blurb()),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]),
-            ],
-            buy_weapon_stat_id(w, stat),
+        let mut lines = vec![Line::from(vec![
+            Span::styled("│", rail),
+            Span::styled(format!(" [{key}] "), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{}  Lv.{}", stat.label(), lv),
+                style.add_modifier(Modifier::BOLD),
+            ),
+            Span::raw("  "),
+            Span::styled(cost_label, Style::default().fg(Color::Cyan)),
+        ])];
+        lines.extend(blurb_lines(
+            Some(rail),
+            BLURB_INDENT,
+            stat.blurb(),
+            width,
+            Style::default().fg(Color::DarkGray),
         ));
+        sections.push(Section::clickable(lines, buy_weapon_stat_id(w, stat)));
     }
     sections
 }
@@ -522,32 +622,35 @@ fn weapon_showcase_lines(
     state: &StarRingState,
     w: WeaponKind,
     unlocked: bool,
+    width: u16,
 ) -> Vec<Line<'static>> {
     let art = weapon_art(w);
     let dmg = state.weapon_damage(w);
     let interval = state.fire_interval(w);
     let volley = state.volley_count(w);
 
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                format!(" {}  {}", w.glyph(), w.label()),
-                Style::default()
-                    .fg(weapon_color(w))
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("   "),
-            Span::styled(art, Style::default().fg(weapon_color(w))),
-        ]),
-        Line::from(Span::styled(
-            if unlocked {
-                format!("  {}", w.blurb())
-            } else {
-                format!("  第{}層で解放", w.unlock_layer())
-            },
-            Style::default().fg(Color::Gray),
-        )),
-    ];
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            format!(" {}  {}", w.glyph(), w.label()),
+            Style::default()
+                .fg(weapon_color(w))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("   "),
+        Span::styled(art, Style::default().fg(weapon_color(w))),
+    ])];
+    let intro = if unlocked {
+        w.blurb().to_string()
+    } else {
+        format!("第{}層で解放", w.unlock_layer())
+    };
+    lines.extend(blurb_lines(
+        None,
+        2,
+        &intro,
+        width,
+        Style::default().fg(Color::Gray),
+    ));
     if unlocked {
         lines.push(Line::from(Span::styled(
             format!("  威力{dmg:.2}  間隔{interval}  斉射×{volley}"),
@@ -557,20 +660,21 @@ fn weapon_showcase_lines(
         let power_lv = state.weapon_stat(w, WeaponStat::Power);
         let rate_lv = state.weapon_stat(w, WeaponStat::Rate);
         let count_lv = state.weapon_stat(w, WeaponStat::Count);
+        let cells = bar_cells(width);
         lines.push(Line::from(vec![
             Span::styled("  ", Style::default()),
             Span::styled(
-                format!("弾{}", bar(count_lv, 7)),
+                format!("弾{}", bar(count_lv, 7, cells)),
                 Style::default().fg(Color::Cyan),
             ),
             Span::raw(" "),
             Span::styled(
-                format!("連{}", bar(rate_lv, 8)),
+                format!("連{}", bar(rate_lv, 8, cells)),
                 Style::default().fg(Color::LightYellow),
             ),
             Span::raw(" "),
             Span::styled(
-                format!("威{}", bar(power_lv.min(8), 8)),
+                format!("威{}", bar(power_lv, 8, cells)),
                 Style::default().fg(Color::LightRed),
             ),
         ]));
@@ -583,10 +687,21 @@ fn weapon_showcase_lines(
     lines
 }
 
-fn bar(lv: u32, width: u32) -> String {
-    let filled = lv.min(width) as usize;
-    let empty = width as usize - filled;
-    format!("{}{}", "█".repeat(filled), "░".repeat(empty))
+/// 強化バー 1 本の升目数。行頭の字下げ 2 桁・全角ラベル 3 つ・バーの間の
+/// 空白 2 桁を除いた残りを 3 本で分ける。
+fn bar_cells(width: u16) -> usize {
+    const FIXED: usize = 2 + 3 * 2 + 2;
+    ((width as usize).saturating_sub(FIXED) / 3).clamp(2, 8)
+}
+
+/// レベルを `cells` 個の升目で表す進捗バー。
+///
+/// 升目数は幅に合わせて縮むので、満たす割合は上限レベル `max_lv` との比で
+/// 決める — 狭い画面でも「どこまで伸ばしたか」の読み取りが変わらない。
+fn bar(lv: u32, max_lv: u32, cells: usize) -> String {
+    let max_lv = max_lv.max(1) as usize;
+    let filled = (lv.min(max_lv as u32) as usize * cells).div_ceil(max_lv);
+    format!("{}{}", "█".repeat(filled), "░".repeat(cells - filled))
 }
 
 fn weapon_art(w: WeaponKind) -> &'static str {
@@ -620,10 +735,7 @@ fn render_ring(
         .borders(borders)
         .border_style(Style::default().fg(Color::Yellow))
         .title(" 環 ");
-    let inner_h = block.inner(area).height;
-
-    let sections = ring_sections(state);
-    let spaced = sections_height(&sections, true) <= inner_h as usize;
+    let (sections, spaced) = fit_sections(block.inner(area), |w| ring_sections(state, w));
     let mut cs = click_state.borrow_mut();
     ScrollableTab::new(
         build_list(sections, spaced),
@@ -637,7 +749,8 @@ fn render_ring(
 }
 
 /// 環タブの行。層の進捗 / 次層開放 / 見出し / 強化項目のかたまりに分ける。
-fn ring_sections(state: &StarRingState) -> Vec<Section> {
+/// `width` は説明文を折り返す桁数。
+fn ring_sections(state: &StarRingState, width: u16) -> Vec<Section> {
     let layer = state.layer();
     let next = Layer::next_threshold(layer);
     let progress = match next {
@@ -776,14 +889,18 @@ fn ring_sections(state: &StarRingState) -> Vec<Section> {
                 Span::styled(cost_label, Style::default().fg(Color::DarkGray)),
             ])
         };
-        let blurb = Line::from(Span::styled(
-            format!("      {}", kind.blurb()),
+        let mut lines = vec![head];
+        lines.extend(blurb_lines(
+            None,
+            BLURB_INDENT,
+            kind.blurb(),
+            width,
             Style::default().fg(Color::DarkGray),
         ));
         sections.push(if unlocked {
-            Section::clickable(vec![head, blurb], buy_ring_id(kind))
+            Section::clickable(lines, buy_ring_id(kind))
         } else {
-            Section::plain(vec![head, blurb])
+            Section::plain(lines)
         });
     }
 
@@ -801,10 +918,7 @@ fn render_codex(
         .borders(borders)
         .border_style(Style::default().fg(Color::Yellow))
         .title(" 図鑑 ");
-    let inner_h = block.inner(area).height;
-
-    let sections = codex_sections(state);
-    let spaced = sections_height(&sections, true) <= inner_h as usize;
+    let (sections, spaced) = fit_sections(block.inner(area), |_| codex_sections(state));
     let mut cs = click_state.borrow_mut();
     ScrollableTab::new(
         build_list(sections, spaced),
@@ -1348,6 +1462,19 @@ mod tests {
         false
     }
 
+    /// バッファの 1 行を文字列へ戻す。全角文字は継続セルを伴うので、
+    /// セルを素直に連結すると文字の間に空白が挟まる。
+    fn row_text(buf: &ratzilla::ratatui::buffer::Buffer, y: u16, width: u16) -> String {
+        let mut out = String::new();
+        let mut x = 0u16;
+        while x < width {
+            let sym = buf[(x, y)].symbol();
+            out.push_str(if sym.is_empty() { " " } else { sym });
+            x += Span::raw(sym).width().max(1) as u16;
+        }
+        out
+    }
+
     #[test]
     fn narrow_ring_tab_exposes_scroll_when_layer_unlock_rows_are_present() {
         // 40×30 の狭い画面では環ペインが短く、層開放行を足すと核脈動が
@@ -1403,6 +1530,191 @@ mod tests {
         );
     }
 
+    /// 端末に近い幅で、説明文が全文残ったまま幅に収まること。
+    ///
+    /// 折り返しは行を増やすかわりに、1 行が幅を超えないことで初めて意味を持つ。
+    /// 幅を超えた行は描画側が右端で捨ててしまい、省略記号も出ない。
+    #[test]
+    fn blurb_lines_keep_the_whole_text_within_the_width() {
+        let texts: Vec<&str> = WeaponStat::ALL
+            .iter()
+            .map(|s| s.blurb())
+            .chain(RingUpgrade::ALL.iter().map(|k| k.blurb()))
+            .chain(WeaponKind::ALL.iter().map(|w| w.blurb()))
+            .collect();
+
+        for width in [20u16, 32, 33, 35, 41, 72] {
+            for rail in [None, Some(Style::default())] {
+                for indent in [2usize, BLURB_INDENT] {
+                    for text in &texts {
+                        let lines =
+                            blurb_lines(rail, indent, text, width, Style::default());
+                        let mut joined = String::new();
+                        for line in &lines {
+                            assert!(
+                                line.width() <= width as usize,
+                                "{width}桁: 折り返した行が幅を超えている ({}桁) {line:?}",
+                                line.width()
+                            );
+                            for span in line.spans.iter() {
+                                joined.push_str(span.content.as_ref());
+                            }
+                        }
+                        let restored: String = joined
+                            .chars()
+                            .filter(|c| *c != ' ' && *c != '│')
+                            .collect();
+                        let want: String = text.chars().filter(|c| *c != ' ').collect();
+                        assert_eq!(
+                            restored, want,
+                            "{width}桁 (indent={indent}): 説明文が欠けている"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// 内容が溢れる領域では、`ScrollableTab` がスクロール列へ回す 1 桁を
+    /// 差し引いた幅で折り返すこと。ここがずれると折り返した行の右端が
+    /// スクロール列に隠れる。
+    #[test]
+    fn fit_sections_leaves_room_for_the_scroll_column() {
+        let state = StarRingState::new();
+        let inner = Rect::new(0, 0, 33, 6);
+        let (fitted, spaced) = fit_sections(inner, |w| armory_sections(&state, w));
+        assert!(!spaced, "溢れている時に装飾の空行は挟まない");
+        assert_eq!(
+            sections_height(&fitted, false),
+            sections_height(&armory_sections(&state, inner.width - 1), false),
+            "スクロール列の 1 桁を引いた幅で折り返していない"
+        );
+    }
+
+    /// 折り返して増えた説明行も、見出し行と同じ購入のクリック領域に入ること。
+    #[test]
+    fn wrapped_blurb_rows_stay_clickable() {
+        let (w, h) = (108u16, 36u16);
+        let mut state = StarRingState::new();
+        state.tab = Tab::Ring;
+        state.total_kills = Layer::THRESHOLDS[1];
+        state.shards = 1e9;
+        assert!(unlock_next_layer(&mut state));
+        state.layer_flash_ticks = 0;
+
+        let wanted = buy_ring_id(RingUpgrade::CorePulse);
+        let inner_w = split_body(split_frame(Rect::new(0, 0, w, h))[2], false)
+            .1
+            .width
+            - 2;
+        let blurb_rows = blurb_lines(
+            None,
+            BLURB_INDENT,
+            RingUpgrade::CorePulse.blurb(),
+            inner_w,
+            Style::default(),
+        )
+        .len();
+        assert!(blurb_rows >= 2, "この幅では説明文が折り返る前提の検査");
+
+        let cs = render_frame(&state, w, h);
+        let guard = cs.borrow();
+        let rows = (0..h)
+            .filter(|&y| (0..w).any(|x| guard.hit_test(x, y) == Some(wanted)))
+            .count();
+        assert!(
+            rows >= 1 + blurb_rows,
+            "折り返した説明行が当たり判定から漏れている ({rows} 行)"
+        );
+    }
+
+    /// モバイル幅でも購入項目が 2 つ以上見えること。折り返しで行が増えるほど
+    /// 一度に見える項目は減るが、比べる相手が無い画面は投資の判断に使えない。
+    #[test]
+    fn mobile_shows_at_least_two_purchase_rows() {
+        let (w, h) = (33u16, 38u16);
+        for tab in [Tab::Armory, Tab::Ring] {
+            let mut state = StarRingState::new();
+            state.tab = tab;
+            state.total_kills = Layer::THRESHOLDS[1];
+            state.shards = 1e9;
+            assert!(unlock_next_layer(&mut state));
+            state.layer_flash_ticks = 0;
+
+            let wanted: Vec<u16> = match tab {
+                Tab::Armory => WeaponStat::ALL
+                    .iter()
+                    .map(|s| buy_weapon_stat_id(state.selected_weapon, *s))
+                    .collect(),
+                _ => RingUpgrade::ALL.iter().map(|k| buy_ring_id(*k)).collect(),
+            };
+            let cs = render_frame(&state, w, h);
+            let visible = wanted
+                .iter()
+                .filter(|id| has_action(&cs, w, h, **id))
+                .count();
+            assert!(
+                visible >= 2,
+                "{tab:?}: モバイルで見えている購入項目が {visible} 個しかない"
+            );
+        }
+    }
+
+    /// 折り返さない情報 (武器名・強化バー) が、実機幅のどれでも切り詰められずに
+    /// 出ること。折り返すのは説明文だけで、1 行に収める情報はパネルの幅が
+    /// 下限を割ると読めなくなる。
+    #[test]
+    fn single_line_info_survives_every_device_width() {
+        for (w, h) in [(108u16, 36u16), (33, 38), (40, 30), (38, 20)] {
+            let mut state = StarRingState::new();
+            state.tab = Tab::Armory;
+
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let cs = Rc::new(RefCell::new(ClickState::new()));
+            cs.borrow_mut().terminal_cols = w;
+            cs.borrow_mut().terminal_rows = h;
+            terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
+            let buf = terminal.backend().buffer();
+
+            let rows: Vec<String> = (0..h).map(|y| row_text(buf, y, w)).collect();
+            let picker = rows
+                .iter()
+                .find(|r| r.contains('▶'))
+                .expect("武器ピッカーの行が見つからない");
+            assert!(
+                picker.contains(state.selected_weapon.label()),
+                "{w}x{h}: 選択中の武器名が読めない {picker}"
+            );
+
+            let tab_area = split_body(split_frame(Rect::new(0, 0, w, h))[2], is_narrow_layout(w)).1;
+            let bar_row = rows
+                .iter()
+                .find(|r| r.contains('弾') && r.contains('威'))
+                .expect("強化バーの行が見つからない");
+            let cells = bar_cells(tab_area.width);
+            assert_eq!(
+                bar_row.matches('░').count(),
+                cells * 3,
+                "{w}x{h}: 強化バーの升目が欠けている {bar_row}"
+            );
+        }
+    }
+
+    /// バーは升目数が変わっても、伸ばした割合が同じに読めること。
+    #[test]
+    fn bar_scales_to_the_cells_it_is_given() {
+        for cells in [3usize, 5, 8] {
+            assert_eq!(bar(0, 8, cells).matches('█').count(), 0);
+            assert_eq!(bar(8, 8, cells).matches('█').count(), cells);
+            assert_eq!(bar(99, 8, cells).matches('█').count(), cells);
+            assert_eq!(bar(0, 8, cells).chars().count(), cells);
+        }
+        assert_eq!(bar(4, 8, 8).matches('█').count(), 4);
+        assert_eq!(bar(4, 8, 4).matches('█').count(), 2);
+        // 升目より上限レベルが大きくても、1 レベル目で必ず升目が 1 つ灯る。
+        assert_eq!(bar(1, 8, 4).matches('█').count(), 1);
+    }
+
     /// 購入項目は見出し行と説明行のどちらを叩いても同じ購入が走ること。
     /// 指の当たる面が広いほどモバイルで押しやすく、武装タブと環タブで
     /// 当たり方が違うと「押せる行」を探させることになる。
@@ -1443,18 +1755,24 @@ mod tests {
         assert!(unlock_next_layer(&mut state));
 
         for (label, make) in [
-            ("armory", armory_sections as fn(&StarRingState) -> Vec<Section>),
+            (
+                "armory",
+                armory_sections as fn(&StarRingState, u16) -> Vec<Section>,
+            ),
             ("ring", ring_sections),
-            ("codex", codex_sections),
+            ("codex", |s: &StarRingState, _w: u16| codex_sections(s)),
         ] {
-            for spaced in [false, true] {
-                let sections = make(&state);
-                let expected = sections_height(&sections, spaced);
-                let actual = build_list(sections, spaced).lines().len();
-                assert_eq!(
-                    expected, actual,
-                    "{label} (spaced={spaced}): 見積もり {expected} 行 / 実際 {actual} 行"
-                );
+            // 折り返しは幅で行数を変えるので、実機で使う幅の両端を含めて見る。
+            for width in [20u16, 33, 34, 41, 72] {
+                for spaced in [false, true] {
+                    let sections = make(&state, width);
+                    let expected = sections_height(&sections, spaced);
+                    let actual = build_list(sections, spaced).lines().len();
+                    assert_eq!(
+                        expected, actual,
+                        "{label} ({width}桁 spaced={spaced}): 見積もり {expected} 行 / 実際 {actual} 行"
+                    );
+                }
             }
         }
     }
@@ -1747,3 +2065,4 @@ mod tests {
         }
     }
 }
+
