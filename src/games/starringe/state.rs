@@ -27,15 +27,23 @@ pub const MAX_TURRETS: u32 = 8;
 /// する。砲台をどの大きさで描くかは `render` が決めるが、環が下がりきった時に
 /// 残る余裕はこの値なので、描画半径の下限もここに揃う。
 pub const TURRET_NEAR_RADIUS: f64 = 1.6;
+/// 画面シェイクの横振れ幅。
+pub const SHAKE_MAX_X: f64 = 0.6;
 /// 画面シェイクの縦振れ幅。
 pub const SHAKE_MAX_Y: f64 = 0.3;
-/// 画面シェイク込みで Canvas の y_bounds (`0..WORLD_H`) に収まる高さの下限。
+/// 画面シェイク込みで Canvas の x_bounds (`0..WORLD_W`) に収まる位置の下限。
 ///
-/// 描画は毎 tick 最大 `SHAKE_MAX_Y` だけ上下へずれる。円の端をこの範囲に収めて
-/// おかないと、揺れた tick だけ上端・下端が欠けた形で描かれる。砲台も鉱石も
-/// 「中心」ではなく「円の端」をこの範囲へ突き合わせる。
+/// 描画は毎 tick 最大 `SHAKE_MAX_X` だけ左右へ、`SHAKE_MAX_Y` だけ上下へずれる。
+/// 円の端をこの範囲に収めておかないと、揺れた tick だけ端が欠けた形で描かれる。
+/// 砲台も鉱石も「中心」ではなく「円の端」をこの範囲へ突き合わせる。振れ幅は縦横で
+/// 違うので、境界も縦横それぞれで持つ。
+pub const VISIBLE_X_LO: f64 = SHAKE_MAX_X;
+/// 画面シェイク込みで Canvas の x_bounds に収まる位置の上限。詳細は `VISIBLE_X_LO`。
+pub const VISIBLE_X_HI: f64 = WORLD_W - SHAKE_MAX_X;
+/// 画面シェイク込みで Canvas の y_bounds (`0..WORLD_H`) に収まる高さの下限。
+/// 詳細は `VISIBLE_X_LO`。
 pub const VISIBLE_Y_LO: f64 = SHAKE_MAX_Y;
-/// 画面シェイク込みで Canvas の y_bounds に収まる高さの上限。詳細は `VISIBLE_Y_LO`。
+/// 画面シェイク込みで Canvas の y_bounds に収まる高さの上限。詳細は `VISIBLE_X_LO`。
 pub const VISIBLE_Y_HI: f64 = WORLD_H - SHAKE_MAX_Y;
 /// 鉱石の出現高さ。
 pub const SPAWN_Y: f64 = 97.0;
@@ -533,15 +541,38 @@ pub struct Ore {
     pub vy: f64,
     pub hp: f64,
     pub kind: OreKind,
-    /// 描画と当たり判定が読む半径。値は必ず `kind.radius()` の写しで、生成は
-    /// `logic::spawn_one` の 1 経路に閉じている。個体ごとに書き換えると
-    /// `OreKind::radius` が持つ下限 (点グリッドの上で弾と見分けがつく大きさ) を
-    /// 迂回できてしまうため、湧かせた後に触らない。
-    pub radius: f64,
     pub motion: OreMotion,
     /// 横方向の速度 (符号付き)。壁で反射すると符号が入れ替わる。
     pub sway: f64,
     pub age: u32,
+}
+
+impl Ore {
+    /// 種から決まる値 (寸法・降下パターン) を埋めて 1 体を組み立てる。
+    ///
+    /// 個体ごとに違うのは位置・HP・横速度だけなので、それ以外は引数に取らない。
+    pub fn new(kind: OreKind, x: f64, y: f64, hp: f64, sway: f64) -> Self {
+        Self {
+            x,
+            y,
+            vx: 0.0,
+            vy: 0.0,
+            hp,
+            kind,
+            motion: kind.default_motion(),
+            sway,
+            age: 0,
+        }
+    }
+
+    /// 描画と当たり判定が読む半径。
+    ///
+    /// 種から毎回引き直すので、個体ごとに別の値を持たせる余地がない。値を写した
+    /// フィールドを持つと、`OreKind::radius` が守っている下限 (点グリッドの上で
+    /// 弾と見分けがつく大きさ) をその個体だけ下回らせる書き換え経路になる。
+    pub fn radius(&self) -> f64 {
+        self.kind.radius()
+    }
 }
 
 /// 飛翔弾。武装から飛び、鉱石に当たって消える (または貫通する)。
@@ -589,6 +620,12 @@ pub struct PulseRing {
     pub max_life: u32,
     /// 波面が通過した鉱石へ与えるダメージ。0 なら演出だけの波。
     pub damage: f64,
+    /// 本数の上限で畳まれた波 (`logic::step_pulse_rings`)。
+    ///
+    /// 畳んだ波の `life` は残寿命ではなく、一息に削った半径を一度描かせるための
+    /// 猶予 1tick になる。`life / max_life` を経過の割合として読む描画は、この
+    /// 波だけ寿命の終わりではなく「畳んだ結果」として扱う。
+    pub folded: bool,
 }
 
 /// UI タブ。

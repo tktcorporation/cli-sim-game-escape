@@ -277,6 +277,7 @@ fn spawn_pulse_wave(state: &mut StarRingState, reach: f64, damage: f64) {
         life,
         max_life: life,
         damage,
+        folded: false,
     });
 }
 
@@ -380,16 +381,22 @@ fn step_particles(state: &mut StarRingState) {
 /// この 1tick が無いと、波面が追い越したはずの鉱石が到達距離の際でだけ
 /// すり抜ける。輪帯の幅がゼロなので、波が届く距離自体は伸びない。
 ///
-/// 本数が上限を越えたら、最も広がった波から畳む。畳む波はこの tick が最後の
-/// 一歩になり、進む先が `radius + PULSE_WAVE_SPEED` ではなく `reach` へ変わる。
-/// 残りの輪帯をこの tick の輪帯と地続きの1区間として通すので、タップした回数
-/// ぶんの手応えを残しながら、同じ鉱石を2度削ることもない。
+/// 本数が上限を越えたら、最も広がった波から早めに退場させる。退場のさせ方は
+/// 削るものが残っているかで変える。
 ///
-/// 畳んだ波は、跳ねた先の `reach` を寿命の最後の 1tick として残す。`render` は
-/// 削る半径そのものを描くので、跳ねたその tick に捨てると `(inner, reach]` を
-/// 削った半径だけが一度も描かれず、波が途中で消えたのに上空の鉱石が減る絵に
-/// なる。残した 1tick は他の波の最終 tick と同じ幅ゼロの輪帯なので、削る範囲も
-/// 本数の上限 (`surviving` は `life > 1` だけを数える) も変わらない。
+/// 削る波 (`damage > 0`) は畳む。この tick が最後の一歩になり、進む先が
+/// `radius + PULSE_WAVE_SPEED` ではなく `reach` へ変わる。残りの輪帯をこの tick
+/// の輪帯と地続きの1区間として通すので、タップした回数ぶんの手応えを残しながら、
+/// 同じ鉱石を2度削ることもない。跳ねた先の `reach` は 1tick だけ残して描かせる
+/// (`PulseRing::folded`) ——`render` は削る半径そのものを描くので、跳ねたその
+/// tick に捨てると `(inner, reach]` を削った半径だけが一度も描かれず、波が途中で
+/// 消えたのに上空の鉱石が減る絵になる。残した 1tick は他の波の最終 tick と同じ
+/// 幅ゼロの輪帯なので、削る範囲も本数の上限 (`surviving` は `life > 1` だけを
+/// 数える) も変わらない。
+///
+/// 演出だけの波 (`damage == 0`) はその場で消す。削り残しが無いので跳ねた半径を
+/// 見せる理由が無く、跳ねさせると途中の半径から `reach` へ飛んだ絵を 1tick だけ
+/// 出して消えることになる。
 fn step_pulse_rings(state: &mut StarRingState) {
     // 畳む本数は波を広げる前に決める。この tick で寿命が尽きる波は放っておいても
     // 消えるので、数えるのは生き残る波だけにする。
@@ -402,29 +409,27 @@ fn step_pulse_rings(state: &mut StarRingState) {
 
     for i in 0..state.pulse_rings.len() {
         let ring = &mut state.pulse_rings[i];
-        if ring.life == 0 {
-            continue;
-        }
         ring.life -= 1;
-        // 畳むのは最も広がった波から。古い順に並んでいるので先頭から取る。
+        // 退場させるのは最も広がった波から。古い順に並んでいるので先頭から取る。
         let retiring = ring.life > 0 && to_retire > 0;
         if retiring {
             to_retire -= 1;
+        }
+        let inner = ring.radius;
+        if retiring && ring.damage > 0.0 {
+            ring.radius = ring.reach;
             // 残すのは描かせるための 1tick。`life > 1` を満たさなくなるので、
             // 次の tick の切り詰め対象にも本数にも数えられない。
             ring.life = 1;
-        }
-        let inner = ring.radius;
-        ring.radius = if retiring {
-            ring.reach
+            ring.folded = true;
+        } else if retiring {
+            ring.life = 0;
         } else if ring.life > 0 {
             // 最後の一歩は端数になるので、到達距離で頭打ちにする。満額進めると
             // `pulse_reach` の外に居る鉱石まで削れ、描かれる波も強化の範囲から
             // はみ出す。
-            (inner + PULSE_WAVE_SPEED).min(ring.reach)
-        } else {
-            inner
-        };
+            ring.radius = (inner + PULSE_WAVE_SPEED).min(ring.reach);
+        }
         let (outer, dmg) = (ring.radius, ring.damage);
         if dmg > 0.0 {
             pulse_wave_damage(state, inner, outer, dmg);
@@ -462,7 +467,7 @@ fn step_projectiles(state: &mut StarRingState) {
         let mut hit: Option<usize> = None;
         for (oi, ore) in state.ores.iter().enumerate() {
             let d = (ore.x - px).hypot(ore.y - py);
-            if d <= ore.radius + pr + HIT_TOLERANCE {
+            if d <= ore.radius() + pr + HIT_TOLERANCE {
                 hit = Some(oi);
                 break;
             }
@@ -552,8 +557,8 @@ fn step_ores(state: &mut StarRingState) {
         // 端で取る——中心を壁に張り付けると半径ぶんが Canvas の x_bounds の外へ
         // 出て、跳ね返った鉱石ほど欠けて描かれる。
         let (lo, hi) = (
-            FIELD_MARGIN + ore.radius,
-            WORLD_W - FIELD_MARGIN - ore.radius,
+            FIELD_MARGIN + ore.radius(),
+            WORLD_W - FIELD_MARGIN - ore.radius(),
         );
         if ore.x < lo {
             ore.x = lo;
@@ -579,7 +584,7 @@ fn resolve_arrivals(state: &mut StarRingState) {
     while i < state.ores.len() {
         let ore = &state.ores[i];
         let reached_core = (ore.x - CX).hypot(ore.y - CORE_Y) <= INNER_RADIUS;
-        if reached_core || ore.y - ore.radius <= VISIBLE_Y_LO {
+        if reached_core || ore.y - ore.radius() <= VISIBLE_Y_LO {
             let ore = state.ores.remove(i);
             state.missed_count += 1;
             burst(state, ore.x, ore.y, 4, 1.5, ParticleKind::Dust, 10);
@@ -629,18 +634,7 @@ fn spawn_one(state: &mut StarRingState, kind: OreKind, x: f64, y: f64) {
     };
     let sway = kind.sway_speed() * sign * rand_range(state, 0.85, 1.15);
     let hp = kind.base_hp() * Layer::hp_mult(state.layer());
-    state.ores.push(Ore {
-        x,
-        y,
-        vx: 0.0,
-        vy: 0.0,
-        hp,
-        kind,
-        radius: kind.radius(),
-        motion: kind.default_motion(),
-        sway,
-        age: 0,
-    });
+    state.ores.push(Ore::new(kind, x, y, hp, sway));
 }
 
 /// 湧きの基準高さ。円の上端がちょうど `VISIBLE_Y_HI` に接する高さへ置く。
@@ -971,7 +965,7 @@ fn apply_damage(state: &mut StarRingState, idx: usize, dmg: f64, source: DamageS
         ore.x,
         ore.y,
         6 + (ore.kind as usize).min(6),
-        3.5 + ore.radius * 0.25,
+        3.5 + ore.radius() * 0.25,
         ParticleKind::Shard,
         18,
     );
@@ -1087,16 +1081,17 @@ mod tests {
             tick(&mut state, 1);
             for ore in state.ores.iter().filter(|o| o.age == 0) {
                 assert!(
-                    ore.y + ore.radius <= VISIBLE_Y_HI + 1e-9 && ore.y - ore.radius >= VISIBLE_Y_LO,
+                    ore.y + ore.radius() <= VISIBLE_Y_HI + 1e-9
+                        && ore.y - ore.radius() >= VISIBLE_Y_LO,
                     "湧いた鉱石が画面からはみ出している y={} r={}",
                     ore.y,
-                    ore.radius
+                    ore.radius()
                 );
                 assert!(
-                    ore.x - ore.radius >= 0.0 && ore.x + ore.radius <= WORLD_W + 1e-9,
+                    ore.x - ore.radius() >= 0.0 && ore.x + ore.radius() <= WORLD_W + 1e-9,
                     "湧いた鉱石が画面からはみ出している x={} r={}",
                     ore.x,
-                    ore.radius
+                    ore.radius()
                 );
                 checked += 1;
             }
@@ -1141,11 +1136,11 @@ mod tests {
             step_ores(&mut state);
             let ore = &state.ores[0];
             assert!(
-                ore.x - ore.radius >= FIELD_MARGIN - 1e-9
-                    && ore.x + ore.radius <= WORLD_W - FIELD_MARGIN + 1e-9,
+                ore.x - ore.radius() >= FIELD_MARGIN - 1e-9
+                    && ore.x + ore.radius() <= WORLD_W - FIELD_MARGIN + 1e-9,
                 "鉱石が横から画面外へ出てはいけない x={} r={}",
                 ore.x,
-                ore.radius
+                ore.radius()
             );
         }
     }
@@ -1178,10 +1173,10 @@ mod tests {
                     break;
                 };
                 assert!(
-                    ore.y - ore.radius > 0.0,
+                    ore.y - ore.radius() > 0.0,
                     "{kind:?} が下端で欠けたまま残っている y={} r={}",
                     ore.y,
-                    ore.radius
+                    ore.radius()
                 );
                 last = (ore.x, ore.y);
             }
@@ -1200,18 +1195,9 @@ mod tests {
     fn killing_ore_with_projectile_increases_shards() {
         let mut state = StarRingState::new();
         let before = state.shards;
-        state.ores.push(Ore {
-            x: CX + 12.0,
-            y: CORE_Y + 25.0,
-            vx: 0.0,
-            vy: 0.0,
-            hp: 0.4,
-            kind: OreKind::Dust,
-            radius: 3.5,
-            motion: OreMotion::Spiral,
-            sway: 0.0,
-            age: 0,
-        });
+        state
+            .ores
+            .push(Ore::new(OreKind::Dust, CX + 12.0, CORE_Y + 25.0, 0.4, 0.0));
         for _ in 0..40 {
             tick(&mut state, 1);
             if state.total_kills > 0 {
@@ -1231,18 +1217,9 @@ mod tests {
     fn arrival_at_core_does_not_drain_shards() {
         let mut state = StarRingState::new();
         state.shards = 50.0;
-        state.ores.push(Ore {
-            x: CX + 1.0,
-            y: CORE_Y,
-            vx: 0.0,
-            vy: 0.0,
-            hp: 10.0,
-            kind: OreKind::Rock,
-            radius: 4.75,
-            motion: OreMotion::Spiral,
-            sway: 0.0,
-            age: 0,
-        });
+        state
+            .ores
+            .push(Ore::new(OreKind::Rock, CX + 1.0, CORE_Y, 10.0, 0.0));
         tick(&mut state, 1);
         assert!(state.missed_count >= 1);
         assert!(
@@ -1302,18 +1279,13 @@ mod tests {
     #[test]
     fn shell_resists_pulse_but_not_ray() {
         let mut state = StarRingState::new();
-        state.ores.push(Ore {
-            x: CX + 14.0,
-            y: CORE_Y + 30.0,
-            vx: 0.0,
-            vy: 0.0,
-            hp: 10.0,
-            kind: OreKind::Shell,
-            radius: 7.5,
-            motion: OreMotion::Heavy,
-            sway: 0.0,
-            age: 0,
-        });
+        state.ores.push(Ore::new(
+            OreKind::Shell,
+            CX + 14.0,
+            CORE_Y + 30.0,
+            10.0,
+            0.0,
+        ));
         apply_damage(&mut state, 0, 5.0, DamageSource::Weapon(WeaponKind::Pulse));
         let after_pulse = state.ores[0].hp;
         assert!(
@@ -1481,18 +1453,13 @@ mod tests {
     fn pulse_fires_many_weak_projectiles() {
         let mut state = StarRingState::new();
         state.weapon_levels[0] = [3, 4, 0];
-        state.ores.push(Ore {
-            x: CX + 20.0,
-            y: CORE_Y + 30.0,
-            vx: 0.0,
-            vy: 0.0,
-            hp: 100.0,
-            kind: OreKind::Dust,
-            radius: 3.5,
-            motion: OreMotion::Spiral,
-            sway: 0.0,
-            age: 0,
-        });
+        state.ores.push(Ore::new(
+            OreKind::Dust,
+            CX + 20.0,
+            CORE_Y + 30.0,
+            100.0,
+            0.0,
+        ));
         for _ in 0..30 {
             tick(&mut state, 1);
         }
@@ -1531,18 +1498,9 @@ mod tests {
     fn layer_ready_pulse_triggers_when_kills_met() {
         let mut state = StarRingState::new();
         state.total_kills = Layer::THRESHOLDS[1] - 1;
-        state.ores.push(Ore {
-            x: CX + 12.0,
-            y: CORE_Y + 25.0,
-            vx: 0.0,
-            vy: 0.0,
-            hp: 0.1,
-            kind: OreKind::Dust,
-            radius: 3.5,
-            motion: OreMotion::Spiral,
-            sway: 0.0,
-            age: 0,
-        });
+        state
+            .ores
+            .push(Ore::new(OreKind::Dust, CX + 12.0, CORE_Y + 25.0, 0.1, 0.0));
         state.weapon_levels[0][WeaponStat::Power.index()] = 8;
         for _ in 0..50 {
             tick(&mut state, 1);
@@ -1584,18 +1542,10 @@ mod tests {
     }
 
     fn push_test_ore(state: &mut StarRingState, x: f64, y: f64, hp: f64) {
-        state.ores.push(Ore {
-            x,
-            y,
-            vx: 0.0,
-            vy: 0.0,
-            hp,
-            kind: OreKind::Dust,
-            radius: OreKind::Dust.radius(),
-            motion: OreMotion::Heavy,
-            sway: 0.0,
-            age: 0,
-        });
+        let mut ore = Ore::new(OreKind::Dust, x, y, hp, 0.0);
+        // 横へ流れない降り方にして、見るものを波の当たり方だけに絞る。
+        ore.motion = OreMotion::Heavy;
+        state.ores.push(ore);
     }
 
     /// 波は核の真上へ `pulse_reach` ぶん伸び、そこに居る鉱石を削ること。
@@ -1901,10 +1851,11 @@ mod tests {
     /// 「自分の撃った弾」の区別が色だけになる。点グリッドの上で見分けがつくかは
     /// `render` のテストが押さえるので、ここは寸法そのものの並びを見る。
     ///
-    /// 突き合わせる相手は `OreKind::radius` の一覧ではなく、実際に湧いた個体の
-    /// `Ore.radius` にする。描画と当たり判定が読むのはインスタンスの値なので、
-    /// enum の一覧だけを見ていると、生成のどこかがそこへ別の値を書いた瞬間に
-    /// 契約が黙って外れる。
+    /// 突き合わせる相手は `OreKind::radius` の一覧ではなく、実際に湧いた個体に
+    /// する。半径は種から導かれる (`Ore::radius`) ので危ういのは値そのものでは
+    /// なく「どの種で湧かせるか」で、分裂子のように通常の湧きと別の経路を持つ
+    /// 鉱石が小さい種を選ぶと、enum の一覧を見ているだけでは弾との差が詰まった
+    /// ことに気付けない。
     #[test]
     fn projectiles_stay_smaller_than_every_ore() {
         let ladder = [
@@ -1925,16 +1876,9 @@ mod tests {
 
         let mut smallest = f64::INFINITY;
         let mut checked = 0u32;
-        let mut inspect = |ores: &[Ore], label: &str| {
+        let mut inspect = |ores: &[Ore]| {
             for ore in ores {
-                assert!(
-                    (ore.radius - ore.kind.radius()).abs() < 1e-9,
-                    "{label}: {:?} の半径が種の値と食い違う r={} kind={}",
-                    ore.kind,
-                    ore.radius,
-                    ore.kind.radius()
-                );
-                smallest = smallest.min(ore.radius);
+                smallest = smallest.min(ore.radius());
                 checked += 1;
             }
         };
@@ -1943,7 +1887,7 @@ mod tests {
         for kind in OreKind::ALL {
             let mut state = StarRingState::new();
             spawn_one(&mut state, kind, CX, spawn_base_y(kind));
-            inspect(&state.ores, "通常湧き");
+            inspect(&state.ores);
         }
 
         // 分裂子。左右へ振れる盤面と、残り枠が 1 つの盤面の両方を通す。
@@ -1960,7 +1904,7 @@ mod tests {
                 !children.is_empty(),
                 "filler={filler} で分裂子が湧いていない"
             );
-            inspect(children, "分裂子");
+            inspect(children);
         }
 
         assert!(checked > 0, "検証対象の鉱石が湧いているはず");

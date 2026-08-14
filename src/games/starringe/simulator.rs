@@ -23,7 +23,8 @@ use super::logic::{
 };
 use super::state::{
     Layer, OreKind, RingUpgrade, StarRingState, WeaponKind, WeaponStat, FIELD_MARGIN,
-    RING_UPGRADE_COUNT, SPAWN_X_MARGIN, SPAWN_Y, VISIBLE_Y_HI, VISIBLE_Y_LO, WORLD_W,
+    RING_UPGRADE_COUNT, SPAWN_X_MARGIN, SPAWN_Y, VISIBLE_X_HI, VISIBLE_X_LO, VISIBLE_Y_HI,
+    VISIBLE_Y_LO, WORLD_W,
 };
 
 /// 購入方策。感度分析で「どの強化が効いているか」を切り分ける。
@@ -758,10 +759,11 @@ fn rapid_tapping_keeps_the_wave_count_bounded() {
 
 /// 裂片が湧く層で、分裂が盤面を溢れさせず迎撃圧も殺さないこと。
 ///
-/// 裂片は撃破のたびに星塵を 2 体足すので、湧きの総量は他の層より上振れする。子は
-/// 通常の星塵と同じ寸法・HP で湧く (`logic::apply_damage`) ため、分裂の重さは
-/// 裂片を割った回数だけで決まる——ここが崩れると、盤面が上限へ張り付く側か、
-/// 割っても何も増えない側のどちらかへ倒れる。
+/// 裂片は撃破のたびに星塵を残り枠のぶんだけ (最大 2 体) 足すので、湧きの総量は
+/// 他の層より上振れする。子は通常の星塵と同じ寸法・HP で湧く
+/// (`logic::apply_damage`) ため、分裂の重さは裂片を割った回数と盤面の空きで
+/// 決まる——ここが崩れると、盤面が上限へ張り付く側か、割っても何も増えない側の
+/// どちらかへ倒れる。
 ///
 /// 武装を Lv1 に固定するのは `saturated_kills` と同じ理由で、強化が積み上がって
 /// 逸失が 0 に落ちた状態では分裂の重さが撃破数へ出ないため。
@@ -848,10 +850,11 @@ fn new_ore_kinds_appear_over_long_run() {
 /// Canvas の内側かつ壁の内側にいる。画面外へ流れる鉱石があると
 /// 「どこから何が降ってきているか」を目で追えなくなる。
 ///
-/// 横も下端も、中心だけでなく円の全体を見る。中心が内側にあっても半径ぶんが
-/// Canvas の bounds (`0..WORLD_W` × `0..WORLD_H`) を越えていれば、その鉱石は
-/// 端で欠けて描かれる。縦は画面シェイクで振れた tick も欠けないよう
-/// `VISIBLE_Y_LO`/`VISIBLE_Y_HI` を境界に取る。
+/// 見るのは中心ではなく円の全体。中心が内側にあっても半径ぶんが Canvas の
+/// bounds (`0..WORLD_W` × `0..WORLD_H`) を越えていれば、その鉱石は端で欠けて
+/// 描かれる。画面シェイクで振れた tick も欠けないよう、境界は縦横それぞれの
+/// 振れ幅を見込んだ `VISIBLE_X_LO`/`VISIBLE_X_HI`・`VISIBLE_Y_LO`/`VISIBLE_Y_HI`
+/// に取る。
 #[test]
 fn ores_stay_inside_the_field_over_a_long_run() {
     const TICKS: u32 = 6_000;
@@ -864,25 +867,27 @@ fn ores_stay_inside_the_field_over_a_long_run() {
         tick(&mut state, 1);
         for ore in &state.ores {
             assert!(
-                ore.x - ore.radius >= FIELD_MARGIN - EPS
-                    && ore.x + ore.radius <= WORLD_W - FIELD_MARGIN + EPS,
+                ore.x - ore.radius() >= FIELD_MARGIN - EPS
+                    && ore.x + ore.radius() <= WORLD_W - FIELD_MARGIN + EPS,
                 "tick {t}: 鉱石が左右の壁を越えた x={} r={} kind={:?}",
                 ore.x,
-                ore.radius,
+                ore.radius(),
                 ore.kind
             );
             assert!(
-                ore.x - ore.radius >= 0.0 && ore.x + ore.radius <= WORLD_W + EPS,
-                "tick {t}: 鉱石が Canvas の横幅からはみ出した x={} r={} kind={:?}",
+                ore.x - ore.radius() >= VISIBLE_X_LO - EPS
+                    && ore.x + ore.radius() <= VISIBLE_X_HI + EPS,
+                "tick {t}: 鉱石が描画範囲の横幅からはみ出した x={} r={} kind={:?}",
                 ore.x,
-                ore.radius,
+                ore.radius(),
                 ore.kind
             );
             assert!(
-                ore.y - ore.radius >= VISIBLE_Y_LO && ore.y <= VISIBLE_Y_HI + EPS,
-                "tick {t}: 鉱石が描画範囲の下端を割った y={} r={} kind={:?}",
+                ore.y - ore.radius() >= VISIBLE_Y_LO - EPS
+                    && ore.y + ore.radius() <= VISIBLE_Y_HI + EPS,
+                "tick {t}: 鉱石が描画範囲の上下からはみ出した y={} r={} kind={:?}",
                 ore.y,
-                ore.radius,
+                ore.radius(),
                 ore.kind
             );
             assert!(ore.x.is_finite() && ore.y.is_finite());

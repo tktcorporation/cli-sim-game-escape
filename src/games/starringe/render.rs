@@ -29,8 +29,8 @@ use super::logic::{
 };
 use super::state::{
     Layer, OreKind, ParticleKind, RingUpgrade, StarRingState, Tab, WeaponKind, WeaponStat, CORE_Y,
-    CX, FIELD_MARGIN, INNER_RADIUS, SHAKE_MAX_Y, SPAWN_Y, TURRET_NEAR_RADIUS, VISIBLE_Y_LO,
-    WORLD_H, WORLD_W,
+    CX, FIELD_MARGIN, INNER_RADIUS, SHAKE_MAX_X, SHAKE_MAX_Y, SPAWN_Y, TURRET_NEAR_RADIUS,
+    VISIBLE_Y_LO, WORLD_H, WORLD_W,
 };
 
 /// 画面全体の縦分割。ヘッダー / タブ / 本体 / フッターの順に返す。
@@ -66,6 +66,20 @@ fn fill_step(inner: Rect) -> f64 {
     dot_x.min(dot_y) * FILL_STEP_MARGIN
 }
 
+/// 核と砲台の塗り潰しに使う、`fill_step` から詰める割合。
+///
+/// `fill_step` の間隔は「同じドットを塗り直さない」ところで止まるので、円の
+/// 縁では標本の位相しだいでドットを取りこぼし、塊の内側に穴が残る。核と砲台は
+/// 画面のどこを見るかを決める 2 つで、輪郭が虫食いだと塊として読めない — この
+/// 2 つだけ、取りこぼしが消えるところまで間隔を詰める。境界は
+/// `the_core_and_the_turret_are_drawn_as_solid_blobs` が実測で持つ。
+const SOLID_FILL_REFINE: f64 = 0.7;
+
+/// 核と砲台の塗り潰しに渡すサンプリング間隔。
+fn solid_fill_step(inner: Rect) -> f64 {
+    fill_step(inner) * SOLID_FILL_REFINE
+}
+
 /// 円を塗り潰した点列。間隔は `fill_step` が領域の解像度から決めるが、半径より
 /// 粗い間隔を渡すと `canvas_fx::filled_ellipse_points` は 1 点も返さない。
 /// 砲台や小さい弾のように半径がドット間隔を下回る円が消えないよう、間隔は
@@ -78,55 +92,43 @@ fn filled_circle(cx: f64, cy: f64, r: f64, step: f64) -> Vec<(f64, f64)> {
 // 自分の武装が、降ってくる鉱石や軌道の装飾と同じ粒度で並ぶと、画面のどこを
 // 見ればよいかが決まらない。以下の半径はその序列を作る値。
 
-/// 核の脈動が取りうる最大倍率。層が上がるぶんの膨らみもここで頭打ちにする —
+/// 核の膨らみが取りうる最大倍率。層のぶんも合図のぶんもここで頭打ちにする —
 /// 層に上限が無い (`Layer::title` の「無限輪」) ため、青天井のまま掛けると
 /// いずれ核が Canvas の下端を割る。
 const CORE_MAX_SCALE: f64 = 1.55;
 
-/// 核本体の基準描画半径。
+/// 核本体の描画半径。層でも合図でも動かさない。
 ///
 /// 鉱石が消える到達半径 (`INNER_RADIUS`) を包む大きさに取る。到達半径より
 /// 小さく描くと、鉱石が核の縁へ触れる手前で消えて吸い込まれたように見えない。
 /// 最大の鉱石 (`OreKind::Nova`) より一回り大きいので、拠点と的は色より先に
 /// 大きさで読み分けられる。
+///
+/// 固定にするのは、核本体が広がってよい幅が点グリッドの分解能より狭いから。
+/// 核本体は「触れた鉱石が消える」判定そのものを見せる図形なので、上へは
+/// 環の最下点にいる手前側の砲台 (`StarRingState::ring_radii` の縦半径) まで、
+/// 下へは到達半径の外にいる最小の鉱石 (`OreKind::Dust`、半径 3.0) を覆わない
+/// ところまでしか塗れない。残る 1〜2 ワールド単位を段階へ割ると、1 段が
+/// `fill_step` のドット間隔 (モバイルで約 1.5、デスクトップで約 0.8) を下回り、
+/// 描かれる点は変わらないまま判定との対応だけが緩む。核が合図を返す役は、
+/// 色 (`core_color`) と面を塗らない暈 (`CORE_HALO_RADIUS`) が持つ。
 const CORE_RADIUS: f64 = INNER_RADIUS + 1.0;
 
-/// 核本体を描いてよい半径の上限。脈動も層ごとの膨らみもここで頭打ちにする。
+/// 核を囲む暈の基準半径。核本体との差が、核がまとう光の厚みになる。
 ///
-/// 核本体は「触れた鉱石が消える」判定そのものを見せる図形なので、演出のために
-/// 判定の外側まで塗り広げられない。上限は、核が塗り潰してはいけない 2 つとの
-/// 距離で決まる。
-///
-/// - 環の最下点にいる手前側の砲台。核からの距離は
-///   `StarRingState::ring_radii` の縦半径で、砲台数が最少のときにいちばん近づく
-/// - まだ到達半径の外にいる鉱石。いちばん小さい `OreKind::Dust` でも半径 3.0 ある
-///   ので、`INNER_RADIUS` から数えてそのぶんは塗り残す
-///
-/// どちらも実際に描かれる半径との距離なので、境界の実測は
-/// `the_swollen_core_never_swallows_the_lowest_turret` と
-/// `the_swollen_core_never_hides_an_ore_that_has_not_reached_it` が持つ。
-/// 膨らみの派手さは、面を塗らない暈 (`CORE_HALO_RADIUS`) の側が引き受ける。
-const CORE_MAX_RADIUS: f64 = 7.5;
-
-/// 核を囲む暈の半径。核本体との差が、核がまとう光の厚みになる。
-///
-/// 輪郭だけの点列なので、脈動の倍率はこちらへそのまま掛ける。上限は「脈動で
-/// `CORE_MAX_SCALE` 倍まで膨らんでも、下端が `VISIBLE_Y_LO` (画面シェイクで
-/// 下がっても Canvas に残る高さ) を割らない」ことで決まる。核は `CORE_Y` に
-/// 座っているので、下へ使える余裕はその値しかない。
+/// 輪郭だけの点列なので、膨らみの倍率はこちらへ掛ける。上限は「`CORE_MAX_SCALE`
+/// 倍まで膨らんでも、下端が `VISIBLE_Y_LO` (画面シェイクで下がっても Canvas に
+/// 残る高さ) を割らない」ことで決まる。核は `CORE_Y` に座っているので、下へ
+/// 使える余裕はその値しかない。
 const CORE_HALO_RADIUS: f64 = 9.0;
 
 const _: () = assert!(
     CORE_Y - CORE_HALO_RADIUS * CORE_MAX_SCALE >= VISIBLE_Y_LO,
-    "脈動しきった核の暈が Canvas の下端を割る"
+    "膨らみしきった核の暈が Canvas の下端を割る"
 );
 const _: () = assert!(
-    INNER_RADIUS <= CORE_RADIUS && CORE_RADIUS <= CORE_MAX_RADIUS,
-    "核本体が到達半径を包まないか、膨らむ余地を持たない"
-);
-const _: () = assert!(
-    CORE_MAX_RADIUS <= CORE_HALO_RADIUS,
-    "核本体が暈より大きいと暈が輪郭に見えない"
+    INNER_RADIUS <= CORE_RADIUS && CORE_RADIUS <= CORE_HALO_RADIUS,
+    "核本体が到達半径を包まないか、暈より大きくて暈が輪郭に見えない"
 );
 
 /// 手前側の砲台を描く半径の上限。環の点より明らかに太い塊として読めて、
@@ -150,33 +152,147 @@ fn turret_radius(ring_ry: f64) -> f64 {
     (CORE_Y - ring_ry - VISIBLE_Y_LO).clamp(TURRET_NEAR_RADIUS, TURRET_MAX_RADIUS)
 }
 
-/// 核の脈動倍率。層開放・被弾・開放待ちの合図を大きさへ変える。
-///
-/// 倍率をそのまま掛けてよいのは、面を塗らない暈だけ。核本体の半径は
-/// `core_body_radius` が上限付きの幅へ写して使う。
-fn core_scale(state: &StarRingState) -> f64 {
-    let raw = if state.layer_flash_ticks > 0 {
-        CORE_MAX_SCALE
-    } else if state.layer_ready_flash_ticks > 0 {
-        1.30
-    } else if state.core_flash_ticks > 0 {
-        1.25
-    } else if can_unlock_next_layer(state) && state.elapsed_ticks % 20 < 10 {
-        1.12
-    } else {
-        1.0 + (state.layer().saturating_sub(1) as f64) * 0.04
-    };
-    raw.min(CORE_MAX_SCALE)
+/// 層が 1 つ上がるごとに核が増す常時の膨らみ。
+const CORE_LAYER_SWELL_PER_LAYER: f64 = 0.04;
+
+/// 常時の膨らみの上限。層に上限が無いので、ここで止めないと合図を乗せる余地が
+/// 無くなる。
+const CORE_LAYER_SWELL_MAX: f64 = 0.20;
+
+/// 開放待ちの点滅で上乗せする膨らみ。
+const CORE_CUE_UNLOCK_READY: f64 = 0.10;
+/// 鉱石が核へ届いたときに上乗せする膨らみ。
+const CORE_CUE_HIT: f64 = 0.15;
+/// 撃破条件を満たした瞬間に上乗せする膨らみ。
+const CORE_CUE_LAYER_READY: f64 = 0.20;
+/// 層を開放した瞬間に上乗せする膨らみ。合図の中でいちばん大きい。
+const CORE_CUE_LAYER_OPEN: f64 = 0.35;
+
+const _: () = assert!(
+    0.0 < CORE_CUE_UNLOCK_READY
+        && CORE_CUE_UNLOCK_READY < CORE_CUE_HIT
+        && CORE_CUE_HIT < CORE_CUE_LAYER_READY
+        && CORE_CUE_LAYER_READY < CORE_CUE_LAYER_OPEN,
+    "合図の重さと膨らみの大きさが対応していない"
+);
+const _: () = assert!(
+    1.0 + CORE_LAYER_SWELL_MAX + CORE_CUE_LAYER_OPEN <= CORE_MAX_SCALE,
+    "層を重ねきった核では、いちばん大きい合図が上限で削られる"
+);
+
+/// 層の深さだけで決まる、核の常時の膨らみ。
+fn core_layer_swell(state: &StarRingState) -> f64 {
+    ((state.layer().saturating_sub(1)) as f64 * CORE_LAYER_SWELL_PER_LAYER)
+        .min(CORE_LAYER_SWELL_MAX)
 }
 
-/// 核本体の描画半径。脈動の倍率を `CORE_RADIUS`〜`CORE_MAX_RADIUS` の幅へ写す。
+/// 層開放・被弾・開放待ちの合図が上乗せする膨らみ。合図が無ければ 0。
+fn core_cue_swell(state: &StarRingState) -> f64 {
+    if state.layer_flash_ticks > 0 {
+        CORE_CUE_LAYER_OPEN
+    } else if state.layer_ready_flash_ticks > 0 {
+        CORE_CUE_LAYER_READY
+    } else if state.core_flash_ticks > 0 {
+        CORE_CUE_HIT
+    } else if can_unlock_next_layer(state) && state.elapsed_ticks % 20 < 10 {
+        CORE_CUE_UNLOCK_READY
+    } else {
+        0.0
+    }
+}
+
+/// 核の膨らみ倍率。層の深さぶんの常時の膨らみへ、合図の膨らみを上乗せする。
 ///
-/// 倍率をそのまま半径へ掛けると、脈動しきった核が「砲台と鉱石を塗り潰さない」
-/// 上限を越えて広がる。上限側で切り落とすと合図ごとの大きさの差が消えるので、
-/// 幅そのものへ写して段階を残す。
-fn core_body_radius(state: &StarRingState) -> f64 {
-    let swell = ((core_scale(state) - 1.0) / (CORE_MAX_SCALE - 1.0)).clamp(0.0, 1.0);
-    CORE_RADIUS * (1.0 - swell) + CORE_MAX_RADIUS * swell
+/// 常時と合図を 1 本の倍率の排他分岐にすると、層が伸びたぶんだけ常時側が
+/// 大きくなり、いずれ合図側を追い越して「合図が出た瞬間に核が縮む」。上乗せ
+/// なら、どの層でも合図は必ずその層の常時より大きい。
+fn core_scale(state: &StarRingState) -> f64 {
+    (1.0 + core_layer_swell(state) + core_cue_swell(state)).min(CORE_MAX_SCALE)
+}
+
+/// 核を囲む暈の描画半径。核の膨らみを引き受けるのはこちらだけ。
+fn core_halo_radius(state: &StarRingState) -> f64 {
+    CORE_HALO_RADIUS * core_scale(state)
+}
+
+// ステージへ同時に出る色は、`ctx.draw` の呼び出しへ直に書かず、この節の定数と
+// 関数だけに持たせる。呼び出し側へ散らすとステージに出る色をコードから列挙
+// できなくなり、同色で潰れ合う組み合わせを検査にかけられない。列挙が閉じて
+// いることは `stage_colours_live_in_the_palette` が見張る。
+
+/// 手前側の砲台の色。
+///
+/// 砲台は塗り潰した円で、描画半径 (`turret_radius`) は光線弾
+/// (`logic::RAY_PROJECTILE_RADIUS`) とほとんど変わらない。しかも弾は砲台の
+/// 位置から出るので、色まで揃うと環の周りで弾と砲台の区別が付かない。鉱石
+/// (`ore_color`) とも弾 (`weapon_color`) とも重ならない色を砲台だけに与える。
+const TURRET_NEAR_COLOR: Color = Color::White;
+
+/// 奥側の砲台の色。手前側と同系の暗い色で、同じ物が遠くにあると読ませる。
+const TURRET_FAR_COLOR: Color = Color::Green;
+
+/// 砲台環の色。
+///
+/// 砲台がどの経路を通るかを示す線なので、背景の星 (`star_color`) より明るい側に
+/// 置く。星より暗くすると、控えめを通り越して経路そのものが背景へ沈む。砲台
+/// (`TURRET_NEAR_COLOR`) より明るくしないのは、通り道が通る物より目立たない
+/// ため。
+const ORBIT_COLOR: Color = Color::Indexed(238);
+
+/// フィールド左右の壁の色。端があると分かる以上に主張させない。
+const FIELD_WALL_COLOR: Color = Color::Indexed(236);
+
+/// 核を囲む暈の色。核本体 (`core_color`) のどの色とも重ならない無彩色で、
+/// 本体の輪郭として読めるようにする。
+const CORE_HALO_COLOR: Color = Color::DarkGray;
+
+/// 着弾の火花の色。
+const SPARK_COLOR: Color = Color::White;
+/// 砕けた鉱石の粉の色。
+const DUST_PARTICLE_COLOR: Color = Color::Gray;
+/// 砕けた鉱石の破片の色。
+const SHARD_PARTICLE_COLOR: Color = Color::LightMagenta;
+/// 燃え残りの色。
+const EMBER_PARTICLE_COLOR: Color = Color::LightRed;
+
+/// ステージ枠の見出しの文字色。枠の上に載る文字で、点描の描画物ではないため
+/// 同色の衝突検査 (`things_that_share_the_stage_never_share_a_colour`) の対象に
+/// しない。
+const STAGE_TITLE_COLOR: Color = Color::Yellow;
+
+/// 核脈動の波面の色。
+///
+/// 波面は `StarRingState::pulse_reach` ぶん広がってフィールドのほぼ全域を毎周期
+/// 舐めるので、鉱石・弾・層のどの色とも重ねられない。境界は
+/// `things_that_share_the_stage_never_share_a_colour` が持つ。
+const PULSE_WAVE_COLOR: Color = Color::LightBlue;
+
+/// 核本体の色。大きさを固定した核が合図を返す手段はこちら。
+fn core_color(state: &StarRingState) -> Color {
+    if state.layer_flash_ticks > 0 {
+        layer_color(state.layer())
+    } else if state.layer_ready_flash_ticks > 0 || can_unlock_next_layer(state) {
+        Color::LightMagenta
+    } else if state.boost_ticks > 0 {
+        Color::LightYellow
+    } else {
+        Color::Yellow
+    }
+}
+
+/// 背景星の色。層が深いほど色味を持たせ、同じ盤面でも空気が変わって見える
+/// ようにする。
+///
+/// 無彩色の層 (第1層・第2層) は核の暈 (`CORE_HALO_COLOR`) より暗い側へ置く。
+/// 暈と同じ明るさだと、暈が核のまとう光ではなく「星が密な領域」に見える。
+fn star_color(layer: u32) -> Color {
+    match layer {
+        1 => Color::DarkGray,
+        2 => Color::Indexed(240),
+        3 => Color::Indexed(81),
+        4 => Color::Indexed(177),
+        _ => Color::Indexed(210),
+    }
 }
 
 /// ステージの描画物をワールド座標から画面座標へ移す平行移動。
@@ -198,7 +314,7 @@ impl Shake {
             return Self { dx: 0.0, dy: 0.0 };
         }
         Self {
-            dx: (((state.elapsed_ticks % 4) as f64) - 1.5) * 0.4,
+            dx: ((((state.elapsed_ticks % 4) as f64) - 1.5) / 1.5) * SHAKE_MAX_X,
             dy: ((((state.elapsed_ticks / 2) % 3) as f64) - 1.0) * SHAKE_MAX_Y,
         }
     }
@@ -228,13 +344,6 @@ const PULSE_ARC_STEP: f64 = 1.0;
 /// 寿命が半分を切った波面の弧長間隔に掛ける倍率。点を間引いて、消えかけの波を
 /// 薄く見せる。
 const PULSE_FADED_ARC_SCALE: f64 = 1.7;
-
-/// 核脈動の波面の色。
-///
-/// 波面は `StarRingState::pulse_reach` ぶん広がってフィールドのほぼ全域を毎周期
-/// 舐めるので、鉱石・弾・層のどの色とも重ねられない。境界は
-/// `things_that_share_the_stage_never_share_a_colour` が持つ。
-const PULSE_WAVE_COLOR: Color = Color::LightBlue;
 
 /// 核脈動の波面の点を `out` へ積む。`arc_scale` は点の弧長間隔に掛かるので、
 /// 大きいほど波面は疎になる。
@@ -1248,7 +1357,7 @@ fn render_stage(
     let block = Block::default()
         .borders(borders)
         .border_style(Style::default().fg(layer_color(layer)))
-        .title(Span::styled(title, Style::default().fg(Color::Yellow)));
+        .title(Span::styled(title, Style::default().fg(STAGE_TITLE_COLOR)));
 
     let inner = block.inner(area);
     if inner.width < 2 || inner.height < 2 {
@@ -1258,6 +1367,7 @@ fn render_stage(
     }
 
     let sample_step = fill_step(inner);
+    let solid_step = solid_fill_step(inner);
     let shake = Shake::new(state);
     let (core_x, core_y) = shake.point(CX, CORE_Y);
 
@@ -1273,9 +1383,8 @@ fn render_stage(
         orbit_a += ORBIT_DOT_SPACING / (ring_rx * sin).hypot(ring_ry * cos).max(0.01);
     }
 
-    let core_pts = shake.circle(CX, CORE_Y, core_body_radius(state), sample_step);
-    let core_halo =
-        canvas_fx::ring_points(core_x, core_y, CORE_HALO_RADIUS * core_scale(state), 0.26);
+    let core_pts = shake.circle(CX, CORE_Y, CORE_RADIUS, sample_step);
+    let core_halo = canvas_fx::ring_points(core_x, core_y, core_halo_radius(state), 0.26);
 
     // 採掘境界。鉱石が湧いてくる高さに水平の点線を引き、そこから上が
     // 今の層の外側だと示す。層が上がるほど点が詰まって濃くなる。
@@ -1321,13 +1430,13 @@ fn render_stage(
     let mut approach_trails: Vec<((f64, f64, f64, f64), Color)> = Vec::new();
     for ore in &state.ores {
         let color = ore_color(ore.kind);
-        let pts = shake.circle(ore.x, ore.y, ore.radius, sample_step);
+        let pts = shake.circle(ore.x, ore.y, ore.radius(), sample_step);
         if let Some(g) = ore_groups.iter_mut().find(|(_, c)| *c == color) {
             g.0.extend(pts);
         } else {
             ore_groups.push((pts, color));
         }
-        let len = ore.radius * 2.8 + ore.vx.hypot(ore.vy).max(0.01) * 3.0;
+        let len = ore.radius() * 2.8 + ore.vx.hypot(ore.vy).max(0.01) * 3.0;
         approach_trails.push((shake.trail(ore.x, ore.y, ore.vx, ore.vy, len), color));
     }
 
@@ -1374,6 +1483,9 @@ fn render_stage(
     // 描画も真円で、削る半径そのものを描く。
     let mut pulse_ring_pts: Vec<(f64, f64)> = Vec::new();
     for ring in &state.pulse_rings {
+        // 畳まれた波 (`PulseRing::folded`) の `life` は残寿命ではなく、一息に
+        // 削った半径を一度だけ描かせる猶予。残寿命として読むと、その波が
+        // 削った範囲を示すただ 1 tick がいちばん薄く描かれてしまう。
         let faded = ring.life * 2 <= ring.max_life;
         let arc_scale = if faded { PULSE_FADED_ARC_SCALE } else { 1.0 };
         push_pulse_wave_points(core_x, core_y, ring.radius, arc_scale, &mut pulse_ring_pts);
@@ -1399,22 +1511,8 @@ fn render_stage(
         stars.push(shake.point(x, y));
     }
 
-    let core_color = if state.layer_flash_ticks > 0 {
-        layer_color(layer)
-    } else if state.layer_ready_flash_ticks > 0 || can_unlock_next_layer(state) {
-        Color::LightMagenta
-    } else if state.boost_ticks > 0 {
-        Color::LightYellow
-    } else {
-        Color::Yellow
-    };
-    let star_color = match layer {
-        1 => Color::DarkGray,
-        2 => Color::Indexed(240),
-        3 => Color::Indexed(81),
-        4 => Color::Indexed(177),
-        _ => Color::Indexed(210),
-    };
+    let core_color = core_color(state);
+    let star_color = star_color(layer);
     let boundary_color = layer_color(layer);
 
     let canvas = Canvas::default()
@@ -1449,13 +1547,23 @@ fn render_stage(
             if !orbit_pts.is_empty() {
                 ctx.draw(&Points {
                     coords: &orbit_pts,
-                    color: Color::Indexed(238),
+                    color: ORBIT_COLOR,
                 });
             }
             if !gun_far.is_empty() {
                 ctx.draw(&Points {
                     coords: &gun_far,
-                    color: Color::Indexed(250),
+                    color: TURRET_FAR_COLOR,
+                });
+            }
+            // 核の暈は背景側の装飾なので、鉱石や砲台より先に置く。1 セルへ同居
+            // した点は後から描いた色を取るので、暈を手前へ回すと、暈をかすめた
+            // 鉱石や砲台がそのぶん虫食いになる — 何基あるか・どこに鉱石がいるか
+            // という、盤面を読むのに要る手がかりの側が削れる。
+            if !core_halo.is_empty() {
+                ctx.draw(&Points {
+                    coords: &core_halo,
+                    color: CORE_HALO_COLOR,
                 });
             }
             for &((x1, y1, x2, y2), color) in &approach_trails {
@@ -1492,18 +1600,10 @@ fn render_stage(
                     });
                 }
             }
-            // 核の暈は背景側の装飾なので砲台より先に置く。手前を通る砲台が
-            // 暈の点で虫食いになると、何基あるかを数える手がかりが濁る。
-            if !core_halo.is_empty() {
-                ctx.draw(&Points {
-                    coords: &core_halo,
-                    color: Color::DarkGray,
-                });
-            }
             if !gun_near.is_empty() {
                 ctx.draw(&Points {
                     coords: &gun_near,
-                    color: Color::White,
+                    color: TURRET_NEAR_COLOR,
                 });
             }
             if !core_pts.is_empty() {
@@ -1515,25 +1615,25 @@ fn render_stage(
             if !dust.is_empty() {
                 ctx.draw(&Points {
                     coords: &dust,
-                    color: Color::Gray,
+                    color: DUST_PARTICLE_COLOR,
                 });
             }
             if !shards.is_empty() {
                 ctx.draw(&Points {
                     coords: &shards,
-                    color: Color::LightMagenta,
+                    color: SHARD_PARTICLE_COLOR,
                 });
             }
             if !embers.is_empty() {
                 ctx.draw(&Points {
                     coords: &embers,
-                    color: Color::LightRed,
+                    color: EMBER_PARTICLE_COLOR,
                 });
             }
             if !sparks.is_empty() {
                 ctx.draw(&Points {
                     coords: &sparks,
-                    color: Color::White,
+                    color: SPARK_COLOR,
                 });
             }
         })
@@ -1602,9 +1702,13 @@ mod tests {
     use ratzilla::ratatui::Terminal;
 
     use crate::games::starringe::actions::buy_ring_id;
-    use crate::games::starringe::logic::{unlock_next_layer, NOVA_PROJECTILE_RADIUS};
+    use crate::games::starringe::logic::{
+        unlock_next_layer, ARC_PROJECTILE_RADIUS, NOVA_PROJECTILE_RADIUS, PULSE_PROJECTILE_RADIUS,
+        RAY_PROJECTILE_RADIUS, SCATTER_PROJECTILE_RADIUS,
+    };
     use crate::games::starringe::state::{
-        Layer, Ore, OreMotion, RingUpgrade, Tab, LAYER_FLASH_TICKS, VISIBLE_Y_HI,
+        Layer, Ore, OreMotion, Projectile, PulseRing, RingUpgrade, Tab, LAYER_FLASH_TICKS,
+        VISIBLE_Y_HI,
     };
 
     fn render_frame(state: &StarRingState, width: u16, height: u16) -> Rc<RefCell<ClickState>> {
@@ -2046,7 +2150,6 @@ mod tests {
                 vy: -0.3,
                 hp: 5.0,
                 kind: OreKind::Crystal,
-                radius: OreKind::Crystal.radius(),
                 motion: OreMotion::Spiral,
                 sway: 0.05,
                 age: 10,
@@ -2192,7 +2295,6 @@ mod tests {
                 vy: -0.3,
                 hp: 5.0,
                 kind: OreKind::Crystal,
-                radius: OreKind::Crystal.radius(),
                 motion: OreMotion::Spiral,
                 sway: 0.05,
                 age: 10,
@@ -2324,18 +2426,18 @@ mod tests {
         out
     }
 
-    /// 点の集合を上下左右に繋がった塊へ分け、塊ごとの点数を返す。
-    /// 塊の数がそのまま「いくつの物として見えるか」になる。
-    fn blob_sizes(pts: &[(usize, usize)]) -> Vec<usize> {
+    /// 点の集合を上下左右に繋がった塊へ分ける。塊の数がそのまま「いくつの物と
+    /// して見えるか」になる。
+    fn blob_groups(pts: &[(usize, usize)]) -> Vec<Vec<(usize, usize)>> {
         use std::collections::HashSet;
         let mut left: HashSet<(usize, usize)> = pts.iter().copied().collect();
-        let mut sizes = Vec::new();
+        let mut blobs = Vec::new();
         while let Some(&seed) = left.iter().next() {
             left.remove(&seed);
             let mut stack = vec![seed];
-            let mut n = 0usize;
+            let mut blob = Vec::new();
             while let Some((x, y)) = stack.pop() {
-                n += 1;
+                blob.push((x, y));
                 for (dx, dy) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
                     let nb = (
                         (x as i64 + dx).max(0) as usize,
@@ -2346,9 +2448,31 @@ mod tests {
                     }
                 }
             }
-            sizes.push(n);
+            blobs.push(blob);
         }
-        sizes
+        blobs
+    }
+
+    /// 塊ごとの点数。
+    fn blob_sizes(pts: &[(usize, usize)]) -> Vec<usize> {
+        blob_groups(pts).iter().map(|b| b.len()).collect()
+    }
+
+    /// 塊の中で点が途切れている行があれば、その行を返す。
+    ///
+    /// 塗り潰した円はどの行も 1 続きの点として並ぶ。途切れは、標本が点を
+    /// 取りこぼして内側に穴が空いたということ。
+    fn row_with_a_gap(blob: &[(usize, usize)]) -> Option<usize> {
+        use std::collections::BTreeMap;
+        let mut rows: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+        for &(x, y) in blob {
+            rows.entry(y).or_default().push(x);
+        }
+        rows.into_iter().find_map(|(y, xs)| {
+            let lo = *xs.iter().min().unwrap();
+            let hi = *xs.iter().max().unwrap();
+            (hi - lo + 1 != xs.len()).then_some(y)
+        })
     }
 
     /// 点の集合の外接幅 (点の単位)。
@@ -2363,22 +2487,28 @@ mod tests {
     /// `(点数, 外接する幅, 外接する高さ)` を点の単位で返す。
     ///
     /// 置いた前後の差を取るのは、背景星や境界線と重なった点まで数えないため。
-    /// 速度を 0 にすると尾 (`approach_trails`) が 1 点へ潰れるので、測るのは
-    /// 円そのものの占有だけになる。
-    fn ore_footprint(radius: f64, x: f64, y: f64, w: u16, h: u16) -> (usize, usize, usize) {
+    /// 速度を 0 にすると尾 (`proj_trails`) が 1 点へ潰れるので、測るのは円その
+    /// ものの占有だけになる。
+    ///
+    /// 円は飛翔弾として置く。鉱石の半径は種から決まる (`Ore::radius`) のに対し
+    /// 弾は個体ごとに半径を持つので、鉱石の大きさも弾の大きさも 1 つの経路で
+    /// 測れる。塗り潰しは `Shake::circle` が両者で共通なので、どちらとして置いて
+    /// も点の落ち方は変わらない。
+    fn circle_footprint(radius: f64, x: f64, y: f64, w: u16, h: u16) -> (usize, usize, usize) {
         let empty = StarRingState::new();
         let mut placed = empty.clone();
-        placed.ores.push(Ore {
+        placed.projectiles.push(Projectile {
             x,
             y,
             vx: 0.0,
             vy: 0.0,
-            hp: 1.0,
-            kind: OreKind::Dust,
+            damage: 1.0,
+            life: 10,
             radius,
-            motion: OreMotion::Spiral,
-            sway: 0.0,
-            age: 0,
+            pierce: 0,
+            splash: 0.0,
+            kind: WeaponKind::Pulse,
+            spin: 0.0,
         });
         let dots_of = |st: &StarRingState| {
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -2419,7 +2549,7 @@ mod tests {
         for (ox, oy) in SAMPLE_ORIGINS {
             for i in 0..6 {
                 for j in 0..6 {
-                    let (n, bw, bh) = ore_footprint(
+                    let (n, bw, bh) = circle_footprint(
                         radius,
                         ox + i as f64 * PHASE_STEP,
                         oy + j as f64 * PHASE_STEP,
@@ -2492,8 +2622,8 @@ mod tests {
     #[test]
     fn the_stage_reads_as_core_over_turret_over_orbit() {
         const CORE: Color = Color::Yellow;
-        const ORBIT: Color = Color::Indexed(238);
-        const TURRET: Color = Color::White;
+        const ORBIT: Color = ORBIT_COLOR;
+        const TURRET: Color = TURRET_NEAR_COLOR;
 
         let big = *kinds_by_radius().last().unwrap();
         let ore_hue = ore_color(big);
@@ -2512,7 +2642,6 @@ mod tests {
             vy: 0.0,
             hp: 5.0,
             kind: big,
-            radius: big.radius(),
             motion: OreMotion::Spiral,
             sway: 0.0,
             age: 0,
@@ -2609,50 +2738,137 @@ mod tests {
         }
     }
 
-    /// 核は最大の鉱石より大きく、層をいくら重ねても・どの合図で膨らんでも、
-    /// 実際に描かれる半径が `CORE_RADIUS`〜`CORE_MAX_RADIUS` に収まること。
+    /// 核は最大の鉱石より大きく描かれること。拠点と的を、色より先に大きさで
+    /// 読み分けられる差を持たせる。
     #[test]
-    fn the_core_outgrows_every_ore_at_any_layer() {
+    fn the_core_outgrows_every_ore() {
         let widest = OreKind::ALL
             .iter()
             .map(|k| k.radius())
             .fold(0.0f64, f64::max);
         assert!(
-            CORE_RADIUS >= widest * 1.25,
+            CORE_RADIUS >= widest * SIZE_TELL_RATIO,
             "核 {CORE_RADIUS} が最大の鉱石 {widest} と同格に見える"
         );
+    }
 
+    /// どの層でも、合図が出た核はその層の平常時より必ず大きく膨らむこと。
+    ///
+    /// 層の伸びぶんの膨らみと合図の膨らみを同じ 1 本の倍率で奪い合わせると、
+    /// 層が深いほど平常時が大きくなり、いずれ合図の膨らみを追い越して
+    /// 「合図が出た瞬間に核が縮む」「層を重ねきると合図の差が消える」。層は
+    /// 上限を持たないので、深い層まで見る。
+    #[test]
+    fn every_cue_swells_the_core_past_the_layer_it_sits_in() {
         let mut state = StarRingState::new();
-        for layer in [1u32, 8, 15, 40, 400] {
+        for layer in [1u32, 2, 6, 8, 15, 40, 400] {
             state.current_layer = layer;
-            for flash in [0, LAYER_FLASH_TICKS] {
-                state.layer_flash_ticks = flash;
-                let drawn = core_body_radius(&state);
+            state.total_kills = 0;
+            state.shards = 0.0;
+            state.core_flash_ticks = 0;
+            state.layer_ready_flash_ticks = 0;
+            state.layer_flash_ticks = 0;
+            let calm = core_halo_radius(&state);
+
+            // 開放待ちの点滅は、灯っている位相だけ平常時より大きい。
+            state.total_kills = u64::MAX;
+            state.shards = f64::MAX;
+            state.elapsed_ticks = 0;
+            assert!(
+                can_unlock_next_layer(&state),
+                "第{layer}層で開放待ちの状態を作れていない"
+            );
+            let blink_on = core_halo_radius(&state);
+            state.elapsed_ticks = 10;
+            let blink_off = core_halo_radius(&state);
+            state.total_kills = 0;
+            state.shards = 0.0;
+            state.elapsed_ticks = 0;
+            assert_eq!(
+                blink_off, calm,
+                "第{layer}層: 点滅の消灯側が平常時と違う大きさで描かれる"
+            );
+
+            state.core_flash_ticks = 6;
+            let hit = core_halo_radius(&state);
+            state.core_flash_ticks = 0;
+
+            state.layer_ready_flash_ticks = LAYER_FLASH_TICKS;
+            let ready = core_halo_radius(&state);
+            state.layer_ready_flash_ticks = 0;
+
+            state.layer_flash_ticks = LAYER_FLASH_TICKS;
+            let open = core_halo_radius(&state);
+            state.layer_flash_ticks = 0;
+
+            for (before, after, what) in [
+                (calm, blink_on, "平常時 → 開放待ちの点滅"),
+                (blink_on, hit, "開放待ちの点滅 → 被弾"),
+                (hit, ready, "被弾 → 撃破条件の達成"),
+                (ready, open, "撃破条件の達成 → 層開放"),
+            ] {
                 assert!(
-                    (CORE_RADIUS..=CORE_MAX_RADIUS).contains(&drawn),
-                    "第{layer}層 (フラッシュ {flash} tick) の核が半径 {drawn} で描かれる"
+                    after > before,
+                    "第{layer}層: {what} で核が {before} から {after} へ縮む/変わらない"
                 );
             }
         }
     }
 
-    /// 膨らみきった核が、環の最下点にいる手前側の砲台へ食い込まないこと。
+    /// 層を重ねきった核でも、層開放の合図が実際に描かれる点として太ること。
+    ///
+    /// 合図の膨らみが上限で削られていないかは、倍率ではなく描いた点で見る。
+    /// 暈の色 (`CORE_HALO_COLOR`) は、鉱石も粒子も置かない第15層のステージでは
+    /// 暈だけが使う。
+    #[test]
+    fn the_layer_flash_still_shows_in_a_deep_layer() {
+        let mut state = StarRingState::new();
+        state.current_layer = 15;
+        assert_ne!(
+            star_color(state.layer()),
+            CORE_HALO_COLOR,
+            "背景星が暈と同色では、暈だけを測れない"
+        );
+
+        for (w, h) in [DESKTOP_STAGE, PHONE_STAGE] {
+            let inner = stage_inner(w, h);
+            let halo_span = |st: &StarRingState| {
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                let cs = Rc::new(RefCell::new(ClickState::new()));
+                cs.borrow_mut().terminal_cols = w;
+                cs.borrow_mut().terminal_rows = h;
+                terminal.draw(|f| render(st, f, f.area(), &cs)).unwrap();
+                dot_span_w(&colored_dots(terminal.backend().buffer(), inner, CORE_HALO_COLOR))
+            };
+
+            let calm = halo_span(&state);
+            assert!(calm > 0, "{w}x{h}: 平常時に暈が見えていない");
+            state.layer_flash_ticks = LAYER_FLASH_TICKS;
+            let flashing = halo_span(&state);
+            state.layer_flash_ticks = 0;
+            assert!(
+                flashing > calm,
+                "{w}x{h}: 第15層の層開放で暈が {calm}点幅 から {flashing}点幅 にしかならない"
+            );
+        }
+    }
+
+    /// 核が、環の最下点にいる手前側の砲台へ食い込まないこと。
     ///
     /// 環は砲台が少ないほど核へ寄る (`StarRingState::ring_radii`) ので、砲台数を
     /// なめて最も狭くなるところを見る。弾数強化を 1 度も買っていない状態が
     /// いちばん狭い。
     #[test]
-    fn the_swollen_core_never_swallows_the_lowest_turret() {
+    fn the_core_never_swallows_the_lowest_turret() {
         let mut state = StarRingState::new();
-        state.layer_flash_ticks = LAYER_FLASH_TICKS;
-        let core = core_body_radius(&state);
+        let core = CORE_RADIUS;
         for count in 0..=7u32 {
             state.weapon_levels[0][0] = count;
             let (_, ring_ry) = state.ring_radii();
             let gap = ring_ry - turret_radius(ring_ry) - core;
             assert!(
                 gap > 0.0,
-                "砲台 {} 基のとき、膨らみきった核 (半径 {core}) が最下点の砲台へ {gap} 食い込む",
+                "砲台 {} 基のとき、核 (半径 {core}) が最下点の砲台へ {gap} 食い込む",
                 state.turret_count()
             );
         }
@@ -2660,12 +2876,12 @@ mod tests {
 
     /// 層開放フラッシュの最中でも、環の最下点にいる砲台が痩せないこと。
     ///
-    /// 核は砲台より後に描かれるので、膨らんだ核と砲台が 1 セルへ同居すると、
-    /// そのセルは核の色になって砲台の側から点が減る。ワールド座標で離れて
+    /// 核と暈は砲台より後に描かれるので、膨らんだ暈と砲台が 1 セルへ同居すると、
+    /// そのセルは暈の色になって砲台の側から点が減る。ワールド座標で離れて
     /// いることを確かめるだけでは足りないので、実際に描いた点を数える。
     #[test]
     fn the_layer_flash_keeps_the_lowest_turret_intact() {
-        const TURRET: Color = Color::White;
+        const TURRET: Color = TURRET_NEAR_COLOR;
 
         let mut state = StarRingState::new();
         // 砲台 1 基だけの環が核にいちばん近い。その 1 基が最下点へ来る位相を選ぶ。
@@ -2703,22 +2919,22 @@ mod tests {
         }
     }
 
-    /// 到達半径の外にいる鉱石が、膨らみきった核の裏へ完全に隠れないこと。
+    /// 到達半径の外にいる鉱石が、核と暈の裏へ完全に隠れないこと。
     ///
     /// 鉱石は核より先に描かれるので、核が到達半径から遠く離れて塗り広がると、
     /// まだ消えていない鉱石が数 tick まるごと見えなくなる。
     #[test]
-    fn the_swollen_core_never_hides_an_ore_that_has_not_reached_it() {
+    fn the_core_never_hides_an_ore_that_has_not_reached_it() {
         let smallest = OreKind::ALL
             .iter()
             .map(|k| k.radius())
             .fold(f64::MAX, f64::min);
         assert!(
-            CORE_MAX_RADIUS < INNER_RADIUS + smallest,
-            "核 {CORE_MAX_RADIUS} が、到達半径 {INNER_RADIUS} の外にいる最小の鉱石 (半径 {smallest}) を丸ごと覆う"
+            CORE_RADIUS < INNER_RADIUS + smallest,
+            "核 {CORE_RADIUS} が、到達半径 {INNER_RADIUS} の外にいる最小の鉱石 (半径 {smallest}) を丸ごと覆う"
         );
 
-        // 核が膨らみきる 2 通り — 層を重ねた定常状態と、層開放フラッシュ中。
+        // 暈が膨らみきる 2 通り — 層を重ねた定常状態と、層開放フラッシュ中。
         // 層は、採掘境界の色 (`layer_color`) が鉱石と重ならないものを選ぶ。
         for (layer, flash) in [(15u32, 0u32), (3, LAYER_FLASH_TICKS)] {
             let mut state = StarRingState::new();
@@ -2738,7 +2954,6 @@ mod tests {
                 vy: 0.0,
                 hp: 5.0,
                 kind: OreKind::Dust,
-                radius: OreKind::Dust.radius(),
                 motion: OreMotion::Spiral,
                 sway: 0.0,
                 age: 0,
@@ -2760,52 +2975,380 @@ mod tests {
         }
     }
 
+    /// 同色でも別物として読める、面を塗った円どうしの描画半径の比。
+    ///
+    /// 半径が 1.25 倍あれば占有する点数はおよそ 1.5 倍になり、隣り合っても
+    /// 大きさで分けられる。核が最大の鉱石より大きいと言える比
+    /// (`the_core_outgrows_every_ore`) と同じ値を使う。
+    const SIZE_TELL_RATIO: f64 = 1.25;
+
+    /// 同色の衝突検査にかける、ステージの描画物 1 つ。
+    struct StageMark {
+        /// 検査が落ちたときに、どれとどれが潰れ合うかを示す名前。
+        what: String,
+        /// 同じ物の別の見え方 (合図ごとの核の色・環の広さで変わる砲台の半径) を
+        /// まとめる名前。同じ物どうしは色が揃っていて構わない。
+        group: &'static str,
+        color: Color,
+        /// 面を塗った円の描画半径 (ワールド単位)。点・線・輪郭は `None`。
+        blob_radius: Option<f64>,
+        /// フィールドへ散る常設の点描か。散った点どうしは大きさも形も同じ 1 点
+        /// なので、色でしか分けられない。
+        field_furniture: bool,
+    }
+
+    fn blob(group: &'static str, what: impl Into<String>, color: Color, radius: f64) -> StageMark {
+        StageMark {
+            what: what.into(),
+            group,
+            color,
+            blob_radius: Some(radius),
+            field_furniture: false,
+        }
+    }
+
+    fn thin(group: &'static str, what: impl Into<String>, color: Color) -> StageMark {
+        StageMark {
+            what: what.into(),
+            group,
+            color,
+            blob_radius: None,
+            field_furniture: false,
+        }
+    }
+
+    /// 毎フレーム同じ場所に出て、フィールド全体へ点として散る装飾。
+    fn furniture(group: &'static str, what: impl Into<String>, color: Color) -> StageMark {
+        StageMark {
+            what: what.into(),
+            group,
+            color,
+            blob_radius: None,
+            field_furniture: true,
+        }
+    }
+
+    /// 弾の描画半径。
+    fn projectile_radius(kind: WeaponKind) -> f64 {
+        match kind {
+            WeaponKind::Pulse => PULSE_PROJECTILE_RADIUS,
+            WeaponKind::Ray => RAY_PROJECTILE_RADIUS,
+            WeaponKind::Scatter => SCATTER_PROJECTILE_RADIUS,
+            WeaponKind::Arc => ARC_PROJECTILE_RADIUS,
+            WeaponKind::Nova => NOVA_PROJECTILE_RADIUS,
+        }
+    }
+
+    /// 核本体が取りうる色。合図ごとの分岐を実際に `core_color` へ通して集める。
+    fn core_colors() -> Vec<(String, Color)> {
+        let mut out = Vec::new();
+        let calm = StarRingState::new();
+        out.push(("核 (平常)".to_string(), core_color(&calm)));
+
+        let mut boosting = StarRingState::new();
+        boosting.boost_ticks = 10;
+        out.push(("核 (ブースト)".to_string(), core_color(&boosting)));
+
+        let mut ready = StarRingState::new();
+        ready.layer_ready_flash_ticks = LAYER_FLASH_TICKS;
+        out.push(("核 (条件達成)".to_string(), core_color(&ready)));
+
+        // 層開放中は層の色をまとう。層に上限は無いので、色が一巡するところまで。
+        for layer in 1..=9u32 {
+            let mut opening = StarRingState::new();
+            opening.current_layer = layer;
+            opening.layer_flash_ticks = LAYER_FLASH_TICKS;
+            out.push((format!("核 (第{layer}層の開放)"), core_color(&opening)));
+        }
+        out
+    }
+
+    /// ステージへ同時に出る描画物と、その色。
+    ///
+    /// 色の衝突を検査できるのは、ステージに出る色をここへ列挙し切れている間
+    /// だけ。列挙が閉じていることは `stage_colours_live_in_the_palette` が
+    /// 見張る。
+    fn stage_marks() -> Vec<StageMark> {
+        let mut marks = Vec::new();
+
+        for kind in OreKind::ALL {
+            marks.push(blob("鉱石", format!("鉱石 {kind:?}"), ore_color(kind), kind.radius()));
+        }
+        for kind in WeaponKind::ALL {
+            marks.push(blob(
+                "弾",
+                format!("弾 {kind:?}"),
+                weapon_color(kind),
+                projectile_radius(kind),
+            ));
+        }
+        // 砲台の半径は環の広さで動く (`turret_radius`)。帯の両端を置いて、どこに
+        // 居ても他の円と潰れ合わないことを見る。
+        for r in [TURRET_NEAR_RADIUS, TURRET_MAX_RADIUS] {
+            marks.push(blob("手前の砲台", "手前の砲台", TURRET_NEAR_COLOR, r));
+            marks.push(blob(
+                "奥の砲台",
+                "奥の砲台",
+                TURRET_FAR_COLOR,
+                r * TURRET_FAR_SCALE,
+            ));
+        }
+        for (what, color) in core_colors() {
+            marks.push(blob("核", what, color, CORE_RADIUS));
+        }
+
+        marks.push(furniture("核の暈", "核の暈", CORE_HALO_COLOR));
+        marks.push(furniture("砲台環", "砲台環", ORBIT_COLOR));
+        marks.push(furniture("壁", "フィールドの壁", FIELD_WALL_COLOR));
+        marks.push(thin("波面", "核脈動の波面", PULSE_WAVE_COLOR));
+        marks.push(thin("火花", "火花", SPARK_COLOR));
+        marks.push(thin("粉", "粉", DUST_PARTICLE_COLOR));
+        marks.push(thin("破片", "破片", SHARD_PARTICLE_COLOR));
+        marks.push(thin("燃え残り", "燃え残り", EMBER_PARTICLE_COLOR));
+        for layer in 1..=9u32 {
+            marks.push(thin(
+                "採掘境界",
+                format!("第{layer}層の採掘境界"),
+                layer_color(layer),
+            ));
+            marks.push(furniture(
+                "背景星",
+                format!("第{layer}層の背景星"),
+                star_color(layer),
+            ));
+        }
+        // 尾は本体と同色。どちらの物に付いた尾かを色で示すため、あえて揃える。
+        marks
+    }
+
     /// 同時に画面へ出て、大きさでも形でも分けられないものが同色にならないこと。
     ///
     /// ステージの物を見分ける手がかりは大きさ・形・色の 3 つで、16 色を全員で
-    /// 分け合っているのは色だけ。鉱石どうし・弾どうしは同じ形で同じ大きさ帯に
-    /// 並ぶので、色でしか分けられない。核脈動の波面は面積を持たない点列で、
-    /// `StarRingState::pulse_reach` ぶんフィールドのほぼ全域を毎周期舐めるため、
-    /// 鉱石・弾・層 (採掘境界と層開放中の核) のどの色とも重ねられない。
+    /// 分け合っているのは色だけ。面を塗った円どうしは形が同じなので、同色なら
+    /// 描画半径が `SIZE_TELL_RATIO` 倍以上離れていること。手前側の砲台と光線弾の
+    /// ように、同じ形で描画半径まで並ぶものは色でしか分けられない。
     ///
-    /// 鉱石と弾が同色になるのは許す — 大きさで分かれることを
-    /// `the_smallest_ore_outgrows_a_shot_on_a_phone_sized_stage` が担保している。
+    /// 点・線・輪郭は面を持たないので、円とは形で分かれる。同じ色を円へ回して
+    /// よいのはそのため。ただし、毎フレーム画面へ散る常設の点描 (背景星・環・
+    /// 壁・核の暈) どうしは大きさも形も同じ 1 点でしかないので、互いに色を
+    /// 分ける。採掘境界は横一列に連なる線として、粒子は着弾の瞬間だけ出る点と
+    /// して、それぞれ並び方と寿命で常設の点描から分かれる。
+    ///
+    /// 核脈動の波面だけは扱いが違う。`StarRingState::pulse_reach` ぶん広がって
+    /// フィールドのほぼ全域を毎周期舐めるので、どの円の上も層の色の上も通る。
     #[test]
     fn things_that_share_the_stage_never_share_a_colour() {
-        let ores: Vec<(OreKind, Color)> = OreKind::ALL.iter().map(|&k| (k, ore_color(k))).collect();
-        for (i, (a, ca)) in ores.iter().enumerate() {
-            for (b, cb) in &ores[i + 1..] {
-                assert_ne!(ca, cb, "鉱石 {a:?} と {b:?} が同色");
+        let marks = stage_marks();
+
+        for (i, a) in marks.iter().enumerate() {
+            let Some(ra) = a.blob_radius else { continue };
+            for b in &marks[i + 1..] {
+                let Some(rb) = b.blob_radius else { continue };
+                if a.color != b.color || a.group == b.group {
+                    continue;
+                }
+                let (small, large) = if ra <= rb { (ra, rb) } else { (rb, ra) };
+                assert!(
+                    large >= small * SIZE_TELL_RATIO,
+                    "{} (半径 {ra}) と {} (半径 {rb}) が同色で同じ大きさに見える",
+                    a.what,
+                    b.what
+                );
             }
         }
 
-        let shots: Vec<(WeaponKind, Color)> = WeaponKind::ALL
-            .iter()
-            .map(|&k| (k, weapon_color(k)))
-            .collect();
-        for (i, (a, ca)) in shots.iter().enumerate() {
-            for (b, cb) in &shots[i + 1..] {
-                assert_ne!(ca, cb, "弾 {a:?} と {b:?} が同色");
+        for mark in &marks {
+            if mark.blob_radius.is_none() {
+                continue;
             }
-        }
-
-        for (kind, color) in &ores {
             assert_ne!(
-                PULSE_WAVE_COLOR, *color,
-                "核脈動の波面が鉱石 {kind:?} と同色"
+                PULSE_WAVE_COLOR, mark.color,
+                "核脈動の波面が {} と同色",
+                mark.what
             );
         }
-        for (kind, color) in &shots {
-            assert_ne!(PULSE_WAVE_COLOR, *color, "核脈動の波面が弾 {kind:?} と同色");
-        }
-        // 層の色は採掘境界と層開放中の核に使う。層に上限は無いので、色が一巡する
-        // ところまで見る。
         for layer in 1..=9u32 {
             assert_ne!(
                 PULSE_WAVE_COLOR,
                 layer_color(layer),
                 "核脈動の波面が第{layer}層の色と同色"
             );
+        }
+
+        for (what, color) in core_colors() {
+            assert_ne!(
+                CORE_HALO_COLOR, color,
+                "核の暈が {what} と同色では、暈が本体の輪郭に見えない"
+            );
+        }
+
+        let furniture: Vec<&StageMark> = marks.iter().filter(|m| m.field_furniture).collect();
+        for (i, a) in furniture.iter().enumerate() {
+            for b in &furniture[i + 1..] {
+                if a.group == b.group {
+                    continue;
+                }
+                assert_ne!(
+                    a.color, b.color,
+                    "{} と {} が同色で、どちらの点か決められない",
+                    a.what, b.what
+                );
+            }
+        }
+    }
+
+    /// ステージの描画色が `ctx.draw` の呼び出しへ直に書かれていないこと。
+    ///
+    /// 色を呼び出し側へ散らすと、同時に画面へ出る色をコードから列挙できなくなり、
+    /// `things_that_share_the_stage_never_share_a_colour` はその色を検査しないまま
+    /// 通る。
+    #[test]
+    fn stage_colours_live_in_the_palette() {
+        let src = include_str!("render.rs");
+        let head = src
+            .find("\nfn render_stage(")
+            .expect("render_stage の定義が見つからない");
+        let body = &src[head + 1..];
+        let tail = body
+            .find("\n}\n")
+            .expect("render_stage の終わりが見つからない");
+        assert!(
+            !body[..tail].contains("Color::"),
+            "render_stage が色を直に書いている — 色はステージの色の節へ移す"
+        );
+    }
+
+    /// 畳んだ波が、広がっている途中の波と同じ濃さで描かれること。
+    ///
+    /// 畳んだ波に残る 1tick (`PulseRing::folded`) は、一息に削った半径を一度だけ
+    /// 描かせるためのもの。ここを寿命の残りとして薄く描くと、その波が削った
+    /// 範囲はどのフレームにも出てこない。
+    #[test]
+    fn a_folded_wave_is_drawn_as_solidly_as_one_still_expanding() {
+        const RADIUS: f64 = 40.0;
+        let wave = |folded: bool, life: u32, reach: f64| PulseRing {
+            radius: RADIUS,
+            reach,
+            life,
+            max_life: 10,
+            damage: 1.0,
+            folded,
+        };
+
+        // 畳まれた波は `reach` まで跳ねた先で 1tick だけ残る。
+        let mut folded = StarRingState::new();
+        folded.pulse_rings.push(wave(true, 1, RADIUS));
+        // 比較対象は、同じ半径をまだ広がっている途中で通っている波。
+        let mut expanding = StarRingState::new();
+        expanding.pulse_rings.push(wave(false, 10, RADIUS + 20.0));
+
+        for (w, h) in [DESKTOP_STAGE, PHONE_STAGE] {
+            let inner = stage_inner(w, h);
+            let wave_dots = |st: &StarRingState| {
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                let cs = Rc::new(RefCell::new(ClickState::new()));
+                cs.borrow_mut().terminal_cols = w;
+                cs.borrow_mut().terminal_rows = h;
+                terminal.draw(|f| render(st, f, f.area(), &cs)).unwrap();
+                colored_dots(terminal.backend().buffer(), inner, PULSE_WAVE_COLOR).len()
+            };
+
+            let still_expanding = wave_dots(&expanding);
+            assert!(still_expanding > 0, "{w}x{h}: 波面が描かれていない");
+            let folded_dots = wave_dots(&folded);
+            assert!(
+                folded_dots >= still_expanding,
+                "{w}x{h}: 畳んだ波が {folded_dots} 点で、広がっている途中の波 {still_expanding} 点より薄い"
+            );
+        }
+    }
+
+    /// 無彩色で描く点の明るさ (0〜255)。xterm のグレースケール ramp と、端末が
+    /// 無彩色として出す既定色だけを扱う。
+    fn grey_level(color: Color) -> Option<u16> {
+        match color {
+            Color::Indexed(n @ 232..=255) => Some(8 + (n as u16 - 232) * 10),
+            Color::DarkGray => Some(128),
+            Color::Gray => Some(192),
+            Color::White => Some(255),
+            _ => None,
+        }
+    }
+
+    /// 常設の点描が「背景ほど暗い」順に並ぶこと。
+    ///
+    /// 環は砲台がどの経路を通るかを示す線なので、背景の星より暗いと経路が
+    /// 背景へ沈む。無彩色どうしは明度でしか順序を付けられないので、壁・星・
+    /// 暈・環の 4 つを暗い順の 1 本の並びとして固定する。層が深い側の星は
+    /// 色味を持ち、明度ではなく色相で分かれるのでこの並びには入らない。
+    #[test]
+    fn the_field_furniture_gets_brighter_towards_the_front() {
+        let chain = [
+            ("フィールドの壁", FIELD_WALL_COLOR),
+            ("第1層の背景星", star_color(1)),
+            ("第2層の背景星", star_color(2)),
+            ("核の暈", CORE_HALO_COLOR),
+            ("砲台環", ORBIT_COLOR),
+        ];
+        let mut prev: Option<(&str, u16)> = None;
+        for (what, color) in chain {
+            let level = grey_level(color)
+                .unwrap_or_else(|| panic!("{what} が無彩色として明るさを比べられない"));
+            if let Some((prev_what, prev_level)) = prev {
+                assert!(
+                    level > prev_level,
+                    "{what} (明るさ {level}) が {prev_what} (明るさ {prev_level}) より暗い"
+                );
+            }
+            prev = Some((what, level));
+        }
+    }
+
+    /// 核と手前側の砲台が、内側に穴の無い塊として描かれること。
+    ///
+    /// 塗り潰しの標本間隔が点の間隔と噛み合わないと、円の内側でドットを
+    /// 取りこぼして市松に見える。画面の主役 2 つは、いちばん粗いモバイル幅でも
+    /// 塊として読めること。
+    #[test]
+    fn the_core_and_the_turret_are_drawn_as_solid_blobs() {
+        let mut state = StarRingState::new();
+        state.weapon_levels[0][0] = 3;
+        // 核に重なる位置の砲台は、後から描く核に上書きされて塗り潰しの検査に
+        // ならない。環の最下点から外れた位相を選び、実際に離れていることを見る。
+        state.elapsed_ticks = 23;
+        for &(gx, gy, depth) in turret_positions(&state).iter() {
+            if depth > 0.0 {
+                continue;
+            }
+            let d = (gx - CX).hypot(gy - CORE_Y);
+            assert!(
+                d > CORE_RADIUS + TURRET_MAX_RADIUS + 4.0,
+                "位相 {} tick では砲台が核へ寄りすぎている (距離 {d})",
+                state.elapsed_ticks
+            );
+        }
+
+        for (w, h) in [DESKTOP_STAGE, PHONE_STAGE] {
+            let inner = stage_inner(w, h);
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let cs = Rc::new(RefCell::new(ClickState::new()));
+            cs.borrow_mut().terminal_cols = w;
+            cs.borrow_mut().terminal_rows = h;
+            terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
+            let buf = terminal.backend().buffer();
+
+            for (what, color) in [("核", core_color(&state)), ("砲台", TURRET_NEAR_COLOR)] {
+                let blobs = blob_groups(&colored_dots(buf, inner, color));
+                assert!(!blobs.is_empty(), "{w}x{h}: {what} が描かれていない");
+                for blob in blobs {
+                    if let Some(row) = row_with_a_gap(&blob) {
+                        panic!(
+                            "{w}x{h}: {what} の塊 ({}点) の {row} 行目で点が途切れている",
+                            blob.len()
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -2889,3 +3432,4 @@ mod tests {
         }
     }
 }
+
