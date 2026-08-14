@@ -160,19 +160,19 @@ const CORE_LAYER_SWELL_PER_LAYER: f64 = 0.04;
 /// 無くなる。
 const CORE_LAYER_SWELL_MAX: f64 = 0.20;
 
+/// 核脈動が波を撃った拍に上乗せする膨らみ。
+const CORE_CUE_PULSE: f64 = 0.06;
 /// 開放待ちの点滅で上乗せする膨らみ。
 const CORE_CUE_UNLOCK_READY: f64 = 0.10;
-/// 鉱石が核へ届いたときに上乗せする膨らみ。
-const CORE_CUE_HIT: f64 = 0.15;
 /// 撃破条件を満たした瞬間に上乗せする膨らみ。
 const CORE_CUE_LAYER_READY: f64 = 0.20;
 /// 層を開放した瞬間に上乗せする膨らみ。合図の中でいちばん大きい。
 const CORE_CUE_LAYER_OPEN: f64 = 0.35;
 
 const _: () = assert!(
-    0.0 < CORE_CUE_UNLOCK_READY
-        && CORE_CUE_UNLOCK_READY < CORE_CUE_HIT
-        && CORE_CUE_HIT < CORE_CUE_LAYER_READY
+    0.0 < CORE_CUE_PULSE
+        && CORE_CUE_PULSE < CORE_CUE_UNLOCK_READY
+        && CORE_CUE_UNLOCK_READY < CORE_CUE_LAYER_READY
         && CORE_CUE_LAYER_READY < CORE_CUE_LAYER_OPEN,
     "合図の重さと膨らみの大きさが対応していない"
 );
@@ -187,16 +187,24 @@ fn core_layer_swell(state: &StarRingState) -> f64 {
         .min(CORE_LAYER_SWELL_MAX)
 }
 
-/// 層開放・被弾・開放待ちの合図が上乗せする膨らみ。合図が無ければ 0。
+/// 層開放・開放待ち・核脈動の合図が上乗せする膨らみ。合図が無ければ 0。
+///
+/// 重い合図から順に見て、最初に当たった 1 つだけを返す。分岐の順は定数の
+/// 大きさの順と揃える——軽い合図を先に見ると、重い合図が出ている間だけ核が
+/// 小さく描かれる。
+///
+/// いちばん軽いのが核脈動の拍。他の 3 つが一度きりの出来事を報せるのに対し、
+/// これは `pulse_interval` ごとに鳴り続ける装飾なので、居座る側が単発の合図を
+/// 覆い隠さない大きさと順序に置く。
 fn core_cue_swell(state: &StarRingState) -> f64 {
     if state.layer_flash_ticks > 0 {
         CORE_CUE_LAYER_OPEN
     } else if state.layer_ready_flash_ticks > 0 {
         CORE_CUE_LAYER_READY
-    } else if state.core_flash_ticks > 0 {
-        CORE_CUE_HIT
     } else if can_unlock_next_layer(state) && state.elapsed_ticks % 20 < 10 {
         CORE_CUE_UNLOCK_READY
+    } else if state.core_pulse_flash_ticks > 0 {
+        CORE_CUE_PULSE
     } else {
         0.0
     }
@@ -1709,7 +1717,7 @@ mod tests {
     };
     use crate::games::starringe::state::{
         Layer, Ore, OreMotion, Projectile, PulseRing, RingUpgrade, Tab, LAYER_FLASH_TICKS,
-        VISIBLE_Y_HI,
+        VISIBLE_X_HI, VISIBLE_X_LO, VISIBLE_Y_HI,
     };
 
     fn render_frame(state: &StarRingState, width: u16, height: u16) -> Rc<RefCell<ClickState>> {
@@ -2701,9 +2709,9 @@ mod tests {
     /// 楕円 (`StarRingState::ring_radii`) を回るので、四辺へいちばん寄るのは
     /// その楕円の端 — 位相をなめる代わりに端を直接見る。
     ///
-    /// 縦は画面シェイクの振れ込みで残る高さ (`VISIBLE_Y_LO`/`VISIBLE_Y_HI`)、
-    /// 横は Canvas の x_bounds そのもの。核側の同じ不変条件は定数の隣の
-    /// `const` アサートが持つ。
+    /// 突き合わせる範囲は画面シェイクの振れ込みで残る領域
+    /// (`VISIBLE_X_LO`/`VISIBLE_X_HI`/`VISIBLE_Y_LO`/`VISIBLE_Y_HI`)。核側の
+    /// 同じ不変条件は定数の隣の `const` アサートが持つ。
     #[test]
     fn turrets_never_leave_the_field() {
         // 余裕を使い切る砲台数では辺へちょうど接するので、丸め誤差ぶんを許す。
@@ -2728,12 +2736,12 @@ mod tests {
             );
             let left = CX - ring_rx - r;
             assert!(
-                left >= -EPS,
+                left >= VISIBLE_X_LO - EPS,
                 "砲台 {guns} 基で環の左端の砲台が左辺を越える (x={left})"
             );
             let right = CX + ring_rx + r;
             assert!(
-                right <= WORLD_W + EPS,
+                right <= VISIBLE_X_HI + EPS,
                 "砲台 {guns} 基で環の右端の砲台が右辺を越える (x={right})"
             );
         }
@@ -2766,7 +2774,7 @@ mod tests {
             state.current_layer = layer;
             state.total_kills = 0;
             state.shards = 0.0;
-            state.core_flash_ticks = 0;
+            state.core_pulse_flash_ticks = 0;
             state.layer_ready_flash_ticks = 0;
             state.layer_flash_ticks = 0;
             let calm = core_halo_radius(&state);
@@ -2780,6 +2788,17 @@ mod tests {
                 "第{layer}層で開放待ちの状態を作れていない"
             );
             let blink_on = core_halo_radius(&state);
+
+            // 核脈動は開放待ちの間も鳴り続ける。軽い側が重い側を覆えば、
+            // 「開放できる」を報せる点滅が脈動の周期に飲まれる。
+            state.core_pulse_flash_ticks = 6;
+            let blink_on_while_pulsing = core_halo_radius(&state);
+            state.core_pulse_flash_ticks = 0;
+            assert_eq!(
+                blink_on_while_pulsing, blink_on,
+                "第{layer}層: 核脈動の拍が開放待ちの点滅を上書きしている"
+            );
+
             state.elapsed_ticks = 10;
             let blink_off = core_halo_radius(&state);
             state.total_kills = 0;
@@ -2790,9 +2809,9 @@ mod tests {
                 "第{layer}層: 点滅の消灯側が平常時と違う大きさで描かれる"
             );
 
-            state.core_flash_ticks = 6;
-            let hit = core_halo_radius(&state);
-            state.core_flash_ticks = 0;
+            state.core_pulse_flash_ticks = 6;
+            let pulse = core_halo_radius(&state);
+            state.core_pulse_flash_ticks = 0;
 
             state.layer_ready_flash_ticks = LAYER_FLASH_TICKS;
             let ready = core_halo_radius(&state);
@@ -2803,9 +2822,9 @@ mod tests {
             state.layer_flash_ticks = 0;
 
             for (before, after, what) in [
-                (calm, blink_on, "平常時 → 開放待ちの点滅"),
-                (blink_on, hit, "開放待ちの点滅 → 被弾"),
-                (hit, ready, "被弾 → 撃破条件の達成"),
+                (calm, pulse, "平常時 → 核脈動の拍"),
+                (pulse, blink_on, "核脈動の拍 → 開放待ちの点滅"),
+                (blink_on, ready, "開放待ちの点滅 → 撃破条件の達成"),
                 (ready, open, "撃破条件の達成 → 層開放"),
             ] {
                 assert!(
@@ -2813,6 +2832,36 @@ mod tests {
                     "第{layer}層: {what} で核が {before} から {after} へ縮む/変わらない"
                 );
             }
+        }
+    }
+
+    /// いちばん軽い合図 (核脈動の拍) も、実際に描かれる点として太ること。
+    ///
+    /// 合図の膨らみは点の解像度より小さくなると絵に出ない。単発の合図より
+    /// 軽くする以上、下限は「描いて増えるか」で見る。
+    #[test]
+    fn the_core_pulse_beat_shows_as_drawn_dots() {
+        let mut state = StarRingState::new();
+        for (w, h) in [DESKTOP_STAGE, PHONE_STAGE] {
+            let inner = stage_inner(w, h);
+            let halo_span = |st: &StarRingState| {
+                let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+                let cs = Rc::new(RefCell::new(ClickState::new()));
+                cs.borrow_mut().terminal_cols = w;
+                cs.borrow_mut().terminal_rows = h;
+                terminal.draw(|f| render(st, f, f.area(), &cs)).unwrap();
+                dot_span_w(&colored_dots(terminal.backend().buffer(), inner, CORE_HALO_COLOR))
+            };
+
+            let calm = halo_span(&state);
+            assert!(calm > 0, "{w}x{h}: 平常時に暈が見えていない");
+            state.core_pulse_flash_ticks = 3;
+            let pulsing = halo_span(&state);
+            state.core_pulse_flash_ticks = 0;
+            assert!(
+                pulsing > calm,
+                "{w}x{h}: 核脈動の拍で暈が {calm}点幅 のまま太らない"
+            );
         }
     }
 

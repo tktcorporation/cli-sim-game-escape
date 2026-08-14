@@ -224,7 +224,6 @@ fn play_layer_unlock_ceremony(state: &mut StarRingState) {
     state.layer_ready_flash_ticks = 0;
     state.layer_ready_latched = false;
     state.shake_ticks = state.shake_ticks.max(16);
-    state.core_flash_ticks = state.core_flash_ticks.max(22);
     burst(state, CX, CORE_Y, 22, 7.0, ParticleKind::Spark, 28);
     burst(state, CX, CORE_Y, 14, 5.0, ParticleKind::Shard, 24);
     burst(state, CX, CORE_Y, 10, 3.5, ParticleKind::Ember, 20);
@@ -288,8 +287,8 @@ pub fn tick(state: &mut StarRingState, delta_ticks: u32) {
         if state.shake_ticks > 0 {
             state.shake_ticks -= 1;
         }
-        if state.core_flash_ticks > 0 {
-            state.core_flash_ticks -= 1;
+        if state.core_pulse_flash_ticks > 0 {
+            state.core_pulse_flash_ticks -= 1;
         }
         if state.boost_ticks > 0 {
             state.boost_ticks -= 1;
@@ -321,7 +320,6 @@ fn check_layer_ready(state: &mut StarRingState) {
     let ready = state.kills_ready_for_next_layer();
     if ready && !state.layer_ready_latched {
         state.layer_ready_flash_ticks = LAYER_READY_FLASH_TICKS;
-        state.core_flash_ticks = state.core_flash_ticks.max(8);
         state.shake_ticks = state.shake_ticks.max(6);
         burst(state, CX, CORE_Y, 8, 3.5, ParticleKind::Spark, 14);
         state.layer_ready_latched = true;
@@ -381,8 +379,9 @@ fn step_particles(state: &mut StarRingState) {
 /// この 1tick が無いと、波面が追い越したはずの鉱石が到達距離の際でだけ
 /// すり抜ける。輪帯の幅がゼロなので、波が届く距離自体は伸びない。
 ///
-/// 本数が上限を越えたら、最も広がった波から早めに退場させる。退場のさせ方は
-/// 削るものが残っているかで変える。
+/// 本数が上限を越えたら、いちばん古い波から早めに退場させる。直近の操作で立った
+/// 波ほど長く残るので、上限に当たっても手応えが返るのはいま押した側になる。
+/// 退場のさせ方は削るものが残っているかで変える。
 ///
 /// 削る波 (`damage > 0`) は畳む。この tick が最後の一歩になり、進む先が
 /// `radius + PULSE_WAVE_SPEED` ではなく `reach` へ変わる。残りの輪帯をこの tick
@@ -410,7 +409,8 @@ fn step_pulse_rings(state: &mut StarRingState) {
     for i in 0..state.pulse_rings.len() {
         let ring = &mut state.pulse_rings[i];
         ring.life -= 1;
-        // 退場させるのは最も広がった波から。古い順に並んでいるので先頭から取る。
+        // `pulse_rings` は立った順に並ぶので、先頭から取れば古い波から退場する。
+        // 到達距離は波の出どころごとに違い、並び順は広がりの順にはならない。
         let retiring = ring.life > 0 && to_retire > 0;
         if retiring {
             to_retire -= 1;
@@ -747,7 +747,7 @@ fn fire_core_pulse(state: &mut StarRingState) {
         return;
     }
     spawn_pulse_wave(state, state.pulse_reach(), state.pulse_damage());
-    state.core_flash_ticks = state.core_flash_ticks.max(4);
+    state.core_pulse_flash_ticks = state.core_pulse_flash_ticks.max(4);
     burst(state, CX, CORE_Y, 5, 2.5, ParticleKind::Spark, 12);
 }
 
@@ -1519,6 +1519,46 @@ mod tests {
             "開放可パルスが走るはず"
         );
         assert_eq!(state.layer_flash_ticks, 0, "到達演出は開放操作後だけ");
+    }
+
+    /// 核の膨らみを駆動する拍を立てるのは核脈動だけであること。
+    ///
+    /// 層の合図は専用のフラグ (`layer_flash_ticks`/`layer_ready_flash_ticks`) で
+    /// 報せる。層側がこの拍まで立てると、`render` はどの出来事の拍かを見分け
+    /// られず、核脈動のための膨らみが層の合図の余韻として出る。
+    #[test]
+    fn only_the_core_pulse_raises_the_pulse_beat() {
+        let mut state = StarRingState::new();
+        state.total_kills = Layer::THRESHOLDS[1];
+        state.shards = 1e9;
+        assert!(unlock_next_layer(&mut state));
+        assert_eq!(
+            state.core_pulse_flash_ticks, 0,
+            "層開放が核脈動の拍を立てている"
+        );
+
+        state.total_kills = Layer::THRESHOLDS[2];
+        check_layer_ready(&mut state);
+        assert!(
+            state.layer_ready_flash_ticks > 0,
+            "開放可の合図を作れていない"
+        );
+        assert_eq!(
+            state.core_pulse_flash_ticks, 0,
+            "開放可の合図が核脈動の拍を立てている"
+        );
+
+        let mut state = state_with_core_pulse(1);
+        state.core_pulse_flash_ticks = 0;
+        let interval = state.pulse_interval().expect("核脈動が解放されていない");
+        for _ in 0..interval {
+            state.elapsed_ticks = state.elapsed_ticks.wrapping_add(1);
+            fire_core_pulse(&mut state);
+        }
+        assert!(
+            state.core_pulse_flash_ticks > 0,
+            "核脈動が波を撃っても拍が立たない"
+        );
     }
 
     #[test]

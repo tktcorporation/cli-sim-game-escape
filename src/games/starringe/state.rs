@@ -660,7 +660,11 @@ pub struct StarRingState {
     pub elapsed_ticks: u64,
     pub rng_state: u32,
     pub shake_ticks: u32,
-    pub core_flash_ticks: u32,
+    /// 核脈動が波を撃った拍の残り。立てるのは `logic::fire_core_pulse` だけで、
+    /// 読むのは核の膨らみ (`render` の合図) だけ。層の合図は専用のフラグ
+    /// (`layer_flash_ticks`/`layer_ready_flash_ticks`) を持つので、ここには
+    /// 混ぜない——混ぜると、読む側が「どの出来事の拍か」を特定できなくなる。
+    pub core_pulse_flash_ticks: u32,
     pub boost_ticks: u32,
     /// 層開放時の到達演出残り。
     pub layer_flash_ticks: u32,
@@ -698,7 +702,7 @@ impl StarRingState {
             elapsed_ticks: 0,
             rng_state: 0xC0FFEE42,
             shake_ticks: 0,
-            core_flash_ticks: 0,
+            core_pulse_flash_ticks: 0,
             boost_ticks: 0,
             layer_flash_ticks: 0,
             layer_ready_flash_ticks: 0,
