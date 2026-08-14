@@ -449,7 +449,15 @@ fn machine_spec_report() {
 
 /// 台ごとの長期出玉率。釘の開きが収支へどう効くか (＝良い台を選ぶ見返り)
 /// と、どの台も 1.0 を割っていることを同時に読む。
+///
+/// 釘の組み合わせごとに長期の試行を回すため単体で 25 秒かかる。assert を
+/// 持たない観測専用なので、`#[ignore]` で routine な `cargo test` から外す
+/// (metropolis の長尺ベンチと同じ運用)。バランスを触るときに
+/// `cargo test pachinko::simulator::payout_ratio_report -- --ignored --nocapture`
+/// で読む。出玉率が損益分岐を割ることの保証は
+/// `payout_ratio_stays_below_break_even` が短い試行で担う。
 #[test]
+#[ignore]
 fn payout_ratio_report() {
     const LAYOUTS: u32 = 8;
     const TICKS: u32 = 120_000;
