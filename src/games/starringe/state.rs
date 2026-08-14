@@ -416,16 +416,20 @@ impl OreKind {
     }
 
     /// 横方向へ漂う基準速度 (ワールド単位/tick)。符号はスポーン時に決める。
+    ///
+    /// 砲台は撃つ瞬間の鉱石の位置へまっすぐ撃つ (`logic::aim_dir`) ので、弾の
+    /// 飛行時間ぶんだけ横へ動く鉱石は自動照準を外せる。降下速度と同じ桁の
+    /// 横速度を持たせて、遠い鉱石ほど当たりにくい状態を作る。
     pub fn sway_speed(self) -> f64 {
         match self {
-            OreKind::Dust => 0.0875,
-            OreKind::Rock => 0.070,
-            OreKind::Crystal => 0.055,
-            OreKind::Wisp => 0.105,
-            OreKind::Prism => 0.075,
-            OreKind::Shell => 0.040,
-            OreKind::Splitter => 0.065,
-            OreKind::Nova => 0.035,
+            OreKind::Dust => 0.26,
+            OreKind::Rock => 0.21,
+            OreKind::Crystal => 0.165,
+            OreKind::Wisp => 0.315,
+            OreKind::Prism => 0.225,
+            OreKind::Shell => 0.12,
+            OreKind::Splitter => 0.195,
+            OreKind::Nova => 0.105,
         }
     }
 

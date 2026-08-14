@@ -638,6 +638,10 @@ fn aim_dir(state: &StarRingState, gx: f64, gy: f64, idx: usize) -> (f64, f64) {
     (dx / dist, dy / dist)
 }
 
+/// 弾速は「弾がフィールドを横切るのに要する tick 数」で決める。速すぎると
+/// 発射から着弾までが一瞬になり、砲台から遠い鉱石でも自動照準がそのまま当たって
+/// しまう。飛行時間を残すことで、横へ漂う鉱石 (`OreKind::sway_speed`) は遠距離
+/// ほど照準を外せる——迎撃の間合いはこの飛行時間と横速度の釣り合いで決まる。
 fn fire_pulse(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize, dmg: f64) {
     let n = guns.len().max(1);
     for k in 0..volley {
@@ -648,7 +652,7 @@ fn fire_pulse(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize
         let (ux, uy) = aim_dir(state, gx, gy, idx);
         let jitter = rand_range(state, -0.12, 0.12);
         let ang = uy.atan2(ux) + jitter;
-        let speed = 6.0;
+        let speed = 4.0;
         state.projectiles.push(Projectile {
             x: gx,
             y: gy,
@@ -673,7 +677,7 @@ fn fire_ray(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize, 
             return;
         };
         let (ux, uy) = aim_dir(state, gx, gy, idx);
-        let speed = 9.0;
+        let speed = 6.0;
         state.projectiles.push(Projectile {
             x: gx,
             y: gy,
@@ -706,7 +710,7 @@ fn fire_scatter(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usi
             (k as f64 / (volley - 1) as f64) - 0.5
         };
         let ang = base_ang + t * spread;
-        let speed = 5.25;
+        let speed = 3.5;
         state.projectiles.push(Projectile {
             x: gx,
             y: gy,
@@ -731,7 +735,7 @@ fn fire_arc(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize, 
             return;
         };
         let (ux, uy) = aim_dir(state, gx, gy, idx);
-        let speed = 4.5;
+        let speed = 3.0;
         let spin = if k % 2 == 0 { 0.14 } else { -0.14 };
         state.projectiles.push(Projectile {
             x: gx,
@@ -757,7 +761,7 @@ fn fire_nova(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize,
             return;
         };
         let (ux, uy) = aim_dir(state, gx, gy, idx);
-        let speed = 3.5;
+        let speed = 2.35;
         state.projectiles.push(Projectile {
             x: gx,
             y: gy,

@@ -9,7 +9,8 @@
 //! - **核脈動の寄与**: 環武装 (コア AOE) の有無で撃破がどう変わるか
 //! - **武装ステの寄与**: 弾数 / 連射 / 威力の優先比較
 //! - **層進行カーブ**: 撃破＋星屑開放で武装・鉱石種が解放されるペース
-//! - **逸失率**: 中心到達で報酬を逃す割合
+//! - **逸失率**: コア到達で報酬を逃す割合
+//! - **迎撃圧の時間推移**: 逸失率が序盤から終盤にかけてどう下がるか
 //!
 //! `cargo test starringe::simulator -- --nocapture` でレポートを確認できる。
 
@@ -20,7 +21,8 @@ use super::logic::{
     purchase_weapon_stat, ring_upgrade_cost, tick, unlock_next_layer, weapon_stat_cost,
 };
 use super::state::{
-    Layer, OreKind, RingUpgrade, StarRingState, WeaponKind, WeaponStat, RING_UPGRADE_COUNT,
+    Layer, OreKind, RingUpgrade, StarRingState, WeaponKind, WeaponStat, FIELD_MARGIN,
+    RING_UPGRADE_COUNT, SPAWN_X_MARGIN, SPAWN_Y, WORLD_H, WORLD_W,
 };
 
 /// 購入方策。感度分析で「どの強化が効いているか」を切り分ける。
@@ -702,4 +704,166 @@ fn new_ore_kinds_appear_over_long_run() {
         "浮遊片層に届くはず layer={}",
         snap.layer
     );
+}
+
+// ---------------------------------------------------------------------------
+// フィールドモデルの不変条件
+// ---------------------------------------------------------------------------
+
+/// 鉱石はワールドの内側に留まる。
+///
+/// 横は左右の反射壁 (`FIELD_MARGIN`)、縦はコア到達 / 場外落下の判定
+/// (`logic::resolve_arrivals`) で回収されるので、tick の切れ目では常に
+/// `0 <= y <= WORLD_H` かつ壁の内側にいる。画面外へ流れる鉱石があると
+/// 「どこから何が降ってきているか」を目で追えなくなる。
+#[test]
+fn ores_stay_inside_the_field_over_a_long_run() {
+    const TICKS: u32 = 6_000;
+    const EPS: f64 = 1e-6;
+    let mut state = StarRingState::new();
+    state.rng_state = 0x5EED_1234;
+    let mut checked = 0u64;
+    for t in 0..TICKS {
+        bot_spend(&mut state, BuyPolicy::Cheapest, 4);
+        tick(&mut state, 1);
+        for ore in &state.ores {
+            assert!(
+                ore.x >= FIELD_MARGIN - EPS && ore.x <= WORLD_W - FIELD_MARGIN + EPS,
+                "tick {t}: 鉱石が左右の壁を越えた x={} kind={:?}",
+                ore.x,
+                ore.kind
+            );
+            assert!(
+                ore.y >= 0.0 && ore.y <= WORLD_H + EPS,
+                "tick {t}: 鉱石が上下へ抜けた y={} kind={:?}",
+                ore.y,
+                ore.kind
+            );
+            assert!(ore.x.is_finite() && ore.y.is_finite());
+            checked += 1;
+        }
+    }
+    assert!(
+        checked > 10_000,
+        "検査対象が少なすぎてフィールド外判定が効いていない n={checked}"
+    );
+}
+
+/// 出現 x は横幅全体へ散る。
+///
+/// 湧きが一箇所へ寄ると、迎撃が「その一点を撃つだけ」に退化する。
+/// 上空から降り始めた鉱石だけを数え、幅を5区画に割って偏りを見る
+/// (裂片の分裂で生まれる子は親の位置に依存するので対象外)。
+#[test]
+fn spawn_x_spreads_across_the_whole_width() {
+    const TICKS: u32 = 6_000;
+    const BUCKETS: usize = 5;
+    let mut hist = [0u64; BUCKETS];
+    let lo = FIELD_MARGIN;
+    let span = WORLD_W - FIELD_MARGIN * 2.0;
+    for seed in 1..=4u32 {
+        let mut state = StarRingState::new();
+        state.rng_state = seed;
+        for _ in 0..TICKS {
+            bot_spend(&mut state, BuyPolicy::Cheapest, 4);
+            tick(&mut state, 1);
+            for ore in state.ores.iter().filter(|o| o.age == 0 && o.y > SPAWN_Y - 8.0) {
+                let i = (((ore.x - lo) / span * BUCKETS as f64) as usize).min(BUCKETS - 1);
+                hist[i] += 1;
+            }
+        }
+    }
+    let total: u64 = hist.iter().sum();
+    eprintln!("[starringe/spawn-x] total={total} buckets={hist:?}");
+    assert!(total > 2_000, "湧きの標本が足りない total={total}");
+
+    // 出現 x は [SPAWN_X_MARGIN, WORLD_W - SPAWN_X_MARGIN] の一様分布なので、
+    // 端の区画だけ SPAWN_X_MARGIN と FIELD_MARGIN の差ぶん狭くなる。
+    let edge_share =
+        (span / BUCKETS as f64 - (SPAWN_X_MARGIN - FIELD_MARGIN)) / (WORLD_W - SPAWN_X_MARGIN * 2.0);
+    let floor = edge_share * 0.55;
+    for (i, &n) in hist.iter().enumerate() {
+        let share = n as f64 / total as f64;
+        assert!(
+            share > floor,
+            "区画 {i} への湧きが少なすぎる share={:.1}% floor={:.1}%",
+            share * 100.0,
+            floor * 100.0
+        );
+        assert!(
+            share < 0.35,
+            "区画 {i} へ湧きが偏っている share={:.1}%",
+            share * 100.0
+        );
+    }
+}
+
+/// 迎撃圧の時間推移。
+///
+/// 逸失率は序盤に高く、強化が積み上がるほど下がる——「守る」ではなく
+/// 「刈り取る」ゲームなので、投資が実った終盤に取りこぼしが消えるのは設計どおり。
+/// 検証したいのは序盤に迎撃の駆け引きが成立していること (下限) と、
+/// 刈り取り自体が破綻していないこと (上限) の2点。
+#[test]
+fn interception_pressure_over_time_report() {
+    const RUNS: u32 = 16;
+    const EDGES: [u32; 6] = [0, 500, 1_000, 2_000, 4_000, 8_000];
+
+    let mut window = vec![(0u64, 0u64); EDGES.len() - 1];
+    let mut opening_rates = Vec::with_capacity(RUNS as usize);
+    let mut peak_ores = Vec::with_capacity(RUNS as usize);
+
+    for seed in 1..=RUNS {
+        let mut state = StarRingState::new();
+        state.rng_state = seed;
+        let mut prev = (0u64, 0u64);
+        let mut wi = 0usize;
+        let mut peak = 0usize;
+        for t in 1..=EDGES[EDGES.len() - 1] {
+            bot_spend(&mut state, BuyPolicy::Cheapest, 4);
+            tick(&mut state, 1);
+            peak = peak.max(state.ores.len());
+            if t == EDGES[wi + 1] {
+                window[wi].0 += state.total_kills - prev.0;
+                window[wi].1 += state.missed_count - prev.1;
+                prev = (state.total_kills, state.missed_count);
+                if EDGES[wi + 1] == 1_000 {
+                    let total = state.total_kills + state.missed_count;
+                    opening_rates.push(state.missed_count as f64 / total.max(1) as f64);
+                }
+                wi += 1;
+            }
+        }
+        peak_ores.push(peak as u64);
+    }
+
+    eprintln!("[starringe/pressure] runs={RUNS} policy=cheapest");
+    for (wi, &(k, m)) in window.iter().enumerate() {
+        eprintln!(
+            "  t={:>5}-{:<5} kills={:>6} missed={:>5} miss={:>5.1}%",
+            EDGES[wi],
+            EDGES[wi + 1],
+            k / RUNS as u64,
+            m / RUNS as u64,
+            m as f64 / (k + m).max(1) as f64 * 100.0
+        );
+    }
+    let opening = median_f64(&mut opening_rates);
+    let peak = median_u64(&mut peak_ores);
+    eprintln!(
+        "  opening(t<1000) median_miss_rate={:.1}% median_peak_ores={peak}",
+        opening * 100.0
+    );
+
+    assert!(
+        opening > 0.03,
+        "序盤から取りこぼしが起きず迎撃の駆け引きが無い: {:.1}%",
+        opening * 100.0
+    );
+    assert!(
+        opening < 0.55,
+        "序盤の取りこぼしが多すぎて刈り取りが立ち上がらない: {:.1}%",
+        opening * 100.0
+    );
+    assert!(peak < 56, "同時存在数が上限に張り付いている peak={peak}");
 }
