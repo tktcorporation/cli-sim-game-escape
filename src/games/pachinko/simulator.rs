@@ -1046,13 +1046,23 @@ fn payout_ratio_stays_below_break_even() {
                 })
                 .collect();
             let average = mean(&ratios);
+            let worst = sorted(ratios).last().copied().unwrap_or(0.0);
             assert!(
                 average < 1.0,
                 "{name}: ホールに並びうる最良の釘の長期出玉率が 1.0 を超えた — \
                  打つほど玉が増えて軍資金が尽きなくなる \
                  (開き={spread:.2} 傾き={bias:+.2} 平均={average:.3} \
-                 最大={:.3} 釘{LAYOUTS}通り)",
-                sorted(ratios).last().copied().unwrap_or(0.0)
+                 最大={worst:.3} 釘{LAYOUTS}通り)"
+            );
+            // 平均だけを見ていると、引きの強さでは説明できない跳ね上がりを
+            // 取りこぼす。実測の最大は 1.05 前後に収まるので、そこから離れた
+            // 上限を置いて「分散ではなく仕組みが壊れた」場合だけを捕まえる。
+            assert!(
+                worst < 1.35,
+                "{name}: 釘1通りの長期出玉率が引きのばらつきで説明できない水準に達した — \
+                 平均が 1.0 を割っていても、賞球か入賞判定のどこかが壊れている疑いがある \
+                 (開き={spread:.2} 傾き={bias:+.2} 平均={average:.3} \
+                 最大={worst:.3} 釘{LAYOUTS}通り)"
             );
         }
     }

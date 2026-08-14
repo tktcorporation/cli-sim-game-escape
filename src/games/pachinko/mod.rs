@@ -68,6 +68,11 @@ impl PachinkoGame {
         // 台を引くと、毎回 `PachinkoState::new` の固定 seed から始まり、
         // 来店のたびに同じ4台・同じ釘が並ぶ。
         logic::generate_hall(&mut state);
+        // 台を引いて進んだ seed をその場で書き戻す。次の保存を待つ間に
+        // 再読み込みされると、保存済みの古い seed から同じ4台を引き直して
+        // しまい、来店ごとに並びが変わらなくなる。
+        #[cfg(target_arch = "wasm32")]
+        save::save_game(&state);
         let saved_jackpot_end_seq = state.jackpot_end_seq;
         Self {
             state,
