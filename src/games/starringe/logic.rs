@@ -667,14 +667,25 @@ fn fire_core_pulse(state: &mut StarRingState) {
     burst(state, CX, CORE_Y, 5, 2.5, ParticleKind::Spark, 12);
 }
 
-/// 核からの距離が `[inner, outer)` に入る鉱石——この tick で波面が跨いだ
-/// ぶん——だけを削る。
+/// この tick に波面が `inner` から `outer` へ進む間、波面が追い越した鉱石を削る。
+///
+/// 鉱石も同じ tick に核へ近づくので、判定はその移動ぶんを含めた掃引で取る。
+/// 中心距離の瞬間値だけを見ると、波面のわずかに外に居た鉱石が次の tick までに
+/// 旧 `outer` の内側へ入り込み、波が通り抜けたのに一度も削られない個体が出る。
+/// 当たりが tick の位相任せになると、核脈動という強化の効きが読めなくなる。
+///
+/// `prev` は `vx`/`vy` から復元した前 tick の中心距離。ある tick の `dist` は
+/// 次の tick の `prev` と一致し、`outer` は次の tick の `inner` と一致するので、
+/// 判定区間は隣り合う tick で継ぎ目なく並ぶ——1 つの波が同じ鉱石を削るのは
+/// 1 度きりになる。
 fn pulse_wave_damage(state: &mut StarRingState, inner: f64, outer: f64, dmg: f64) {
     let mut i = state.ores.len();
     while i > 0 {
         i -= 1;
-        let dist = (state.ores[i].x - CX).hypot(state.ores[i].y - CORE_Y);
-        if dist >= inner && dist < outer {
+        let ore = &state.ores[i];
+        let dist = (ore.x - CX).hypot(ore.y - CORE_Y);
+        let prev = (ore.x - ore.vx - CX).hypot(ore.y - ore.vy - CORE_Y);
+        if prev > inner && dist <= outer {
             apply_damage(state, i, dmg, DamageSource::CorePulse);
         }
     }
@@ -1499,6 +1510,37 @@ mod tests {
             (dealt - dmg).abs() < 1e-6,
             "1波で与えたダメージが1発ぶんでない dealt={dealt} dmg={dmg}"
         );
+    }
+
+    /// 波が通り抜けた鉱石は、tick の位相によらず必ず 1 度だけ削られること。
+    ///
+    /// 鉱石は波へ近づく向きに動くので、その tick の中心距離だけを見ていると
+    /// 波面の外から内へ一気に潜り込んだ個体を取りこぼす。当たりが初期位置の
+    /// 端数任せになると、核脈動を積んでも効きが体感できない。
+    #[test]
+    fn pulse_wave_hits_every_ore_it_passes_regardless_of_phase() {
+        let reach = state_with_core_pulse(3).pulse_reach();
+        let dmg = state_with_core_pulse(3).pulse_damage();
+        // 波面は 1tick で PULSE_WAVE_SPEED 進むので、その幅より細かく初期位置を
+        // ずらせば波面と鉱石の位相関係を一巡できる。
+        let steps = (PULSE_WAVE_SPEED / 0.4).ceil() as u32 + 2;
+        for step in 0..steps {
+            let mut state = state_with_core_pulse(3);
+            let y = CORE_Y + reach * 0.5 + step as f64 * 0.4;
+            push_test_ore(&mut state, CX, y, 1e6);
+            spawn_pulse_wave(&mut state, reach, dmg);
+            let before = state.ores[0].hp;
+            // tick と同じ順序 (波を広げてから鉱石を動かす) で回す。
+            for _ in 0..40 {
+                step_pulse_rings(&mut state);
+                step_ores(&mut state);
+            }
+            let dealt = before - state.ores[0].hp;
+            assert!(
+                (dealt - dmg).abs() < 1e-6,
+                "y={y} の鉱石への被弾が1発ぶんでない dealt={dealt} dmg={dmg}"
+            );
+        }
     }
 
     /// 層開放の演出で立つ波は鉱石に触れないこと。
