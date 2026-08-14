@@ -433,9 +433,14 @@ pub struct PachinkoState {
     pub chain: u32,
     pub log: Vec<String>,
     pub rng_state: u32,
-    /// 大当たりのたびに増える単調増加カウンタ。保存側は前回保存時との差分の
-    /// 有無だけを見るので、logic 側は当たったら増やすだけでよい。
+    /// 大当たりが確定するたびに増える単調増加カウンタ。読み手は前回見た値との
+    /// 差分の有無だけを見るので、logic 側は当たったら増やすだけでよい。
     pub jackpot_seq: u32,
+    /// 大当たりが終わって電サポへ移るたびに増える単調増加カウンタ。出玉が
+    /// 確定するのは終了時なので、保存の契機はこちらを見る。`jackpot_seq` とは
+    /// 別に持つ — 1つのフィールドで確定と終了を兼ねると、差分を見た側が
+    /// どちらの瞬間なのかを区別できない。
+    pub jackpot_end_seq: u32,
     /// ヘソに玉が入った瞬間を光らせる残り tick。
     pub start_flash: u8,
     /// リーチに入った瞬間を光らせる残り tick。
@@ -484,6 +489,7 @@ impl PachinkoState {
             // xorshift32 は 0 が不動点なので非ゼロで始める。
             rng_state: 0x7AC1_2E5B,
             jackpot_seq: 0,
+            jackpot_end_seq: 0,
             start_flash: 0,
             reach_flash: 0,
             reach_flash_kind: ReachKind::None,

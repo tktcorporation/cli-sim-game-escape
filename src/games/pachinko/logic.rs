@@ -474,7 +474,12 @@ fn advance_jackpot(state: &mut PachinkoState) {
     state.mode = Mode::Jackpot(jackpot);
 }
 
+/// 最終ラウンドを消化し終えた大当たりを閉じ、確変か時短へ送り出す。
+///
+/// ここで `jackpot_end_seq` を進める。ここが「アタッカーで取れる出玉が
+/// 出揃った」唯一の地点で、保存の契機を待たせたくない瞬間にあたる。
 fn end_jackpot(state: &mut PachinkoState, jackpot: JackpotState) {
+    state.jackpot_end_seq = state.jackpot_end_seq.wrapping_add(1);
     let spec = seated_spec(state);
     if jackpot.kakuhen {
         state.mode = Mode::Kakuhen { spins_left: 0 };
@@ -1035,6 +1040,30 @@ mod tests {
         assert!(
             !matches!(state.mode, Mode::Jackpot(_)),
             "玉が入らないラウンドで大当たりが終わらない"
+        );
+    }
+
+    #[test]
+    fn jackpot_end_seq_advances_at_the_end_of_a_jackpot_not_at_the_hit() {
+        // 出玉が確定するのは終了時なので、保存の契機を読む側が「確定」と
+        // 「終了」を取り違えないようにする。
+        let mut state = seated_state();
+        let before = state.jackpot_end_seq;
+        resolve_spin(&mut state, jackpot(3));
+        assert_eq!(
+            state.jackpot_end_seq, before,
+            "大当たりの確定だけで終了カウンタが進んでいる"
+        );
+
+        tick_n(&mut state, ROUND_LIMIT_TICKS * 4);
+        assert!(
+            !matches!(state.mode, Mode::Jackpot(_)),
+            "大当たりが終わっていない"
+        );
+        assert_eq!(
+            state.jackpot_end_seq,
+            before + 1,
+            "大当たりの終了で終了カウンタが進んでいない"
         );
     }
 

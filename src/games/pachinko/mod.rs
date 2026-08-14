@@ -45,9 +45,9 @@ const POWER_STEP: i16 = 2;
 pub struct PachinkoGame {
     pub state: PachinkoState,
     save_countdown: u32,
-    /// 保存済みの `state.jackpot_seq`。差が出た tick で即座に保存し、
-    /// 大当たりで伸びた記録が次の定期保存までのリロードで消えるのを防ぐ。
-    saved_jackpot_seq: u32,
+    /// 保存済みの `state.jackpot_end_seq`。差が出た tick で即座に保存し、
+    /// 大当たりで積んだ出玉と記録が次の定期保存までのリロードで消えるのを防ぐ。
+    saved_jackpot_end_seq: u32,
 }
 
 impl Default for PachinkoGame {
@@ -68,18 +68,18 @@ impl PachinkoGame {
         // 台を引くと、毎回 `PachinkoState::new` の固定 seed から始まり、
         // 来店のたびに同じ4台・同じ釘が並ぶ。
         logic::generate_hall(&mut state);
-        let saved_jackpot_seq = state.jackpot_seq;
+        let saved_jackpot_end_seq = state.jackpot_end_seq;
         Self {
             state,
             save_countdown: save::AUTOSAVE_INTERVAL,
-            saved_jackpot_seq,
+            saved_jackpot_end_seq,
         }
     }
 
     fn flush_save(&mut self) {
         #[cfg(target_arch = "wasm32")]
         save::save_game(&self.state);
-        self.saved_jackpot_seq = self.state.jackpot_seq;
+        self.saved_jackpot_end_seq = self.state.jackpot_end_seq;
         self.save_countdown = save::AUTOSAVE_INTERVAL;
     }
 
@@ -217,9 +217,15 @@ impl Game for PachinkoGame {
 
     fn tick(&mut self, delta_ticks: u32) {
         logic::tick_n(&mut self.state, delta_ticks);
-        if self.state.jackpot_seq != self.saved_jackpot_seq {
-            // 大当たりは自己記録 (`record`) が伸びる瞬間。定期保存を待つと、
-            // その間にリロードした分の記録が静かに消える。
+        if self.state.jackpot_end_seq != self.saved_jackpot_end_seq {
+            // 大当たりの終了は、アタッカーで取れる出玉と自己記録 (`record`) が
+            // 揃って確定する瞬間。定期保存を待つと、その間にリロードした分の
+            // 出玉と記録が静かに消える。
+            //
+            // 契機を大当たりの確定側に置かないのは、確定時点では出玉がまだ
+            // 1玉も増えていないため。`save.rs` は遊技中の `mode` を保存せず、
+            // 読み込みは必ず通常状態から始まるので、確定だけを保存すると
+            // 「記録には残っているのに出玉が無い」食い違いだけが残る。
             self.flush_save();
         } else if self.save_countdown > delta_ticks {
             self.save_countdown -= delta_ticks;
@@ -438,23 +444,65 @@ mod tests {
         assert!(!game.state.balls.is_empty(), "着席中は玉が打ち出される");
     }
 
+    /// 最終ラウンドを残り1tickまで進めた大当たり。次の tick で終了する。
+    fn last_round_of_a_jackpot() -> state::Mode {
+        state::Mode::Jackpot(state::JackpotState {
+            round: 1,
+            total_rounds: 1,
+            count: 0,
+            ticks_left: 1,
+            kakuhen: false,
+        })
+    }
+
     #[test]
-    fn jackpot_flushes_the_autosave_countdown() {
-        let mut game = PachinkoGame::new();
+    fn finishing_a_jackpot_flushes_the_autosave_countdown() {
+        let mut game = seated();
         game.tick(10);
         assert!(
             game.save_countdown < save::AUTOSAVE_INTERVAL,
             "何も起きていない tick では定期保存までのカウントダウンが進む"
         );
 
-        game.state.jackpot_seq += 1;
+        game.state.mode = last_round_of_a_jackpot();
         game.tick(1);
+        assert!(
+            !matches!(game.state.mode, state::Mode::Jackpot(_)),
+            "最終ラウンドの時間切れで大当たりが終わっていない"
+        );
         assert_eq!(
             game.save_countdown,
             save::AUTOSAVE_INTERVAL,
-            "大当たりで伸びた記録は、次の定期保存を待たずに保存する"
+            "大当たりで確定した出玉と記録は、次の定期保存を待たずに保存する"
         );
-        assert_eq!(game.saved_jackpot_seq, game.state.jackpot_seq);
+        assert_eq!(game.saved_jackpot_end_seq, game.state.jackpot_end_seq);
+    }
+
+    #[test]
+    fn a_confirmed_jackpot_alone_does_not_flush_the_autosave_countdown() {
+        // 大当たりが確定した時点では出玉がまだ1玉も増えていない。ここで
+        // 保存すると、リロード後は通常状態から始まるので「記録には残って
+        // いるのに出玉が無い」食い違いだけが残る。
+        let mut game = seated();
+        game.state.jackpot_seq += 1;
+        game.state.mode = state::Mode::Jackpot(state::JackpotState {
+            round: 1,
+            total_rounds: 10,
+            count: 0,
+            ticks_left: state::ROUND_LIMIT_TICKS,
+            kakuhen: true,
+        });
+        let countdown_before = game.save_countdown;
+        game.tick(1);
+
+        assert!(
+            matches!(game.state.mode, state::Mode::Jackpot(_)),
+            "大当たりの途中を試すテストなのに大当たりが終わっている"
+        );
+        assert!(
+            game.save_countdown < countdown_before,
+            "大当たりの確定だけでは定期保存を早めない"
+        );
     }
 
     #[test]
