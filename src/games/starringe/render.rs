@@ -68,11 +68,12 @@ fn fill_step(inner: Rect) -> f64 {
 
 /// 核と砲台の塗り潰しに使う、`fill_step` から詰める割合。
 ///
-/// `fill_step` の間隔は「同じドットを塗り直さない」ところで止まるので、円の
-/// 縁では標本の位相しだいでドットを取りこぼし、塊の内側に穴が残る。核と砲台は
-/// 画面のどこを見るかを決める 2 つで、輪郭が虫食いだと塊として読めない — この
-/// 2 つだけ、取りこぼしが消えるところまで間隔を詰める。境界は
-/// `the_core_and_the_turret_are_drawn_as_solid_blobs` が実測で持つ。
+/// `fill_step` は「同じドットを塗り直さない」ところで間隔を止めるので、円の縁は
+/// 標本の位相しだいでドットを取りこぼす。モバイル幅の核は 90 点ほどしか無く、
+/// 縁の欠けがそのまま輪郭の粗さになって塊に見えない。核と砲台は画面のどこを
+/// 見るかを決める 2 つなので、この 2 つだけ縁が丸く出るところまで詰める。
+/// どの行でも点が途切れないことは
+/// `the_core_and_the_turret_are_drawn_as_solid_blobs` が実描画で見張る。
 const SOLID_FILL_REFINE: f64 = 0.7;
 
 /// 核と砲台の塗り潰しに渡すサンプリング間隔。
@@ -104,11 +105,11 @@ const CORE_MAX_SCALE: f64 = 1.55;
 /// 最大の鉱石 (`OreKind::Nova`) より一回り大きいので、拠点と的は色より先に
 /// 大きさで読み分けられる。
 ///
-/// 固定にするのは、核本体が広がってよい幅が点グリッドの分解能より狭いから。
-/// 核本体は「触れた鉱石が消える」判定そのものを見せる図形なので、上へは
-/// 環の最下点にいる手前側の砲台 (`StarRingState::ring_radii` の縦半径) まで、
-/// 下へは到達半径の外にいる最小の鉱石 (`OreKind::Dust`、半径 3.0) を覆わない
-/// ところまでしか塗れない。残る 1〜2 ワールド単位を段階へ割ると、1 段が
+/// 固定にするのは、核本体が広げてよい幅が点グリッドの分解能より狭いから。
+/// 核本体は「触れた鉱石が消える」判定そのものを見せる図形なので、環の最下点に
+/// いる手前側の砲台 (`StarRingState::ring_radii` の縦半径) と、まだ到達半径の
+/// 外にいる最小の鉱石 (`OreKind::Dust`、半径 3.0) のどちらも覆わないところまで
+/// しか塗れない。そこまでの 1〜2 ワールド単位を合図ごとの段階へ割っても、1 段が
 /// `fill_step` のドット間隔 (モバイルで約 1.5、デスクトップで約 0.8) を下回り、
 /// 描かれる点は変わらないまま判定との対応だけが緩む。核が合図を返す役は、
 /// 色 (`core_color`) と面を塗らない暈 (`CORE_HALO_RADIUS`) が持つ。
@@ -226,7 +227,7 @@ fn core_halo_radius(state: &StarRingState) -> f64 {
 /// (`logic::RAY_PROJECTILE_RADIUS`) とほとんど変わらない。しかも弾は砲台の
 /// 位置から出るので、色まで揃うと環の周りで弾と砲台の区別が付かない。鉱石
 /// (`ore_color`) とも弾 (`weapon_color`) とも重ならない色を砲台だけに与える。
-const TURRET_NEAR_COLOR: Color = Color::White;
+const TURRET_NEAR_COLOR: Color = Color::LightGreen;
 
 /// 奥側の砲台の色。手前側と同系の暗い色で、同じ物が遠くにあると読ませる。
 const TURRET_FAR_COLOR: Color = Color::Green;
@@ -237,7 +238,7 @@ const TURRET_FAR_COLOR: Color = Color::Green;
 /// 置く。星より暗くすると、控えめを通り越して経路そのものが背景へ沈む。砲台
 /// (`TURRET_NEAR_COLOR`) より明るくしないのは、通り道が通る物より目立たない
 /// ため。
-const ORBIT_COLOR: Color = Color::Indexed(238);
+const ORBIT_COLOR: Color = Color::Indexed(246);
 
 /// フィールド左右の壁の色。端があると分かる以上に主張させない。
 const FIELD_WALL_COLOR: Color = Color::Indexed(236);
@@ -287,8 +288,8 @@ fn core_color(state: &StarRingState) -> Color {
 /// 暈と同じ明るさだと、暈が核のまとう光ではなく「星が密な領域」に見える。
 fn star_color(layer: u32) -> Color {
     match layer {
-        1 => Color::DarkGray,
-        2 => Color::Indexed(240),
+        1 => Color::Indexed(240),
+        2 => Color::Indexed(242),
         3 => Color::Indexed(81),
         4 => Color::Indexed(177),
         _ => Color::Indexed(210),
@@ -1383,7 +1384,7 @@ fn render_stage(
         orbit_a += ORBIT_DOT_SPACING / (ring_rx * sin).hypot(ring_ry * cos).max(0.01);
     }
 
-    let core_pts = shake.circle(CX, CORE_Y, CORE_RADIUS, sample_step);
+    let core_pts = shake.circle(CX, CORE_Y, CORE_RADIUS, solid_step);
     let core_halo = canvas_fx::ring_points(core_x, core_y, core_halo_radius(state), 0.26);
 
     // 採掘境界。鉱石が湧いてくる高さに水平の点線を引き、そこから上が
@@ -1418,7 +1419,7 @@ fn render_stage(
         } else {
             near_radius * TURRET_FAR_SCALE
         };
-        let pts = shake.circle(gx, gy, r, sample_step);
+        let pts = shake.circle(gx, gy, r, solid_step);
         if near {
             gun_near.extend(pts);
         } else {
@@ -1486,7 +1487,7 @@ fn render_stage(
         // 畳まれた波 (`PulseRing::folded`) の `life` は残寿命ではなく、一息に
         // 削った半径を一度だけ描かせる猶予。残寿命として読むと、その波が
         // 削った範囲を示すただ 1 tick がいちばん薄く描かれてしまう。
-        let faded = ring.life * 2 <= ring.max_life;
+        let faded = !ring.folded && ring.life * 2 <= ring.max_life;
         let arc_scale = if faded { PULSE_FADED_ARC_SCALE } else { 1.0 };
         push_pulse_wave_points(core_x, core_y, ring.radius, arc_scale, &mut pulse_ring_pts);
     }
@@ -1535,7 +1536,7 @@ fn render_stage(
             if !wall_pts.is_empty() {
                 ctx.draw(&Points {
                     coords: &wall_pts,
-                    color: Color::Indexed(236),
+                    color: FIELD_WALL_COLOR,
                 });
             }
             if !pulse_ring_pts.is_empty() {
