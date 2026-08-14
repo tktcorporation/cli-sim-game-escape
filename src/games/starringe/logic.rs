@@ -460,8 +460,13 @@ fn step_ores(state: &mut StarRingState) {
         }
 
         // 左右の壁で跳ね返す。鉱石が横から画面外へ消えると何が起きているか
-        // 追えなくなるので、常にフィールド内に留める。
-        let (lo, hi) = (FIELD_MARGIN, WORLD_W - FIELD_MARGIN);
+        // 追えなくなるので、常にフィールド内に留める。境界は中心ではなく円の
+        // 端で取る——中心を壁に張り付けると半径ぶんが Canvas の x_bounds の外へ
+        // 出て、跳ね返った鉱石ほど欠けて描かれる。
+        let (lo, hi) = (
+            FIELD_MARGIN + ore.radius,
+            WORLD_W - FIELD_MARGIN - ore.radius,
+        );
         if ore.x < lo {
             ore.x = lo;
             ore.sway = -ore.sway;
@@ -555,6 +560,17 @@ fn spawn_base_y(kind: OreKind) -> f64 {
     WORLD_H - kind.radius()
 }
 
+/// 湧きの x の有効範囲。`spawn_base_y` と同じく円の端で取る。
+///
+/// 中心をそのまま `SPAWN_X_MARGIN` まで寄せると、半径がマージンを上回る鉱石は
+/// 湧いた瞬間から Canvas の x_bounds の外へはみ出して欠けて描かれる。円の端が
+/// フィールド端から `SPAWN_X_MARGIN` 離れる位置を境界にすると、どの大きさでも
+/// 全体が見えたまま降り始める。
+fn spawn_x_range(kind: OreKind) -> (f64, f64) {
+    let r = kind.radius();
+    (SPAWN_X_MARGIN + r, WORLD_W - SPAWN_X_MARGIN - r)
+}
+
 fn spawn_ores(state: &mut StarRingState) {
     let layer = state.layer();
     let interval = Layer::spawn_interval_ticks(layer);
@@ -565,12 +581,13 @@ fn spawn_ores(state: &mut StarRingState) {
         return;
     }
     let batch = Layer::spawn_batch(layer).min(MAX_ORES - state.ores.len());
-    // 同時湧きの x を層化サンプリングで散らす。一様乱数だけだと固まって湧いた
-    // ときに重なり、何体降ってきているのか読めなくなる。
-    let lo = SPAWN_X_MARGIN;
-    let slot = (WORLD_W - SPAWN_X_MARGIN * 2.0) / batch as f64;
     for i in 0..batch {
         let kind = pick_ore_kind(state);
+        // 同時湧きの x を層化サンプリングで散らす。一様乱数だけだと固まって湧いた
+        // ときに重なり、何体降ってきているのか読めなくなる。有効範囲は鉱石の
+        // 大きさで変わるので、その幅をバッチ数で等分して i 番目のスロットから取る。
+        let (lo, hi) = spawn_x_range(kind);
+        let slot = (hi - lo) / batch as f64;
         let slot_lo = lo + slot * i as f64;
         let x = rand_range(state, slot_lo, slot_lo + slot);
         // ばらつきは下方向へ取る。上へ振ると `WORLD_H` を超え、Canvas の
@@ -857,8 +874,12 @@ fn apply_damage(state: &mut StarRingState, idx: usize, dmg: f64, source: DamageS
         let child_hp = OreKind::Dust.base_hp() * Layer::hp_mult(state.layer()) * SPLIT_CHILD_SCALE;
         let child_radius = OreKind::Dust.radius() * SPLIT_CHILD_SCALE;
         for k in 0..2 {
-            let x = (ore.x + (k as f64 * 2.0 - 1.0) * SPLIT_SPREAD)
-                .clamp(FIELD_MARGIN, WORLD_W - FIELD_MARGIN);
+            // 子も円の端で壁に収める。分裂は反射処理より後に走るので、中心だけを
+            // 壁へ寄せるとその tick のあいだ Canvas の外へはみ出したまま描かれる。
+            let x = (ore.x + (k as f64 * 2.0 - 1.0) * SPLIT_SPREAD).clamp(
+                FIELD_MARGIN + child_radius,
+                WORLD_W - FIELD_MARGIN - child_radius,
+            );
             spawn_one(state, OreKind::Dust, x, ore.y);
             if let Some(child) = state.ores.last_mut() {
                 child.hp = child_hp;
@@ -908,9 +929,10 @@ mod tests {
         );
     }
 
-    /// 湧いた鉱石は最初の tick から円の全体が Canvas の y_bounds (`0..WORLD_H`)
+    /// 湧いた鉱石は最初の tick から円の全体が Canvas (`0..WORLD_W` × `0..WORLD_H`)
     /// に収まること。上端がはみ出すと、降りてくるまでの数十 tick は大きい鉱石ほど
-    /// 上を欠いた形で描かれる。
+    /// 上を欠いた形で描かれる。左右も同じで、はみ出したまま降り始めた鉱石は
+    /// 端で欠けて見える。
     ///
     /// 湧いた後も内側に留まり続けることは
     /// `simulator::ores_stay_inside_the_field_over_a_long_run` が見る。
@@ -930,6 +952,14 @@ mod tests {
                 "{kind:?} が採掘境界より上へ丸ごと収まっている bottom={}",
                 base - kind.radius()
             );
+
+            let (lo, hi) = spawn_x_range(kind);
+            assert!(
+                lo - kind.radius() >= 0.0 && hi + kind.radius() <= WORLD_W,
+                "{kind:?} の湧き x 範囲が Canvas をはみ出す lo={lo} hi={hi} r={}",
+                kind.radius()
+            );
+            assert!(lo < hi, "{kind:?} の湧き x 範囲が潰れている lo={lo} hi={hi}");
         }
 
         let mut state = StarRingState::new();
@@ -941,6 +971,12 @@ mod tests {
                     ore.y + ore.radius <= WORLD_H + 1e-9 && ore.y - ore.radius >= 0.0,
                     "湧いた鉱石が画面からはみ出している y={} r={}",
                     ore.y,
+                    ore.radius
+                );
+                assert!(
+                    ore.x - ore.radius >= 0.0 && ore.x + ore.radius <= WORLD_W + 1e-9,
+                    "湧いた鉱石が画面からはみ出している x={} r={}",
+                    ore.x,
                     ore.radius
                 );
                 checked += 1;
@@ -984,10 +1020,13 @@ mod tests {
         state.ores[0].sway = 2.0;
         for _ in 0..60 {
             step_ores(&mut state);
-            let x = state.ores[0].x;
+            let ore = &state.ores[0];
             assert!(
-                (FIELD_MARGIN..=WORLD_W - FIELD_MARGIN).contains(&x),
-                "鉱石が横から画面外へ出てはいけない x={x}"
+                ore.x - ore.radius >= FIELD_MARGIN - 1e-9
+                    && ore.x + ore.radius <= WORLD_W - FIELD_MARGIN + 1e-9,
+                "鉱石が横から画面外へ出てはいけない x={} r={}",
+                ore.x,
+                ore.radius
             );
         }
     }

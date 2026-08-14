@@ -742,6 +742,9 @@ fn new_ore_kinds_appear_over_long_run() {
 /// (`logic::resolve_arrivals`) で回収されるので、tick の切れ目では常に
 /// `0 <= y <= WORLD_H` かつ壁の内側にいる。画面外へ流れる鉱石があると
 /// 「どこから何が降ってきているか」を目で追えなくなる。
+///
+/// 横は中心だけでなく円の全体を見る。中心が壁の内側でも半径ぶんが Canvas の
+/// x_bounds (`0..WORLD_W`) を越えていれば、その鉱石は端で欠けて描かれる。
 #[test]
 fn ores_stay_inside_the_field_over_a_long_run() {
     const TICKS: u32 = 6_000;
@@ -754,9 +757,18 @@ fn ores_stay_inside_the_field_over_a_long_run() {
         tick(&mut state, 1);
         for ore in &state.ores {
             assert!(
-                ore.x >= FIELD_MARGIN - EPS && ore.x <= WORLD_W - FIELD_MARGIN + EPS,
-                "tick {t}: 鉱石が左右の壁を越えた x={} kind={:?}",
+                ore.x - ore.radius >= FIELD_MARGIN - EPS
+                    && ore.x + ore.radius <= WORLD_W - FIELD_MARGIN + EPS,
+                "tick {t}: 鉱石が左右の壁を越えた x={} r={} kind={:?}",
                 ore.x,
+                ore.radius,
+                ore.kind
+            );
+            assert!(
+                ore.x - ore.radius >= 0.0 && ore.x + ore.radius <= WORLD_W + EPS,
+                "tick {t}: 鉱石が Canvas の横幅からはみ出した x={} r={} kind={:?}",
+                ore.x,
+                ore.radius,
                 ore.kind
             );
             assert!(
@@ -803,10 +815,16 @@ fn spawn_x_spreads_across_the_whole_width() {
     eprintln!("[starringe/spawn-x] total={total} buckets={hist:?}");
     assert!(total > 2_000, "湧きの標本が足りない total={total}");
 
-    // 出現 x は [SPAWN_X_MARGIN, WORLD_W - SPAWN_X_MARGIN] の一様分布なので、
-    // 端の区画だけ SPAWN_X_MARGIN と FIELD_MARGIN の差ぶん狭くなる。
+    // 出現 x は鉱石ごとに [SPAWN_X_MARGIN + 半径, WORLD_W - SPAWN_X_MARGIN - 半径]
+    // の一様分布なので、端の区画は大きい鉱石ほど狭くなる。最も大きい鉱石が端の
+    // 区画へ湧く割合を下限の基準に取る。
+    let r_max = OreKind::ALL
+        .iter()
+        .map(|k| k.radius())
+        .fold(0.0f64, f64::max);
+    let edge_margin = SPAWN_X_MARGIN + r_max;
     let edge_share =
-        (span / BUCKETS as f64 - (SPAWN_X_MARGIN - FIELD_MARGIN)) / (WORLD_W - SPAWN_X_MARGIN * 2.0);
+        (span / BUCKETS as f64 - (edge_margin - FIELD_MARGIN)) / (WORLD_W - edge_margin * 2.0);
     let floor = edge_share * 0.55;
     for (i, &n) in hist.iter().enumerate() {
         let share = n as f64 / total as f64;
