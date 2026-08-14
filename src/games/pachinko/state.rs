@@ -411,6 +411,10 @@ pub struct PachinkoState {
     pub jackpot_seq: u32,
     pub start_hit_seq: u32,
     pub reach_seq: u32,
+    /// 前回の大当たりから消化したデジタル回転数 (ハマり回数)。大当たりの
+    /// たびに 0 へ戻す。演出トリガのカウンタとは別に持つ — トリガ側は
+    /// 「増えたか」しか見ない約束なので、リセットする値を兼ねさせられない。
+    pub spins_since_jackpot: u32,
     /// セーブ対象の自己記録。
     pub record: Record,
     /// タブのスクロール位置。`&self` しか持たない render から書き戻すため Cell。
@@ -447,6 +451,7 @@ impl PachinkoState {
             rng_state: 0x7AC1_2E5B,
             jackpot_seq: 0,
             start_hit_seq: 0,
+            spins_since_jackpot: 0,
             reach_seq: 0,
             record: Record::default(),
             hall_scroll: Cell::new(0),

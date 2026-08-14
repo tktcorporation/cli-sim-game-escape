@@ -390,6 +390,9 @@ fn advance_digit(state: &mut PachinkoState) {
 /// デジタル停止時の処理。当たりなら大当たりへ、ハズレなら電サポの残り回転を
 /// 1減らす。
 fn resolve_spin(state: &mut PachinkoState, outcome: SpinOutcome) {
+    // 当たった回転自体もハマり回数に数える (「42回転で当たった」という
+    // 数え方に合わせる) ので、当落を見る前に加算する。
+    state.spins_since_jackpot = state.spins_since_jackpot.saturating_add(1);
     if !outcome.hit {
         decay_assist(state);
         return;
@@ -403,11 +406,12 @@ fn resolve_spin(state: &mut PachinkoState, outcome: SpinOutcome) {
         HistoryEntry {
             rounds: outcome.rounds,
             kakuhen: outcome.kakuhen,
-            spins_before: hammer_count(state),
+            spins_before: state.spins_since_jackpot,
         },
     );
     state.history.truncate(HISTORY_LEN);
-    mark_jackpot(state);
+    state.spins_since_jackpot = 0;
+    state.jackpot_seq = state.jackpot_seq.wrapping_add(1);
     state.mode = Mode::Jackpot(JackpotState {
         round: 1,
         total_rounds: outcome.rounds.max(1),
@@ -416,20 +420,6 @@ fn resolve_spin(state: &mut PachinkoState, outcome: SpinOutcome) {
         kakuhen: outcome.kakuhen,
     });
     state.add_log(format!("{}Rの大当たり！", outcome.rounds));
-}
-
-/// 前回の大当たりから何回転したか (ハマり回数)。
-///
-/// `start_hit_seq` はヘソ入賞のたびに増える単調増加カウンタで、大当たりの
-/// たびにその時点の値を `jackpot_seq` へ写しているので、差がそのまま回転数に
-/// なる。`jackpot_seq` は render が「前回描画時から変化したか」だけを見る
-/// 演出トリガなので、大当たりごとに必ず増える値であれば何を入れてもよい。
-fn hammer_count(state: &PachinkoState) -> u32 {
-    state.start_hit_seq.saturating_sub(state.jackpot_seq)
-}
-
-fn mark_jackpot(state: &mut PachinkoState) {
-    state.jackpot_seq = state.start_hit_seq;
 }
 
 /// 電サポの残り回転を1消化する。`Kakuhen { spins_left: 0 }` は次回当たりまで
@@ -1011,36 +1001,53 @@ mod tests {
         );
     }
 
+    fn miss(reach: ReachKind) -> SpinOutcome {
+        SpinOutcome { hit: false, rounds: 0, kakuhen: false, reach, reels: [1, 2, 3] }
+    }
+
+    fn jackpot(rounds: u32) -> SpinOutcome {
+        SpinOutcome { hit: true, rounds, kakuhen: false, reach: ReachKind::Super, reels: [7, 7, 7] }
+    }
+
     #[test]
-    fn hammer_count_measures_spins_since_the_last_jackpot() {
+    fn spins_since_jackpot_counts_rotations_and_resets_on_a_hit() {
         let mut state = seated_state();
-        state.start_hit_seq = 40;
-        resolve_spin(
-            &mut state,
-            SpinOutcome {
-                hit: true,
-                rounds: 5,
-                kakuhen: false,
-                reach: ReachKind::Super,
-                reels: [7, 7, 7],
-            },
+        for _ in 0..39 {
+            resolve_spin(&mut state, miss(ReachKind::None));
+        }
+        resolve_spin(&mut state, jackpot(5));
+        assert_eq!(
+            state.history[0].spins_before, 40,
+            "当たった回転を含めた回転数がハマり回数になっていない"
         );
-        assert_eq!(state.history[0].spins_before, 40);
-        state.start_hit_seq = 55;
+
         state.mode = Mode::Normal;
-        resolve_spin(
-            &mut state,
-            SpinOutcome {
-                hit: true,
-                rounds: 5,
-                kakuhen: false,
-                reach: ReachKind::Normal,
-                reels: [3, 3, 3],
-            },
-        );
+        for _ in 0..14 {
+            resolve_spin(&mut state, miss(ReachKind::None));
+        }
+        resolve_spin(&mut state, jackpot(5));
         assert_eq!(
             state.history[0].spins_before, 15,
-            "前回の大当たりからの回転数になっていない"
+            "大当たり時に回転数が 0 へ戻っていない"
+        );
+    }
+
+    #[test]
+    fn jackpot_seq_advances_on_every_hit_even_without_new_start_pocket_entries() {
+        // 保留を貯めた状態で連続して当たると、次のヘソ入賞を挟まずに大当たりが
+        // 2回起きる。演出トリガは「増えたか」だけを見るので、ヘソ入賞の
+        // カウンタに連動させると発火を取りこぼす。
+        let mut state = seated_state();
+        let before = state.jackpot_seq;
+        resolve_spin(&mut state, jackpot(5));
+        let after_first = state.jackpot_seq;
+        state.mode = Mode::Normal;
+        resolve_spin(&mut state, jackpot(10));
+
+        assert!(after_first > before, "1回目の大当たりで演出トリガが進んでいない");
+        assert!(
+            state.jackpot_seq > after_first,
+            "ヘソ入賞を挟まない連続大当たりで演出トリガが進んでいない"
         );
     }
 }
