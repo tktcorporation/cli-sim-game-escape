@@ -18,7 +18,7 @@
 
 use super::logic::{
     can_unlock_next_layer, can_upgrade_ring, can_upgrade_weapon_stat, purchase_ring_upgrade,
-    purchase_weapon_stat, ring_upgrade_cost, tick, unlock_next_layer, weapon_stat_cost,
+    purchase_weapon_stat, ring_upgrade_cost, tick, unlock_next_layer, weapon_stat_cost, MAX_ORES,
 };
 use super::state::{
     Layer, OreKind, RingUpgrade, StarRingState, WeaponKind, WeaponStat, FIELD_MARGIN,
@@ -806,7 +806,7 @@ fn spawn_x_spreads_across_the_whole_width() {
 /// 刈り取り自体が破綻していないこと (上限) の2点。
 #[test]
 fn interception_pressure_over_time_report() {
-    const RUNS: u32 = 16;
+    const RUNS: u32 = 32;
     const EDGES: [u32; 6] = [0, 500, 1_000, 2_000, 4_000, 8_000];
 
     let mut window = vec![(0u64, 0u64); EDGES.len() - 1];
@@ -855,15 +855,23 @@ fn interception_pressure_over_time_report() {
         opening * 100.0
     );
 
+    // 序盤の逸失率の中央値は 12.5% 前後。上下 2 倍弱の幅に収め、迎撃圧が体感で
+    // 消える側 (数%) へ緩んでも、逆に序盤が刈り取れない側へ振れても検知する。
+    // シードは 1..=RUNS 固定なので、閾値に触れるのはバランスを動かした時だけ。
     assert!(
-        opening > 0.03,
-        "序盤から取りこぼしが起きず迎撃の駆け引きが無い: {:.1}%",
+        opening > 0.06,
+        "序盤の取りこぼしが減りすぎて迎撃の駆け引きが薄い: {:.1}%",
         opening * 100.0
     );
     assert!(
-        opening < 0.55,
+        opening < 0.19,
         "序盤の取りこぼしが多すぎて刈り取りが立ち上がらない: {:.1}%",
         opening * 100.0
     );
-    assert!(peak < 56, "同時存在数が上限に張り付いている peak={peak}");
+    // 同時存在数の中央値は 20 前後。上限 (`MAX_ORES`) へ張り付くのは湧きが
+    // 刈り取りに勝っている状態なので、上限に届く手前で検知する。
+    assert!(
+        peak < (MAX_ORES * 3 / 4) as u64,
+        "同時存在数が上限に迫っている peak={peak} / 上限{MAX_ORES}"
+    );
 }

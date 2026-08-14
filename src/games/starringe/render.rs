@@ -49,6 +49,22 @@ fn split_frame(area: Rect) -> [Rect; 4] {
     [chunks[0], chunks[1], chunks[2], chunks[3]]
 }
 
+/// 円を塗り潰すサンプリング間隔をドット間隔ちょうどから少しだけ詰める割合。
+/// 端の丸みが標本の位相で欠けないぶんの余裕。
+const FILL_STEP_MARGIN: f64 = 0.85;
+
+/// 円の塗り潰し (`canvas_fx::filled_ellipse_points`) に渡すサンプリング間隔。
+///
+/// Braille は 1 セルを 2×4 のドットへ割るので、1 ドットが受け持つワールド距離は
+/// 描画領域の広さで決まる。ドットより細かく刻んでも同じドットを塗り直すだけで
+/// 見た目は変わらず点数だけが増える — 非力な端末ほどステージが狭く、そこで
+/// 過剰サンプリングが一番効いてしまうので、間隔は領域の解像度から導く。
+fn fill_step(inner: Rect) -> f64 {
+    let dot_x = WORLD_W / (inner.width.max(1) as f64 * 2.0);
+    let dot_y = WORLD_H / (inner.height.max(1) as f64 * 4.0);
+    dot_x.min(dot_y) * FILL_STEP_MARGIN
+}
+
 /// 本体を (ステージ, タブ内容) へ分ける。
 ///
 /// ステージ側を過半にするのは、鉱石が降ってきて砕ける様子が主役だから。
@@ -100,7 +116,7 @@ pub fn render(
         Tab::Codex => render_codex(state, f, tab_area, borders, click_state),
     }
 
-    render_footer(state, f, footer);
+    render_footer(state, f, footer, is_narrow);
 }
 
 fn format_shards(n: f64) -> String {
@@ -564,6 +580,28 @@ fn render_ring(
     borders: Borders,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let block = Block::default()
+        .borders(borders)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" 環 ");
+    let inner_h = block.inner(area).height;
+
+    let sections = ring_sections(state);
+    let spaced = sections_height(&sections, true) <= inner_h as usize;
+    let mut cs = click_state.borrow_mut();
+    ScrollableTab::new(
+        build_list(sections, spaced),
+        &state.tab_scroll,
+        TAB_SCROLL_UP,
+        TAB_SCROLL_DOWN,
+    )
+    .block(block)
+    .arrow_color(Color::Yellow)
+    .render(f, area, &mut cs);
+}
+
+/// 環タブの行。層の進捗 / 次層開放 / 見出し / 強化項目のかたまりに分ける。
+fn ring_sections(state: &StarRingState) -> Vec<Section> {
     let layer = state.layer();
     let next = Layer::next_threshold(layer);
     let progress = match next {
@@ -581,20 +619,15 @@ fn render_ring(
         "░".repeat(10 - progress as usize)
     );
 
-    let mut cl = ClickableList::new();
-    cl.push(Line::from(Span::styled(
-        format!(
-            " 第{}層 {}  {}",
-            layer,
-            Layer::title(layer),
-            bar
-        ),
+    let mut sections = Vec::new();
+    let status = Line::from(Span::styled(
+        format!(" 第{}層 {}  {}", layer, Layer::title(layer), bar),
         Style::default()
             .fg(layer_color(layer))
             .add_modifier(Modifier::BOLD),
-    )));
+    ));
     // 撃破進捗と湧き倍率を1行にまとめ、狭い画面で強化行が押し出されないようにする。
-    cl.push(Line::from(Span::styled(
+    let mults = Line::from(Span::styled(
         match next {
             Some(th) => format!(
                 " 撃破{}/{}  湧き×{} HP×{:.1} ✦×{:.1}",
@@ -613,7 +646,8 @@ fn render_ring(
             ),
         },
         Style::default().fg(Color::DarkGray),
-    )));
+    ));
+    sections.push(Section::plain(vec![status, mults]));
 
     if let Some(th) = next {
         let next_layer = layer + 1;
@@ -643,13 +677,14 @@ fn render_ring(
                     format_shards(cost)
                 )
             };
-            if can {
-                cl.push_clickable(Line::from(Span::styled(label, style)), OPEN_LAYER);
+            let line = vec![Line::from(Span::styled(label, style))];
+            sections.push(if can {
+                Section::clickable(line, OPEN_LAYER)
             } else {
-                cl.push(Line::from(Span::styled(label, style)));
-            }
+                Section::plain(line)
+            });
         } else {
-            cl.push(Line::from(Span::styled(
+            sections.push(Section::plain(vec![Line::from(Span::styled(
                 format!(
                     " 次層「{}」 撃破{} ✦{}",
                     Layer::title(next_layer),
@@ -657,16 +692,16 @@ fn render_ring(
                     format_shards(cost)
                 ),
                 Style::default().fg(Color::DarkGray),
-            )));
+            ))]));
         }
     }
 
-    cl.push(Line::from(Span::styled(
+    sections.push(Section::plain(vec![Line::from(Span::styled(
         " 環の強化",
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
-    )));
+    ))]));
 
     let keys = ['1', '2'];
     for (i, kind) in RingUpgrade::ALL.iter().copied().enumerate() {
@@ -692,37 +727,31 @@ fn render_ring(
         } else {
             format!("✦{}", format_shards(cost))
         };
-        if unlocked {
-            cl.push_clickable(
-                Line::from(vec![
-                    Span::styled(format!(" [{key}] "), Style::default().fg(Color::Yellow)),
-                    Span::styled(format!("{} Lv.{} ", kind.label(), lv), style),
-                    Span::styled(cost_label, Style::default().fg(Color::Cyan)),
-                ]),
-                buy_ring_id(kind),
-            );
+        let head = if unlocked {
+            Line::from(vec![
+                Span::styled(format!(" [{key}] "), Style::default().fg(Color::Yellow)),
+                Span::styled(format!("{} Lv.{} ", kind.label(), lv), style),
+                Span::styled(cost_label, Style::default().fg(Color::Cyan)),
+            ])
         } else {
-            cl.push(Line::from(vec![
+            Line::from(vec![
                 Span::styled(format!(" [{key}] "), Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{}  ", kind.label()), style),
                 Span::styled(cost_label, Style::default().fg(Color::DarkGray)),
-            ]));
-        }
-        cl.push(Line::from(Span::styled(
+            ])
+        };
+        let blurb = Line::from(Span::styled(
             format!("      {}", kind.blurb()),
             Style::default().fg(Color::DarkGray),
-        )));
+        ));
+        sections.push(if unlocked {
+            Section::clickable(vec![head, blurb], buy_ring_id(kind))
+        } else {
+            Section::plain(vec![head, blurb])
+        });
     }
 
-    let block = Block::default()
-        .borders(borders)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title(" 環 ");
-    let mut cs = click_state.borrow_mut();
-    ScrollableTab::new(cl, &state.tab_scroll, TAB_SCROLL_UP, TAB_SCROLL_DOWN)
-        .block(block)
-        .arrow_color(Color::Yellow)
-        .render(f, area, &mut cs);
+    sections
 }
 
 fn render_codex(
@@ -953,6 +982,8 @@ fn render_stage(
         }
     }
 
+    let sample_step = fill_step(inner);
+
     let mut ore_groups: Vec<(Vec<(f64, f64)>, Color)> = Vec::new();
     let mut approach_trails: Vec<(f64, f64, f64, f64, Color)> = Vec::new();
     for ore in &state.ores {
@@ -962,7 +993,7 @@ fn render_stage(
             ore.y + shake_y,
             ore.radius,
             ore.radius,
-            0.65,
+            sample_step,
         );
         if let Some(g) = ore_groups.iter_mut().find(|(_, c)| *c == color) {
             g.0.extend(pts);
@@ -988,9 +1019,9 @@ fn render_stage(
         let pts = canvas_fx::filled_ellipse_points(
             p.x + shake_x,
             p.y + shake_y,
-            p.radius.max(0.4),
-            p.radius.max(0.4),
-            0.5,
+            p.radius,
+            p.radius,
+            sample_step.min(p.radius),
         );
         if let Some(g) = proj_groups.iter_mut().find(|(_, c)| *c == color) {
             g.0.extend(pts);
@@ -998,11 +1029,17 @@ fn render_stage(
             proj_groups.push((pts, color));
         }
         let speed = p.vx.hypot(p.vy).max(0.01);
-        let len = match p.kind {
-            WeaponKind::Ray => 4.5,
-            WeaponKind::Pulse => 1.8,
-            _ => 2.4,
-        };
+        // 尾の長さは弾半径の倍数で持つ。尾は「弾本体より何倍長いか」で見え方が
+        // 決まるので、ワールド単位の固定長にすると弾の大きさを変えた途端に尾が
+        // 本体へ飲まれ、飛んでいる向きが読めなくなる。
+        let len = p.radius
+            * match p.kind {
+                WeaponKind::Ray => 6.4,
+                WeaponKind::Scatter => 4.8,
+                WeaponKind::Arc => 3.7,
+                WeaponKind::Pulse => 3.3,
+                WeaponKind::Nova => 2.2,
+            };
         proj_trails.push((
             p.x + shake_x,
             p.y + shake_y,
@@ -1202,9 +1239,8 @@ fn render_stage(
 
 /// フッター。1 行しかないので、ナローでは末尾の `[Q]戻る` が切り落とされ
 /// ないところまで短縮する。
-fn render_footer(state: &StarRingState, f: &mut Frame, area: Rect) {
-    let narrow = is_narrow_layout(area.width);
-    let hint = match (state.tab, narrow) {
+fn render_footer(state: &StarRingState, f: &mut Frame, area: Rect, is_narrow: bool) {
+    let hint = match (state.tab, is_narrow) {
         (Tab::Armory, false) => "[◀▶]武装  [A/S/D]弾数/連射/威力  情景タップでブースト  [Q]戻る",
         (Tab::Armory, true) => "[A/S/D]強化  情景タップで加速  [Q]戻る",
         (Tab::Ring, false) => "[!]次層開放  [1-2]収率/核脈動  [J/K]スクロール  [Q]戻る",
@@ -1231,7 +1267,7 @@ mod tests {
     use crate::games::starringe::logic::unlock_next_layer;
     use crate::games::starringe::state::{Layer, RingUpgrade, Tab};
 
-    fn render_ring_tab(state: &StarRingState, width: u16, height: u16) -> Rc<RefCell<ClickState>> {
+    fn render_frame(state: &StarRingState, width: u16, height: u16) -> Rc<RefCell<ClickState>> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let cs = Rc::new(RefCell::new(ClickState::new()));
         cs.borrow_mut().terminal_cols = width;
@@ -1302,11 +1338,38 @@ mod tests {
         // 先頭の層情報を送って核脈動行を可視領域へ入れる。
         state.tab_scroll.set(4);
 
-        let cs = render_ring_tab(&state, 40, 30);
+        let cs = render_frame(&state, 40, 30);
         assert!(
             has_action(&cs, 40, 30, buy_ring_id(RingUpgrade::CorePulse)),
             "スクロール後は核脈動の購入行がクリックできるはず"
         );
+    }
+
+    /// 購入項目は見出し行と説明行のどちらを叩いても同じ購入が走ること。
+    /// 指の当たる面が広いほどモバイルで押しやすく、武装タブと環タブで
+    /// 当たり方が違うと「押せる行」を探させることになる。
+    #[test]
+    fn purchase_rows_take_taps_on_their_blurb_line_too() {
+        let (w, h) = (100u16, 30u16);
+        for (tab, wanted) in [
+            (
+                Tab::Armory,
+                buy_weapon_stat_id(WeaponKind::Pulse, WeaponStat::Count),
+            ),
+            (Tab::Ring, buy_ring_id(RingUpgrade::Yield)),
+        ] {
+            let mut state = StarRingState::new();
+            state.tab = tab;
+            let cs = render_frame(&state, w, h);
+            let guard = cs.borrow();
+            let rows = (0..h)
+                .filter(|&y| (0..w).any(|x| guard.hit_test(x, y) == Some(wanted)))
+                .count();
+            assert!(
+                rows >= 2,
+                "{tab:?}: 購入項目の当たり判定が {rows} 行しかない (見出し+説明の2行を想定)"
+            );
+        }
     }
 
     /// ヘッダー・タブ・フッターの固定消費が 4 行に収まり、残りがすべて

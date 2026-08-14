@@ -7,10 +7,11 @@ use super::state::{
 };
 
 /// 鉱石の同時存在上限。これを超えると湧きも分裂も止める。
-const MAX_ORES: usize = 56;
+pub(super) const MAX_ORES: usize = 56;
 
-/// うねりの振れ幅は「基準速度 × 倍率 ÷ 角周波数」で決まる。周期が長いほど
-/// 同じ振れ幅を出すのに大きな速度が要るため、周期に見合った倍率を持たせる。
+/// うねりの振れ幅は「基準速度 × 倍率 ÷ 角周波数」で決まる。角周波数 (RATE) が
+/// 小さい = 周期が長いほど同じ倍率でも振れ幅が伸びるので、倍率は周期と釣り合う
+/// 大きさへ揃える。
 const SPIRAL_SWAY_RATE: f64 = 0.05;
 const SPIRAL_SWAY_GAIN: f64 = 4.0;
 const ZIGZAG_SWAY_RATE: f64 = 0.20;
@@ -27,6 +28,9 @@ const CORE_PULL_RATIO: f64 = 1.5;
 const ORBIT_SWIRL_GAIN: f64 = 2.2;
 /// 裂片が分裂する際、子を親の左右へ振り分ける幅。
 const SPLIT_SPREAD: f64 = 4.0;
+/// 分裂子は星塵を一回り小さくした個体として湧く。HP と半径へ同じ係数を掛け、
+/// 「小さいのが2つ出た」と見た目と手応えを揃える。
+const SPLIT_CHILD_SCALE: f64 = 0.7;
 
 /// ダメージの出どころ。殻石の耐性計算に使う。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -517,6 +521,13 @@ fn spawn_one(state: &mut StarRingState, kind: OreKind, x: f64, y: f64) {
     });
 }
 
+/// 湧きの基準高さ。採掘境界 (`SPAWN_Y`) の直下から現れつつ、円の上端が
+/// `WORLD_H` を越えないところまで下げる。Canvas の y_bounds の外は描画されない
+/// ので、越えたぶんだけ湧いた直後の大きい鉱石が上を欠いて見える。
+fn spawn_base_y(kind: OreKind) -> f64 {
+    SPAWN_Y.min(WORLD_H - kind.radius())
+}
+
 fn spawn_ores(state: &mut StarRingState) {
     let layer = state.layer();
     let interval = Layer::spawn_interval_ticks(layer);
@@ -537,7 +548,7 @@ fn spawn_ores(state: &mut StarRingState) {
         let x = rand_range(state, slot_lo, slot_lo + slot);
         // ばらつきは下方向へ取る。上へ振ると `WORLD_H` を超え、Canvas の
         // y_bounds 外で数tick見えないまま落ちてくる。
-        let y = SPAWN_Y - rand_range(state, 0.0, 6.0);
+        let y = spawn_base_y(kind) - rand_range(state, 0.0, 6.0);
         spawn_one(state, kind, x, y);
     }
 }
@@ -558,6 +569,12 @@ pub fn turret_positions(state: &StarRingState) -> Vec<(f64, f64, f64)> {
         .collect()
 }
 
+/// 各武装の発射 (`fire_*`) が持つ `speed` と `life` は、飛行時間と射程
+/// (`speed × life`) の兼ね合いで決める。速すぎると発射から着弾までが一瞬になり、
+/// 砲台から遠い鉱石でも自動照準がそのまま当たってしまう。飛行時間を残すことで、
+/// 横へ漂う鉱石 (`OreKind::sway_speed`) は遠距離ほど照準を外せる——迎撃の間合いは
+/// この飛行時間と横速度の釣り合いで決まる。`life` はそのうえで、弾が届いてほしい
+/// 距離を飛び切ったところで消えるよう合わせる。
 fn fire_weapons(state: &mut StarRingState) {
     if state.ores.is_empty() {
         return;
@@ -638,10 +655,6 @@ fn aim_dir(state: &StarRingState, gx: f64, gy: f64, idx: usize) -> (f64, f64) {
     (dx / dist, dy / dist)
 }
 
-/// 弾速は「弾がフィールドを横切るのに要する tick 数」で決める。速すぎると
-/// 発射から着弾までが一瞬になり、砲台から遠い鉱石でも自動照準がそのまま当たって
-/// しまう。飛行時間を残すことで、横へ漂う鉱石 (`OreKind::sway_speed`) は遠距離
-/// ほど照準を外せる——迎撃の間合いはこの飛行時間と横速度の釣り合いで決まる。
 fn fire_pulse(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize, dmg: f64) {
     let n = guns.len().max(1);
     for k in 0..volley {
@@ -819,14 +832,15 @@ fn apply_damage(state: &mut StarRingState, idx: usize, dmg: f64, source: DamageS
     burst(state, ore.x, ore.y, 4, 5.0, ParticleKind::Spark, 12);
 
     if ore.kind.splits_on_death() && state.ores.len() < MAX_ORES {
-        let child_hp = OreKind::Dust.base_hp() * Layer::hp_mult(state.layer()) * 0.7;
+        let child_hp = OreKind::Dust.base_hp() * Layer::hp_mult(state.layer()) * SPLIT_CHILD_SCALE;
+        let child_radius = OreKind::Dust.radius() * SPLIT_CHILD_SCALE;
         for k in 0..2 {
-            let x = (ore.x + (k as f64 - 0.5) * 2.0 * SPLIT_SPREAD)
+            let x = (ore.x + (k as f64 * 2.0 - 1.0) * SPLIT_SPREAD)
                 .clamp(FIELD_MARGIN, WORLD_W - FIELD_MARGIN);
             spawn_one(state, OreKind::Dust, x, ore.y);
             if let Some(child) = state.ores.last_mut() {
                 child.hp = child_hp;
-                child.radius = 2.75;
+                child.radius = child_radius;
             }
         }
     }
@@ -872,22 +886,43 @@ mod tests {
         );
     }
 
-    /// 湧いた鉱石は最初の tick から Canvas の y_bounds (`0..WORLD_H`) の内側に
-    /// いること。外へ湧くと降りてくるまで画面に映らず、湧いた瞬間を見逃す。
+    /// 湧いた鉱石は最初の tick から円の全体が Canvas の y_bounds (`0..WORLD_H`)
+    /// に収まること。上端がはみ出すと、降りてくるまでの数十 tick は大きい鉱石ほど
+    /// 上を欠いた形で描かれる。
+    ///
+    /// 湧いた後も内側に留まり続けることは
+    /// `simulator::ores_stay_inside_the_field_over_a_long_run` が見る。
     #[test]
-    fn spawned_ores_start_inside_the_visible_world() {
+    fn spawned_ores_fit_inside_the_canvas_from_the_first_tick() {
+        for kind in OreKind::ALL {
+            let top = spawn_base_y(kind) + kind.radius();
+            assert!(
+                top <= WORLD_H + 1e-9,
+                "{:?} の湧き高さで上端が画面を越える top={top}",
+                kind
+            );
+            assert!(
+                spawn_base_y(kind) + kind.radius() >= SPAWN_Y,
+                "{:?} が採掘境界より下から丸ごと現れてしまう",
+                kind
+            );
+        }
+
         let mut state = StarRingState::new();
+        let mut checked = 0u32;
         for _ in 0..600 {
             tick(&mut state, 1);
-            for ore in &state.ores {
+            for ore in state.ores.iter().filter(|o| o.age == 0) {
                 assert!(
-                    (0.0..=WORLD_H).contains(&ore.y),
-                    "鉱石が画面外に湧いている y={}",
-                    ore.y
+                    ore.y + ore.radius <= WORLD_H + 1e-9 && ore.y - ore.radius >= 0.0,
+                    "湧いた鉱石が画面からはみ出している y={} r={}",
+                    ore.y,
+                    ore.radius
                 );
+                checked += 1;
             }
         }
-        assert!(!state.ores.is_empty(), "検証対象の鉱石が湧いているはず");
+        assert!(checked > 0, "検証対象の鉱石が湧いているはず");
     }
 
     #[test]
