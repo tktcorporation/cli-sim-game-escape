@@ -227,8 +227,12 @@ pub fn manual_strike(state: &mut StarRingState) {
 
 /// 核脈動の波を1つ立てる。`reach` まで広がったところで消える。
 /// `damage` が 0 の波は演出だけで、鉱石には触れない。
+///
+/// 寿命は「広がる tick 数 + 1」。最後の 1 tick は広がらず、波面が到達距離へ
+/// 着いたその tick の鉱石の動きだけを見る (`step_pulse_rings`)。
 fn spawn_pulse_wave(state: &mut StarRingState, reach: f64, damage: f64) {
-    let life = ((reach - INNER_RADIUS) / PULSE_WAVE_SPEED).ceil().max(1.0) as u32;
+    let expand = ((reach - INNER_RADIUS) / PULSE_WAVE_SPEED).ceil().max(1.0) as u32;
+    let life = expand + 1;
     state.pulse_rings.push(PulseRing {
         radius: INNER_RADIUS,
         life,
@@ -324,6 +328,12 @@ fn step_particles(state: &mut StarRingState) {
 /// 1度きりになる。核の近くに居座るほど連続で削られる当たり方にすると、
 /// 核へ吸い込まれる直前の鉱石だけが極端に有利になり、上空へ広がる波という
 /// 見た目と噛み合わない。
+///
+/// 最後の1tickだけは広がらず、幅ゼロの輪帯 `[reach, reach]` で判定する。
+/// `pulse_wave_damage` は前 tick の移動区間を見るので、波面が到達距離へ
+/// 着いた tick に鉱石がその距離を跨ぐ動きは、次の tick でしか見えない——
+/// この 1tick が無いと、波面が追い越したはずの鉱石が到達距離の際でだけ
+/// すり抜ける。輪帯の幅がゼロなので、波が届く距離自体は伸びない。
 fn step_pulse_rings(state: &mut StarRingState) {
     for i in 0..state.pulse_rings.len() {
         let ring = &mut state.pulse_rings[i];
@@ -332,7 +342,9 @@ fn step_pulse_rings(state: &mut StarRingState) {
         }
         ring.life -= 1;
         let inner = ring.radius;
-        ring.radius += PULSE_WAVE_SPEED;
+        if ring.life > 0 {
+            ring.radius += PULSE_WAVE_SPEED;
+        }
         let (outer, dmg) = (ring.radius, ring.damage);
         if dmg > 0.0 {
             pulse_wave_damage(state, inner, outer, dmg);
@@ -886,13 +898,24 @@ fn apply_damage(state: &mut StarRingState, idx: usize, dmg: f64, source: DamageS
     );
     burst(state, ore.x, ore.y, 4, 5.0, ParticleKind::Spark, 12);
 
-    if ore.kind.splits_on_death() && state.ores.len() < MAX_ORES {
+    if ore.kind.splits_on_death() {
+        // 親を取り除いた後の残り枠のぶんだけ湧かせる。2 体を固定で足すと、上限
+        // まで埋まった盤面では裂片を割るたびに `MAX_ORES` を超えていく。
+        let room = MAX_ORES.saturating_sub(state.ores.len()).min(2);
         let child_hp = OreKind::Dust.base_hp() * Layer::hp_mult(state.layer()) * SPLIT_CHILD_SCALE;
         let child_radius = OreKind::Dust.radius() * SPLIT_CHILD_SCALE;
-        for k in 0..2 {
+        for k in 0..room {
+            // 左右へ振る幅は 2 体を見分けるためのものなので、1 体しか入らない
+            // ときは親の位置をそのまま使う——片方だけを寄せると、理由の見えない
+            // 横ずれとして残る。
+            let spread = if room == 2 {
+                (k as f64 * 2.0 - 1.0) * SPLIT_SPREAD
+            } else {
+                0.0
+            };
             // 子も円の端で壁に収める。分裂は反射処理より後に走るので、中心だけを
             // 壁へ寄せるとその tick のあいだ Canvas の外へはみ出したまま描かれる。
-            let x = (ore.x + (k as f64 * 2.0 - 1.0) * SPLIT_SPREAD).clamp(
+            let x = (ore.x + spread).clamp(
                 FIELD_MARGIN + child_radius,
                 WORLD_W - FIELD_MARGIN - child_radius,
             );
@@ -1250,6 +1273,72 @@ mod tests {
         assert!(state.ores.iter().all(|o| o.kind == OreKind::Dust));
     }
 
+    /// 分裂しても同時存在数は `MAX_ORES` を超えないこと。
+    ///
+    /// 親を取り除いてから子を足すので、上限まで埋まった盤面で裂片を割ると
+    /// 残り枠は 1 つしかない。残り枠を見ずに 2 体足すと、割るたびに盤面が
+    /// 上限を 1 体ずつ超えていき、上限そのものが意味を失う。
+    #[test]
+    fn splitting_never_exceeds_the_ore_cap() {
+        for filler in [MAX_ORES - 1, MAX_ORES] {
+            let mut state = StarRingState::new();
+            state.ores.push(Ore {
+                x: CX,
+                y: CORE_Y + 30.0,
+                vx: 0.0,
+                vy: 0.0,
+                hp: 1.0,
+                kind: OreKind::Splitter,
+                radius: 6.0,
+                motion: OreMotion::Spiral,
+                sway: 0.05,
+                age: 0,
+            });
+            while state.ores.len() < filler {
+                push_test_ore(&mut state, CX, CORE_Y + 40.0, 100.0);
+            }
+            apply_damage(&mut state, 0, 10.0, DamageSource::Weapon(WeaponKind::Ray));
+            assert!(
+                state.ores.len() <= MAX_ORES,
+                "分裂で上限を超えた filler={filler} n={} 上限={MAX_ORES}",
+                state.ores.len()
+            );
+        }
+    }
+
+    /// 残り枠が 1 つのときの子は親の位置へ湧くこと。
+    ///
+    /// 左右へ振る幅は 2 体を見分けるためのものなので、1 体だけを片側へ寄せると
+    /// 理由の見えない横ずれになる。
+    #[test]
+    fn a_lone_split_child_keeps_the_parent_position() {
+        let mut state = StarRingState::new();
+        let parent_x = CX + 16.0;
+        state.ores.push(Ore {
+            x: parent_x,
+            y: CORE_Y + 30.0,
+            vx: 0.0,
+            vy: 0.0,
+            hp: 1.0,
+            kind: OreKind::Splitter,
+            radius: 6.0,
+            motion: OreMotion::Spiral,
+            sway: 0.05,
+            age: 0,
+        });
+        while state.ores.len() < MAX_ORES {
+            push_test_ore(&mut state, CX, CORE_Y + 40.0, 100.0);
+        }
+        apply_damage(&mut state, 0, 10.0, DamageSource::Weapon(WeaponKind::Ray));
+        let child = state.ores.last().expect("残り枠1つぶんの子が湧いていない");
+        assert_eq!(child.kind, OreKind::Dust);
+        assert!(
+            (child.x - parent_x).abs() < 1e-9,
+            "1体だけの子が横へずれている child_x={} parent_x={parent_x}",
+            child.x
+        );
+    }
+
     #[test]
     fn kills_alone_do_not_advance_layer() {
         let mut state = StarRingState::new();
@@ -1541,6 +1630,82 @@ mod tests {
                 "y={y} の鉱石への被弾が1発ぶんでない dealt={dealt} dmg={dmg}"
             );
         }
+    }
+
+    /// 波面が到達距離へ着いた tick に、鉱石がちょうどその距離を跨いだ場合も
+    /// 削られること。
+    ///
+    /// 波面と鉱石は互いへ向かって動くので、波が広がり切る tick に鉱石が最外周を
+    /// 内側へ跨ぐ組み合わせがある。その動きを見ないまま波を消すと、当たりが
+    /// 到達距離の際でだけ tick の位相任せになる。
+    #[test]
+    fn pulse_wave_hits_an_ore_crossing_its_outer_edge_on_the_last_tick() {
+        let reach = state_with_core_pulse(3).pulse_reach();
+        let dmg = state_with_core_pulse(3).pulse_damage();
+        let expand = ((reach - INNER_RADIUS) / PULSE_WAVE_SPEED).ceil().max(1.0) as u32;
+        let outermost = INNER_RADIUS + expand as f64 * PULSE_WAVE_SPEED;
+
+        let mut crossings = 0;
+        for step in 0..90 {
+            let y = CORE_Y + outermost + step as f64 * 0.15;
+
+            // 波を出さずに同じ鉱石を走らせ、波面が最外周へ着く tick
+            // (`expand` 回目の移動) にその距離を跨ぐ初期位置だけを選ぶ。
+            let mut probe = state_with_core_pulse(3);
+            push_test_ore(&mut probe, CX, y, 1e6);
+            for _ in 0..expand - 1 {
+                step_ores(&mut probe);
+            }
+            let entering = (probe.ores[0].y - CORE_Y).hypot(probe.ores[0].x - CX);
+            step_ores(&mut probe);
+            let leaving = (probe.ores[0].y - CORE_Y).hypot(probe.ores[0].x - CX);
+            if entering <= outermost || leaving > outermost {
+                continue;
+            }
+            crossings += 1;
+
+            let mut state = state_with_core_pulse(3);
+            push_test_ore(&mut state, CX, y, 1e6);
+            spawn_pulse_wave(&mut state, reach, dmg);
+            let before = state.ores[0].hp;
+            for _ in 0..expand + 4 {
+                step_pulse_rings(&mut state);
+                step_ores(&mut state);
+            }
+            let dealt = before - state.ores[0].hp;
+            assert!(
+                (dealt - dmg).abs() < 1e-6,
+                "最外周 {outermost:.2} を跨いだ鉱石 (y={y}) への被弾が1発ぶんでない dealt={dealt}"
+            );
+        }
+        assert!(crossings > 0, "最外周を跨ぐ初期位置を1つも作れていない");
+    }
+
+    /// 波の到達距離の外に居続けた鉱石は削られないこと。
+    ///
+    /// 波の寿命には最外周を跨ぐ動きを見るための1tickが含まれるが、その1tickでは
+    /// 輪帯が広がらない——波が届く距離そのものは `pulse_reach` のままになる。
+    #[test]
+    fn pulse_wave_leaves_ores_beyond_its_reach_untouched() {
+        let reach = state_with_core_pulse(3).pulse_reach();
+        let dmg = state_with_core_pulse(3).pulse_damage();
+        let expand = ((reach - INNER_RADIUS) / PULSE_WAVE_SPEED).ceil().max(1.0) as u32;
+        let outermost = INNER_RADIUS + expand as f64 * PULSE_WAVE_SPEED;
+
+        let mut state = state_with_core_pulse(3);
+        // 波が消えるまでに降りてこられない高さへ置く。
+        let y = CORE_Y + outermost + expand as f64 * 2.0 + 10.0;
+        push_test_ore(&mut state, CX, y, 1e6);
+        spawn_pulse_wave(&mut state, reach, dmg);
+        let before = state.ores[0].hp;
+        for _ in 0..expand + 4 {
+            step_pulse_rings(&mut state);
+            step_ores(&mut state);
+        }
+        assert_eq!(
+            state.ores[0].hp, before,
+            "到達距離の外に居た鉱石を波が削っている y={y}"
+        );
     }
 
     /// 層開放の演出で立つ波は鉱石に触れないこと。
