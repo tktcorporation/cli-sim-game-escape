@@ -19,8 +19,8 @@
 
 use super::logic::{self, NAIL_SPREAD_RANGE, RAIL_BIAS_RANGE};
 use super::state::{
-    Digit, Machine, Mode, PachinkoState, ReachKind, BALL_LOAN_COUNT, BALL_LOAN_YEN, BOARD_H,
-    BOARD_W, FIRE_INTERVAL_TICKS, HALL_SIZE, MACHINE_SPECS, MAX_BALLS, MAX_PENDING,
+    Digit, Machine, Mode, PachinkoState, ReachKind, BALL_LOAN_COUNT, BALL_LOAN_YEN, BALL_R, BOARD_H,
+    BOARD_W, FIRE_INTERVAL_TICKS, HALL_SIZE, HIT_GLOW_TICKS, MACHINE_SPECS, MAX_BALLS, MAX_PENDING,
 };
 
 // ── 自動プレイ ─────────────────────────────────────────────────
@@ -197,6 +197,87 @@ fn measure_payout_ratio(
     won as f64 / fired.max(1) as f64
 }
 
+// ── 玉の見え方 ─────────────────────────────────────────────────
+
+/// 玉1個が打ち出されてから盤面を去るまでの軌跡。
+struct Flight {
+    /// 盤面に居た tick 数。10 ticks/sec なのでそのまま滞空時間になる。
+    ticks: u32,
+    /// 釘に触れた tick 数。1 tick は `logic::PHYSICS_SUBSTEPS` 回の判定を
+    /// 含むため、同じ tick に複数本の釘へ当たっても 1 と数える。
+    contact_ticks: u32,
+    /// tick ごとの移動距離。描画は tick 単位なので、この値がそのまま
+    /// 「1コマで玉がどれだけ飛ぶか」になる。
+    steps: Vec<f64>,
+}
+
+/// 玉を1個だけ打ち出し、盤面を去るまで tick 単位で追う。
+///
+/// 玉同士は衝突しないので、1個だけ流した軌跡は盤面が混んでいるときの軌跡と
+/// 変わらない。混雑した盤面から特定の1個を追い続けるより、こちらの方が
+/// 取り違えなく測れる。
+fn measure_flight(state: &mut PachinkoState) -> Flight {
+    state.balls_held = state.balls_held.max(1);
+    state.firing = true;
+    state.fire_cooldown = 0;
+    // 打ち出しは `fire_cooldown` を挟むので、玉が出るまで数 tick かかる。
+    for _ in 0..(FIRE_INTERVAL_TICKS + 2) {
+        logic::tick(state);
+        if !state.balls.is_empty() {
+            break;
+        }
+    }
+    state.firing = false;
+    assert_eq!(state.balls.len(), 1, "測定用の玉が打ち出されていない");
+
+    let mut flight = Flight {
+        ticks: 1,
+        contact_ticks: 0,
+        steps: Vec::new(),
+    };
+    // 盤面の上端から下端まで落ちても足りる長さ。無限ループの保険。
+    const FLIGHT_TICK_LIMIT: u32 = 2_000;
+    while flight.ticks < FLIGHT_TICK_LIMIT {
+        let before = state.balls[0];
+        logic::tick(state);
+        flight.ticks += 1;
+        let Some(after) = state.balls.first() else {
+            break;
+        };
+        let (dx, dy) = (after.x - before.x, after.y - before.y);
+        flight.steps.push((dx * dx + dy * dy).sqrt());
+        // `decay_glow` が tick の頭で 1 減らした後に `step_balls` が焼き直すので、
+        // tick 終わりに満タンなら この tick で釘に触れている。
+        if after.hit_glow == HIT_GLOW_TICKS {
+            flight.contact_ticks += 1;
+        }
+    }
+    // 次の測定へ玉と保留を持ち越さない。
+    state.balls.clear();
+    state.pending.clear();
+    state.digit = Digit::Idle;
+    flight
+}
+
+/// 打ちっぱなしにしたときの盤面上の玉数 (平均, 最大)。滞空時間が伸びると
+/// ここが `MAX_BALLS` へ張り付き、打ち出しそのものが止まる。
+fn measure_board_crowding(nail_spread: f64, seed: u32, ticks: u32) -> (f64, usize) {
+    let mut nail_seed = seed ^ 0x5EED_1234;
+    let machine = machine_with(0, nail_spread, 0.0, &mut nail_seed);
+    let mut state = seated_state(seed, machine);
+    state.balls_held = 1_000_000;
+    state.cash = 0;
+    state.firing = true;
+    let mut total = 0u64;
+    let mut peak = 0usize;
+    for _ in 0..ticks {
+        logic::tick(&mut state);
+        total += state.balls.len() as u64;
+        peak = peak.max(state.balls.len());
+    }
+    (total as f64 / ticks as f64, peak)
+}
+
 // ── 統計ヘルパ ─────────────────────────────────────────────────
 
 fn percentile(sorted: &[f64], q: f64) -> f64 {
@@ -254,6 +335,78 @@ fn reach_tally(spec_index: usize, trials: u32) -> ([u32; 4], [u32; 4]) {
 }
 
 // ── レポート ───────────────────────────────────────────────────
+
+/// 玉の動きが目で追える速さかを測る。10 ticks/sec で描画するので、1 tick の
+/// 移動距離が玉の直径 (`BALL_R * 2`) の数倍を超えると、玉は毎コマ離れた位置へ
+/// 飛んで現れ、釘に弾かれる瞬間そのものが見えなくなる。
+#[test]
+fn ball_motion_report() {
+    const LAYOUTS: u32 = 4;
+    const BALLS_PER_LAYOUT: u32 = 24;
+    let diameter = BALL_R * 2.0;
+
+    let mut flight_ticks = Vec::new();
+    let mut contacts = Vec::new();
+    let mut steps = Vec::new();
+    let mut nail_counts = Vec::new();
+
+    for layout in 1..=LAYOUTS {
+        let mut nail_seed = layout.wrapping_mul(2_654_435_761);
+        let machine = machine_with(0, 0.55, 0.0, &mut nail_seed);
+        nail_counts.push(machine.nails.len() as f64);
+        let mut state = seated_state(layout.wrapping_mul(40_503), machine);
+        state.cash = 0;
+        for _ in 0..BALLS_PER_LAYOUT {
+            let flight = measure_flight(&mut state);
+            flight_ticks.push(flight.ticks as f64);
+            contacts.push(flight.contact_ticks as f64);
+            steps.extend(flight.steps);
+        }
+    }
+
+    let f = sorted(flight_ticks);
+    let c = sorted(contacts);
+    let s = sorted(steps);
+
+    eprintln!(
+        "[pachinko/motion] 釘{:.0}本 玉{}個の軌跡 (釘{LAYOUTS}通り × {BALLS_PER_LAYOUT}個)",
+        mean(&nail_counts),
+        f.len()
+    );
+    eprintln!(
+        "  滞空時間:       平均={:.1}tick ({:.1}s) 中央={:.0}tick p90={:.0}tick 最長={:.0}tick",
+        mean(&f),
+        mean(&f) / 10.0,
+        percentile(&f, 0.5),
+        percentile(&f, 0.9),
+        f[f.len() - 1],
+    );
+    eprintln!(
+        "  釘に触れたtick: 平均={:.1}回 中央={:.0}回 p90={:.0}回 (滞空の{:.0}%)",
+        mean(&c),
+        percentile(&c, 0.5),
+        percentile(&c, 0.9),
+        mean(&c) / mean(&f) * 100.0,
+    );
+    eprintln!(
+        "  1tickの移動:    平均={:.2} (玉の直径の{:.1}倍 / 盤面高の{:.1}%) \
+         中央={:.2} p90={:.2} 最大={:.2} (直径の{:.1}倍)",
+        mean(&s),
+        mean(&s) / diameter,
+        mean(&s) / BOARD_H * 100.0,
+        percentile(&s, 0.5),
+        percentile(&s, 0.9),
+        s[s.len() - 1],
+        s[s.len() - 1] / diameter,
+    );
+
+    for spread in [NAIL_SPREAD_RANGE.0, 0.55, NAIL_SPREAD_RANGE.1] {
+        let (avg, peak) = measure_board_crowding(spread, 0x3333_4444, 20_000);
+        eprintln!(
+            "  盤面の玉数:     開き={spread:.2} 平均={avg:.1}個 最大={peak}個 / 上限{MAX_BALLS}個",
+        );
+    }
+}
 
 /// 各台の実測回転率を `nail_spread` と並べて出す。釘の開きが回転率として
 /// 現れているか (＝盤面を見て台を選ぶ意味があるか) を人間が読むためのもの。
@@ -773,6 +926,34 @@ fn money_runs_out_in_finite_time() {
                 run.payout_ratio(),
                 run.nail_spread,
                 run.jackpots
+            );
+        }
+    }
+}
+
+/// 打ち出した玉が必ず盤面から出ること。釘の反発 (`NAIL_RESTITUTION`) を
+/// 上げると、玉は釘と釘の間で跳ね続けて落ちてこなくなる。1個でも居座ると
+/// その分だけ玉数上限 (`MAX_BALLS`) の枠が埋まり続け、打ち出しが細っていく。
+#[test]
+fn no_ball_gets_stuck_bouncing_on_the_nails() {
+    // 中央値の10倍を超える滞空は「跳ね続けている」と見なす。上限そのものは
+    // `measure_flight` の `FLIGHT_TICK_LIMIT` が持つので、ここはそれより
+    // 十分手前で切って、詰まりかけている段階で気付けるようにする。
+    const STALL_TICKS: u32 = 1_000;
+    for layout in 1..=6u32 {
+        let mut nail_seed = layout.wrapping_mul(2_654_435_761);
+        let machine = machine_with(0, 0.55, 0.0, &mut nail_seed);
+        let mut state = seated_state(layout.wrapping_mul(40_503), machine);
+        state.cash = 0;
+        for ball in 0..40u32 {
+            let flight = measure_flight(&mut state);
+            assert!(
+                flight.ticks < STALL_TICKS,
+                "釘の間で跳ね続けて落ちてこない玉がある — 反発が強すぎて玉が \
+                 盤面に居座り、玉数上限の枠を食い潰す \
+                 (釘{layout}通り目の{ball}個目, {}tick 滞空, 釘に触れた回数={})",
+                flight.ticks,
+                flight.contact_ticks
             );
         }
     }

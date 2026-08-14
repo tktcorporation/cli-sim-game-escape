@@ -40,7 +40,12 @@ pub const START_POCKET_X: f64 = BOARD_W / 2.0;
 pub const START_POCKET_Y: f64 = 54.0;
 /// ヘソの基本の受け口半幅。台ごとの `nail_spread` と電サポの有無を加えた値が
 /// 実効幅になる (`logic::effective_pocket_half_w`)。
-pub const START_POCKET_BASE_HALF_W: f64 = 1.0;
+///
+/// 回転率はこの幅とヘソ手前の釘の当たり方の積で決まる。ヘソ釘に当たった玉は
+/// 弾かれて受け口を外れるので、玉が速くて釘の判定をすり抜けるほど回転率は
+/// 上がる — 玉の速さ (`logic` の `GRAVITY` / `MAX_SPEED`) を変えたら、この幅も
+/// 測り直して合わせる。`simulator::spin_rate_report` の対照が実測値を出す。
+pub const START_POCKET_BASE_HALF_W: f64 = 1.2;
 
 /// アタッカー (大当たり中のみ開放)。
 pub const ATTACKER_X: f64 = BOARD_W / 2.0;
@@ -391,7 +396,13 @@ pub const MAX_PENDING: usize = 4;
 pub const HISTORY_LEN: usize = 12;
 /// 盤面に同時に存在できる玉の上限。釘との距離判定は玉数×釘数で効くため、
 /// 描画とシミュレーションの負荷をここで抑える。
-pub const MAX_BALLS: usize = 24;
+///
+/// 上限へ届くと `logic::try_fire` が撃たなくなり、`FIRE_INTERVAL_TICKS` が
+/// 意味を失う。同時に居る玉数は「1発の滞空時間 ÷ 打ち出し間隔」で決まるので、
+/// 玉を遅くしたり跳ねやすくしたりして滞空時間を延ばしたら、ここも上げて
+/// 余裕を残す (`simulator::the_ball_cap_does_not_throttle_the_firing_rate`
+/// が実測の最大値と突き合わせる)。
+pub const MAX_BALLS: usize = 32;
 /// ログの保持件数。
 pub const LOG_LEN: usize = 40;
 
