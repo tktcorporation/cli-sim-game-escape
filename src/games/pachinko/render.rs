@@ -333,7 +333,10 @@ fn draw_board_statics(
         });
     }
     draw_points(ctx, &statics.out_mouth, Color::DarkGray);
-    draw_points(ctx, &statics.nails, Color::Gray);
+    // 釘は盤面に固定された構造物なので暗く沈める。玉と同じ明るさで描くと、
+    // 点描の粒がどちらのものか判別できず、玉が釘の間を落ちていく動きを
+    // 目で追えなくなる。
+    draw_points(ctx, &statics.nails, Color::DarkGray);
     draw_points(ctx, &statics.side_pockets, Color::Blue);
     draw_points(ctx, &statics.start_pocket, start_pocket_color);
     draw_points(ctx, &statics.attacker, attacker_color);
@@ -811,7 +814,10 @@ fn render_board(
         .marker(Marker::Braille)
         .paint(move |ctx| {
             draw_board_statics(ctx, &statics, start_pocket_color, attacker_color);
-            draw_points(ctx, &ball_pts, Color::Gray);
+            // 玉は盤面で唯一動くものなので、固定物 (釘・入賞口) より明るく
+            // 描いて視線を集める。弾かれた瞬間だけさらに白く飛ばすことで、
+            // 「今この瞬間に当たった」印はヘソの入賞と同じ白で統一される。
+            draw_points(ctx, &ball_pts, Color::LightYellow);
             draw_points(ctx, &glow_pts, Color::White);
             draw_points(ctx, &jackpot_ring, Color::LightRed);
         })
@@ -1308,7 +1314,8 @@ mod tests {
     use ratzilla::ratatui::Terminal;
 
     use crate::games::pachinko::state::{
-        Ball, Digit, ReachKind, SpinOutcome, INITIAL_REELS, REACH_FLASH_TICKS, START_FLASH_TICKS,
+        Ball, Digit, Pending, PendingRank, ReachKind, SpinOutcome, StopStyle, INITIAL_REELS,
+        REACH_FLASH_TICKS, START_FLASH_TICKS,
     };
 
     /// `Game::render` ではなく `render` を直接叩く。前者は `crate::time::now_ms()`
@@ -1559,6 +1566,7 @@ mod tests {
             count: 4,
             ticks_left: 120,
             kakuhen: true,
+            payout: 0,
         });
         state.digit = Digit::Spinning {
             ticks_left: 20,
@@ -1567,6 +1575,10 @@ mod tests {
                 rounds: 16,
                 kakuhen: true,
                 reach: ReachKind::Super,
+                rank: PendingRank::White,
+                stop: StopStyle::Plain,
+                confirmed: false,
+                assisted: false,
                 reels: [7, 7, 7],
             },
         };
@@ -1584,13 +1596,17 @@ mod tests {
             vy: 0.9,
             hit_glow: 0,
         });
-        state.pending.push(SpinOutcome {
+        state.pending.push(Pending::new(SpinOutcome {
             hit: false,
             rounds: 0,
             kakuhen: false,
             reach: ReachKind::None,
+            rank: PendingRank::White,
+            stop: StopStyle::Plain,
+            confirmed: false,
+            assisted: false,
             reels: [1, 2, 3],
-        });
+        }));
         render_to_test_backend_with_click_state(&state, 100, 40);
         render_to_test_backend_with_click_state(&state, 40, 30);
     }
@@ -1624,6 +1640,10 @@ mod tests {
             rounds: 0,
             kakuhen: false,
             reach: ReachKind::Super,
+            rank: PendingRank::White,
+            stop: StopStyle::Plain,
+            confirmed: false,
+            assisted: false,
             reels: [7, 3, 7],
         };
         let total = ReachKind::Super.spin_ticks();
@@ -1662,6 +1682,10 @@ mod tests {
                 rounds: 0,
                 kakuhen: false,
                 reach,
+                rank: PendingRank::White,
+                stop: StopStyle::Plain,
+                confirmed: false,
+                assisted: false,
                 reels: [7, 3, 7],
             };
             // 回転中に render が見る最後の tick。`logic::advance_digit` は
@@ -1693,6 +1717,10 @@ mod tests {
                 rounds: if hit { 8 } else { 0 },
                 kakuhen: false,
                 reach,
+                rank: PendingRank::White,
+                stop: StopStyle::Plain,
+                confirmed: false,
+                assisted: false,
                 reels,
             },
         };
@@ -1728,6 +1756,7 @@ mod tests {
             count: ROUND_COUNT + 1,
             ticks_left: 40,
             kakuhen: false,
+            payout: 0,
         });
         let capped = format!("{ROUND_COUNT}/{ROUND_COUNT}");
         let overflowed = format!("{}/{ROUND_COUNT}", ROUND_COUNT + 1);
@@ -1772,6 +1801,7 @@ mod tests {
             count: 0,
             ticks_left: 40,
             kakuhen: false,
+            payout: 0,
         });
         assert_eq!(
             board_border_color(&state),
@@ -1863,13 +1893,17 @@ mod tests {
     fn pending_text_shows_one_mark_per_slot() {
         let mut state = PachinkoState::new();
         assert_eq!(pending_text(&state).chars().count(), MAX_PENDING);
-        state.pending.push(SpinOutcome {
+        state.pending.push(Pending::new(SpinOutcome {
             hit: false,
             rounds: 0,
             kakuhen: false,
             reach: ReachKind::None,
+            rank: PendingRank::White,
+            stop: StopStyle::Plain,
+            confirmed: false,
+            assisted: false,
             reels: [0, 1, 2],
-        });
+        }));
         let text = pending_text(&state);
         assert_eq!(text.chars().filter(|&c| c == '●').count(), 1);
         assert_eq!(text.chars().count(), MAX_PENDING);
