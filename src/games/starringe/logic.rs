@@ -30,13 +30,17 @@ const ORBIT_SWIRL_GAIN: f64 = 2.2;
 /// 核脈動の波面が1tickで外へ進む距離。鉱石の降下 (最大 0.55/tick) より十分
 /// 速くし、核が脈打つたびに上空を舐めていく動きとして読める速さにする。
 const PULSE_WAVE_SPEED: f64 = 4.25;
+/// 流星弾の半径。最初に触れる武器の弾なので、これが「弾の大きさ」の基準になる。
+/// 最小の鉱石 (`OreKind::Dust`) はこれより明確に大きく描かれる必要があり、
+/// 両者の関係は `render` のテストが押さえている。
+pub(super) const PULSE_PROJECTILE_RADIUS: f64 = 1.375;
 /// 弾と鉱石の当たり判定を、両者の円が触れる距離からどれだけ甘くするか。
 ///
 /// 砲台は撃つ瞬間の位置へ撃つ (`aim_dir`) ので、迎撃の手応えは「弾の飛行時間の
 /// あいだに鉱石が横へ逃げ切れるか」で決まる。的の見た目の大きさは画面の広さに
 /// 合わせて決めたいが、そこへ判定を直結させると、絵を縮めただけで迎撃が
 /// 成立しなくなる。見た目と手応えを別々に動かせるよう、余裕を独立した値で持つ。
-const HIT_TOLERANCE: f64 = 1.5;
+const HIT_TOLERANCE: f64 = 0.8;
 /// 層開放の演出で立つ波が届く距離。鉱石には触れない波なので、どの脈動レベルの
 /// 到達距離とも噛み合わせず、開放の瞬間だけ上空まで駆け上がる長さを取る。
 const CEREMONY_WAVE_REACH: f64 = 70.0;
@@ -764,7 +768,7 @@ fn fire_pulse(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize
             vy: ang.sin() * speed,
             damage: dmg,
             life: 22,
-            radius: 1.375,
+            radius: PULSE_PROJECTILE_RADIUS,
             pierce: 0,
             splash: 0.0,
             kind: WeaponKind::Pulse,

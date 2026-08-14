@@ -1436,8 +1436,8 @@ mod tests {
     use ratzilla::ratatui::Terminal;
 
     use crate::games::starringe::actions::buy_ring_id;
-    use crate::games::starringe::logic::unlock_next_layer;
-    use crate::games::starringe::state::{Layer, RingUpgrade, Tab};
+    use crate::games::starringe::logic::{unlock_next_layer, PULSE_PROJECTILE_RADIUS};
+    use crate::games::starringe::state::{Layer, Ore, OreMotion, RingUpgrade, Tab};
 
     fn render_frame(state: &StarRingState, width: u16, height: u16) -> Rc<RefCell<ClickState>> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -2070,6 +2070,237 @@ mod tests {
                 0,
                 "{w}x{h}: コアが上部へ描かれてはいけない"
             );
+        }
+    }
+
+    /// Braille セルのビット列を、ステージ全体を覆う点のオン/オフ表へ展開する。
+    ///
+    /// `Marker::Braille` は 1 セルへ 2×4 の点を詰めるので、セル単位で数えると
+    /// 「見かけの大きさ」が 4 分の 1 の粗さでしか測れない。点の単位まで開くと、
+    /// 円がどれだけの点を占めているかをそのまま数えられる。
+    fn braille_dots(buf: &ratzilla::ratatui::buffer::Buffer, w: u16, h: u16) -> Vec<bool> {
+        // Unicode の braille は「左列を上から 1・2・3、右列を上から 4・5・6、
+        // 最下段を左 7・右 8」の順にビットが並ぶ。行×列の位置へ並べ替える。
+        const DOT_BITS: [[u16; 2]; 4] = [
+            [0x0001, 0x0008],
+            [0x0002, 0x0010],
+            [0x0004, 0x0020],
+            [0x0040, 0x0080],
+        ];
+        const BRAILLE_BASE: u32 = 0x2800;
+        let mut grid = vec![false; (w as usize * 2) * (h as usize * 4)];
+        for y in 0..h {
+            for x in 0..w {
+                let Some(c) = buf[(x, y)].symbol().chars().next() else {
+                    continue;
+                };
+                let cp = c as u32;
+                if !(BRAILLE_BASE..BRAILLE_BASE + 0x100).contains(&cp) {
+                    continue;
+                }
+                let bits = (cp - BRAILLE_BASE) as u16;
+                for (row, cols) in DOT_BITS.iter().enumerate() {
+                    for (col, bit) in cols.iter().enumerate() {
+                        if bits & bit != 0 {
+                            grid[(y as usize * 4 + row) * (w as usize * 2) + x as usize * 2 + col] =
+                                true;
+                        }
+                    }
+                }
+            }
+        }
+        grid
+    }
+
+    /// 半径 `radius` の円を `(x, y)` へ 1 つ置いたときに増える点を数え、
+    /// `(点数, 外接する幅, 外接する高さ)` を点の単位で返す。
+    ///
+    /// 置いた前後の差を取るのは、背景星や境界線と重なった点まで数えないため。
+    /// 速度を 0 にすると尾 (`approach_trails`) が 1 点へ潰れるので、測るのは
+    /// 円そのものの占有だけになる。
+    fn ore_footprint(radius: f64, x: f64, y: f64, w: u16, h: u16) -> (usize, usize, usize) {
+        let empty = StarRingState::new();
+        let mut placed = empty.clone();
+        placed.ores.push(Ore {
+            x,
+            y,
+            vx: 0.0,
+            vy: 0.0,
+            hp: 1.0,
+            kind: OreKind::Dust,
+            radius,
+            motion: OreMotion::Spiral,
+            sway: 0.0,
+            age: 0,
+        });
+        let dots_of = |st: &StarRingState| {
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let cs = Rc::new(RefCell::new(ClickState::new()));
+            cs.borrow_mut().terminal_cols = w;
+            cs.borrow_mut().terminal_rows = h;
+            terminal.draw(|f| render(st, f, f.area(), &cs)).unwrap();
+            braille_dots(terminal.backend().buffer(), w, h)
+        };
+        let before = dots_of(&empty);
+        let after = dots_of(&placed);
+        let grid_w = w as usize * 2;
+        let (mut count, mut x0, mut y0) = (0usize, usize::MAX, usize::MAX);
+        let (mut x1, mut y1) = (0usize, 0usize);
+        for (i, (b, a)) in before.iter().zip(after.iter()).enumerate() {
+            if *a && !*b {
+                count += 1;
+                x0 = x0.min(i % grid_w);
+                x1 = x1.max(i % grid_w);
+                y0 = y0.min(i / grid_w);
+                y1 = y1.max(i / grid_w);
+            }
+        }
+        if count == 0 {
+            return (0, 0, 0);
+        }
+        (count, x1 - x0 + 1, y1 - y0 + 1)
+    }
+
+    /// 円の中心をずらしながら繰り返し測り、まとめた `FootprintStats` を返す。
+    ///
+    /// 円が点グリッドのどこに落ちるかは中心の端数で変わる。位相をなめて初めて
+    /// 「降下するあいだずっとこの大きさに見える」と言える。
+    fn footprint_stats(radius: f64, w: u16, h: u16) -> FootprintStats {
+        let mut total = 0usize;
+        let mut samples = 0usize;
+        let (mut min_w, mut min_h, mut max_w, mut max_h) = (usize::MAX, usize::MAX, 0, 0);
+        for (ox, oy) in SAMPLE_ORIGINS {
+            for i in 0..6 {
+                for j in 0..6 {
+                    let (n, bw, bh) = ore_footprint(
+                        radius,
+                        ox + i as f64 * PHASE_STEP,
+                        oy + j as f64 * PHASE_STEP,
+                        w,
+                        h,
+                    );
+                    total += n;
+                    samples += 1;
+                    min_w = min_w.min(bw);
+                    min_h = min_h.min(bh);
+                    max_w = max_w.max(bw);
+                    max_h = max_h.max(bh);
+                }
+            }
+        }
+        FootprintStats {
+            // 点数の平均は 1/100 点まで刻んで持つ。整数へ丸めると、隣り合う
+            // 種の差がまるごと丸め誤差に飲まれてしまう。
+            mean_dots_centi: total * 100 / samples,
+            min_w,
+            min_h,
+            max_w,
+            max_h,
+        }
+    }
+
+    /// 円を点の単位で測った結果。`mean_dots_centi` は占有点数の平均を 100 倍
+    /// した整数、残りは外接矩形の振れ幅。
+    struct FootprintStats {
+        mean_dots_centi: usize,
+        min_w: usize,
+        min_h: usize,
+        max_w: usize,
+        max_h: usize,
+    }
+
+    /// 位相をなめる刻み。ステージの点間隔 (モバイルで約 1.5、デスクトップで
+    /// 約 0.7 ワールド単位) のどちらとも割り切れない幅を選び、少ない標本でも
+    /// 位相が同じところへ偏らないようにする。
+    const PHASE_STEP: f64 = 0.31;
+    /// 測る場所。円が点へ落ちる位相は中心の端数だけでなく、描画領域のどこに
+    /// いるかでも変わる。離れた 2 点で測って、片方に都合の良い位置で判定が
+    /// 通ってしまうのを避ける。
+    const SAMPLE_ORIGINS: [(f64, f64); 2] = [(30.0, 68.0), (52.5, 41.5)];
+
+    /// 電話幅のステージ。ワールド 100 幅が braille 66 点しかない最小構成で、
+    /// 点グリッドの粗さが一番効く。
+    const PHONE_STAGE: (u16, u16) = (33, 38);
+    /// デスクトップ幅のステージ。
+    const DESKTOP_STAGE: (u16, u16) = (108, 36);
+
+    /// 半径の小さい順に並べた鉱石。大きさの比較はこの順で見る。
+    fn kinds_by_radius() -> Vec<OreKind> {
+        let mut kinds = OreKind::ALL.to_vec();
+        kinds.sort_by(|a, b| a.radius().partial_cmp(&b.radius()).unwrap());
+        kinds
+    }
+
+    /// 最小の鉱石は、最初に手にする武器の弾より確実に大きく描かれる。
+    ///
+    /// 星塵と流星弾は色と尾の向きでも違うが、降ってくる的と自分の撃った弾を
+    /// 見分ける最初の手がかりは大きさになる。端数をどうずらしても外接矩形が
+    /// 2 点ぶん離れていれば、弾と的が同じ塊に見えることはない。
+    #[test]
+    fn the_smallest_ore_outgrows_a_shot_on_a_phone_sized_stage() {
+        let (w, h) = PHONE_STAGE;
+        let ore = footprint_stats(OreKind::Dust.radius(), w, h);
+        let shot = footprint_stats(PULSE_PROJECTILE_RADIUS, w, h);
+        assert!(
+            ore.min_w >= shot.max_w + 2 && ore.min_h >= shot.max_h + 2,
+            "星塵 {}x{}点 と流星弾 {}x{}点 が紛らわしい",
+            ore.min_w,
+            ore.min_h,
+            shot.max_w,
+            shot.max_h
+        );
+    }
+
+    /// 最小の鉱石は、端数がどこに落ちても 3×3 点を割らない。
+    ///
+    /// 直径が 3 点を下回ると、円が点へ落ちる位相しだいで見かけの大きさが
+    /// 1 点ぶん揺れる。降下するあいだ端数は毎 tick 変わるので、その揺れは
+    /// 脈打つ明滅として出てしまう。
+    #[test]
+    fn the_smallest_ore_keeps_a_steady_size_while_it_falls() {
+        for (w, h) in [PHONE_STAGE, DESKTOP_STAGE] {
+            let s = footprint_stats(OreKind::Dust.radius(), w, h);
+            assert!(
+                s.min_w >= 3 && s.min_h >= 3,
+                "{w}x{h}: 星塵が {}x{}点まで痩せる",
+                s.min_w,
+                s.min_h
+            );
+            assert!(
+                s.max_w - s.min_w <= 1 && s.max_h - s.min_h <= 1,
+                "{w}x{h}: 星塵の大きさが {}x{}〜{}x{}点 で暴れる",
+                s.min_w,
+                s.min_h,
+                s.max_w,
+                s.max_h
+            );
+        }
+    }
+
+    /// 隣り合う大きさの鉱石どうしが、点グリッドの上で同じ塊に潰れない。
+    ///
+    /// 半径の差が点の間隔を下回ると、ラスタライズ後の占有点数がほぼ同じに
+    /// なり、種の違いが色だけになる。8 種を `OreKind::Dust` から
+    /// `OreKind::Nova` までの幅へ詰め込む以上ここが一番狭くなるので、順序と
+    /// 最小の差を数値で押さえる。閾値は実測の最小差より一段低く取ってあり、
+    /// 半径をわずかに動かしただけでは鳴らない。
+    #[test]
+    fn neighbouring_ore_kinds_stay_distinguishable_by_size() {
+        const MIN_GROWTH_PERCENT: usize = 108;
+        for (w, h) in [PHONE_STAGE, DESKTOP_STAGE] {
+            let mut prev: Option<(OreKind, usize)> = None;
+            for kind in kinds_by_radius() {
+                let dots = footprint_stats(kind.radius(), w, h).mean_dots_centi;
+                if let Some((prev_kind, prev_dots)) = prev {
+                    assert!(
+                        dots * 100 >= prev_dots * MIN_GROWTH_PERCENT,
+                        "{w}x{h}: {prev_kind:?} 平均{:.1}点 と {kind:?} 平均{:.1}点 が同じ大きさに見える",
+                        prev_dots as f64 / 100.0,
+                        dots as f64 / 100.0
+                    );
+                }
+                prev = Some((kind, dots));
+            }
         }
     }
 }
