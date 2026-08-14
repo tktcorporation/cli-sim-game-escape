@@ -539,7 +539,7 @@ fn resolve_spin(state: &mut PachinkoState, outcome: SpinOutcome) {
     state.spins_since_jackpot = state.spins_since_jackpot.saturating_add(1);
     if !outcome.hit {
         decay_assist(state);
-        end_chain_if_back_to_normal(state, outcome);
+        end_chain_if_back_to_normal(state);
         return;
     }
     // 連チャンの継続は消化時点のモードではなく抽選時点の状態で決める。保留は
@@ -607,11 +607,17 @@ fn end_assist(state: &mut PachinkoState, reason: &str) {
 /// 電サポが切れた瞬間ではなく、電サポ中に引いた抽選を消化し尽くしてから戻す。
 /// 保留は抽選から消化まで時間差があり、電サポ切れの直後に残った保留で当たる
 /// (引き戻す) ことがある — その当たりは電サポ中の抽選なので連チャンの一部で、
-/// そこで数え直すと表示も自己記録も過少になる。保留は先入れ先出しなので、
-/// 電サポの外で引いた抽選が通常時に消化された時点で、それより前の抽選は
-/// 全て消化済みだと分かる。
-fn end_chain_if_back_to_normal(state: &mut PachinkoState, outcome: SpinOutcome) {
-    if !outcome.assisted && !state.mode.is_assisted() {
+/// そこで数え直すと表示も自己記録も過少になる。
+///
+/// 判定は「電サポ中に引いた保留がまだ残っているか」で行う。消化した抽選が
+/// 電サポ外のものかどうかで見ると、電サポ中の保留が全てハズレで尽きた後に
+/// 打ち出しを止めた場合、次の抽選が来ないまま連チャン表示が残り続ける。
+fn end_chain_if_back_to_normal(state: &mut PachinkoState) {
+    if state.mode.is_assisted() {
+        return;
+    }
+    let assisted_left = state.pending.iter().any(|p| p.outcome.assisted);
+    if !assisted_left {
         state.chain = 0;
     }
 }
@@ -1701,17 +1707,47 @@ mod tests {
         resolve_spin(&mut state, jackpot(5));
         assert_eq!(state.chain, 1);
 
-        // 電サポ中に「ハズレ → 当たり」の順で積んだ保留をそのまま消化する。
+        // 電サポ中に「ハズレ → 当たり」の順で積んだ保留を、先頭から消化する。
+        // 消化中の抽選は保留から取り出された状態なので、当たりの方だけが
+        // `pending` に残る。
         state.mode = Mode::Jitan { spins_left: 1 };
+        state.pending.push(Pending::new(assisted_jackpot(5)));
         resolve_spin(&mut state, assisted_miss(ReachKind::None));
         assert_eq!(state.mode, Mode::Normal, "時短が切れていない");
-        resolve_spin(&mut state, assisted_jackpot(5));
+        let queued = state.pending.remove(0);
+        resolve_spin(&mut state, queued.outcome);
 
         assert_eq!(
             state.chain, 2,
             "電サポ中に引いた当たりが初当たり扱いになり、連チャンが数え直された"
         );
         assert_eq!(state.record.best_chain, 2);
+    }
+
+    #[test]
+    fn the_chain_ends_when_the_last_assisted_pending_misses() {
+        // 電サポ中に引いた保留が全てハズレで尽きた後、玉切れや打ち出しの
+        // 停止で次の抽選が来ないことがある。次の抽選を待って数え直す作りだと、
+        // 通常時の画面が終わった連チャンを出し続けたまま止まる。
+        let mut state = seated_state();
+        resolve_spin(&mut state, jackpot(5));
+        state.mode = Mode::Jitan { spins_left: 1 };
+        // 消化待ちの保留を1つ残したまま、電サポ中に引いたハズレを消化する。
+        state.pending.push(Pending::new(assisted_miss(ReachKind::None)));
+        resolve_spin(&mut state, assisted_miss(ReachKind::None));
+        assert_eq!(state.mode, Mode::Normal, "時短が切れていない");
+        assert_eq!(
+            state.chain, 1,
+            "電サポ中に引いた保留が残っている間は引き戻しの余地があるので連チャンを保つ"
+        );
+
+        // 最後の1つを消化すると、もう引き戻す余地が無い。
+        let last = state.pending.remove(0);
+        resolve_spin(&mut state, last.outcome);
+        assert_eq!(
+            state.chain, 0,
+            "電サポ中の保留を消化し尽くしても連チャン表示が残り続ける"
+        );
     }
 
     #[test]
