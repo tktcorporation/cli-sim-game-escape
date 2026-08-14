@@ -1499,7 +1499,19 @@ const PENDING_EMPTY_MARK: char = '·';
 /// 出し、信頼度は数値にしない — どのランクがどれだけ当たるかを見つけるのは
 /// プレイヤー側の領分にする。
 fn pending_spans(state: &PachinkoState) -> Vec<Span<'static>> {
-    let mut spans = Vec::with_capacity(MAX_PENDING * 3);
+    let mut spans = Vec::with_capacity((MAX_PENDING + 1) * 3);
+    // 回転中の抽選を列の先頭に置く。保留が空の状態で入賞した玉は待たずに
+    // 消化されるので、保留列だけを描くとその抽選のランクを一度も見せられない。
+    // 消化中であることは括弧で示し、待っている保留と区別する。
+    if let Digit::Spinning { outcome, .. } = &state.digit {
+        let color = outcome.rank.color();
+        spans.push(Span::styled("(", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            outcome.rank.mark().to_string(),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(") ", Style::default().fg(Color::DarkGray)));
+    }
     for slot in 0..MAX_PENDING {
         let Some(pending) = state.pending.get(slot) else {
             spans.push(Span::styled(
@@ -1619,10 +1631,11 @@ fn board_tab_list(state: &PachinkoState) -> ClickableList<'static> {
     // 大当たりの決算。アタッカーが閉じた時点で出玉が確定するので、
     // 大当たり中は進行中のカウンタ (`render_jackpot_theater`) に譲る。
     if !matches!(state.mode, Mode::Jackpot(_)) && state.last_jackpot_payout > 0 {
-        // 連チャンは数え直された時点で 0 に戻る。0 のまま添えると、途切れた
-        // 連チャンが1連として決算に残る。
-        let chain = if state.chain > 0 {
-            format!(" / {}連", state.chain)
+        // 決算には終了時点で確定した連チャン数を添える。進行中の `chain` は
+        // 電サポが切れた時点で数え直しに戻るので、そちらを使うと決算の途中で
+        // 連チャンの長さだけが消える。
+        let chain = if state.last_jackpot_chain > 0 {
+            format!(" / {}連", state.last_jackpot_chain)
         } else {
             String::new()
         };
@@ -2442,6 +2455,23 @@ mod tests {
             assisted: false,
             reels: [0, 1, 2],
         }
+    }
+
+    #[test]
+    fn the_spin_in_progress_shows_the_rank_of_the_pending_it_came_from() {
+        // 保留が空の状態で入賞した玉は待たずに消化される。保留列だけを描くと、
+        // その抽選のランクを一度も見せないまま結果が出てしまう。
+        let mut state = seated_state();
+        state.pending.clear();
+        state.digit = Digit::Spinning {
+            ticks_left: 10,
+            outcome: outcome(PendingRank::Gold, StopStyle::Plain),
+        };
+        let rows = rendered_rows(&state, 100, 40).join("\n");
+        assert!(
+            rows.contains(PendingRank::Gold.mark()),
+            "消化中の抽選のランクが画面に出ていない"
+        );
     }
 
     /// 描いた画面から記号だけを行ごとに取り出す。

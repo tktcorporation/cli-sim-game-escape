@@ -573,6 +573,10 @@ fn resolve_spin(state: &mut PachinkoState, outcome: SpinOutcome) {
         kakuhen: outcome.kakuhen,
         payout: 0,
     });
+    // 表示用の出玉も 0 から数え直す。連チャンで前回の額が残っていると、
+    // カウンタは新しい大当たりの獲得を積み上げる前に前回の額から下がって
+    // いくことになり、増えていく数字を見せるという狙いと逆の動きになる。
+    state.jackpot_payout_shown = 0.0;
     state.add_log(format!("{}Rの大当たり！", outcome.rounds));
 }
 
@@ -659,6 +663,7 @@ fn end_jackpot(state: &mut PachinkoState, jackpot: JackpotState) {
     // 出玉は `Mode::Jackpot` が抱えているので、モードを移す前に取り出す。
     // 終了後のサマリはこの値を読む。
     state.last_jackpot_payout = jackpot.payout;
+    state.last_jackpot_chain = state.chain;
     let spec = seated_spec(state);
     if jackpot.kakuhen {
         state.mode = Mode::Kakuhen { spins_left: 0 };
@@ -844,6 +849,7 @@ fn reset_seat(state: &mut PachinkoState) {
     state.reach_flash = 0;
     // 出玉のサマリも前の台で起きた事実なので、移った先へ持ち込まない。
     state.last_jackpot_payout = 0;
+    state.last_jackpot_chain = 0;
     state.jackpot_payout_shown = 0.0;
 }
 
@@ -1574,6 +1580,63 @@ mod tests {
                 "次の変動で消化される保留が最終ランクに届いていない"
             );
         }
+    }
+
+    #[test]
+    fn a_spin_carries_the_rank_of_the_pending_it_came_from() {
+        // 保留が空の状態で入賞した玉は、待つ間もなく消化される。保留列から
+        // 消えた後もランクを読めるよう、回転中の抽選が自分のランクを持ち回る
+        // (描画はこれを使って消化中の1つを描く)。
+        let mut state = seated_state();
+        state
+            .pending
+            .push(Pending::new(ranked_miss(PendingRank::Gold)));
+        state.digit = Digit::Idle;
+        start_spin_if_idle(&mut state);
+
+        let Digit::Spinning { outcome, .. } = &state.digit else {
+            panic!("回転が始まっていない");
+        };
+        assert_eq!(
+            outcome.rank,
+            PendingRank::Gold,
+            "回転中の抽選から元の保留のランクを読めない"
+        );
+    }
+
+    #[test]
+    fn a_new_jackpot_counts_its_payout_up_from_zero() {
+        // 連チャンで前回の額が残っていると、カウンタは新しい大当たりの獲得を
+        // 積み上げる前に前回の額から下がっていく。
+        let mut state = seated_state();
+        state.jackpot_payout_shown = 1_800.0;
+        resolve_spin(&mut state, jackpot(10));
+        assert_eq!(
+            state.jackpot_payout_shown, 0.0,
+            "前の大当たりの出玉が表示に残り、増える前に減っていく"
+        );
+    }
+
+    #[test]
+    fn the_summary_keeps_the_chain_the_jackpot_ended_on() {
+        // 決算は電サポが切れた後も残る。進行中の連チャン数を使うと、
+        // 数え直された時点で決算から連チャンの長さだけが消える。
+        let mut state = seated_state();
+        resolve_spin(&mut state, jackpot(5));
+        state.mode = Mode::Jitan { spins_left: 1 };
+        resolve_spin(&mut state, assisted_jackpot(5));
+        assert_eq!(state.chain, 2);
+
+        let Mode::Jackpot(jackpot_state) = state.mode else {
+            panic!("大当たり中ではない");
+        };
+        end_jackpot(&mut state, jackpot_state);
+        assert_eq!(state.last_jackpot_chain, 2, "終了時点の連チャン数が残っていない");
+
+        // 電サポを切らして連チャンを数え直しても、決算の値は動かない。
+        state.mode = Mode::Normal;
+        state.chain = 0;
+        assert_eq!(state.last_jackpot_chain, 2);
     }
 
     #[test]

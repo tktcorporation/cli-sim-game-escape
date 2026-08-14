@@ -685,6 +685,10 @@ pub struct PachinkoState {
     /// 大当たりが終わっても消さない。進行中の値は `Mode::Jackpot` が持つ
     /// (`jackpot_payout` が両者を1つの読み口にまとめる)。
     pub last_jackpot_payout: u32,
+    /// 直近に終わった大当たりが何連目だったか。決算はこちらを使う —
+    /// 進行中の連チャン数 (`chain`) は電サポが切れた時点で数え直しに戻るので、
+    /// 決算に添えると、終わった連チャンの長さが表示から消えてしまう。
+    pub last_jackpot_chain: u32,
     /// 出玉カウンタの表示値。`jackpot_payout` へ毎 tick 少しずつ寄せることで、
     /// 内部値が一度に跳ねても数字は数 tick かけて追いつく — 「増え続けている」
     /// 手応えは、増えた事実より数字が動いている時間の長さが作る。
@@ -736,6 +740,7 @@ impl PachinkoState {
             reach_flash: 0,
             reach_flash_kind: ReachKind::None,
             last_jackpot_payout: 0,
+            last_jackpot_chain: 0,
             jackpot_payout_shown: 0.0,
             spins_since_jackpot: 0,
             record: Record::default(),
