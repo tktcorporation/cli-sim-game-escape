@@ -2154,6 +2154,7 @@ mod tests {
             vx: -0.4,
             vy: 0.6,
             hit_glow: 3,
+            fired_in_normal: true,
         });
         state.balls.push(Ball {
             x: 12.0,
@@ -2161,6 +2162,7 @@ mod tests {
             vx: 0.2,
             vy: 0.9,
             hit_glow: 0,
+            fired_in_normal: true,
         });
         state.pending.push(Pending::new(SpinOutcome {
             hit: false,

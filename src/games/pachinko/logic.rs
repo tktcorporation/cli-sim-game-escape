@@ -149,7 +149,9 @@ fn step_balls(state: &mut PachinkoState) {
     let attacker_open = matches!(state.mode, Mode::Jackpot(_));
     let seed = &mut state.rng_state;
 
-    let mut start_hits = 0u32;
+    // ヘソ入賞は玉ごとに「通常時に打たれた玉か」を持ち回る。回転率の分母は
+    // 打ち出しの時点で数えるので、分子もその玉が打たれた区間へ揃える。
+    let mut start_hits: Vec<bool> = Vec::new();
     let mut attacker_hits = 0u32;
     let mut side_hits = 0u32;
 
@@ -167,7 +169,7 @@ fn step_balls(state: &mut PachinkoState) {
             if crossed_downward(prev_y, ball.y, START_POCKET_Y)
                 && (ball.x - START_POCKET_X).abs() < pocket_half_w
             {
-                start_hits += 1;
+                start_hits.push(ball.fired_in_normal);
                 return false;
             }
             if crossed_downward(prev_y, ball.y, SIDE_POCKET_Y)
@@ -205,8 +207,8 @@ fn step_balls(state: &mut PachinkoState) {
             state.mode = Mode::Jackpot(j);
         }
     }
-    for _ in 0..start_hits {
-        resolve_start_pocket(state);
+    for fired_in_normal in start_hits {
+        resolve_start_pocket(state, fired_in_normal);
     }
 }
 
@@ -275,7 +277,7 @@ fn add_balls(state: &mut PachinkoState, amount: u32) {
 // ── 抽選 ───────────────────────────────────────────────────────
 
 /// ヘソ入賞1個分の処理。賞球を払い、保留に空きがあれば当落を確定させる。
-fn resolve_start_pocket(state: &mut PachinkoState) {
+fn resolve_start_pocket(state: &mut PachinkoState, fired_in_normal: bool) {
     add_balls(state, START_PAYOUT);
     state.start_flash = START_FLASH_TICKS;
     if state.pending.len() >= MAX_PENDING {
@@ -286,10 +288,11 @@ fn resolve_start_pocket(state: &mut PachinkoState) {
     let outcome = roll_outcome(state);
     state.pending.push(Pending::new(outcome));
     // 回転率は通常時の分だけで測る (`Machine::normal_spins_seen` 参照)。
-    let normal = state.mode == Mode::Normal;
+    // 今のモードではなく玉が打たれた時のモードで数えるのは、打ち出しから
+    // 入賞までの数秒の間にモードが変わりうるため。
     if let Some(machine) = state.seated_machine_mut() {
         machine.spins_seen += 1;
-        if normal {
+        if fired_in_normal {
             machine.normal_spins_seen += 1;
         }
     }
@@ -744,18 +747,19 @@ fn try_fire(state: &mut PachinkoState) {
     let seed = &mut state.rng_state;
     let jitter = |seed: &mut u32| 1.0 + (rand01(seed) - 0.5) * 2.0 * LAUNCH_JITTER;
     let (vx, vy) = (vx * jitter(seed), vy * jitter(seed));
+    let fired_in_normal = state.mode == Mode::Normal;
     state.balls.push(Ball {
         x: LAUNCH_X,
         y: LAUNCH_Y,
         vx,
         vy,
         hit_glow: 0,
+        fired_in_normal,
     });
     state.balls_held -= 1;
-    let normal = state.mode == Mode::Normal;
     if let Some(machine) = state.seated_machine_mut() {
         machine.balls_spent += 1;
-        if normal {
+        if fired_in_normal {
             machine.normal_balls_spent += 1;
         }
     }
@@ -1101,6 +1105,7 @@ mod tests {
             vx: 0.0,
             vy: 0.5,
             hit_glow: 0,
+            fired_in_normal: true,
         });
         step_balls(&mut state);
         let ball = state.balls.first().expect("玉が消えている");
@@ -1165,6 +1170,7 @@ mod tests {
             vx: 0.0,
             vy: MAX_SPEED,
             hit_glow: 0,
+            fired_in_normal: true,
         });
         let before = state.balls_held;
         step_balls(&mut state);
@@ -1473,6 +1479,7 @@ mod tests {
             vx: 0.0,
             vy: MAX_SPEED,
             hit_glow: 0,
+            fired_in_normal: true,
         });
         step_balls(&mut state);
         assert_eq!(
@@ -1532,7 +1539,7 @@ mod tests {
         let mut saw_a_hot_final = false;
         for _ in 0..2_000 {
             state.pending.clear();
-            resolve_start_pocket(&mut state);
+            resolve_start_pocket(&mut state, true);
             let pending = state.pending[0];
             assert_eq!(
                 pending.rank,
@@ -1626,7 +1633,8 @@ mod tests {
             state.fire_cooldown = 0;
             try_fire(&mut state);
             state.balls.clear();
-            resolve_start_pocket(&mut state);
+            // 電サポ中に打たれた玉なので、入賞も通常時の分子には入らない。
+            resolve_start_pocket(&mut state, false);
             state.pending.clear();
         }
         let after_assist = spin_rate(state.seated_machine().expect("着席していない"))
@@ -1642,6 +1650,35 @@ mod tests {
             machine.balls_spent > machine.normal_balls_spent,
             "総打ち込み数は電サポ中の分も数える"
         );
+    }
+
+    #[test]
+    fn a_ball_counts_toward_the_mode_it_was_fired_in() {
+        // 打ち出しから入賞までは数秒あり、その間に電サポが切れることがある。
+        // 入賞時のモードで数えると、分母を増やさなかった玉が分子だけ増やす。
+        let mut state = seated_state();
+        state.balls_held = 10;
+        state.firing = true;
+        state.mode = Mode::Kakuhen { spins_left: 0 };
+        state.fire_cooldown = 0;
+        try_fire(&mut state);
+        let before = state
+            .seated_machine()
+            .expect("着席していない")
+            .normal_balls_spent;
+        assert_eq!(before, 0, "電サポ中に打った玉が通常時の分母に入っている");
+
+        // 玉が落ちている間に電サポが切れ、その後ヘソへ入る。
+        state.mode = Mode::Normal;
+        let fired_in_normal = state.balls[0].fired_in_normal;
+        resolve_start_pocket(&mut state, fired_in_normal);
+
+        let machine = state.seated_machine().expect("着席していない");
+        assert_eq!(
+            machine.normal_spins_seen, 0,
+            "電サポ中に打った玉の入賞が通常時の分子に入り、分母と区間が食い違う"
+        );
+        assert_eq!(machine.spins_seen, 1, "総回転数はモードによらず数える");
     }
 
     #[test]
@@ -1995,6 +2032,7 @@ mod tests {
             vx: 0.0,
             vy: MAX_SPEED,
             hit_glow: 0,
+            fired_in_normal: true,
         });
         step_balls(&mut state);
         assert_eq!(state.jackpot_payout(), ATTACKER_PAYOUT);
