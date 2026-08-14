@@ -46,6 +46,14 @@ use super::state::{
 /// メニュー一覧での識別色と同じものを引くことで、ゲーム内外で色がずれない。
 const ACCENT: Color = theme::accent(&GameChoice::Pachinko);
 
+/// 玉を描く大きさ。当たり判定の半径 (`BALL_R`) より小さく描く。
+///
+/// braille の1点は盤面座標のごく一部でしかないので、判定と同じ半径で塗ると
+/// 玉が数点まとまった塊になり、隣り合った玉どうしが1つに融合して数を見失う。
+/// 判定より小さく描く分には、釘のどちら側を抜けたかという読み取りは変わらない
+/// — 玉の中心が動く軌跡は同じで、見えるのがその周りの塗りだけになる。
+const BALL_DRAW_SCALE: f64 = 0.7;
+
 pub fn render(
     state: &PachinkoState,
     f: &mut Frame,
@@ -894,8 +902,8 @@ fn render_board(
         let pts = canvas_fx::filled_ellipse_points(
             ball.x,
             board_to_canvas_y(ball.y),
-            BALL_R,
-            BALL_R * aspect,
+            BALL_R * BALL_DRAW_SCALE,
+            BALL_R * BALL_DRAW_SCALE * aspect,
             0.25,
         );
         if ball.hit_glow > 0 {
