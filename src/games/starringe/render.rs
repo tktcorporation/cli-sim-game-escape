@@ -1131,7 +1131,10 @@ fn codex_sections(state: &StarRingState, width: u16) -> Vec<Section> {
     for w in WeaponKind::ALL {
         if state.is_weapon_unlocked(w) {
             weapons.extend(wrapped_row(
-                Span::styled(format!("  {} ", w.glyph()), Style::default().fg(weapon_color(w))),
+                Span::styled(
+                    format!("  {} ", w.glyph()),
+                    Style::default().fg(weapon_color(w)),
+                ),
                 format!("{} 解放済", w.label()),
                 Style::default().fg(weapon_color(w)),
                 width,
