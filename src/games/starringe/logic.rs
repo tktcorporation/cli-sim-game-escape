@@ -2,9 +2,31 @@
 
 use super::state::{
     Layer, Ore, OreKind, OreMotion, Particle, ParticleKind, Projectile, PulseRing, RingUpgrade,
-    StarRingState, WeaponKind, WeaponStat, BOOST_DURATION, CX, CY, INNER_RADIUS, LAYER_FLASH_TICKS,
-    LAYER_READY_FLASH_TICKS, ORBIT_Y_SQUASH, SPAWN_RADIUS, WORLD_H, WORLD_W,
+    StarRingState, WeaponKind, WeaponStat, BOOST_DURATION, CORE_Y, CX, FIELD_MARGIN, INNER_RADIUS,
+    LAYER_FLASH_TICKS, LAYER_READY_FLASH_TICKS, SPAWN_X_MARGIN, SPAWN_Y, WORLD_H, WORLD_W,
 };
+
+/// 鉱石の同時存在上限。これを超えると湧きも分裂も止める。
+const MAX_ORES: usize = 56;
+
+/// うねりの振れ幅は「基準速度 × 倍率 ÷ 角周波数」で決まる。周期が長いほど
+/// 同じ振れ幅を出すのに大きな速度が要るため、周期に見合った倍率を持たせる。
+const SPIRAL_SWAY_RATE: f64 = 0.05;
+const SPIRAL_SWAY_GAIN: f64 = 4.0;
+const ZIGZAG_SWAY_RATE: f64 = 0.20;
+const ZIGZAG_SWAY_GAIN: f64 = 10.0;
+/// 回り込み成分が主役になるので、横揺れそのものは抑える。
+const ORBIT_SWAY_GAIN: f64 = 0.5;
+const HEAVY_SWAY_GAIN: f64 = 0.15;
+/// 重い鉱石の落下減速。
+const HEAVY_FALL_MULT: f64 = 0.85;
+/// コアへの引き寄せの強さ (落下速度に対する倍率)。1 を超えると降下より
+/// 引き寄せが勝ち、コア付近まで来た鉱石は必ず吸い込まれる。
+const CORE_PULL_RATIO: f64 = 1.5;
+/// Orbit の接線方向の回り込みの強さ (落下速度に対する倍率)。
+const ORBIT_SWIRL_GAIN: f64 = 2.2;
+/// 裂片が分裂する際、子を親の左右へ振り分ける幅。
+const SPLIT_SPREAD: f64 = 4.0;
 
 /// ダメージの出どころ。殻石の耐性計算に使う。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -153,9 +175,9 @@ fn play_layer_unlock_ceremony(state: &mut StarRingState) {
     state.layer_ready_latched = false;
     state.shake_ticks = state.shake_ticks.max(16);
     state.core_flash_ticks = state.core_flash_ticks.max(22);
-    burst(state, CX, CY, 22, 2.8, ParticleKind::Spark, 28);
-    burst(state, CX, CY, 14, 2.0, ParticleKind::Shard, 24);
-    burst(state, CX, CY, 10, 1.4, ParticleKind::Ember, 20);
+    burst(state, CX, CORE_Y, 22, 7.0, ParticleKind::Spark, 28);
+    burst(state, CX, CORE_Y, 14, 5.0, ParticleKind::Shard, 24);
+    burst(state, CX, CORE_Y, 10, 3.5, ParticleKind::Ember, 20);
     state.pulse_rings.push(PulseRing {
         radius: INNER_RADIUS,
         life: 16,
@@ -174,13 +196,13 @@ fn play_layer_unlock_ceremony(state: &mut StarRingState) {
 pub fn manual_strike(state: &mut StarRingState) {
     state.boost_ticks = BOOST_DURATION;
     if state.ores.is_empty() {
-        burst(state, CX, CY, 6, 1.2, ParticleKind::Spark, 14);
+        burst(state, CX, CORE_Y, 6, 3.0, ParticleKind::Spark, 14);
         return;
     }
     let mut best = 0usize;
     let mut best_d = f64::MAX;
     for (i, ore) in state.ores.iter().enumerate() {
-        let d = (ore.x - CX).hypot(ore.y - CY);
+        let d = (ore.x - CX).hypot(ore.y - CORE_Y);
         if d < best_d {
             best_d = d;
             best = i;
@@ -243,7 +265,7 @@ fn check_layer_ready(state: &mut StarRingState) {
         state.layer_ready_flash_ticks = LAYER_READY_FLASH_TICKS;
         state.core_flash_ticks = state.core_flash_ticks.max(8);
         state.shake_ticks = state.shake_ticks.max(6);
-        burst(state, CX, CY, 8, 1.4, ParticleKind::Spark, 14);
+        burst(state, CX, CORE_Y, 8, 3.5, ParticleKind::Spark, 14);
         state.layer_ready_latched = true;
     } else if !ready {
         state.layer_ready_latched = false;
@@ -274,7 +296,7 @@ fn step_particles(state: &mut StarRingState) {
         p.life -= 1;
     }
     state.particles.retain(|p| {
-        p.life > 0 && p.x > -8.0 && p.x < WORLD_W + 8.0 && p.y > -8.0 && p.y < WORLD_H + 8.0
+        p.life > 0 && p.x > -20.0 && p.x < WORLD_W + 20.0 && p.y > -20.0 && p.y < WORLD_H + 20.0
     });
     if state.particles.len() > 500 {
         let drop = state.particles.len() - 400;
@@ -286,7 +308,7 @@ fn step_pulse_rings(state: &mut StarRingState) {
     for r in &mut state.pulse_rings {
         if r.life > 0 {
             r.life -= 1;
-            r.radius += 0.55;
+            r.radius += 1.375;
         }
     }
     state.pulse_rings.retain(|r| r.life > 0);
@@ -341,9 +363,9 @@ fn step_projectiles(state: &mut StarRingState) {
                         apply_damage(state, j, splash_dmg, DamageSource::Weapon(kind));
                     }
                 }
-                burst(state, ox, oy, 8, 1.8, ParticleKind::Ember, 14);
+                burst(state, ox, oy, 8, 4.5, ParticleKind::Ember, 14);
             } else {
-                burst(state, px, py, 2, 0.8, ParticleKind::Spark, 8);
+                burst(state, px, py, 2, 2.0, ParticleKind::Spark, 8);
             }
             if pierce == 0 {
                 state.projectiles.swap_remove(i);
@@ -355,7 +377,7 @@ fn step_projectiles(state: &mut StarRingState) {
     }
 
     state.projectiles.retain(|p| {
-        p.life > 0 && p.x > -10.0 && p.x < WORLD_W + 10.0 && p.y > -10.0 && p.y < WORLD_H + 10.0
+        p.life > 0 && p.x > -25.0 && p.x < WORLD_W + 25.0 && p.y > -25.0 && p.y < WORLD_H + 25.0
     });
     if state.projectiles.len() > 220 {
         let drop = state.projectiles.len() - 180;
@@ -363,49 +385,78 @@ fn step_projectiles(state: &mut StarRingState) {
     }
 }
 
+/// 降下・横揺れ・コアへの引き寄せを重ねて鉱石を1tick進める。
 fn step_ores(state: &mut StarRingState) {
-    let radial_m = Layer::radial_mult(state.layer());
+    let fall_m = Layer::fall_mult(state.layer());
     for ore in &mut state.ores {
         let prev_x = ore.x;
         let prev_y = ore.y;
-        let dx = ore.x - CX;
-        let dy = ore.y - CY;
-        let r = dx.hypot(dy).max(0.2);
-        let ang = dy.atan2(dx);
         ore.age = ore.age.wrapping_add(1);
 
-        let radial = match ore.motion {
-            OreMotion::Spiral | OreMotion::Orbit => ore.kind.radial_speed() * radial_m,
-            OreMotion::Zigzag => {
-                let breath = (ore.age as f64 * 0.18).sin() * 0.08;
-                (ore.kind.radial_speed() + breath) * radial_m
-            }
-            OreMotion::Heavy => ore.kind.radial_speed() * 0.85 * radial_m,
-        };
-        let ang_delta = match ore.motion {
-            OreMotion::Zigzag => ore.ang_vel + (ore.age as f64 * 0.11).sin() * 0.012,
-            _ => ore.ang_vel,
+        let fall = ore.kind.fall_speed()
+            * fall_m
+            * if ore.motion == OreMotion::Heavy {
+                HEAVY_FALL_MULT
+            } else {
+                1.0
+            };
+        ore.y -= fall;
+
+        let phase = ore.age as f64;
+        ore.x += match ore.motion {
+            OreMotion::Spiral => ore.sway * SPIRAL_SWAY_GAIN * (phase * SPIRAL_SWAY_RATE).cos(),
+            OreMotion::Zigzag => ore.sway * ZIGZAG_SWAY_GAIN * (phase * ZIGZAG_SWAY_RATE).cos(),
+            OreMotion::Orbit => ore.sway * ORBIT_SWAY_GAIN,
+            OreMotion::Heavy => ore.sway * HEAVY_SWAY_GAIN,
         };
 
-        let new_ang = ang + ang_delta;
-        let new_r = (r + radial).max(0.15);
-        ore.x = CX + new_ang.cos() * new_r;
-        ore.y = CY + new_ang.sin() * new_r * ORBIT_Y_SQUASH.max(0.55);
+        // 引き寄せは降下が進むほど強くする。上空では自由に散らばり、コア付近で
+        // 吸い込まれる。落下速度に比例させるので、遅い鉱石ほど時間をかけて
+        // 同じ軌跡をたどる。
+        let descent = ((SPAWN_Y - ore.y) / (SPAWN_Y - CORE_Y)).clamp(0.0, 1.0);
+        let ramp = descent * descent * descent;
+        let dx = CX - ore.x;
+        let dy = CORE_Y - ore.y;
+        let dist = dx.hypot(dy).max(0.001);
+        let (ux, uy) = (dx / dist, dy / dist);
+        let pull = fall * CORE_PULL_RATIO * ramp;
+        ore.x += ux * pull;
+        ore.y += uy * pull;
+
+        if ore.motion == OreMotion::Orbit {
+            // 引き寄せ方向と直交する成分。コアに近いほど強まり、吸い込まれる
+            // 前にコアの周りを一度回り込ませる。
+            let swirl = fall * ORBIT_SWIRL_GAIN * descent * descent * ore.sway.signum();
+            ore.x += -uy * swirl;
+            ore.y += ux * swirl;
+        }
+
+        // 左右の壁で跳ね返す。鉱石が横から画面外へ消えると何が起きているか
+        // 追えなくなるので、常にフィールド内に留める。
+        let (lo, hi) = (FIELD_MARGIN, WORLD_W - FIELD_MARGIN);
+        if ore.x < lo {
+            ore.x = lo;
+            ore.sway = -ore.sway;
+        } else if ore.x > hi {
+            ore.x = hi;
+            ore.sway = -ore.sway;
+        }
+
         ore.vx = ore.x - prev_x;
         ore.vy = ore.y - prev_y;
     }
 }
 
-/// 中心到達: 報酬なしで消える (逸失)。星屑は減らない——防衛失敗ではない。
+/// コア到達と場外落下: 報酬なしで消える (逸失)。星屑は減らない——防衛失敗ではない。
 fn resolve_arrivals(state: &mut StarRingState) {
     let mut i = 0;
     while i < state.ores.len() {
         let ore = &state.ores[i];
-        let dist = (ore.x - CX).hypot(ore.y - CY);
-        if dist <= INNER_RADIUS {
+        let reached_core = (ore.x - CX).hypot(ore.y - CORE_Y) <= INNER_RADIUS;
+        if reached_core || ore.y < 0.0 {
             let ore = state.ores.remove(i);
             state.missed_count += 1;
-            burst(state, ore.x, ore.y, 4, 0.6, ParticleKind::Dust, 10);
+            burst(state, ore.x, ore.y, 4, 1.5, ParticleKind::Dust, 10);
         } else {
             i += 1;
         }
@@ -444,15 +495,13 @@ fn pick_ore_kind(state: &mut StarRingState) -> OreKind {
     OreKind::Dust
 }
 
-fn spawn_one(state: &mut StarRingState, kind: OreKind, angle: f64, radius: f64) {
-    let x = CX + angle.cos() * radius;
-    let y = CY + angle.sin() * radius * ORBIT_Y_SQUASH.max(0.55);
+fn spawn_one(state: &mut StarRingState, kind: OreKind, x: f64, y: f64) {
     let sign = if rng_next(state).is_multiple_of(2) {
         1.0
     } else {
         -1.0
     };
-    let ang_vel = kind.ang_speed() * sign * rand_range(state, 0.85, 1.15);
+    let sway = kind.sway_speed() * sign * rand_range(state, 0.85, 1.15);
     let hp = kind.base_hp() * Layer::hp_mult(state.layer());
     state.ores.push(Ore {
         x,
@@ -463,7 +512,7 @@ fn spawn_one(state: &mut StarRingState, kind: OreKind, angle: f64, radius: f64) 
         kind,
         radius: kind.radius(),
         motion: kind.default_motion(),
-        ang_vel,
+        sway,
         age: 0,
     });
 }
@@ -474,27 +523,35 @@ fn spawn_ores(state: &mut StarRingState) {
     if !state.elapsed_ticks.is_multiple_of(interval) {
         return;
     }
-    if state.ores.len() >= 56 {
+    if state.ores.len() >= MAX_ORES {
         return;
     }
-    let batch = Layer::spawn_batch(layer).min(56 - state.ores.len());
-    for _ in 0..batch {
+    let batch = Layer::spawn_batch(layer).min(MAX_ORES - state.ores.len());
+    // 同時湧きの x を層化サンプリングで散らす。一様乱数だけだと固まって湧いた
+    // ときに重なり、何体降ってきているのか読めなくなる。
+    let lo = SPAWN_X_MARGIN;
+    let slot = (WORLD_W - SPAWN_X_MARGIN * 2.0) / batch as f64;
+    for i in 0..batch {
         let kind = pick_ore_kind(state);
-        let angle = rand_range(state, 0.0, std::f64::consts::TAU);
-        spawn_one(state, kind, angle, SPAWN_RADIUS);
+        let slot_lo = lo + slot * i as f64;
+        let x = rand_range(state, slot_lo, slot_lo + slot);
+        // ばらつきは下方向へ取る。上へ振ると `WORLD_H` を超え、Canvas の
+        // y_bounds 外で数tick見えないまま落ちてくる。
+        let y = SPAWN_Y - rand_range(state, 0.0, 6.0);
+        spawn_one(state, kind, x, y);
     }
 }
 
 /// 砲台のワールド座標一覧 (立体感用に depth = sin も返す)。
 pub fn turret_positions(state: &StarRingState) -> Vec<(f64, f64, f64)> {
     let n = state.turret_count().max(1);
-    let r = state.ring_radius();
+    let (rx, ry) = state.ring_radii();
     let base = state.elapsed_ticks as f64 * state.orbit_speed();
     (0..n)
         .map(|i| {
             let a = base + i as f64 * std::f64::consts::TAU / n as f64;
-            let x = CX + a.cos() * r;
-            let y = CY + a.sin() * r * ORBIT_Y_SQUASH;
+            let x = CX + a.cos() * rx;
+            let y = CORE_Y + a.sin() * ry;
             let depth = a.sin();
             (x, y, depth)
         })
@@ -548,14 +605,14 @@ fn fire_core_pulse(state: &mut StarRingState) {
         max_life: 10,
     });
     state.core_flash_ticks = state.core_flash_ticks.max(4);
-    burst(state, CX, CY, 5, 1.0, ParticleKind::Spark, 12);
+    burst(state, CX, CORE_Y, 5, 2.5, ParticleKind::Spark, 12);
 }
 
 fn pulse_damage_area(state: &mut StarRingState, radius: f64, dmg: f64) {
     let mut i = state.ores.len();
     while i > 0 {
         i -= 1;
-        let dist = (state.ores[i].x - CX).hypot(state.ores[i].y - CY);
+        let dist = (state.ores[i].x - CX).hypot(state.ores[i].y - CORE_Y);
         if dist <= radius + state.ores[i].radius {
             apply_damage(state, i, dmg, DamageSource::CorePulse);
         }
@@ -591,7 +648,7 @@ fn fire_pulse(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize
         let (ux, uy) = aim_dir(state, gx, gy, idx);
         let jitter = rand_range(state, -0.12, 0.12);
         let ang = uy.atan2(ux) + jitter;
-        let speed = 2.4;
+        let speed = 6.0;
         state.projectiles.push(Projectile {
             x: gx,
             y: gy,
@@ -599,7 +656,7 @@ fn fire_pulse(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize
             vy: ang.sin() * speed,
             damage: dmg,
             life: 22,
-            radius: 0.55,
+            radius: 1.375,
             pierce: 0,
             splash: 0.0,
             kind: WeaponKind::Pulse,
@@ -616,7 +673,7 @@ fn fire_ray(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize, 
             return;
         };
         let (ux, uy) = aim_dir(state, gx, gy, idx);
-        let speed = 3.6;
+        let speed = 9.0;
         state.projectiles.push(Projectile {
             x: gx,
             y: gy,
@@ -624,7 +681,7 @@ fn fire_ray(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize, 
             vy: uy * speed,
             damage: dmg,
             life: 28,
-            radius: 0.7,
+            radius: 1.75,
             pierce: 2,
             splash: 0.0,
             kind: WeaponKind::Ray,
@@ -649,7 +706,7 @@ fn fire_scatter(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usi
             (k as f64 / (volley - 1) as f64) - 0.5
         };
         let ang = base_ang + t * spread;
-        let speed = 2.1;
+        let speed = 5.25;
         state.projectiles.push(Projectile {
             x: gx,
             y: gy,
@@ -657,7 +714,7 @@ fn fire_scatter(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usi
             vy: ang.sin() * speed,
             damage: dmg,
             life: 18,
-            radius: 0.5,
+            radius: 1.25,
             pierce: 0,
             splash: 0.0,
             kind: WeaponKind::Scatter,
@@ -674,7 +731,7 @@ fn fire_arc(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize, 
             return;
         };
         let (ux, uy) = aim_dir(state, gx, gy, idx);
-        let speed = 1.8;
+        let speed = 4.5;
         let spin = if k % 2 == 0 { 0.14 } else { -0.14 };
         state.projectiles.push(Projectile {
             x: gx,
@@ -683,7 +740,7 @@ fn fire_arc(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize, 
             vy: uy * speed,
             damage: dmg,
             life: 30,
-            radius: 0.65,
+            radius: 1.625,
             pierce: 1,
             splash: 0.0,
             kind: WeaponKind::Arc,
@@ -700,7 +757,7 @@ fn fire_nova(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize,
             return;
         };
         let (ux, uy) = aim_dir(state, gx, gy, idx);
-        let speed = 1.4;
+        let speed = 3.5;
         state.projectiles.push(Projectile {
             x: gx,
             y: gy,
@@ -708,9 +765,9 @@ fn fire_nova(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize,
             vy: uy * speed,
             damage: dmg,
             life: 26,
-            radius: 1.1,
+            radius: 2.75,
             pierce: 0,
-            splash: 5.5,
+            splash: 13.75,
             kind: WeaponKind::Nova,
             spin: 0.0,
         });
@@ -751,22 +808,21 @@ fn apply_damage(state: &mut StarRingState, idx: usize, dmg: f64, source: DamageS
         ore.x,
         ore.y,
         6 + (ore.kind as usize).min(6),
-        1.4 + ore.radius * 0.25,
+        3.5 + ore.radius * 0.25,
         ParticleKind::Shard,
         18,
     );
-    burst(state, ore.x, ore.y, 4, 2.0, ParticleKind::Spark, 12);
+    burst(state, ore.x, ore.y, 4, 5.0, ParticleKind::Spark, 12);
 
-    if ore.kind.splits_on_death() && state.ores.len() < 56 {
-        let base_ang = (ore.y - CY).atan2(ore.x - CX);
+    if ore.kind.splits_on_death() && state.ores.len() < MAX_ORES {
         let child_hp = OreKind::Dust.base_hp() * Layer::hp_mult(state.layer()) * 0.7;
-        let r = (ore.x - CX).hypot(ore.y - CY).max(INNER_RADIUS + 3.0);
         for k in 0..2 {
-            let ang = base_ang + (k as f64 - 0.5) * 0.55;
-            spawn_one(state, OreKind::Dust, ang, r);
+            let x = (ore.x + (k as f64 - 0.5) * 2.0 * SPLIT_SPREAD)
+                .clamp(FIELD_MARGIN, WORLD_W - FIELD_MARGIN);
+            spawn_one(state, OreKind::Dust, x, ore.y);
             if let Some(child) = state.ores.last_mut() {
                 child.hp = child_hp;
-                child.radius = 1.1;
+                child.radius = 2.75;
             }
         }
     }
@@ -812,28 +868,64 @@ mod tests {
         );
     }
 
+    /// 湧いた鉱石は最初の tick から Canvas の y_bounds (`0..WORLD_H`) の内側に
+    /// いること。外へ湧くと降りてくるまで画面に映らず、湧いた瞬間を見逃す。
     #[test]
-    fn ores_drift_spiral_not_straight_at_core() {
+    fn spawned_ores_start_inside_the_visible_world() {
         let mut state = StarRingState::new();
-        spawn_one(&mut state, OreKind::Dust, 0.0, SPAWN_RADIUS);
-        let ore = &state.ores[0];
-        let start_ang = (ore.y - CY).atan2(ore.x - CX);
-        for _ in 0..20 {
+        for _ in 0..600 {
             tick(&mut state, 1);
+            for ore in &state.ores {
+                assert!(
+                    (0.0..=WORLD_H).contains(&ore.y),
+                    "鉱石が画面外に湧いている y={}",
+                    ore.y
+                );
+            }
         }
-        assert!(!state.ores.is_empty() || state.total_kills + state.missed_count > 0);
-        if let Some(ore) = state.ores.first() {
-            let ang = (ore.y - CY).atan2(ore.x - CX);
-            let r = (ore.x - CX).hypot(ore.y - CY);
-            // 螺旋なので角度が動き、かつ中心へ一直線に消えていない
+        assert!(!state.ores.is_empty(), "検証対象の鉱石が湧いているはず");
+    }
+
+    #[test]
+    fn ores_drift_sideways_while_falling() {
+        let mut state = StarRingState::new();
+        spawn_one(&mut state, OreKind::Dust, CX + 20.0, SPAWN_Y);
+        let (start_x, start_y) = (state.ores[0].x, state.ores[0].y);
+        for _ in 0..20 {
+            step_ores(&mut state);
+        }
+        let ore = &state.ores[0];
+        assert!(ore.y < start_y - 1.0, "降下するはず y={start_y}->{}", ore.y);
+        assert!(
+            (ore.x - start_x).abs() > 0.2,
+            "真っ直ぐ落ちるだけでなく横へも漂うはず x={start_x}->{}",
+            ore.x
+        );
+        // 20tick でコアに到達しない (一直線ミサイルではない)
+        let dist = (ore.x - CX).hypot(ore.y - CORE_Y);
+        assert!(
+            dist > INNER_RADIUS + 1.0,
+            "すぐコアに到達しすぎ dist={dist}"
+        );
+    }
+
+    #[test]
+    fn ores_bounce_off_side_walls() {
+        let mut state = StarRingState::new();
+        spawn_one(
+            &mut state,
+            OreKind::Dust,
+            WORLD_W - FIELD_MARGIN - 0.1,
+            SPAWN_Y,
+        );
+        state.ores[0].sway = 2.0;
+        for _ in 0..60 {
+            step_ores(&mut state);
+            let x = state.ores[0].x;
             assert!(
-                (ang - start_ang).abs() > 0.05 || r < SPAWN_RADIUS - 1.0,
-                "螺旋漂流で角度か半径が変わるはず ang_delta={} r={}",
-                (ang - start_ang).abs(),
-                r
+                (FIELD_MARGIN..=WORLD_W - FIELD_MARGIN).contains(&x),
+                "鉱石が横から画面外へ出てはいけない x={x}"
             );
-            // 20tick で中心に到達しない (一直線ミサイルではない)
-            assert!(r > INNER_RADIUS + 1.0, "すぐ中心に到達しすぎ r={r}");
         }
     }
 
@@ -843,14 +935,14 @@ mod tests {
         let before = state.shards;
         state.ores.push(Ore {
             x: CX + 12.0,
-            y: CY,
+            y: CORE_Y + 25.0,
             vx: 0.0,
             vy: 0.0,
             hp: 0.4,
             kind: OreKind::Dust,
-            radius: 1.4,
+            radius: 3.5,
             motion: OreMotion::Spiral,
-            ang_vel: 0.0,
+            sway: 0.0,
             age: 0,
         });
         for _ in 0..40 {
@@ -874,14 +966,14 @@ mod tests {
         state.shards = 50.0;
         state.ores.push(Ore {
             x: CX + 1.0,
-            y: CY,
+            y: CORE_Y,
             vx: 0.0,
             vy: 0.0,
             hp: 10.0,
             kind: OreKind::Rock,
-            radius: 1.9,
+            radius: 4.75,
             motion: OreMotion::Spiral,
-            ang_vel: 0.0,
+            sway: 0.0,
             age: 0,
         });
         tick(&mut state, 1);
@@ -945,14 +1037,14 @@ mod tests {
         let mut state = StarRingState::new();
         state.ores.push(Ore {
             x: CX + 14.0,
-            y: CY,
+            y: CORE_Y + 30.0,
             vx: 0.0,
             vy: 0.0,
             hp: 10.0,
             kind: OreKind::Shell,
-            radius: 3.0,
+            radius: 7.5,
             motion: OreMotion::Heavy,
-            ang_vel: 0.0,
+            sway: 0.0,
             age: 0,
         });
         apply_damage(&mut state, 0, 5.0, DamageSource::Weapon(WeaponKind::Pulse));
@@ -974,14 +1066,14 @@ mod tests {
         let mut state = StarRingState::new();
         state.ores.push(Ore {
             x: CX + 16.0,
-            y: CY,
+            y: CORE_Y + 30.0,
             vx: 0.0,
             vy: 0.0,
             hp: 1.0,
             kind: OreKind::Splitter,
-            radius: 2.4,
+            radius: 6.0,
             motion: OreMotion::Spiral,
-            ang_vel: 0.02,
+            sway: 0.05,
             age: 0,
         });
         apply_damage(&mut state, 0, 10.0, DamageSource::Weapon(WeaponKind::Ray));
@@ -1091,14 +1183,14 @@ mod tests {
         state.weapon_levels[0] = [3, 4, 0];
         state.ores.push(Ore {
             x: CX + 20.0,
-            y: CY,
+            y: CORE_Y + 30.0,
             vx: 0.0,
             vy: 0.0,
             hp: 100.0,
             kind: OreKind::Dust,
-            radius: 1.4,
+            radius: 3.5,
             motion: OreMotion::Spiral,
-            ang_vel: 0.0,
+            sway: 0.0,
             age: 0,
         });
         for _ in 0..30 {
@@ -1141,14 +1233,14 @@ mod tests {
         state.total_kills = Layer::THRESHOLDS[1] - 1;
         state.ores.push(Ore {
             x: CX + 12.0,
-            y: CY,
+            y: CORE_Y + 25.0,
             vx: 0.0,
             vy: 0.0,
             hp: 0.1,
             kind: OreKind::Dust,
-            radius: 1.4,
+            radius: 3.5,
             motion: OreMotion::Spiral,
-            ang_vel: 0.0,
+            sway: 0.0,
             age: 0,
         });
         state.weapon_levels[0][WeaponStat::Power.index()] = 8;
@@ -1188,15 +1280,15 @@ mod tests {
         // 追加で威力を上げる
         assert!(purchase_ring_upgrade(&mut state, RingUpgrade::CorePulse));
         state.ores.push(Ore {
-            x: CX + 6.0,
-            y: CY,
+            x: CX + 15.0,
+            y: CORE_Y + 15.0,
             vx: 0.0,
             vy: 0.0,
             hp: 2.0,
             kind: OreKind::Dust,
-            radius: 1.4,
+            radius: 3.5,
             motion: OreMotion::Orbit,
-            ang_vel: 0.0,
+            sway: 0.05,
             age: 0,
         });
         let interval = state.pulse_interval().unwrap();

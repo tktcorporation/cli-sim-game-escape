@@ -1,29 +1,34 @@
 //! 星環 (Star Ring) の状態定義。
 //!
-//! 外周を螺旋漂流する鉱石を、公転する武装の連射で砕いて星屑を稼ぐ放置ゲーム。
-//! 「守る」ではなく「刈り取る」——中心の星は採掘の核であり、防衛対象ではない。
+//! 画面下部の核とそれを公転する武装が、上空の広い範囲から降ってくる鉱石を
+//! 迎撃して星屑を稼ぐ放置ゲーム。
+//! 「守る」ではなく「刈り取る」——下の星は採掘の核であり、防衛対象ではない。
 //! 脅威の増加はプレイヤー強化ではなく「層」開放が担う。
 
 use std::cell::Cell;
 
 /// ワールド幅 (Canvas x_bounds)。
-pub const WORLD_W: f64 = 60.0;
+pub const WORLD_W: f64 = 100.0;
 /// ワールド高さ (Canvas y_bounds)。
-pub const WORLD_H: f64 = 80.0;
-/// 中心 X。
+pub const WORLD_H: f64 = 100.0;
+/// コアの X。
 pub const CX: f64 = WORLD_W * 0.5;
-/// 中心 Y。
-pub const CY: f64 = WORLD_H * 0.5;
-/// 中心到達半径。ここに達した鉱石は逸失 (報酬なし・ペナルティなし) で消える。
-pub const INNER_RADIUS: f64 = 5.5;
-/// 砲台の基準軌道半径。
-pub const BASE_RING_R: f64 = 12.0;
-/// 軌道の Y 方向潰し (立体感)。
-pub const ORBIT_Y_SQUASH: f64 = 0.45;
+/// コアの Y。画面下部に置き、上空を鉱石の降下レーンとして丸ごと使う。
+pub const CORE_Y: f64 = 15.0;
+/// コア到達半径。ここに達した鉱石は逸失 (報酬なし・ペナルティなし) で消える。
+pub const INNER_RADIUS: f64 = 6.0;
+/// 砲台環の基準 X 半径。
+pub const RING_RX: f64 = 32.0;
+/// 砲台環の基準 Y 半径。横長にして環全体を画面下部へ収める。
+pub const RING_RY: f64 = 10.0;
 /// 砲台スロット上限。
 pub const MAX_TURRETS: u32 = 8;
-/// 鉱石の出現外半径。
-pub const SPAWN_RADIUS: f64 = 36.0;
+/// 鉱石の出現高さ。
+pub const SPAWN_Y: f64 = 97.0;
+/// 出現 X のフィールド端マージン。端ぴったりに湧かせない。
+pub const SPAWN_X_MARGIN: f64 = 5.0;
+/// 左右の反射壁の位置 (フィールド端からの距離)。鉱石を横へ逃がさない。
+pub const FIELD_MARGIN: f64 = 2.0;
 /// 手動タップの火力ブースト持続 (tick)。
 pub const BOOST_DURATION: u32 = 40;
 /// 武器種数。
@@ -326,8 +331,8 @@ impl Layer {
         1.0 + (layer.saturating_sub(1) as f64) * 0.50
     }
 
-    /// 螺旋の沈み速度倍率 (層が深いほどわずかに速い)。
-    pub fn radial_mult(layer: u32) -> f64 {
+    /// 落下速度の倍率 (層が深いほどわずかに速い)。
+    pub fn fall_mult(layer: u32) -> f64 {
         1.0 + (layer.saturating_sub(1) as f64) * 0.05
     }
 }
@@ -396,44 +401,45 @@ impl OreKind {
         }
     }
 
+    /// 当たり判定と見た目の半径 (ワールド単位)。
     pub fn radius(self) -> f64 {
         match self {
-            OreKind::Dust => 1.4,
-            OreKind::Rock => 1.9,
-            OreKind::Crystal => 2.3,
-            OreKind::Wisp => 1.7,
-            OreKind::Prism => 2.8,
-            OreKind::Shell => 3.0,
-            OreKind::Splitter => 2.4,
-            OreKind::Nova => 3.4,
+            OreKind::Dust => 3.5,
+            OreKind::Rock => 4.75,
+            OreKind::Crystal => 5.75,
+            OreKind::Wisp => 4.25,
+            OreKind::Prism => 7.0,
+            OreKind::Shell => 7.5,
+            OreKind::Splitter => 6.0,
+            OreKind::Nova => 8.5,
         }
     }
 
-    /// 軌道上の角速度 (rad/tick)。符号はスポーン時に決める。
-    pub fn ang_speed(self) -> f64 {
+    /// 横方向へ漂う基準速度 (ワールド単位/tick)。符号はスポーン時に決める。
+    pub fn sway_speed(self) -> f64 {
         match self {
-            OreKind::Dust => 0.035,
-            OreKind::Rock => 0.028,
-            OreKind::Crystal => 0.022,
-            OreKind::Wisp => 0.042,
-            OreKind::Prism => 0.030,
-            OreKind::Shell => 0.016,
-            OreKind::Splitter => 0.026,
-            OreKind::Nova => 0.014,
+            OreKind::Dust => 0.0875,
+            OreKind::Rock => 0.070,
+            OreKind::Crystal => 0.055,
+            OreKind::Wisp => 0.105,
+            OreKind::Prism => 0.075,
+            OreKind::Shell => 0.040,
+            OreKind::Splitter => 0.065,
+            OreKind::Nova => 0.035,
         }
     }
 
-    /// 内側へ沈む速度 (負 = 中心方向)。一直線突進ではなくゆるい螺旋。
-    pub fn radial_speed(self) -> f64 {
+    /// 降下速度 (ワールド単位/tick)。一直線突進ではなくゆるい降下。
+    pub fn fall_speed(self) -> f64 {
         match self {
-            OreKind::Dust => -0.22,
-            OreKind::Rock => -0.17,
-            OreKind::Crystal => -0.12,
-            OreKind::Wisp => -0.040,
-            OreKind::Prism => -0.14,
-            OreKind::Shell => -0.085,
-            OreKind::Splitter => -0.13,
-            OreKind::Nova => -0.07,
+            OreKind::Dust => 0.55,
+            OreKind::Rock => 0.425,
+            OreKind::Crystal => 0.30,
+            OreKind::Wisp => 0.10,
+            OreKind::Prism => 0.35,
+            OreKind::Shell => 0.2125,
+            OreKind::Splitter => 0.325,
+            OreKind::Nova => 0.175,
         }
     }
 
@@ -469,17 +475,17 @@ impl OreKind {
     }
 }
 
-/// 鉱石の軌道パターン。どれも「外周を漂いながらゆっくり沈む」系で、
-/// 中心への一直線ミサイルにはしない。
+/// 鉱石の降下パターン。どれも「横へ漂いながら降りてくる」系で、
+/// コアへの一直線ミサイルにはしない。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OreMotion {
-    /// 螺旋漂流 (基本)
+    /// 長い周期で左右へうねりながら降下 (基本)
     Spiral,
-    /// ほぼ周回、沈みはごく遅い
+    /// コア付近で横へ回り込み、一度旋回してから吸い込まれる
     Orbit,
-    /// 螺旋 + 半径の呼吸
+    /// 短い周期で大きく左右に振れる
     Zigzag,
-    /// 重く遅い螺旋
+    /// 横揺れがほとんど無く、重くゆっくり降りる
     Heavy,
 }
 
@@ -494,8 +500,8 @@ pub struct Ore {
     pub kind: OreKind,
     pub radius: f64,
     pub motion: OreMotion,
-    /// 角速度 (符号付き)。
-    pub ang_vel: f64,
+    /// 横方向の速度 (符号付き)。壁で反射すると符号が入れ替わる。
+    pub sway: f64,
     pub age: u32,
 }
 
@@ -585,8 +591,9 @@ pub struct StarRingState {
     pub tab: Tab,
     /// 武装タブで選択中の武器。
     pub selected_weapon: WeaponKind,
-    /// 環タブの縦スクロール位置。セーブしない (リロード時は先頭へ戻す)。
-    pub ring_scroll: Cell<u16>,
+    /// 表示中タブの縦スクロール位置。タブを切り替えると先頭へ戻すので
+    /// 3 タブで 1 つを共有する。セーブしない (リロード時は先頭へ戻す)。
+    pub tab_scroll: Cell<u16>,
     /// 直近の星屑獲得量 (shards/sec 表示用、リングバッファ)。
     pub recent_gain: [f64; 20],
     pub recent_gain_idx: usize,
@@ -618,16 +625,18 @@ impl StarRingState {
             layer_ready_latched: false,
             tab: Tab::Armory,
             selected_weapon: WeaponKind::Pulse,
-            ring_scroll: Cell::new(0),
+            tab_scroll: Cell::new(0),
             recent_gain: [0.0; 20],
             recent_gain_idx: 0,
             tick_gain: 0.0,
         }
     }
 
-    pub fn scroll_ring(&self, delta: i32) {
-        let cur = self.ring_scroll.get() as i32;
-        self.ring_scroll.set(cur.saturating_add(delta).max(0) as u16);
+    /// タブ内容を縦に送る。上限は描画時に `ScrollableTab` が実際の内容高さで
+    /// 丸めるので、ここでは 0 未満だけを止める。
+    pub fn scroll_tab(&self, delta: i32) {
+        let cur = self.tab_scroll.get() as i32;
+        self.tab_scroll.set(cur.saturating_add(delta).max(0) as u16);
     }
 
     pub fn layer(&self) -> u32 {
@@ -681,8 +690,10 @@ impl StarRingState {
         0.028 * (1.0 + 0.08 * self.turret_count().saturating_sub(1) as f64)
     }
 
-    pub fn ring_radius(&self) -> f64 {
-        BASE_RING_R + self.turret_count() as f64 * 0.55
+    /// 砲台環の (X 半径, Y 半径)。砲台が増えるほど環はわずかに広がる。
+    pub fn ring_radii(&self) -> (f64, f64) {
+        let n = self.turret_count() as f64;
+        (RING_RX + n * 1.4, RING_RY + n * 0.45)
     }
 
     pub fn yield_mult(&self) -> f64 {
@@ -700,7 +711,7 @@ impl StarRingState {
 
     pub fn pulse_radius(&self) -> f64 {
         let lv = self.ring_level(RingUpgrade::CorePulse) as f64;
-        8.5 + lv * 1.10
+        21.25 + lv * 2.75
     }
 
     pub fn pulse_damage(&self) -> f64 {
