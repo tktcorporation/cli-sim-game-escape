@@ -477,15 +477,34 @@ pub fn render(
     render_footer(state, f, footer);
 }
 
+/// 星屑の表記。桁が伸びても幅が動かないよう、単位を繰り上げて 7 桁に収める。
+///
+/// 層は上限なく伸びるので星屑も際限なく増える。単位が頭打ちだと
+/// `1640144.07M` のように桁だけが伸び、タブの本文が最小幅を超えて切れる。
+/// 用意した単位を使い切ったら指数表記へ落として、それ以上は伸ばさない。
 fn format_shards(n: f64) -> String {
-    if n >= 1_000_000.0 {
-        format!("{:.2}M", n / 1_000_000.0)
-    } else if n >= 10_000.0 {
-        format!("{:.1}K", n / 1_000.0)
-    } else if n >= 100.0 {
-        format!("{:.0}", n)
+    const UNITS: [(f64, &str); 5] = [
+        (1e15, "P"),
+        (1e12, "T"),
+        (1e9, "B"),
+        (1e6, "M"),
+        (1e4, "K"),
+    ];
+    if n >= 1e18 {
+        return format!("{n:.2e}");
+    }
+    for (scale, suffix) in UNITS {
+        if n >= scale {
+            // K だけ千で割る。1e4 から単位を付けるのは、4 桁の生の数字より
+            // `12.3K` の方が短いため。
+            let div = if suffix == "K" { 1e3 } else { scale };
+            return format!("{:.*}{suffix}", if suffix == "K" { 1 } else { 2 }, n / div);
+        }
+    }
+    if n >= 100.0 {
+        format!("{n:.0}")
     } else {
-        format!("{:.1}", n)
+        format!("{n:.1}")
     }
 }
 
@@ -2085,6 +2104,23 @@ mod tests {
         }
         state.shards = 1e9;
         state
+    }
+
+    /// 星屑がどれだけ増えても表記の幅が動かないこと。
+    ///
+    /// 単位が頭打ちだと桁だけが伸び、強化行がタブの最小幅を超えて切れる。
+    /// 層に上限が無い以上、到達しうる桁はテストの側で決め打てない。
+    #[test]
+    fn the_shard_count_keeps_its_width_however_far_the_run_goes() {
+        let mut n = 0.1_f64;
+        while n < 1e30 {
+            let s = format_shards(n);
+            assert!(
+                display_width(&s) <= 8,
+                "星屑 {n:e} の表記 {s} が 8 桁を超える"
+            );
+            n *= 3.0;
+        }
     }
 
     /// 幅を 1 桁ずつ動かして、どの幅でもタブ本文の行が切り落ちないこと。
