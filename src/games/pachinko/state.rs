@@ -700,6 +700,14 @@ pub struct PachinkoState {
     /// 直近に終わった大当たりの獲得玉数。終了後のサマリ表示が参照するので、
     /// 大当たりが終わっても消さない。進行中の値は `Mode::Jackpot` が持つ
     /// (`jackpot_payout` が両者を1つの読み口にまとめる)。
+    /// この来店を始めた時点の総資産 (円換算)。収支はここからの増減で見せる。
+    ///
+    /// 現金と持ち玉はどちらも来店をまたいで持ち越されるので、差し引かないと
+    /// 前回の残りが今回の利益として計上され、打ち始める前から収支がプラスで
+    /// 始まる。玉数ではなく円換算で持つのは、玉を借りる操作も換金する操作も
+    /// 資産の内訳を移し替えるだけで総額を変えないため — 内訳で見ると、
+    /// 換金した瞬間に収支が動いてしまう。保存はしない。
+    pub opening_assets: u64,
     pub last_jackpot_payout: u32,
     /// 直近に終わった大当たりが何連目だったか。決算はこちらを使う —
     /// 進行中の連チャン数 (`chain`) は電サポが切れた時点で数え直しに戻るので、
@@ -755,6 +763,7 @@ impl PachinkoState {
             start_flash: 0,
             reach_flash: 0,
             reach_flash_kind: ReachKind::None,
+            opening_assets: 0,
             last_jackpot_payout: 0,
             last_jackpot_chain: 0,
             jackpot_payout_shown: 0.0,
@@ -811,6 +820,12 @@ impl PachinkoState {
 
     pub fn seated_machine_mut(&mut self) -> Option<&mut Machine> {
         self.machines.get_mut(self.seat)
+    }
+
+    /// 手持ちの総資産 (円換算)。現金と持ち玉の合計で、玉を借りても換金しても
+    /// 総額は変わらない。収支はこの値の増減で見る。
+    pub fn assets_yen(&self) -> u64 {
+        self.cash as u64 + self.balls_held as u64 * BALL_LOAN_YEN as u64 / BALL_LOAN_COUNT as u64
     }
 
     /// 出玉カウンタが目指す値。大当たり中は進行中の獲得数、終わった後は

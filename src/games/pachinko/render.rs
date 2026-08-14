@@ -36,8 +36,7 @@ use super::actions;
 use super::logic;
 use super::state::{
     Digit, InfoTab, JackpotState, Machine, MachineSpec, Mode, PachinkoState, PendingRank, Phase,
-    SpinOutcome, StopStyle, ATTACKER_HALF_W, ATTACKER_X, ATTACKER_Y, BALL_LOAN_COUNT,
-    BALL_LOAN_YEN, BALL_R, BOARD_H, BOARD_W, LAUNCH_X, LAUNCH_Y, MAX_PENDING, NAIL_R,
+    SpinOutcome, StopStyle, ATTACKER_HALF_W, ATTACKER_X, ATTACKER_Y, BALL_R, BOARD_H, BOARD_W, LAUNCH_X, LAUNCH_Y, MAX_PENDING, NAIL_R,
     PENDING_PROMOTE_FLASH_TICKS, ROUND_COUNT, SIDE_POCKET_HALF_W, SIDE_POCKET_LEFT_X,
     SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y, START_POCKET_X, START_POCKET_Y,
 };
@@ -94,15 +93,10 @@ fn format_signed_yen(value: i64) -> String {
     format!("{sign}{}円", format_thousands(value.unsigned_abs()))
 }
 
-/// 持ち玉を換金したときの金額。収支表示は「今この瞬間に流したら手元に
-/// いくら残るか」で見せる。
-fn balls_to_yen(balls: u32) -> u64 {
-    balls as u64 * BALL_LOAN_YEN as u64 / BALL_LOAN_COUNT as u64
-}
-
-/// この来店の収支 (持ち玉の価値 - 投資額)。
+/// この来店の収支。開始時点の総資産からの増減で見る
+/// (`PachinkoState::opening_assets` 参照)。
 fn visit_balance(state: &PachinkoState) -> i64 {
-    balls_to_yen(state.balls_held) as i64 - state.invested as i64
+    state.assets_yen() as i64 - state.opening_assets as i64
 }
 
 fn balance_color(value: i64) -> Color {
@@ -1876,6 +1870,7 @@ fn render_playing_footer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::games::pachinko::state::{BALL_LOAN_COUNT, BALL_LOAN_YEN};
     use ratzilla::ratatui::backend::TestBackend;
     use ratzilla::ratatui::Terminal;
 
@@ -2449,12 +2444,36 @@ mod tests {
     #[test]
     fn visit_balance_counts_held_balls_against_the_investment() {
         let mut state = PachinkoState::new();
-        state.invested = 1_000;
+        state.opening_assets = state.assets_yen();
+
+        // 現金を玉に替えただけでは資産の内訳が動くだけで、収支は変わらない。
+        state.cash -= BALL_LOAN_YEN;
+        state.invested = BALL_LOAN_YEN;
         state.balls_held = BALL_LOAN_COUNT;
         assert_eq!(visit_balance(&state), 0, "借りた分をそのまま持っていれば収支は 0");
+
         state.balls_held = BALL_LOAN_COUNT * 2;
         assert_eq!(visit_balance(&state), 1_000);
         assert_eq!(format_signed_yen(visit_balance(&state)), "+1,000円");
+
+        // 換金しても内訳が move するだけなので、収支は動かない。
+        state.cash += BALL_LOAN_YEN * 2;
+        state.balls_held = 0;
+        assert_eq!(visit_balance(&state), 1_000, "換金した瞬間に収支が動いている");
+    }
+
+    #[test]
+    fn a_visit_starts_at_zero_however_much_was_carried_over() {
+        // 現金も持ち玉も来店をまたいで持ち越される。開始時点を基準にしないと、
+        // 前回の残りが今回の利益として計上され、打つ前から収支がプラスになる。
+        let mut state = PachinkoState::new();
+        state.balls_held = BALL_LOAN_COUNT;
+        state.opening_assets = state.assets_yen();
+        assert_eq!(
+            visit_balance(&state),
+            0,
+            "持ち越した玉が、打ち始める前から今回の利益に計上されている"
+        );
     }
 
     // ── 保留の見せ方 ───────────────────────────────────────────

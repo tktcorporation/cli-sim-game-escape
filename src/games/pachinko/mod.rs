@@ -67,6 +67,9 @@ impl PachinkoGame {
         // 生成はセーブの読み込みより後に置く。`rng_state` を読み込む前に
         // 台を引くと、毎回 `PachinkoState::new` の固定 seed から始まり、
         // 来店のたびに同じ4台・同じ釘が並ぶ。
+        // 読み込んだ現金と持ち玉を、この来店の開始時点として記録する。収支は
+        // ここからの増減で見せる (`PachinkoState::opening_assets` 参照)。
+        state.opening_assets = state.assets_yen();
         logic::generate_hall(&mut state);
         // 台を引いて進んだ seed をその場で書き戻す。次の保存を待つ間に
         // 再読み込みされると、保存済みの古い seed から同じ4台を引き直して
