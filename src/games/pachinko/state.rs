@@ -40,7 +40,7 @@ pub const START_POCKET_X: f64 = BOARD_W / 2.0;
 pub const START_POCKET_Y: f64 = 54.0;
 /// ヘソの基本の受け口半幅。台ごとの `nail_spread` と電サポの有無を加えた値が
 /// 実効幅になる (`logic::effective_pocket_half_w`)。
-pub const START_POCKET_BASE_HALF_W: f64 = 1.6;
+pub const START_POCKET_BASE_HALF_W: f64 = 1.0;
 
 /// アタッカー (大当たり中のみ開放)。
 pub const ATTACKER_X: f64 = BOARD_W / 2.0;
@@ -98,30 +98,30 @@ pub const MACHINE_SPECS: [(&str, MachineSpec); 3] = [
         "海凪",
         MachineSpec {
             normal_odds: 45,
-            kakuhen_odds: 12,
-            round_table: &[(5, 60), (10, 40)],
-            kakuhen_rate: 55,
-            jitan_spins: 50,
+            kakuhen_odds: 16,
+            round_table: &[(4, 60), (8, 40)],
+            kakuhen_rate: 35,
+            jitan_spins: 18,
         },
     ),
     (
         "花火繚乱",
         MachineSpec {
             normal_odds: 80,
-            kakuhen_odds: 15,
-            round_table: &[(10, 50), (16, 50)],
-            kakuhen_rate: 65,
-            jitan_spins: 80,
+            kakuhen_odds: 22,
+            round_table: &[(8, 50), (14, 50)],
+            kakuhen_rate: 38,
+            jitan_spins: 24,
         },
     ),
     (
         "極楽轟音",
         MachineSpec {
-            normal_odds: 140,
-            kakuhen_odds: 18,
+            normal_odds: 105,
+            kakuhen_odds: 42,
             round_table: &[(16, 100)],
-            kakuhen_rate: 75,
-            jitan_spins: 100,
+            kakuhen_rate: 37,
+            jitan_spins: 30,
         },
     ),
 ];
@@ -263,17 +263,22 @@ pub enum Digit {
 
 // ── 遊技モード ─────────────────────────────────────────────────
 
-/// 1ラウンドの規定カウント。
-pub const ROUND_COUNT: u32 = 10;
+/// 1ラウンドの規定カウント。アタッカーは盤面幅の2割ほどしかないので、
+/// 実機と同じ10カウントにすると規定数に届く前に必ず時間切れになり、
+/// ラウンドの進捗表示が一度も満たされないまま流れていく。
+pub const ROUND_COUNT: u32 = 2;
 /// 1ラウンドの制限時間。玉が入らなくてもここで打ち切ることで、
 /// 打ち出しを止めたまま大当たりが永久に終わらない状態を防ぐ。
-pub const ROUND_LIMIT_TICKS: u32 = 180;
-/// アタッカー1入賞あたりの賞球。
-pub const ATTACKER_PAYOUT: u32 = 15;
+pub const ROUND_LIMIT_TICKS: u32 = 80;
+/// アタッカー1入賞あたりの賞球。大当たり中の出玉はほぼこの値だけで決まるので、
+/// 「当たった瞬間に持ち玉がドンと増える」手応えはここが持っている。
+pub const ATTACKER_PAYOUT: u32 = 16;
 /// 一般入賞口1入賞あたりの賞球。
-pub const SIDE_PAYOUT: u32 = 3;
-/// ヘソ1入賞あたりの賞球。
-pub const START_PAYOUT: u32 = 3;
+pub const SIDE_PAYOUT: u32 = 1;
+/// ヘソ1入賞あたりの賞球。打った玉の1割弱がヘソへ入るので、ここは賞球全体の
+/// 4割前後を占める。厚くすると通常時に削られる感覚が消え、大当たりで取り返す
+/// という起伏そのものが平坦になる。
+pub const START_PAYOUT: u32 = 2;
 
 /// 大当たりラウンドの進行。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -364,8 +369,12 @@ impl InfoTab {
 /// 1000 円で借りられる玉数。
 pub const BALL_LOAN_YEN: u32 = 1000;
 pub const BALL_LOAN_COUNT: u32 = 250;
-/// 打ち出し間隔。10 ticks/sec なので 0.6 秒間隔となり、実機の毎分100発に近い。
-pub const FIRE_INTERVAL_TICKS: u32 = 6;
+/// 打ち出し間隔。`try_fire` は残り tick を減らす tick では撃たないので、
+/// 実際の周期はこの値 +1 tick = 0.4 秒 (毎分150発) になる。実機の毎分100発
+/// より速いのは、盤面に常時数個の玉が流れている絵を作るため — 実機の間隔
+/// では玉が1個ずつ落ちるだけの寂しい盤面になり、玉数の上限 (`MAX_BALLS`) も
+/// 遊んだままになる。
+pub const FIRE_INTERVAL_TICKS: u32 = 3;
 /// 保留の上限。
 pub const MAX_PENDING: usize = 4;
 /// 履歴に残す大当たりの件数。

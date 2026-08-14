@@ -69,7 +69,7 @@ const NAIL_SCATTER: f64 = 0.22;
 /// `nail_spread` がヘソの受け口へ効く強さ。ヘソ釘の位置 (`generate_nails`)
 /// と当たり判定の幅 (`effective_pocket_half_w`) は同じ係数を共有しないと、
 /// 見た目の開きと実際の入りやすさが食い違って釘読みが嘘になる。
-const POCKET_SPREAD_GAIN: f64 = 2.4;
+const POCKET_SPREAD_GAIN: f64 = 1.3;
 /// 玉と釘が接触する距離。
 const CONTACT_DIST: f64 = BALL_R + NAIL_R;
 /// 1サブステップごとに横方向の速度へ掛かる減衰。打ち出した勢いは盤面を
@@ -99,7 +99,7 @@ pub fn effective_pocket_half_w(state: &PachinkoState) -> f64 {
     if state.mode.is_assisted() {
         // 電サポ中は羽根が開いてヘソが広がる。確変・時短の価値をヘソの
         // 見た目そのもので伝えるため、確率ではなく受け口を触る。
-        base + 1.8
+        base + 1.0
     } else {
         base
     }
@@ -644,10 +644,21 @@ const RAIL_STEP_X: f64 = 8.0;
 const RAIL_BASE_X: f64 = 8.0;
 /// `rail_bias` が最大のときに外側の釘を中央へ寄せる割合。中央の釘は動かず、
 /// 端ほど大きく動くので、盤面では「上部の釘が中央へ傾いている」形に見える。
-const RAIL_BIAS_PULL: f64 = 0.25;
+///
+/// 寄り釘は等間隔の格子なので、ここを大きくして格子ごと縮めると、段の隙間が
+/// ヘソの真上へ揃う `rail_bias` の値でだけ玉道が一本に繋がり、回転率が跳ね
+/// 上がる。跳ね方は `rail_bias` に対して単調ではなく、盤面の見た目からは
+/// 読めない。読める手がかり (ヘソ釘の開き) より強い当たり外れを隠し持たせ
+/// ないよう、傾きは玉道を大きく変えない範囲に留める。
+const RAIL_BIAS_PULL: f64 = 0.02;
 /// 釘1本ごとの位置の揺らぎ。同じ `nail_spread` / `rail_bias` の台でも
 /// 盤面が同一にならないようにして、台ごとの見た目の個体差を作る。
-const NAIL_JITTER: f64 = 0.8;
+///
+/// ここを大きくすると、玉道を決めるのが「見えるヘソ釘の開き」ではなく
+/// 「見えない寄り釘のズレ」になり、盤面から回りやすさを読むという判断軸が
+/// 成立しなくなる。`simulator::nail_spread_correlates_with_spin_rate` が
+/// その退行を検知する。
+const NAIL_JITTER: f64 = 0.15;
 
 /// 下部釘の段数と本数。
 const LOWER_ROWS: usize = 4;
@@ -716,6 +727,17 @@ pub fn generate_nails(seed: &mut u32, nail_spread: f64, rail_bias: f64) -> Vec<N
     nails
 }
 
+/// ホールに並ぶ台のヘソ釘の開きの範囲。
+///
+/// 下限は「全く回らない台」を並べないための足切り。上限は出玉率 (賞球総数 ÷
+/// 打ち込み玉数) の天井を決める — 開くほど回り、回るほど当たるので、ここを
+/// 上げすぎると打つほど玉が増える台がホールに並び、有限の軍資金という前提が
+/// 崩れる。`simulator::payout_ratio_stays_below_break_even` がこの上限の台を
+/// 実際に打って確かめる。
+pub const NAIL_SPREAD_RANGE: (f64, f64) = (0.25, 0.80);
+/// ホールに並ぶ台の寄り釘の傾きの範囲。効き方は `RAIL_BIAS_PULL` を参照。
+pub const RAIL_BIAS_RANGE: (f64, f64) = (-0.6, 0.9);
+
 /// 来店ごとのホールを作る。同じスペックの台が釘だけ違う形で並ぶことがあり、
 /// それが釘読みという判断軸を成立させる。
 pub fn generate_hall(state: &mut PachinkoState) {
@@ -723,9 +745,9 @@ pub fn generate_hall(state: &mut PachinkoState) {
     for _ in 0..HALL_SIZE {
         let pick = rng_below(&mut state.rng_state, MACHINE_SPECS.len() as u32) as usize;
         let (name, spec) = MACHINE_SPECS[pick];
-        // 全く回らない台が並ぶと選ぶ意味が消えるため、下限を 0.15 で切る。
-        let nail_spread = rand_range(&mut state.rng_state, 0.15, 0.95);
-        let rail_bias = rand_range(&mut state.rng_state, -0.6, 0.9);
+        let nail_spread =
+            rand_range(&mut state.rng_state, NAIL_SPREAD_RANGE.0, NAIL_SPREAD_RANGE.1);
+        let rail_bias = rand_range(&mut state.rng_state, RAIL_BIAS_RANGE.0, RAIL_BIAS_RANGE.1);
         let nails = generate_nails(&mut state.rng_state, nail_spread, rail_bias);
         machines.push(Machine {
             name,

@@ -18,6 +18,13 @@ pub const TAB_RECORD: u16 = 8;
 /// 盤面全面のタップ。打ち出しのトグルに割り当てる。盤面は Canvas 1枚で
 /// 占有面積が最も広いので、モバイルで最も押しやすい操作を主操作に当てる。
 pub const BOARD_TAP: u16 = 9;
+/// 台リスト (ホール) と情報パネル (遊技中) のスクロール矢印。矢印の描画と
+/// タップ登録は `ScrollableTab` が行い、押された時の挙動はスクロール位置の
+/// 更新だけで閉じる。
+pub const HALL_SCROLL_UP: u16 = 10;
+pub const HALL_SCROLL_DOWN: u16 = 11;
+pub const INFO_SCROLL_UP: u16 = 12;
+pub const INFO_SCROLL_DOWN: u16 = 13;
 /// ホールの台選択ベース + 台の index。
 pub const MACHINE_SELECT_BASE: u16 = 100;
 
@@ -52,5 +59,6 @@ mod tests {
         assert_eq!(decode_machine_select(MACHINE_SELECT_BASE - 1), None);
         assert_eq!(decode_machine_select(TOGGLE_FIRE), None);
         assert_eq!(decode_machine_select(BOARD_TAP), None);
+        assert_eq!(decode_machine_select(INFO_SCROLL_DOWN), None);
     }
 }

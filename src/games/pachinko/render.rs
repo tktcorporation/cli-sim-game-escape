@@ -27,6 +27,7 @@ use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::canvas_fx;
+use crate::games::GameChoice;
 use crate::input::{is_narrow_layout, ClickState};
 use crate::theme;
 use crate::widgets::{Clickable, ClickableList, ScrollableTab, TabBar};
@@ -41,15 +42,8 @@ use super::state::{
 };
 
 /// 玉響のアクセント色 (銀玉の色)。盤面の枠・選択中タブ・見出しで共有する。
-const ACCENT: Color = Color::White;
-
-/// スクロール矢印のアクション ID。矢印の描画とタップ登録は `ScrollableTab`
-/// の内側で完結し、押された時の挙動もスクロール位置 (`Cell<u16>`) の更新
-/// だけで閉じるため、盤面や台の操作を表す `actions.rs` とは別に置く。
-pub const HALL_SCROLL_UP: u16 = 10;
-pub const HALL_SCROLL_DOWN: u16 = 11;
-pub const INFO_SCROLL_UP: u16 = 12;
-pub const INFO_SCROLL_DOWN: u16 = 13;
+/// メニュー一覧での識別色と同じものを引くことで、ゲーム内外で色がずれない。
+const ACCENT: Color = theme::accent(&GameChoice::Pachinko);
 
 pub fn render(
     state: &PachinkoState,
@@ -282,7 +276,12 @@ fn render_hall_list(
         .border_style(Style::default().fg(Color::DarkGray))
         .title(Span::styled(" 台を選ぶ ", Style::default().fg(Color::Gray)));
     let mut cs = click_state.borrow_mut();
-    ScrollableTab::new(cl, &state.hall_scroll, HALL_SCROLL_UP, HALL_SCROLL_DOWN)
+    ScrollableTab::new(
+        cl,
+        &state.hall_scroll,
+        actions::HALL_SCROLL_UP,
+        actions::HALL_SCROLL_DOWN,
+    )
         .block(block)
         .arrow_color(ACCENT)
         .render(f, area, &mut cs);
@@ -685,7 +684,12 @@ fn render_info_panel(
         InfoTab::Record => record_tab_list(state),
     };
     let mut cs = click_state.borrow_mut();
-    ScrollableTab::new(list, &state.info_scroll, INFO_SCROLL_UP, INFO_SCROLL_DOWN)
+    ScrollableTab::new(
+        list,
+        &state.info_scroll,
+        actions::INFO_SCROLL_UP,
+        actions::INFO_SCROLL_DOWN,
+    )
         .arrow_color(ACCENT)
         .render(f, chunks[1], &mut cs);
 }
