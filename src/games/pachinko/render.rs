@@ -35,10 +35,11 @@ use crate::widgets::{Clickable, ClickableList, ScrollableTab, TabBar};
 use super::actions;
 use super::logic;
 use super::state::{
-    Digit, InfoTab, JackpotState, Machine, MachineSpec, Mode, PachinkoState, Phase,
-    ATTACKER_HALF_W, ATTACKER_X, ATTACKER_Y, BALL_LOAN_COUNT, BALL_LOAN_YEN, BALL_R, BOARD_H,
-    BOARD_W, LAUNCH_X, LAUNCH_Y, MAX_PENDING, NAIL_R, ROUND_COUNT, SIDE_POCKET_HALF_W,
-    SIDE_POCKET_LEFT_X, SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y, START_POCKET_X, START_POCKET_Y,
+    Digit, InfoTab, JackpotState, Machine, MachineSpec, Mode, PachinkoState, PendingRank, Phase,
+    SpinOutcome, StopStyle, ATTACKER_HALF_W, ATTACKER_X, ATTACKER_Y, BALL_LOAN_COUNT,
+    BALL_LOAN_YEN, BALL_R, BOARD_H, BOARD_W, LAUNCH_X, LAUNCH_Y, MAX_PENDING, NAIL_R,
+    PENDING_PROMOTE_FLASH_TICKS, ROUND_COUNT, SIDE_POCKET_HALF_W, SIDE_POCKET_LEFT_X,
+    SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y, START_POCKET_X, START_POCKET_Y,
 };
 
 /// 玉響のアクセント色 (銀玉の色)。盤面の枠・選択中タブ・見出しで共有する。
@@ -729,6 +730,115 @@ fn board_border_color(state: &PachinkoState) -> Color {
     }
 }
 
+// ── 確定シグナル ───────────────────────────────────────────────
+
+/// 確定シグナルが立っている回転の残り tick。虹が枠を回る速さの位相に使う。
+///
+/// この演出は当たりでしか立たない (`logic::pick_confirmed`) 唯一のもので、
+/// 他のどの演出とも混ざらない見せ方にする。確定が存在すること自体が、
+/// 確定ではない他の全ての演出に「まだ分からない」という緊張を与える。
+fn confirmed_signal_phase(state: &PachinkoState) -> Option<u32> {
+    match &state.digit {
+        Digit::Spinning {
+            ticks_left,
+            outcome,
+        } if outcome.confirmed => Some(*ticks_left),
+        _ => None,
+    }
+}
+
+/// 虹が枠を1周する速さ (1 tick あたりの色相の度数)。
+const RAINBOW_DEG_PER_TICK: f64 = 26.0;
+
+/// 色相環の1点を彩度・明度いっぱいの RGB にする。虹を「流れている」と
+/// 感じさせるには隣り合うセルの色が連続している必要があり、16色のパレット
+/// では段が飛んでしまう。
+fn hue_color(degrees: f64) -> Color {
+    let h = degrees.rem_euclid(360.0) / 60.0;
+    let x = ((1.0 - (h % 2.0 - 1.0).abs()) * 255.0) as u8;
+    match h as u32 {
+        0 => Color::Rgb(255, x, 0),
+        1 => Color::Rgb(x, 255, 0),
+        2 => Color::Rgb(0, 255, x),
+        3 => Color::Rgb(0, x, 255),
+        4 => Color::Rgb(x, 0, 255),
+        _ => Color::Rgb(255, 0, x),
+    }
+}
+
+/// 枠セルを外周に沿って一筆書きの順に並べる。並び順がそのまま虹の流れる
+/// 向きになるので、時計回りに一周させる。
+fn border_cells(area: Rect) -> Vec<(u16, u16)> {
+    let (right, bottom) = (area.right() - 1, area.bottom() - 1);
+    let mut cells = Vec::new();
+    for x in area.x..=right {
+        cells.push((x, area.y));
+    }
+    for y in (area.y + 1)..=bottom {
+        cells.push((right, y));
+    }
+    for x in (area.x..right).rev() {
+        cells.push((x, bottom));
+    }
+    for y in ((area.y + 1)..bottom).rev() {
+        cells.push((area.x, y));
+    }
+    cells
+}
+
+/// 盤面の枠へ虹を流す。枠は既に描かれている前提で、色だけを塗り替える。
+/// 別 DOM 要素を足さずに済ませるため、同じ `<pre>` のセルを直接染める。
+fn paint_rainbow_border(f: &mut Frame, area: Rect, phase: u32) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let cells = border_cells(area);
+    let total = cells.len() as f64;
+    let buf = f.buffer_mut();
+    for (index, position) in cells.into_iter().enumerate() {
+        let Some(cell) = buf.cell_mut(position) else {
+            continue;
+        };
+        let hue = index as f64 / total * 360.0 + phase as f64 * RAINBOW_DEG_PER_TICK;
+        cell.set_fg(hue_color(hue));
+    }
+}
+
+// ── 熱い瞬間の画面効果 ─────────────────────────────────────────
+
+/// 盤面をずらして見せる tick 数。
+const SHAKE_TICKS: u8 = 3;
+
+/// 盤面を1セル横へずらすか。赤以上の保留が出た瞬間と確定シグナルの発生時に
+/// 限る — 揺れは「他と違うことが起きた」という合図なので、頻度が上がるほど
+/// 合図としての意味が薄れる。
+fn board_shake(state: &PachinkoState) -> bool {
+    let hot_pending = state.pending.iter().any(|p| {
+        p.rank >= PendingRank::Red && p.promote_flash + SHAKE_TICKS > PENDING_PROMOTE_FLASH_TICKS
+    });
+    let confirmed_start = match &state.digit {
+        Digit::Spinning {
+            ticks_left,
+            outcome,
+        } => {
+            outcome.confirmed
+                && ticks_left + SHAKE_TICKS as u32
+                    > outcome.reach.spin_ticks() + outcome.stop.extra_ticks()
+        }
+        Digit::Idle => false,
+    };
+    hot_pending || confirmed_start
+}
+
+/// 揺れている間の盤面の描画領域。幅を1つ削って右へ寄せることで、盤面の
+/// 中身ごと1セル動く。削れないほど狭い領域では揺らさない。
+fn shaken_area(state: &PachinkoState, area: Rect) -> Rect {
+    if area.width < 3 || !board_shake(state) {
+        return area;
+    }
+    Rect::new(area.x + 1, area.y, area.width - 1, area.height)
+}
+
 /// ヘソの色。玉が入った直後だけ白く光らせる。釘に弾かれた玉
 /// (`Ball::hit_glow`) と同じ見せ方にすることで、盤面の白さが一貫して
 /// 「今この瞬間に何かが当たった」印になる。
@@ -748,6 +858,7 @@ fn render_board(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let area = shaken_area(state, area);
     let jackpot = match state.mode {
         Mode::Jackpot(j) => Some(j),
         _ => None,
@@ -824,7 +935,208 @@ fn render_board(
         .block(block);
 
     Clickable::new(canvas, actions::BOARD_TAP).render(f, area, &mut click_state.borrow_mut());
+    if let Some(phase) = confirmed_signal_phase(state) {
+        paint_rainbow_border(f, area, phase);
+    }
     render_board_banner(state, f, inner);
+    if let Some(j) = jackpot {
+        render_jackpot_theater(state, f, inner, j);
+    }
+}
+
+// ── 大当たり中の出玉カウンタ ───────────────────────────────────
+
+/// 出玉カウンタの数字。3×5 のドット絵を行ごとに持ち、各行の下位3ビットが
+/// 左から右のドットにあたる。
+const BIG_DIGIT_ROWS: [[u8; 5]; 10] = [
+    [0b111, 0b101, 0b101, 0b101, 0b111],
+    [0b010, 0b110, 0b010, 0b010, 0b111],
+    [0b111, 0b001, 0b111, 0b100, 0b111],
+    [0b111, 0b001, 0b111, 0b001, 0b111],
+    [0b101, 0b101, 0b111, 0b001, 0b001],
+    [0b111, 0b100, 0b111, 0b001, 0b111],
+    [0b111, 0b100, 0b111, 0b101, 0b111],
+    [0b111, 0b001, 0b010, 0b010, 0b010],
+    [0b111, 0b101, 0b111, 0b101, 0b111],
+    [0b111, 0b101, 0b111, 0b001, 0b111],
+];
+
+/// ドット絵の高さ (行数)。
+const BIG_DIGIT_ROW_COUNT: usize = 5;
+/// 出玉カウンタに割く高さ (セル)。braille は 1 セル = 横2×縦4 の疑似ピクセル
+/// なので、2 セルで縦 8 ピクセルが使える。
+const BIG_DIGIT_H: u16 = 2;
+/// ドット絵1行分の縦のピクセル数。5行を縦 8 ピクセルへ引き伸ばす倍率。
+const BIG_DIGIT_ROW_PX: f64 = 1.4;
+/// 疑似ピクセル1つを塗るときのサンプリング間隔。braille の 1 点より細かく
+/// することで、引き伸ばした数字の縁が欠けない。
+const BIG_DIGIT_STEP: f64 = 0.3;
+
+/// 数字列を縦 `BIG_DIGIT_ROW_COUNT` の点灯パターンへ展開する。1要素が
+/// 1ピクセル列で、下位ビットから順に上の行にあたる。
+///
+/// 桁の間と区切りのコンマも列として持つことで、描画側は列を左から並べる
+/// だけでよくなり、文字ごとの幅を意識せずに済む。
+fn big_number_columns(text: &str) -> Vec<u8> {
+    let mut columns: Vec<u8> = Vec::new();
+    for ch in text.chars() {
+        match ch.to_digit(10) {
+            Some(value) => {
+                for col in 0..3u32 {
+                    let mut bits = 0u8;
+                    for (row, pattern) in BIG_DIGIT_ROWS[value as usize].iter().enumerate() {
+                        if pattern & (0b100 >> col) != 0 {
+                            bits |= 1 << row;
+                        }
+                    }
+                    columns.push(bits);
+                }
+            }
+            // コンマは最下行の1点だけ。桁区切りが数字と同じ大きさで並ぶと、
+            // どこが桁の切れ目なのか却って読めなくなる。
+            None => columns.push(1 << (BIG_DIGIT_ROW_COUNT - 1)),
+        }
+        columns.push(0);
+    }
+    columns.pop();
+    columns
+}
+
+/// 展開した点灯パターンを Canvas の点群にする。`invert` を立てると点灯と
+/// 消灯を入れ替え、数字が塗り潰しから抜けた形になる。
+fn big_number_points(columns: &[u8], invert: bool, top_y: f64) -> Vec<(f64, f64)> {
+    let mut points = Vec::new();
+    for (col, bits) in columns.iter().enumerate() {
+        for row in 0..BIG_DIGIT_ROW_COUNT {
+            if (bits & (1 << row) != 0) == invert {
+                continue;
+            }
+            let y = top_y - (row + 1) as f64 * BIG_DIGIT_ROW_PX;
+            points.extend(canvas_fx::filled_rect_points(
+                col as f64,
+                y,
+                col as f64 + 1.0,
+                y + BIG_DIGIT_ROW_PX,
+                BIG_DIGIT_STEP,
+            ));
+        }
+    }
+    points
+}
+
+/// 桁上がりで数字を反転させる tick 数。
+const CARRY_FLASH_TICKS: f64 = 2.0;
+
+/// 桁が1つ増えた直後か。表示値は実際の値へ毎 tick 一定割合ずつ寄る
+/// (`logic::PAYOUT_EASE_RATE`) ので、今の桁の最小値からの距離が直近数 tick 分の
+/// 伸びに収まっていれば、桁が変わったのはその数 tick の間だと分かる。表示値
+/// だけから導けるので、演出のための状態を state 側に増やさずに済む。
+fn payout_carry_flash(state: &PachinkoState) -> bool {
+    let shown = state.jackpot_payout_shown;
+    if shown < 10.0 {
+        return false;
+    }
+    let step = (state.jackpot_payout() as f64 - shown) * logic::PAYOUT_EASE_RATE;
+    if step <= 0.0 {
+        return false;
+    }
+    let decade = 10f64.powi(shown.log10().floor() as i32);
+    shown - decade < step * CARRY_FLASH_TICKS
+}
+
+/// ラウンド内の規定カウントをドットで見せる。1個入賞するたびに埋まるので、
+/// アタッカーへ入った瞬間が数字の増加とは別の形でも返ってくる。
+fn round_dots(j: JackpotState) -> String {
+    (0..ROUND_COUNT)
+        .map(|i| if i < j.count { '●' } else { '○' })
+        .collect()
+}
+
+/// 大当たり中に盤面へ重ねる出玉の劇場。数字はドット絵で大きく描き、その下に
+/// ラウンドの進行を置く。別 DOM 要素を足さず同じ `<pre>` へ上書きするので、
+/// 下の Canvas に登録済みのタップ判定 (`BOARD_TAP`) は保たれる。
+///
+/// 描く余地が無い狭さでは1行の文字表示へ落とす。カウンタが盤面を覆って
+/// 玉が見えなくなると、出玉が増える理由そのものが画面から消える。
+fn render_jackpot_theater(
+    state: &PachinkoState,
+    f: &mut Frame,
+    inner: Rect,
+    j: JackpotState,
+) {
+    if inner.width < 12 || inner.height < 3 {
+        return;
+    }
+    let shown = state.jackpot_payout_shown.round().max(0.0) as u64;
+    let columns = big_number_columns(&format_thousands(shown));
+    // 疑似ピクセルは 1 セルにつき横 2 つ。奇数列で右端が欠けないよう切り上げる。
+    let digits_w = columns.len().div_ceil(2) as u16;
+
+    let round_line = Line::from(vec![
+        Span::styled(
+            format!(" R {}/{} ", j.round, j.total_rounds),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            format!(" {}", round_dots(j)),
+            Style::default().fg(Color::LightYellow),
+        ),
+    ]);
+
+    // 数字を出す余地が無ければ、玉数を文字のまま1行に収める。
+    if inner.height < 2 + BIG_DIGIT_H || digits_w + 6 > inner.width {
+        let text = format!(" {}玉  R {}/{} ", format_thousands(shown), j.round, j.total_rounds);
+        let row = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                text,
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD),
+            )))
+            .alignment(Alignment::Center),
+            row,
+        );
+        return;
+    }
+
+    let invert = payout_carry_flash(state);
+    let points = big_number_points(&columns, invert, BIG_DIGIT_H as f64 * 4.0 - 0.5);
+    let width_px = columns.len() as f64;
+    let digits_x = inner.x + (inner.width - digits_w) / 2;
+    let digits_area = Rect::new(
+        digits_x,
+        inner.bottom() - 1 - BIG_DIGIT_H,
+        digits_w,
+        BIG_DIGIT_H,
+    );
+    let canvas = Canvas::default()
+        .x_bounds([0.0, width_px])
+        .y_bounds([0.0, BIG_DIGIT_H as f64 * 4.0])
+        .marker(Marker::Braille)
+        .paint(move |ctx| {
+            draw_points(ctx, &points, Color::LightYellow);
+        });
+    f.render_widget(canvas, digits_area);
+
+    // 数字の左に単位を添える。数字だけでは持ち玉との区別が付かない。
+    if digits_area.x > inner.x + 4 {
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "出玉",
+                Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+            ))),
+            Rect::new(digits_area.x - 5, digits_area.y, 4, 1),
+        );
+    }
+    f.render_widget(
+        Paragraph::new(round_line).alignment(Alignment::Center),
+        Rect::new(inner.x, inner.bottom() - 1, inner.width, 1),
+    );
 }
 
 /// 盤面の最上段に重ねる1行。別 DOM 要素を足さず同じ `<pre>` へ上書きする
@@ -941,49 +1253,179 @@ const RIGHT_STOP_TICKS: u32 = 8;
 /// 左→右→中という停止順が崩れる。
 const MIDDLE_STOP_REMAINING_TICKS: u32 = 3;
 
+/// テンパイ後、中桁が1コマ進むのに要する tick を停止に近い側から並べたもの。
+/// 手前ほど長く留まることで、残り1コマの重みが最大になる。手前から数えて
+/// この表を使い切った先は毎 tick 1コマ進む (＝まだ減速していない区間)。
+const MIDDLE_SLOW_HOLDS: [u32; 5] = [5, 3, 3, 2, 2];
+
+/// 滑りで中桁が動いた後、出目を見せる tick 数。`StopStyle::Slip` の
+/// `extra_ticks` のうち、ここを引いた残りがハズレ位置で止まって見える時間になる。
+const SLIP_MOVE_TICKS: u32 = 2;
+/// 復活で中桁が戻ってから停止するまでの tick 数。`StopStyle::Revival` の
+/// `extra_ticks` のうち、ここを引いた残りが「ハズレで確定した」静止時間になる。
+const REVIVAL_RETURN_TICKS: u32 = 8;
+
 fn digit_char(value: u8) -> char {
     char::from_digit(value as u32 % 10, 10).unwrap_or('0')
 }
 
-/// デジタルの3桁。回転中のリールは擬似的な出目を tick ごとに差し替え、
-/// 左→右→中の順に停止させる。停止中は最後に止まった出目 (`last_reels`) を
-/// 出し続ける。
-fn reel_faces(digit: &Digit, last_reels: [u8; 3]) -> [char; 3] {
-    match digit {
-        Digit::Idle => last_reels.map(digit_char),
-        Digit::Spinning {
-            ticks_left,
-            outcome,
-        } => {
-            let elapsed = outcome.reach.spin_ticks().saturating_sub(*ticks_left);
-            let rolling = |slot: u32| digit_char((ticks_left.wrapping_mul(3) + slot * 7) as u8);
-            let left = if elapsed >= LEFT_STOP_TICKS {
-                digit_char(outcome.reels[0])
-            } else {
-                rolling(0)
-            };
-            let right = if elapsed >= RIGHT_STOP_TICKS {
-                digit_char(outcome.reels[2])
-            } else {
-                rolling(2)
-            };
-            let middle = if *ticks_left <= MIDDLE_STOP_REMAINING_TICKS {
-                digit_char(outcome.reels[1])
-            } else {
-                rolling(1)
-            };
-            [left, middle, right]
+/// 中桁の停止まで残り `ticks_to_stop` tick の時点で、出目から何コマ手前に
+/// いるか。`MIDDLE_SLOW_HOLDS` の滞留時間を停止側から積み上げて逆に引く。
+fn middle_slow_offset(ticks_to_stop: u32) -> u32 {
+    let mut acc = 0;
+    for (index, &hold) in MIDDLE_SLOW_HOLDS.iter().enumerate() {
+        acc += hold;
+        if ticks_to_stop <= acc {
+            return index as u32 + 1;
         }
+    }
+    MIDDLE_SLOW_HOLDS.len() as u32 + (ticks_to_stop - acc)
+}
+
+/// 中桁が最後に動く前に見せる目と、その動きを表す印。滑りと復活は
+/// 「一度止まったように見せてから動かす」型なので、出目そのものではなく
+/// 1コマずれた目で止まったふりをする。
+///
+/// 滑りは1コマ下がって出目になる位置から始めるが、そこが左と同じ目になる
+/// 場合だけ反対側から寄せる — ハズレなのに一度ゾロ目を見せてから崩す形に
+/// なると、揃った瞬間の意味そのものが信用できなくなる。
+fn middle_pre_stop(outcome: &SpinOutcome) -> (u8, char) {
+    let middle = outcome.reels[1] % 10;
+    let left = outcome.reels[0] % 10;
+    match outcome.stop {
+        StopStyle::Slip => {
+            let above = (middle + 1) % 10;
+            if above == left {
+                ((middle + 9) % 10, '↑')
+            } else {
+                (above, '↓')
+            }
+        }
+        StopStyle::Revival => ((middle + 9) % 10, '←'),
+        StopStyle::Plain | StopStyle::NearMiss => (middle, ' '),
     }
 }
 
-fn digit_style(digit: &Digit) -> Style {
-    match digit {
-        Digit::Idle => Style::default().fg(Color::DarkGray),
-        Digit::Spinning { outcome, .. } => Style::default()
-            .fg(outcome.reach.color())
-            .add_modifier(Modifier::BOLD),
+/// 液晶に出す1コマ分の絵。
+struct ReelView {
+    faces: [char; 3],
+    /// 中桁の動きを説明する印。動いていない間は空白。
+    cue: char,
+    style: Style,
+}
+
+/// 回転中の色。格の色をそのまま使う。
+fn spinning_style(outcome: &SpinOutcome) -> Style {
+    Style::default()
+        .fg(outcome.reach.color())
+        .add_modifier(Modifier::BOLD)
+}
+
+/// デジタルの1コマ。回転中は左→右→中の順に停止させ、テンパイ後の中桁は
+/// 出目へ1コマずつ近づけながら減速する。停止中は最後に止まった出目
+/// (`last_reels`) を出し続ける。
+///
+/// 追加の回転時間 (`StopStyle::extra_ticks`) は末尾に確保されているものとして
+/// 扱う。基本の回転で一度出目まで持っていき、そこから滑る・戻るという順序が
+/// 「止まったと思わせてから動かす」型の前提になる。
+fn reel_view(digit: &Digit, last_reels: [u8; 3]) -> ReelView {
+    let Digit::Spinning {
+        ticks_left,
+        outcome,
+    } = digit
+    else {
+        return ReelView {
+            faces: last_reels.map(digit_char),
+            cue: ' ',
+            style: Style::default().fg(Color::DarkGray),
+        };
+    };
+
+    let extra = outcome.stop.extra_ticks();
+    let base_left = ticks_left.saturating_sub(extra);
+    let base_elapsed = outcome.reach.spin_ticks().saturating_sub(base_left);
+    let rolling = |slot: u32| digit_char((ticks_left.wrapping_mul(3) + slot * 7) as u8);
+    let left = if base_elapsed >= LEFT_STOP_TICKS {
+        digit_char(outcome.reels[0])
+    } else {
+        rolling(0)
+    };
+    let right = if base_elapsed >= RIGHT_STOP_TICKS {
+        digit_char(outcome.reels[2])
+    } else {
+        rolling(2)
+    };
+    // 左右が揃って初めて中桁の1コマに意味が生まれる。揃わないうちに減速
+    // させても、遅くなった分だけ待ち時間が延びるだけになる。
+    let tempai = base_elapsed >= RIGHT_STOP_TICKS && outcome.reels[0] == outcome.reels[2];
+    let (pre_stop, move_cue) = middle_pre_stop(outcome);
+    let final_middle = outcome.reels[1] % 10;
+
+    let (middle, cue, style) = if *ticks_left > extra {
+        let value = if base_left <= MIDDLE_STOP_REMAINING_TICKS {
+            pre_stop
+        } else if tempai {
+            (pre_stop + middle_slow_offset(base_left - MIDDLE_STOP_REMAINING_TICKS) as u8) % 10
+        } else {
+            // テンパイ前は目を追う相手がいないので、コマ送りではなく
+            // 回っていることだけが分かればよい。
+            return ReelView {
+                faces: [left, rolling(1), right],
+                cue: ' ',
+                style: spinning_style(outcome),
+            };
+        };
+        (digit_char(value), ' ', spinning_style(outcome))
+    } else {
+        match outcome.stop {
+            // 滑りと復活は基本の回転で1コマ手前に止まっており、ここで動く。
+            StopStyle::Slip if *ticks_left > SLIP_MOVE_TICKS => (
+                digit_char(pre_stop),
+                ' ',
+                Style::default().fg(Color::Gray),
+            ),
+            StopStyle::Slip => (
+                digit_char(final_middle),
+                move_cue,
+                // 動いた瞬間は盤面の「今この瞬間に何かが当たった」印と同じ白に
+                // 揃える。まだ当落は分からないので、格の色は出さない。
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            StopStyle::Revival if *ticks_left > REVIVAL_RETURN_TICKS => (
+                digit_char(pre_stop),
+                ' ',
+                Style::default().fg(Color::Gray),
+            ),
+            StopStyle::Revival => (
+                digit_char(final_middle),
+                move_cue,
+                Style::default()
+                    .fg(Color::LightMagenta)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            // 惜しいハズレは出目のまま数 tick 留める。次の回転へすぐ移ると、
+            // 惜しかったこと自体が画面に残らない。色を落とすことで、
+            // 引っ張った末に何も起きなかったという結末を先に伝える。
+            StopStyle::NearMiss | StopStyle::Plain => (
+                digit_char(final_middle),
+                ' ',
+                Style::default().fg(Color::Gray),
+            ),
+        }
+    };
+
+    ReelView {
+        faces: [left, middle, right],
+        cue,
+        style,
     }
+}
+
+/// デジタルの3桁だけを取り出す。停止順と出目の対応をテストで突き合わせる
+/// ためのもので、描画は `reel_view` をそのまま使う。
+#[cfg(test)]
+fn reel_faces(digit: &Digit, last_reels: [u8; 3]) -> [char; 3] {
+    reel_view(digit, last_reels).faces
 }
 
 fn mode_text(state: &PachinkoState) -> String {
@@ -1010,11 +1452,50 @@ fn mode_color(mode: Mode) -> Color {
     }
 }
 
-fn pending_text(state: &PachinkoState) -> String {
-    let filled = state.pending.len().min(MAX_PENDING);
-    (0..MAX_PENDING)
-        .map(|i| if i < filled { '●' } else { '○' })
-        .collect()
+/// 空きスロットの印。ランクの記号 (`PendingRank::mark`) と形がぶつからない
+/// 点にすることで、白保留と空きが同じ絵にならない。
+const PENDING_EMPTY_MARK: char = '·';
+
+/// 保留の列。1スロットを「消化の順番の印 / ランクの記号 / 昇格の印」の3文字で
+/// 描く。ランクは色と形の二重符号化 (`PendingRank::mark` / `color`) をそのまま
+/// 出し、信頼度は数値にしない — どのランクがどれだけ当たるかを見つけるのは
+/// プレイヤー側の領分にする。
+fn pending_spans(state: &PachinkoState) -> Vec<Span<'static>> {
+    let mut spans = Vec::with_capacity(MAX_PENDING * 3);
+    for slot in 0..MAX_PENDING {
+        let Some(pending) = state.pending.get(slot) else {
+            spans.push(Span::styled(
+                format!(" {PENDING_EMPTY_MARK} "),
+                Style::default().fg(Color::DarkGray),
+            ));
+            continue;
+        };
+        let color = pending.rank.color();
+        // 次に消化される保留を指す。どれが今から回るのかが分からないと、
+        // 熱い保留を見つけても「あと何回転待つのか」が読めない。
+        spans.push(Span::styled(
+            if slot == 0 { "▶" } else { " " },
+            Style::default().fg(ACCENT),
+        ));
+        let promoting = pending.promote_flash > 0;
+        let mark_style = if promoting {
+            // 昇格した瞬間だけ地と図を入れ替える。ランクが上がったことは
+            // 記号が変わるだけでは見逃されるので、変わった瞬間そのものを
+            // 別の見え方にする。
+            Style::default()
+                .fg(Color::Black)
+                .bg(color)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(color)
+        };
+        spans.push(Span::styled(pending.rank.mark().to_string(), mark_style));
+        spans.push(Span::styled(
+            if promoting { "↑" } else { " " },
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        ));
+    }
+    spans
 }
 
 fn power_bar(power: u8) -> String {
@@ -1048,24 +1529,25 @@ fn divider_line() -> Line<'static> {
 fn board_tab_list(state: &PachinkoState) -> ClickableList<'static> {
     let mut cl = ClickableList::new();
 
-    let faces = reel_faces(&state.digit, state.last_reels);
-    let style = digit_style(&state.digit);
-    cl.push(Line::from(Span::styled(
-        " ┌───────┐",
-        Style::default().fg(Color::DarkGray),
-    )));
+    let view = reel_view(&state.digit, state.last_reels);
+    let frame_style = Style::default().fg(Color::DarkGray);
+    cl.push(Line::from(Span::styled(" ┌───────┐", frame_style)));
     cl.push(Line::from(vec![
-        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(" │ ", frame_style),
         Span::styled(
-            format!("{} {} {}", faces[0], faces[1], faces[2]),
-            style,
+            format!("{} {} {}", view.faces[0], view.faces[1], view.faces[2]),
+            view.style,
         ),
-        Span::styled(" │", Style::default().fg(Color::DarkGray)),
+        Span::styled(" │", frame_style),
     ]));
-    cl.push(Line::from(Span::styled(
-        " └───────┘",
-        Style::default().fg(Color::DarkGray),
-    )));
+    // 中桁の下に印の行を常に置く。動きが無い間も空けておくことで、滑りや
+    // 復活で印が出た時に他の行がずれず、動いた1コマだけに目が行く。
+    cl.push(Line::from(vec![
+        Span::styled(" │ ", frame_style),
+        Span::styled(format!("  {}  ", view.cue), view.style),
+        Span::styled(" │", frame_style),
+    ]));
+    cl.push(Line::from(Span::styled(" └───────┘", frame_style)));
 
     // リーチの格は色と一言でだけ伝える。どの格がどれだけ当たるかは、
     // 打って覚えるプレイヤー側の領分にする。
@@ -1081,7 +1563,9 @@ fn board_tab_list(state: &PachinkoState) -> ClickableList<'static> {
         }
     }
 
-    cl.push(label_value_line("保留", pending_text(state), ACCENT));
+    let mut pending_line = vec![Span::styled(" 保留 ", Style::default().fg(Color::DarkGray))];
+    pending_line.extend(pending_spans(state));
+    cl.push(Line::from(pending_line));
     cl.push(label_value_line(
         "状態",
         mode_text(state),
@@ -1092,6 +1576,19 @@ fn board_tab_list(state: &PachinkoState) -> ClickableList<'static> {
             "連チャン",
             format!("{}連", state.chain),
             Color::LightMagenta,
+        ));
+    }
+    // 大当たりの決算。アタッカーが閉じた時点で出玉が確定するので、
+    // 大当たり中は進行中のカウンタ (`render_jackpot_theater`) に譲る。
+    if !matches!(state.mode, Mode::Jackpot(_)) && state.last_jackpot_payout > 0 {
+        let chain = state.chain.max(1);
+        cl.push(label_value_line(
+            "前回の当たり",
+            format!(
+                "{}玉 / {chain}連",
+                format_thousands(state.last_jackpot_payout as u64)
+            ),
+            Color::LightRed,
         ));
     }
 
@@ -1889,23 +2386,600 @@ mod tests {
         assert_eq!(format_signed_yen(visit_balance(&state)), "+1,000円");
     }
 
-    #[test]
-    fn pending_text_shows_one_mark_per_slot() {
-        let mut state = PachinkoState::new();
-        assert_eq!(pending_text(&state).chars().count(), MAX_PENDING);
-        state.pending.push(Pending::new(SpinOutcome {
+    // ── 保留の見せ方 ───────────────────────────────────────────
+
+    /// 抽選結果1件。ランクと止まり方だけを差し替えて使う。
+    fn outcome(rank: PendingRank, stop: StopStyle) -> SpinOutcome {
+        SpinOutcome {
             hit: false,
             rounds: 0,
             kakuhen: false,
             reach: ReachKind::None,
-            rank: PendingRank::White,
-            stop: StopStyle::Plain,
+            rank,
+            stop,
             confirmed: false,
             assisted: false,
             reels: [0, 1, 2],
-        }));
-        let text = pending_text(&state);
-        assert_eq!(text.chars().filter(|&c| c == '●').count(), 1);
-        assert_eq!(text.chars().count(), MAX_PENDING);
+        }
+    }
+
+    /// 描いた画面から記号だけを行ごとに取り出す。
+    fn rendered_rows(state: &PachinkoState, w: u16, h: u16) -> Vec<String> {
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = w;
+        cs.borrow_mut().terminal_rows = h;
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| render(state, f, f.area(), &cs)).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..h)
+            .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect())
+            .collect()
+    }
+
+    /// 描いた画面のうち、`symbol` を持つ最初のセルの色。
+    fn color_of_symbol(state: &PachinkoState, w: u16, h: u16, symbol: char) -> Option<Style> {
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = w;
+        cs.borrow_mut().terminal_rows = h;
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| render(state, f, f.area(), &cs)).unwrap();
+        let buf = terminal.backend().buffer();
+        for y in 0..h {
+            for x in 0..w {
+                let cell = &buf[(x, y)];
+                if cell.symbol().starts_with(symbol) {
+                    return Some(cell.style());
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn every_pending_rank_draws_its_own_mark_and_color() {
+        // ランクが色と形の両方で見分けられないと、保留が情報を運ばない。
+        // 信頼度は出さない約束なので、伝える手段はこの2つしかない。
+        for rank in PendingRank::ALL {
+            let mut state = seated_state();
+            state.pending.push(Pending::new(outcome(rank, StopStyle::Plain)));
+            state.pending[0].rank = rank;
+            for (w, h) in [(100u16, 40u16), (40u16, 30u16)] {
+                let style = color_of_symbol(&state, w, h, rank.mark());
+                let style = style.unwrap_or_else(|| panic!(
+                    "{w}x{h}: {} 保留の記号 {} が描かれていない",
+                    rank.label(),
+                    rank.mark()
+                ));
+                assert_eq!(
+                    style.fg,
+                    Some(rank.color()),
+                    "{w}x{h}: {} 保留がランクの色で描かれていない",
+                    rank.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_pending_slot_reads_apart_from_a_white_one() {
+        // 空きスロットと白保留が同じ絵だと、保留が何個溜まっているかすら
+        // 読めなくなる。
+        let state = seated_state();
+        let spans = pending_spans(&state);
+        let drawn: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(
+            drawn.chars().filter(|&c| c == PENDING_EMPTY_MARK).count(),
+            MAX_PENDING,
+            "保留が空なのに空きスロットが {MAX_PENDING} 個並んでいない: {drawn}"
+        );
+        assert_ne!(PENDING_EMPTY_MARK, PendingRank::White.mark());
+        assert!(!drawn.chars().any(|c| c.is_ascii_digit()), "保留に数値が出ている");
+    }
+
+    #[test]
+    fn the_head_of_the_queue_is_marked_as_the_next_to_spin() {
+        let mut state = seated_state();
+        for _ in 0..2 {
+            state
+                .pending
+                .push(Pending::new(outcome(PendingRank::White, StopStyle::Plain)));
+        }
+        let drawn: String = pending_spans(&state)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(
+            drawn.chars().filter(|&c| c == '▶').count(),
+            1,
+            "次に消化される保留を指す印が1つでない: {drawn}"
+        );
+    }
+
+    #[test]
+    fn a_promoting_pending_swaps_its_foreground_and_background() {
+        // 昇格そのものは記号が変わるだけなので見逃される。変わった瞬間を
+        // 別の見え方にしないと、段階的に情報を出している意味が消える。
+        let mut state = seated_state();
+        state
+            .pending
+            .push(Pending::new(outcome(PendingRank::Red, StopStyle::Plain)));
+        state.pending[0].rank = PendingRank::Red;
+
+        let calm: String = pending_spans(&state)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        state.pending[0].promote_flash = PENDING_PROMOTE_FLASH_TICKS;
+        let flashing = pending_spans(&state);
+        let flashing_text: String = flashing.iter().map(|s| s.content.as_ref()).collect();
+        assert_ne!(calm, flashing_text, "昇格した瞬間に描画が変わっていない");
+        assert!(flashing_text.contains('↑'), "昇格の向きが出ていない");
+
+        let mark = flashing
+            .iter()
+            .find(|s| s.content.contains(PendingRank::Red.mark()))
+            .expect("ランクの記号が描かれていない");
+        assert_eq!(mark.style.bg, Some(PendingRank::Red.color()));
+        assert_eq!(mark.style.fg, Some(Color::Black));
+
+        for (w, h) in [(100u16, 40u16), (40u16, 30u16)] {
+            assert!(
+                rendered_rows(&state, w, h).iter().any(|row| row.contains('↑')),
+                "{w}x{h}: 昇格の印が画面に出ていない"
+            );
+        }
+    }
+
+    // ── 図柄の止まり方 ─────────────────────────────────────────
+
+    /// 回転の総 tick 数。追加の回転時間は末尾に確保されている。
+    fn total_ticks(outcome: &SpinOutcome) -> u32 {
+        outcome.reach.spin_ticks() + outcome.stop.extra_ticks()
+    }
+
+    /// 回転開始から停止直前まで、1 tick ずつの見え方を並べる。
+    fn spin_frames(outcome: SpinOutcome) -> Vec<ReelView> {
+        (1..=total_ticks(&outcome))
+            .rev()
+            .map(|ticks_left| {
+                reel_view(
+                    &Digit::Spinning {
+                        ticks_left,
+                        outcome,
+                    },
+                    INITIAL_REELS,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_stop_style_lands_on_the_drawn_outcome() {
+        // 抽選が決めた出目が画面に一度も出ないまま消えると、演出から当落を
+        // 読むという学習が成り立たない。止まり方を変えても着地は同じになる。
+        for stop in StopStyle::ALL {
+            for reach in ReachKind::ALL {
+                let hit = matches!(stop, StopStyle::Revival);
+                let reels = if hit { [7, 7, 7] } else { [7, 3, 7] };
+                let mut o = outcome(PendingRank::White, stop);
+                o.hit = hit;
+                o.reach = reach;
+                o.reels = reels;
+                let last = spin_frames(o).pop().expect("回転が1 tick も無い");
+                assert_eq!(
+                    last.faces,
+                    reels.map(digit_char),
+                    "{} / {} で停止間際に出目が揃っていない",
+                    reach.label(),
+                    stop.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_slipping_reel_stops_off_the_outcome_before_it_moves() {
+        // 一度ハズレ位置で止まって見えなければ、滑りは「ただ長く回っただけ」
+        // になる。動く前の目が出目と違うことが演出の前提になる。
+        let mut o = outcome(PendingRank::White, StopStyle::Slip);
+        o.hit = true;
+        o.reach = ReachKind::Super;
+        o.reels = [7, 7, 7];
+        let frames = spin_frames(o);
+        let moved = frames
+            .iter()
+            .position(|v| v.cue != ' ')
+            .expect("滑りの印が一度も出ていない");
+        assert_ne!(
+            frames[moved - 1].faces[1], '7',
+            "滑る直前に既に出目が揃っている"
+        );
+        assert_eq!(frames[moved].faces[1], '7', "滑った先が出目になっていない");
+        assert_eq!(frames[moved].cue, '↓', "滑りの向きが下になっていない");
+    }
+
+    #[test]
+    fn a_reviving_reel_settles_on_a_miss_before_it_turns_back() {
+        // 復活は「完全に停止してハズレが確定した」と思わせる間があって初めて
+        // 復活になる。戻る前に出目が揃っていると、ただの遅い停止になる。
+        let mut o = outcome(PendingRank::White, StopStyle::Revival);
+        o.hit = true;
+        o.reach = ReachKind::Super;
+        o.reels = [7, 7, 7];
+        let frames = spin_frames(o);
+        let back = frames
+            .iter()
+            .position(|v| v.cue == '←')
+            .expect("復活の印が一度も出ていない");
+        let still: Vec<char> = frames[..back].iter().map(|v| v.faces[1]).collect();
+        let held = still.iter().rev().take_while(|&&c| c != '7').count();
+        assert!(
+            held >= 5,
+            "ハズレ位置で静止している時間が短く、復活の間が作れていない: {held} tick"
+        );
+        assert!(
+            frames[back..].iter().all(|v| v.faces[1] == '7'),
+            "復活した後に出目が崩れている"
+        );
+    }
+
+    #[test]
+    fn a_near_miss_holds_the_stopped_reels_instead_of_moving_on() {
+        // 惜しいハズレは、止まった出目を数 tick 残すことでしか伝わらない。
+        let mut o = outcome(PendingRank::Green, StopStyle::NearMiss);
+        o.reach = ReachKind::Super;
+        o.reels = [7, 3, 7];
+        let frames = spin_frames(o);
+        let held = frames
+            .iter()
+            .rev()
+            .take_while(|v| v.faces == ['7', '3', '7'])
+            .count() as u32;
+        assert!(
+            held > StopStyle::NearMiss.extra_ticks(),
+            "出目が止まってから次へ移るまでの間が確保できていない: {held} tick"
+        );
+    }
+
+    #[test]
+    fn the_middle_reel_slows_down_after_the_sides_match() {
+        // 停止に近いコマほど長く画面に留まらないと、1コマの重みが増していく
+        // 感覚が出ない。
+        let mut o = outcome(PendingRank::White, StopStyle::Plain);
+        o.hit = true;
+        o.reach = ReachKind::Super;
+        o.reels = [7, 7, 7];
+        let frames = spin_frames(o);
+        // テンパイ (左右が揃った) 以降だけを見る。
+        let tempai = frames
+            .iter()
+            .position(|v| v.faces[0] == '7' && v.faces[2] == '7')
+            .expect("左右が揃う瞬間が無い");
+        // 同じコマが続いた長さを順に数える。
+        let mut holds: Vec<u32> = Vec::new();
+        let mut current = '\0';
+        for view in &frames[tempai..] {
+            if view.faces[1] == current {
+                *holds.last_mut().expect("最初のコマが積まれていない") += 1;
+            } else {
+                current = view.faces[1];
+                holds.push(1);
+            }
+        }
+        assert!(holds.len() >= 3, "コマが数えられていない: {holds:?}");
+        assert!(
+            holds[holds.len() - 1] > holds[0],
+            "停止間際のコマが序盤より長く留まっていない: {holds:?}"
+        );
+    }
+
+    #[test]
+    fn every_stop_style_renders_without_panicking() {
+        for stop in StopStyle::ALL {
+            let mut o = outcome(PendingRank::White, stop);
+            o.reach = ReachKind::Super;
+            o.reels = [7, 3, 7];
+            let total = total_ticks(&o);
+            for ticks_left in [total, total / 2, 2, 1] {
+                let mut state = seated_state();
+                state.digit = Digit::Spinning {
+                    ticks_left,
+                    outcome: o,
+                };
+                render_to_test_backend_with_click_state(&state, 100, 40);
+                render_to_test_backend_with_click_state(&state, 40, 30);
+            }
+        }
+    }
+
+    // ── 大当たり中の出玉カウンタ ───────────────────────────────
+
+    fn jackpot_state(payout: u32) -> PachinkoState {
+        let mut state = seated_state();
+        state.mode = Mode::Jackpot(JackpotState {
+            round: 3,
+            total_rounds: 10,
+            count: 1,
+            ticks_left: 40,
+            kakuhen: true,
+            payout,
+        });
+        state.jackpot_payout_shown = payout as f64;
+        state
+    }
+
+    #[test]
+    fn the_payout_counter_follows_the_eased_value() {
+        // カウンタが内部値ではなく表示値 (`jackpot_payout_shown`) を読んで
+        // いないと、数字は跳ねるだけで「増え続けている」時間が生まれない。
+        let low = big_number_columns(&format_thousands(120));
+        let high = big_number_columns(&format_thousands(1_480));
+        assert_ne!(low, high);
+
+        let mut state = jackpot_state(1_480);
+        state.jackpot_payout_shown = 120.0;
+        let mid = jackpot_payout_columns(&state);
+        assert_eq!(mid, low, "表示値ではなく内部値を描いている");
+
+        state.jackpot_payout_shown = 1_480.0;
+        assert_eq!(jackpot_payout_columns(&state), high);
+    }
+
+    /// 出玉カウンタが今描いている点灯パターン。
+    fn jackpot_payout_columns(state: &PachinkoState) -> Vec<u8> {
+        big_number_columns(&format_thousands(
+            state.jackpot_payout_shown.round().max(0.0) as u64
+        ))
+    }
+
+    #[test]
+    fn the_payout_counter_is_drawn_wide_and_falls_back_when_narrow() {
+        // ドット絵は braille で描くので、文字としては現れない。数字が画面に
+        // 「無い」ことではなく、点が描かれていることで確かめる。
+        let state = jackpot_state(1_480);
+        for (w, h) in [(100u16, 40u16), (40u16, 30u16)] {
+            let rows = rendered_rows(&state, w, h);
+            let braille = rows
+                .iter()
+                .any(|row| row.chars().any(|c| ('\u{2801}'..='\u{28FF}').contains(&c)));
+            let plain = rows.iter().any(|row| row.contains("1,480玉"));
+            assert!(
+                braille || plain,
+                "{w}x{h}: 出玉カウンタが大きな数字としても文字としても出ていない"
+            );
+            assert!(
+                rows.iter().any(|row| row.contains("R 3/10")),
+                "{w}x{h}: ラウンドの進行が出ていない"
+            );
+        }
+    }
+
+    #[test]
+    fn a_carry_inverts_the_counter_and_a_settled_value_does_not() {
+        let mut state = jackpot_state(4_000);
+        // 桁が増えた直後 (1000 をまたいだ数 tick 以内)。
+        state.jackpot_payout_shown = 1_002.0;
+        assert!(payout_carry_flash(&state), "桁上がりの瞬間に反転していない");
+        // 同じ桁の中を伸びている間。
+        state.jackpot_payout_shown = 2_500.0;
+        assert!(!payout_carry_flash(&state), "桁が変わっていないのに反転している");
+        // 追いつき終えた後。
+        state.jackpot_payout_shown = 4_000.0;
+        assert!(!payout_carry_flash(&state), "止まった数字が反転し続けている");
+
+        let columns = big_number_columns("1,002");
+        assert_ne!(
+            big_number_points(&columns, false, 7.5),
+            big_number_points(&columns, true, 7.5),
+            "反転しても同じ絵になっている"
+        );
+    }
+
+    #[test]
+    fn the_round_dots_fill_as_balls_enter_the_attacker() {
+        let empty = round_dots(JackpotState {
+            round: 1,
+            total_rounds: 4,
+            count: 0,
+            ticks_left: 40,
+            kakuhen: false,
+            payout: 0,
+        });
+        let full = round_dots(JackpotState {
+            round: 1,
+            total_rounds: 4,
+            count: ROUND_COUNT,
+            ticks_left: 40,
+            kakuhen: false,
+            payout: 0,
+        });
+        assert_eq!(empty.chars().count(), ROUND_COUNT as usize);
+        assert_eq!(empty.chars().filter(|&c| c == '●').count(), 0);
+        assert_eq!(full.chars().filter(|&c| c == '●').count(), ROUND_COUNT as usize);
+    }
+
+    #[test]
+    fn the_summary_of_the_last_jackpot_shows_after_it_ends() {
+        let mut state = seated_state();
+        state.last_jackpot_payout = 1_536;
+        state.chain = 3;
+        state.mode = Mode::Kakuhen { spins_left: 0 };
+        for (w, h) in [(100u16, 40u16), (40u16, 30u16)] {
+            let rows = rendered_rows(&state, w, h);
+            assert!(
+                rows.iter().any(|row| row.contains("1,536玉")),
+                "{w}x{h}: 大当たりの決算が出ていない"
+            );
+        }
+    }
+
+    // ── 確定シグナルと画面効果 ─────────────────────────────────
+
+    fn confirmed_state() -> PachinkoState {
+        let mut state = seated_state();
+        let mut o = outcome(PendingRank::Rainbow, StopStyle::Plain);
+        o.hit = true;
+        o.rounds = 16;
+        o.reach = ReachKind::Premium;
+        o.confirmed = true;
+        o.reels = [7, 7, 7];
+        state.digit = Digit::Spinning {
+            ticks_left: o.reach.spin_ticks() / 2,
+            outcome: o,
+        };
+        state
+    }
+
+    /// 盤面の枠が今どう塗られているか。虹は色そのものが情報なので、
+    /// 記号ではなく色の並びで見る。
+    fn border_colors(state: &PachinkoState, w: u16, h: u16) -> Vec<Option<Color>> {
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = w;
+        cs.borrow_mut().terminal_rows = h;
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| render(state, f, f.area(), &cs)).unwrap();
+        let buf = terminal.backend().buffer();
+        (0..w).map(|x| buf[(x, 0)].style().fg).collect()
+    }
+
+    #[test]
+    fn the_confirmed_signal_runs_a_rainbow_around_the_board_border() {
+        let mut plain = seated_state();
+        let mut o = outcome(PendingRank::White, StopStyle::Plain);
+        o.reach = ReachKind::Super;
+        plain.digit = Digit::Spinning {
+            ticks_left: 10,
+            outcome: o,
+        };
+        let confirmed = confirmed_state();
+        for (w, h) in [(100u16, 40u16), (40u16, 30u16)] {
+            let calm = border_colors(&plain, w, h);
+            let hot = border_colors(&confirmed, w, h);
+            assert_ne!(calm, hot, "{w}x{h}: 確定シグナルで枠の描画が変わっていない");
+            let hues = hot
+                .iter()
+                .filter(|c| matches!(c, Some(Color::Rgb(_, _, _))))
+                .count();
+            assert!(hues > 2, "{w}x{h}: 枠に色相が並んでいない");
+        }
+    }
+
+    #[test]
+    fn the_rainbow_travels_as_the_spin_goes_on() {
+        // 位相が動かないと「1周流れる」ではなくただの色付きの枠になる。
+        let mut state = confirmed_state();
+        let first = border_colors(&state, 100, 40);
+        if let Digit::Spinning { ticks_left, .. } = &mut state.digit {
+            *ticks_left -= 1;
+        }
+        assert_ne!(first, border_colors(&state, 100, 40), "虹が止まっている");
+    }
+
+    #[test]
+    fn only_a_hot_moment_shakes_the_board() {
+        // 揺れは「他と違うことが起きた」という合図なので、通常時に出ると
+        // 合図としての意味が消える。
+        let mut state = seated_state();
+        assert!(!board_shake(&state), "通常時に揺れている");
+
+        state
+            .pending
+            .push(Pending::new(outcome(PendingRank::Blue, StopStyle::Plain)));
+        state.pending[0].rank = PendingRank::Blue;
+        state.pending[0].promote_flash = PENDING_PROMOTE_FLASH_TICKS;
+        assert!(!board_shake(&state), "赤に届かない保留で揺れている");
+
+        state.pending[0].rank = PendingRank::Red;
+        assert!(board_shake(&state), "赤保留が出た瞬間に揺れていない");
+        state.pending[0].promote_flash = 1;
+        assert!(!board_shake(&state), "揺れが最初の数 tick で収まっていない");
+
+        let confirmed = confirmed_state();
+        assert!(!board_shake(&confirmed), "確定シグナルの揺れが回転中ずっと続いている");
+    }
+
+    #[test]
+    fn a_shaken_board_draws_one_cell_across() {
+        let mut state = seated_state();
+        state
+            .pending
+            .push(Pending::new(outcome(PendingRank::Gold, StopStyle::Plain)));
+        state.pending[0].rank = PendingRank::Gold;
+        for (w, h) in [(100u16, 40u16), (40u16, 30u16)] {
+            let calm = rendered_rows(&state, w, h);
+            state.pending[0].promote_flash = PENDING_PROMOTE_FLASH_TICKS;
+            let shaken = rendered_rows(&state, w, h);
+            state.pending[0].promote_flash = 0;
+            assert_ne!(calm, shaken, "{w}x{h}: 揺れが描画に出ていない");
+        }
+    }
+
+    #[test]
+    fn the_pending_row_never_shows_a_reliability_number() {
+        // 信頼度を数値で配ると、赤が熱いことをプレイヤー自身が見つける
+        // 余地が消える。
+        for rank in PendingRank::ALL {
+            let mut state = seated_state();
+            state.pending.push(Pending::new(outcome(rank, StopStyle::Plain)));
+            state.pending[0].rank = rank;
+            let drawn: String = pending_spans(&state)
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            assert!(
+                !drawn.chars().any(|c| c.is_ascii_digit() || c == '%'),
+                "{} 保留に信頼度らしき値が出ている: {drawn}",
+                rank.label()
+            );
+        }
+    }
+    #[test]
+    #[ignore = "目視用"]
+    fn dump_screens() {
+        let dump = |state: &PachinkoState, w: u16, h: u16, title: &str| {
+            let cs = Rc::new(RefCell::new(ClickState::new()));
+            cs.borrow_mut().terminal_cols = w;
+            cs.borrow_mut().terminal_rows = h;
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            t.draw(|f| render(state, f, f.area(), &cs)).unwrap();
+            let buf = t.backend().buffer();
+            eprintln!("=== {title} ({w}x{h}) ===");
+            for y in 0..h {
+                let row: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
+                eprintln!("|{row}|");
+            }
+        };
+
+        let mut state = seated_state();
+        state.balls_held = 400;
+        state.pending.push(Pending::new(outcome(PendingRank::White, StopStyle::Plain)));
+        state.pending.push(Pending::new(outcome(PendingRank::Red, StopStyle::Plain)));
+        state.pending.push(Pending::new(outcome(PendingRank::Gold, StopStyle::Plain)));
+        state.pending[0].rank = PendingRank::White;
+        state.pending[1].rank = PendingRank::Red;
+        state.pending[1].promote_flash = PENDING_PROMOTE_FLASH_TICKS;
+        state.pending[2].rank = PendingRank::Gold;
+        dump(&state, 100, 40, "保留ワイド");
+        dump(&state, 40, 30, "保留ナロー");
+
+        let mut j = jackpot_state(1480);
+        j.jackpot_payout_shown = 1237.4;
+        dump(&j, 100, 40, "大当たりワイド");
+        dump(&j, 40, 30, "大当たりナロー");
+
+        let mut small = jackpot_state(84);
+        small.jackpot_payout_shown = 84.0;
+        dump(&small, 100, 40, "大当たり2桁");
+
+        let c = confirmed_state();
+        dump(&c, 40, 30, "確定ナロー");
+
+        let mut slip = seated_state();
+        let mut o = outcome(PendingRank::White, StopStyle::Slip);
+        o.hit = true; o.reach = ReachKind::Super; o.reels = [7,7,7];
+        for tl in (1..=2).rev() {
+            slip.digit = Digit::Spinning { ticks_left: tl, outcome: o };
+            dump(&slip, 40, 30, &format!("滑り t={tl}"));
+        }
     }
 }
