@@ -12,10 +12,10 @@ use super::state::{
     Ball, Digit, HistoryEntry, JackpotState, Machine, MachineSpec, Mode, Nail, PachinkoState,
     Phase, ReachKind, SpinOutcome, ATTACKER_HALF_W, ATTACKER_PAYOUT, ATTACKER_X, ATTACKER_Y,
     BALL_LOAN_COUNT, BALL_LOAN_YEN, BALL_R, BOARD_H, BOARD_W, FIRE_INTERVAL_TICKS, HALL_SIZE,
-    HISTORY_LEN, HIT_GLOW_TICKS, LAUNCH_X, LAUNCH_Y, MACHINE_SPECS, MAX_BALLS, MAX_PENDING,
-    NAIL_R, ROUND_COUNT, ROUND_LIMIT_TICKS, SIDE_PAYOUT, SIDE_POCKET_HALF_W, SIDE_POCKET_LEFT_X,
-    SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y, START_PAYOUT, START_POCKET_BASE_HALF_W, START_POCKET_X,
-    START_POCKET_Y,
+    HISTORY_LEN, HIT_GLOW_TICKS, INITIAL_REELS, LAUNCH_X, LAUNCH_Y, MACHINE_SPECS, MAX_BALLS,
+    MAX_PENDING, NAIL_R, ROUND_COUNT, ROUND_LIMIT_TICKS, SIDE_PAYOUT, SIDE_POCKET_HALF_W,
+    SIDE_POCKET_LEFT_X, SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y, START_PAYOUT,
+    START_POCKET_BASE_HALF_W, START_POCKET_X, START_POCKET_Y,
 };
 
 // ── 乱数 (xorshift32。seed を state に持たせてセーブ・シミュレーターで再現可能にする) ──
@@ -383,6 +383,9 @@ fn advance_digit(state: &mut PachinkoState) {
     };
     if let Some(outcome) = finished {
         state.digit = Digit::Idle;
+        // 停止した出目は液晶に残る。`Digit::Idle` は出目を持たないので、
+        // ここで書き戻さないと当たった瞬間にゾロ目が消える。
+        state.last_reels = outcome.reels;
         resolve_spin(state, outcome);
     }
 }
@@ -615,6 +618,8 @@ fn reset_seat(state: &mut PachinkoState) {
     state.firing = false;
     state.fire_cooldown = 0;
     state.digit = Digit::Idle;
+    // 出目は台の液晶に残るものなので、別の台へ移ったら持ち込まない。
+    state.last_reels = INITIAL_REELS;
     state.pending.clear();
     state.mode = Mode::Normal;
     state.chain = 0;
@@ -1071,5 +1076,40 @@ mod tests {
             state.jackpot_seq > after_first,
             "ヘソ入賞を挟まない連続大当たりで演出トリガが進んでいない"
         );
+    }
+
+    #[test]
+    fn generate_hall_varies_with_the_rng_state() {
+        // ホールの並びは `rng_state` だけが決める。ここが効かないと来店の
+        // たびに同じ台・同じ釘が並び、「今日はどの台が回るか」を読む余地が
+        // 消える。
+        let hall_of = |seed: u32| -> Vec<String> {
+            let mut state = PachinkoState::new();
+            state.rng_state = seed;
+            generate_hall(&mut state);
+            state
+                .machines
+                .iter()
+                .map(|m| format!("{} {:.4}", m.name, m.nail_spread))
+                .collect()
+        };
+        assert_ne!(hall_of(0x1234_5678), hall_of(0x9E37_79B9));
+    }
+
+    #[test]
+    fn a_finished_spin_leaves_its_reels_on_the_display() {
+        // 停止した出目を残さないと、当たった瞬間に液晶からゾロ目が消え、
+        // 何が揃ったのか見えないまま次の回転へ移る。
+        let mut state = seated_state();
+        let outcome = jackpot(8);
+        state.digit = Digit::Spinning { ticks_left: 1, outcome };
+        advance_digit(&mut state);
+        assert_eq!(state.digit, Digit::Idle);
+        assert_eq!(state.last_reels, outcome.reels);
+
+        // 台を替えれば前の台の液晶は付いてこない。
+        state.mode = Mode::Normal;
+        assert!(leave_seat(&mut state));
+        assert_eq!(state.last_reels, INITIAL_REELS);
     }
 }

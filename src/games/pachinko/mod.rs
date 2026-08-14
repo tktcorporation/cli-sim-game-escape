@@ -59,11 +59,15 @@ impl Default for PachinkoGame {
 impl PachinkoGame {
     pub fn new() -> Self {
         let mut state = PachinkoState::new();
-        // ホールの並びは来店ごとに作る。`PachinkoState::new` は台を持たない
-        // ので、これを呼ばないと着席できる台が1つも無い画面になる。
-        logic::generate_hall(&mut state);
         #[cfg(target_arch = "wasm32")]
         save::load_game(&mut state);
+        // ホールの並びは来店ごとに作る。`PachinkoState::new` は台を持たない
+        // ので、これを呼ばないと着席できる台が1つも無い画面になる。
+        //
+        // 生成はセーブの読み込みより後に置く。`rng_state` を読み込む前に
+        // 台を引くと、毎回 `PachinkoState::new` の固定 seed から始まり、
+        // 来店のたびに同じ4台・同じ釘が並ぶ。
+        logic::generate_hall(&mut state);
         let saved_jackpot_seq = state.jackpot_seq;
         Self {
             state,
@@ -154,6 +158,17 @@ impl PachinkoGame {
 
     fn handle_click(&mut self, action_id: u16) -> bool {
         match action_id {
+            // main.rs が画面左上へ重ねる「◀戻る」。大当たり中だけは消費して
+            // 席に留まる。消費しないと main.rs がこのインスタンスごと捨て、
+            // 開いているアタッカーで取れるはずだった出玉を失わせる —
+            // `handle_playing_key` の 'q' と同じ扱いに揃える。
+            crate::BACK_TO_MENU
+                if self.state.phase == Phase::Playing
+                    && matches!(self.state.mode, state::Mode::Jackpot(_)) =>
+            {
+                logic::leave_seat(&mut self.state);
+                true
+            }
             // 盤面全面のタップも打ち出しのトグルに繋ぐ。画面で最も面積の
             // 広い領域を主操作に当てることで、指でも狙わずに押せる。
             TOGGLE_FIRE | BOARD_TAP => logic::toggle_fire(&mut self.state),
@@ -281,6 +296,32 @@ mod tests {
         });
         assert!(game.handle_input(&InputEvent::Key('q')));
         assert_eq!(game.state.phase, Phase::Playing);
+    }
+
+    #[test]
+    fn back_button_click_stays_in_the_seat_during_a_jackpot() {
+        // 戻るボタンは main.rs が毎フレーム盤面へ重ねる。消費しないと
+        // インスタンスごと捨てられ、大当たりの残りラウンドの出玉が消える。
+        let mut game = seated();
+        assert!(
+            !game.handle_input(&click(crate::BACK_TO_MENU)),
+            "通常時の戻るボタンはメニューへ戻す操作なので、ゲーム側で消費してはいけない"
+        );
+
+        game.state.mode = state::Mode::Jackpot(state::JackpotState {
+            round: 1,
+            total_rounds: 10,
+            count: 0,
+            ticks_left: state::ROUND_LIMIT_TICKS,
+            kakuhen: true,
+        });
+        assert!(game.handle_input(&click(crate::BACK_TO_MENU)));
+        assert_eq!(game.state.phase, Phase::Playing);
+        assert_eq!(
+            game.state.log.first().map(String::as_str),
+            Some("大当たり中は席を立てない"),
+            "キー操作と同じく、席を立てない理由をログで伝える"
+        );
     }
 
     #[test]

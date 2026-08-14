@@ -110,10 +110,15 @@ fn balance_color(value: i64) -> Color {
 
 /// 当たりの軽さ。分母そのものを出すと「どれが得か」が計算問題になり、
 /// 打って確かめる意味が消えるので3段階の語に丸める。
+///
+/// 語の切れ目は `MACHINE_SPECS` の `normal_odds` の隣り合う値の間に置く。
+/// 2機種が同じ側へ入ると当たりやすさの差が表示から消え、ホールでどの台を
+/// 選ぶかという判断がラウンド数だけの比較になる。
+/// `every_machine_spec_reads_as_a_distinct_odds_word` が切れ目のズレを検知する。
 fn odds_flavor(spec: &MachineSpec) -> &'static str {
     match spec.normal_odds {
         0..=59 => "甘め",
-        60..=109 => "中間",
+        60..=94 => "中間",
         _ => "荒い",
     }
 }
@@ -698,17 +703,24 @@ fn render_info_panel(
 /// 「リーチになった」ことが中が止まる前に伝わる。
 const LEFT_STOP_TICKS: u32 = 4;
 const RIGHT_STOP_TICKS: u32 = 8;
+/// 中リールが止まる残り tick。左右が揃ってから当落が見えるまでの「間」を
+/// 作るため、最後まで引っ張ってから止める。
+///
+/// 残り tick で測るのは、回転の長さが `ReachKind` ごとに違うため。経過 tick
+/// で測ると、最も短い通常回転 (`ReachKind::None`) では右より先に中が止まり、
+/// 左→右→中という停止順が崩れる。
+const MIDDLE_STOP_REMAINING_TICKS: u32 = 3;
 
 fn digit_char(value: u8) -> char {
     char::from_digit(value as u32 % 10, 10).unwrap_or('0')
 }
 
 /// デジタルの3桁。回転中のリールは擬似的な出目を tick ごとに差し替え、
-/// 左→右→中の順に停止させる。
-fn reel_faces(digit: &Digit) -> [char; 3] {
+/// 左→右→中の順に停止させる。停止中は最後に止まった出目 (`last_reels`) を
+/// 出し続ける。
+fn reel_faces(digit: &Digit, last_reels: [u8; 3]) -> [char; 3] {
     match digit {
-        // 停止中の出目は state が保持しないので、伏せ字にする。
-        Digit::Idle => ['-', '-', '-'],
+        Digit::Idle => last_reels.map(digit_char),
         Digit::Spinning {
             ticks_left,
             outcome,
@@ -725,7 +737,12 @@ fn reel_faces(digit: &Digit) -> [char; 3] {
             } else {
                 rolling(2)
             };
-            [left, rolling(1), right]
+            let middle = if *ticks_left <= MIDDLE_STOP_REMAINING_TICKS {
+                digit_char(outcome.reels[1])
+            } else {
+                rolling(1)
+            };
+            [left, middle, right]
         }
     }
 }
@@ -799,7 +816,7 @@ fn divider_line() -> Line<'static> {
 fn board_tab_list(state: &PachinkoState) -> ClickableList<'static> {
     let mut cl = ClickableList::new();
 
-    let faces = reel_faces(&state.digit);
+    let faces = reel_faces(&state.digit, state.last_reels);
     let style = digit_style(&state.digit);
     cl.push(Line::from(Span::styled(
         " ┌───────┐",
@@ -1064,7 +1081,7 @@ mod tests {
     use ratzilla::ratatui::backend::TestBackend;
     use ratzilla::ratatui::Terminal;
 
-    use crate::games::pachinko::state::{Ball, Digit, ReachKind, SpinOutcome};
+    use crate::games::pachinko::state::{Ball, Digit, ReachKind, SpinOutcome, INITIAL_REELS};
 
     /// `Game::render` ではなく `render` を直接叩く。前者は `crate::time::now_ms()`
     /// を経由し、native のテストでは panic する。
@@ -1255,14 +1272,20 @@ mod tests {
             reels: [7, 3, 7],
         };
         let total = ReachKind::Super.spin_ticks();
-        let just_started = reel_faces(&Digit::Spinning {
-            ticks_left: total,
-            outcome,
-        });
-        let after_both_stops = reel_faces(&Digit::Spinning {
-            ticks_left: total - RIGHT_STOP_TICKS,
-            outcome,
-        });
+        let just_started = reel_faces(
+            &Digit::Spinning {
+                ticks_left: total,
+                outcome,
+            },
+            INITIAL_REELS,
+        );
+        let after_both_stops = reel_faces(
+            &Digit::Spinning {
+                ticks_left: total - RIGHT_STOP_TICKS,
+                outcome,
+            },
+            INITIAL_REELS,
+        );
         assert_eq!(
             (after_both_stops[0], after_both_stops[2]),
             ('7', '7'),
@@ -1275,21 +1298,99 @@ mod tests {
     }
 
     #[test]
-    fn every_machine_spec_reads_as_a_distinct_pair_of_words() {
-        // 分母もラウンド数も出さない代わりに、台の性格はこの2語だけで
-        // 伝わらなければならない。2機種が同じ語に潰れると、ホールで
-        // 「どちらを選ぶか」という判断そのものが消える。
-        use crate::games::pachinko::state::MACHINE_SPECS;
-        let mut seen: Vec<(&str, &str)> = Vec::new();
-        for (name, spec) in MACHINE_SPECS {
-            let pair = (odds_flavor(&spec), payout_flavor(&spec));
-            assert!(
-                !seen.contains(&pair),
-                "{name} が既出の台と同じ語 ({} / {}) になっている",
-                pair.0,
-                pair.1
+    fn every_reel_stops_on_the_outcome_before_the_spin_ends() {
+        // 中リールが止まらないと、当たってもゾロ目が出ず、ハズレでもリーチ目に
+        // ならない。抽選が決めた出目が画面に一度も現れないまま消える。
+        for reach in ReachKind::ALL {
+            let outcome = SpinOutcome {
+                hit: false,
+                rounds: 0,
+                kakuhen: false,
+                reach,
+                reels: [7, 3, 7],
+            };
+            // 回転中に render が見る最後の tick。`logic::advance_digit` は
+            // 0 まで減った時点で `Digit::Idle` へ移すため、1 が下限。
+            let faces = reel_faces(&Digit::Spinning { ticks_left: 1, outcome }, INITIAL_REELS);
+            assert_eq!(
+                faces,
+                ['7', '3', '7'],
+                "{} の停止間際に出目が揃っていない",
+                reach.label()
             );
-            seen.push(pair);
+        }
+    }
+
+    #[test]
+    fn idle_digit_shows_the_last_stopped_reels() {
+        // 停止中の液晶が伏せ字だと、大当たり直後にゾロ目が残らず、
+        // 台の当たり状況を液晶から読めなくなる。
+        assert_eq!(reel_faces(&Digit::Idle, [7, 7, 7]), ['7', '7', '7']);
+        assert_eq!(reel_faces(&Digit::Idle, INITIAL_REELS), ['1', '2', '3']);
+    }
+
+    #[test]
+    fn a_hit_draws_matching_reels_and_a_reach_draws_only_the_middle_apart() {
+        let spinning = |reach: ReachKind, hit: bool, reels: [u8; 3]| Digit::Spinning {
+            ticks_left: 1,
+            outcome: SpinOutcome {
+                hit,
+                rounds: if hit { 8 } else { 0 },
+                kakuhen: false,
+                reach,
+                reels,
+            },
+        };
+        for (digit, expected) in [
+            (spinning(ReachKind::Super, true, [7, 7, 7]), "7 7 7"),
+            (spinning(ReachKind::Super, false, [7, 3, 7]), "7 3 7"),
+        ] {
+            let mut state = seated_state();
+            state.digit = digit;
+            let (w, h) = (100u16, 40u16);
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let cs = Rc::new(RefCell::new(ClickState::new()));
+            cs.borrow_mut().terminal_cols = w;
+            cs.borrow_mut().terminal_rows = h;
+            terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
+            let buf = terminal.backend().buffer();
+            let drawn = (0..h).any(|y| {
+                let row: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
+                row.contains(expected)
+            });
+            assert!(drawn, "液晶に {expected} が描かれていない");
+        }
+    }
+
+    #[test]
+    fn every_machine_spec_reads_as_a_distinct_odds_word() {
+        // 分母を出さない代わりに、当たりの軽さの違いはこの1語だけで伝わる
+        // 必要がある。2機種が同じ語に潰れると、その差はホールから読めない。
+        // 出玉側の語と組にして判定すると、閾値が `MACHINE_SPECS` からずれても
+        // 出玉側の違いで通ってしまうので、語ごとに一意性を見る。
+        use crate::games::pachinko::state::MACHINE_SPECS;
+        let mut seen: Vec<&str> = Vec::new();
+        for (name, spec) in MACHINE_SPECS {
+            let word = odds_flavor(&spec);
+            assert!(
+                !seen.contains(&word),
+                "{name} が既出の台と同じ語 ({word}) になっている"
+            );
+            seen.push(word);
+        }
+    }
+
+    #[test]
+    fn every_machine_spec_reads_as_a_distinct_payout_word() {
+        use crate::games::pachinko::state::MACHINE_SPECS;
+        let mut seen: Vec<&str> = Vec::new();
+        for (name, spec) in MACHINE_SPECS {
+            let word = payout_flavor(&spec);
+            assert!(
+                !seen.contains(&word),
+                "{name} が既出の台と同じ語 ({word}) になっている"
+            );
+            seen.push(word);
         }
     }
 

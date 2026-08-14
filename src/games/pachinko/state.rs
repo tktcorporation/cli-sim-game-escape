@@ -252,10 +252,14 @@ pub struct SpinOutcome {
     pub reels: [u8; 3],
 }
 
+/// 台に着いた直後に表示しておく出目。ゾロ目にすると、まだ一度も回して
+/// いない台が当たり済みに見えてしまうため、揃わない目にする。
+pub const INITIAL_REELS: [u8; 3] = [1, 2, 3];
+
 /// デジタル (液晶) の状態。
 #[derive(Clone, Debug, PartialEq)]
 pub enum Digit {
-    /// 停止中。前回の出目を表示している。
+    /// 停止中。前回の出目 (`PachinkoState::last_reels`) を表示している。
     Idle,
     /// 回転中。`ticks_left` が 0 になると結果が確定する。
     Spinning { ticks_left: u32, outcome: SpinOutcome },
@@ -406,6 +410,10 @@ pub struct PachinkoState {
     /// この来店での総投資額 (円)。収支表示に使う。
     pub invested: u32,
     pub digit: Digit,
+    /// 最後に停止した出目。`Digit::Idle` は「回っていない液晶」なので、
+    /// 直前の結果を出し続けることで大当たりの後にゾロ目が残る — 実機で
+    /// 台の当たり状況が液晶から読めるのと同じ見え方になる。
+    pub last_reels: [u8; 3],
     /// 保留 (最大 `MAX_PENDING`)。ヘソ入賞のたびに積まれ、順に消化される。
     pub pending: Vec<SpinOutcome>,
     pub mode: Mode,
@@ -451,6 +459,7 @@ impl PachinkoState {
             cash: 10_000,
             invested: 0,
             digit: Digit::Idle,
+            last_reels: INITIAL_REELS,
             pending: Vec::new(),
             mode: Mode::Normal,
             history: Vec::new(),
