@@ -13,9 +13,9 @@ use super::state::{
     Phase, ReachKind, SpinOutcome, ATTACKER_HALF_W, ATTACKER_PAYOUT, ATTACKER_X, ATTACKER_Y,
     BALL_LOAN_COUNT, BALL_LOAN_YEN, BALL_R, BOARD_H, BOARD_W, FIRE_INTERVAL_TICKS, HALL_SIZE,
     HISTORY_LEN, HIT_GLOW_TICKS, INITIAL_REELS, LAUNCH_X, LAUNCH_Y, MACHINE_SPECS, MAX_BALLS,
-    MAX_PENDING, NAIL_R, ROUND_COUNT, ROUND_LIMIT_TICKS, SIDE_PAYOUT, SIDE_POCKET_HALF_W,
-    SIDE_POCKET_LEFT_X, SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y, START_PAYOUT,
-    START_POCKET_BASE_HALF_W, START_POCKET_X, START_POCKET_Y,
+    MAX_PENDING, NAIL_R, REACH_FLASH_TICKS, ROUND_COUNT, ROUND_LIMIT_TICKS, SIDE_PAYOUT,
+    SIDE_POCKET_HALF_W, SIDE_POCKET_LEFT_X, SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y, START_FLASH_TICKS,
+    START_PAYOUT, START_POCKET_BASE_HALF_W, START_POCKET_X, START_POCKET_Y,
 };
 
 // ── 乱数 (xorshift32。seed を state に持たせてセーブ・シミュレーターで再現可能にする) ──
@@ -252,7 +252,7 @@ fn add_balls(state: &mut PachinkoState, amount: u32) {
 /// ヘソ入賞1個分の処理。賞球を払い、保留に空きがあれば当落を確定させる。
 fn resolve_start_pocket(state: &mut PachinkoState) {
     add_balls(state, START_PAYOUT);
-    state.start_hit_seq = state.start_hit_seq.wrapping_add(1);
+    state.start_flash = START_FLASH_TICKS;
     if state.pending.len() >= MAX_PENDING {
         // 保留満タン中の入賞は賞球だけ。抽選を受けられない玉が出ることが
         // 「打ち出しを止める」判断の材料になる。
@@ -361,7 +361,8 @@ fn start_spin_if_idle(state: &mut PachinkoState) {
     }
     let outcome = state.pending.remove(0);
     if outcome.reach != ReachKind::None {
-        state.reach_seq = state.reach_seq.wrapping_add(1);
+        state.reach_flash = REACH_FLASH_TICKS;
+        state.reach_flash_kind = outcome.reach;
     }
     state.digit = Digit::Spinning {
         ticks_left: outcome.reach.spin_ticks(),
@@ -511,6 +512,8 @@ fn decay_glow(state: &mut PachinkoState) {
     for ball in &mut state.balls {
         ball.hit_glow = ball.hit_glow.saturating_sub(1);
     }
+    state.start_flash = state.start_flash.saturating_sub(1);
+    state.reach_flash = state.reach_flash.saturating_sub(1);
 }
 
 fn try_fire(state: &mut PachinkoState) {
@@ -591,6 +594,7 @@ pub fn sit_at(state: &mut PachinkoState, index: usize) -> bool {
         return false;
     }
     state.seat = index;
+    state.has_seated = true;
     state.phase = Phase::Playing;
     reset_seat(state);
     let name = state.machines[index].name;
@@ -623,6 +627,12 @@ fn reset_seat(state: &mut PachinkoState) {
     state.pending.clear();
     state.mode = Mode::Normal;
     state.chain = 0;
+    // 履歴もハマり回数もその台で起きた事実なので、移った先へ持ち込むと
+    // 「この台は何回転で当たっているか」という判断材料そのものが嘘になる。
+    state.history.clear();
+    state.spins_since_jackpot = 0;
+    state.start_flash = 0;
+    state.reach_flash = 0;
 }
 
 /// 持ち玉を換金して記録へ確定させる。
@@ -1076,6 +1086,108 @@ mod tests {
             state.jackpot_seq > after_first,
             "ヘソ入賞を挟まない連続大当たりで演出トリガが進んでいない"
         );
+    }
+
+    #[test]
+    fn moving_to_another_machine_leaves_the_history_and_the_miss_count_behind() {
+        // 履歴もハマり回数も台ごとの事実。持ち越すと、移った先の台が
+        // 「もう当たっている」「既に◯◯回転ハマっている」台に見える。
+        let mut state = seated_state();
+        for _ in 0..29 {
+            resolve_spin(&mut state, miss(ReachKind::None));
+        }
+        resolve_spin(&mut state, jackpot(5));
+        assert_eq!(state.history.len(), 1);
+        state.mode = Mode::Normal;
+        for _ in 0..30 {
+            resolve_spin(&mut state, miss(ReachKind::None));
+        }
+        assert_eq!(state.spins_since_jackpot, 30);
+
+        assert!(leave_seat(&mut state));
+        assert!(sit_at(&mut state, 1));
+        assert!(
+            state.history.is_empty(),
+            "前の台の大当たり履歴が移った先の台に残っている"
+        );
+        assert_eq!(
+            state.spins_since_jackpot, 0,
+            "前の台の回転数が移った先の台に残っている"
+        );
+
+        for _ in 0..5 {
+            resolve_spin(&mut state, miss(ReachKind::None));
+        }
+        resolve_spin(&mut state, jackpot(5));
+        assert_eq!(
+            state.history[0].spins_before, 6,
+            "前の台の回転数がハマり回数へ水増しされている"
+        );
+    }
+
+    #[test]
+    fn sitting_down_marks_the_player_as_seated() {
+        // ホールの表示はこの印で着席中の台を選ぶ。印が立たないままだと、
+        // 座っている台があっても強調されない。
+        let mut state = PachinkoState::new();
+        generate_hall(&mut state);
+        assert!(!state.has_seated);
+        assert!(sit_at(&mut state, 2));
+        assert!(state.has_seated);
+        assert!(leave_seat(&mut state));
+        assert!(state.has_seated, "席を立っても着席した事実は消えない");
+        assert_eq!(state.seat, 2);
+    }
+
+    #[test]
+    fn a_start_pocket_entry_lights_the_pocket() {
+        let mut state = state_with_nails(Vec::new());
+        state.balls.push(Ball {
+            x: START_POCKET_X,
+            y: START_POCKET_Y - 0.5,
+            vx: 0.0,
+            vy: MAX_SPEED,
+            hit_glow: 0,
+        });
+        step_balls(&mut state);
+        assert_eq!(
+            state.start_flash, START_FLASH_TICKS,
+            "ヘソ入賞の演出トリガが立っていない"
+        );
+    }
+
+    #[test]
+    fn entering_a_reach_lights_the_board_with_its_own_kind() {
+        let mut state = seated_state();
+        state.pending.push(miss(ReachKind::Super));
+        start_spin_if_idle(&mut state);
+        assert_eq!(state.reach_flash, REACH_FLASH_TICKS);
+        assert_eq!(state.reach_flash_kind, ReachKind::Super);
+
+        // リーチにならない回転は光らせない。毎回転光ると、光ること自体が
+        // リーチの合図でなくなる。
+        state.digit = Digit::Idle;
+        state.reach_flash = 0;
+        state.pending.push(miss(ReachKind::None));
+        start_spin_if_idle(&mut state);
+        assert_eq!(state.reach_flash, 0);
+    }
+
+    #[test]
+    fn effect_flashes_survive_a_batched_tick() {
+        // `delta_ticks` は最大5までまとめて来るので、それ未満の長さの
+        // カウンタは一度も描画されないまま消える (`HIT_GLOW_TICKS` 参照)。
+        const { assert!(START_FLASH_TICKS >= HIT_GLOW_TICKS) };
+        const { assert!(REACH_FLASH_TICKS >= HIT_GLOW_TICKS) };
+        let mut state = seated_state();
+        state.start_flash = START_FLASH_TICKS;
+        state.reach_flash = REACH_FLASH_TICKS;
+        tick_n(&mut state, HIT_GLOW_TICKS as u32);
+        assert!(state.start_flash > 0, "ヘソの光が描画される前に消えている");
+        assert!(state.reach_flash > 0, "リーチの光が描画される前に消えている");
+        tick_n(&mut state, REACH_FLASH_TICKS as u32);
+        assert_eq!(state.start_flash, 0, "ヘソの光が消えない");
+        assert_eq!(state.reach_flash, 0, "リーチの光が消えない");
     }
 
     #[test]

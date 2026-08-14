@@ -35,10 +35,10 @@ use crate::widgets::{Clickable, ClickableList, ScrollableTab, TabBar};
 use super::actions;
 use super::logic;
 use super::state::{
-    Digit, InfoTab, Machine, MachineSpec, Mode, PachinkoState, Phase, ATTACKER_HALF_W, ATTACKER_X,
-    ATTACKER_Y, BALL_LOAN_COUNT, BALL_LOAN_YEN, BALL_R, BOARD_H, BOARD_W, LAUNCH_X, LAUNCH_Y,
-    MAX_PENDING, NAIL_R, ROUND_COUNT, SIDE_POCKET_HALF_W, SIDE_POCKET_LEFT_X, SIDE_POCKET_RIGHT_X,
-    SIDE_POCKET_Y, START_POCKET_X, START_POCKET_Y,
+    Digit, InfoTab, JackpotState, Machine, MachineSpec, Mode, PachinkoState, Phase,
+    ATTACKER_HALF_W, ATTACKER_X, ATTACKER_Y, BALL_LOAN_COUNT, BALL_LOAN_YEN, BALL_R, BOARD_H,
+    BOARD_W, LAUNCH_X, LAUNCH_Y, MAX_PENDING, NAIL_R, ROUND_COUNT, SIDE_POCKET_HALF_W,
+    SIDE_POCKET_LEFT_X, SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y, START_POCKET_X, START_POCKET_Y,
 };
 
 /// 玉響のアクセント色 (銀玉の色)。盤面の枠・選択中タブ・見出しで共有する。
@@ -232,6 +232,18 @@ fn render_hall_header(
     f.render_widget(para, area);
 }
 
+/// ホールの台名の色。座っている (直前まで座っていた) 台だけを目立たせる。
+/// 着席の有無 (`PachinkoState::has_seated`) を見るのは、`seat` が初期値 0 を
+/// 持つため — 見ないと、まだ一度も座っていないプレイヤーにも先頭の台が
+/// 着席中として映る。
+fn machine_name_color(state: &PachinkoState, index: usize) -> Color {
+    if state.has_seated && index == state.seat {
+        Color::LightYellow
+    } else {
+        ACCENT
+    }
+}
+
 fn render_hall_list(
     state: &PachinkoState,
     f: &mut Frame,
@@ -249,8 +261,7 @@ fn render_hall_list(
     for (index, machine) in state.machines.iter().enumerate() {
         let action_id = actions::machine_select_id(index);
         let key = char::from_digit(index as u32 + 1, 10).unwrap_or('?');
-        let seated = index == state.seat;
-        let name_color = if seated { Color::LightYellow } else { ACCENT };
+        let name_color = machine_name_color(state, index);
         // 2行とも同じ台へ結び付ける。台名と実測値のどちらを触っても座れる
         // 方が、指が行を跨いだ時に「押したのに何も起きない」を避けられる。
         cl.push_clickable(
@@ -378,17 +389,52 @@ fn round_aspect(inner: Rect) -> f64 {
     (scale_x / scale_y).clamp(0.5, 3.0)
 }
 
+/// ラウンドの規定カウントの消化具合。1 tick の間に複数の玉がアタッカーへ
+/// 入ると `count` は規定数を超える。賞球は実機と同じくオーバー入賞分も
+/// 払うので、表示だけを規定数で止めて「3/2」のような読めない進捗にしない。
+fn round_progress(j: JackpotState) -> String {
+    format!("{}/{}", j.count.min(ROUND_COUNT), ROUND_COUNT)
+}
+
 fn board_title(state: &PachinkoState) -> String {
     let name = state.seated_machine().map(|m| m.name).unwrap_or("空き台");
     match state.mode {
         Mode::Jackpot(j) => format!(
-            " {name}  大当たり {}R/{}R  {}/{} ",
-            j.round, j.total_rounds, j.count, ROUND_COUNT
+            " {name}  大当たり {}R/{}R  {} ",
+            j.round,
+            j.total_rounds,
+            round_progress(j)
         ),
         Mode::Kakuhen { spins_left: 0 } => format!(" {name}  確変 "),
         Mode::Kakuhen { spins_left } => format!(" {name}  確変 残り{spins_left} "),
         Mode::Jitan { spins_left } => format!(" {name}  時短 残り{spins_left} "),
         Mode::Normal => format!(" {name} "),
+    }
+}
+
+/// 盤面の枠色。リーチに入った瞬間だけ格の色で縁を光らせ、盤面の玉を目で
+/// 追っている間にも「今の回転はリーチだ」と気付けるようにする。大当たり中は
+/// リーチより後に来た確定した結果なので、そちらの色で上書きする。
+fn board_border_color(state: &PachinkoState) -> Color {
+    if matches!(state.mode, Mode::Jackpot(_)) {
+        Color::LightRed
+    } else if state.reach_flash > 0 {
+        state.reach_flash_kind.color()
+    } else {
+        ACCENT
+    }
+}
+
+/// ヘソの色。玉が入った直後だけ白く光らせる。釘に弾かれた玉
+/// (`Ball::hit_glow`) と同じ見せ方にすることで、盤面の白さが一貫して
+/// 「今この瞬間に何かが当たった」印になる。
+fn start_pocket_color(state: &PachinkoState) -> Color {
+    if state.start_flash > 0 {
+        Color::White
+    } else if state.mode.is_assisted() {
+        Color::LightCyan
+    } else {
+        Color::Cyan
     }
 }
 
@@ -402,11 +448,7 @@ fn render_board(
         Mode::Jackpot(j) => Some(j),
         _ => None,
     };
-    let border_color = if jackpot.is_some() {
-        Color::LightRed
-    } else {
-        ACCENT
-    };
+    let border_color = board_border_color(state);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
@@ -480,11 +522,7 @@ fn render_board(
         board_to_canvas_y(START_POCKET_Y + 0.9),
         0.35,
     );
-    let start_pocket_color = if state.mode.is_assisted() {
-        Color::LightCyan
-    } else {
-        Color::Cyan
-    };
+    let start_pocket_color = start_pocket_color(state);
 
     // アタッカーは開放中だけ厚みを持たせ、閉じている間は細い線にする。
     let attacker_open = jackpot.is_some();
@@ -763,8 +801,10 @@ fn mode_text(state: &PachinkoState) -> String {
         Mode::Kakuhen { spins_left } => format!("確変 残り{spins_left}回転"),
         Mode::Jitan { spins_left } => format!("時短 残り{spins_left}回転"),
         Mode::Jackpot(j) => format!(
-            "大当たり {}R/{}R  {}/{}",
-            j.round, j.total_rounds, j.count, ROUND_COUNT
+            "大当たり {}R/{}R  {}",
+            j.round,
+            j.total_rounds,
+            round_progress(j)
         ),
     }
 }
@@ -1081,7 +1121,9 @@ mod tests {
     use ratzilla::ratatui::backend::TestBackend;
     use ratzilla::ratatui::Terminal;
 
-    use crate::games::pachinko::state::{Ball, Digit, ReachKind, SpinOutcome, INITIAL_REELS};
+    use crate::games::pachinko::state::{
+        Ball, Digit, ReachKind, SpinOutcome, INITIAL_REELS, REACH_FLASH_TICKS, START_FLASH_TICKS,
+    };
 
     /// `Game::render` ではなく `render` を直接叩く。前者は `crate::time::now_ms()`
     /// を経由し、native のテストでは panic する。
@@ -1360,6 +1402,97 @@ mod tests {
             });
             assert!(drawn, "液晶に {expected} が描かれていない");
         }
+    }
+
+    #[test]
+    fn the_round_counter_reads_at_most_the_round_limit() {
+        // 1 tick の間に複数の玉がアタッカーへ入ると `count` は規定数を超える。
+        // 賞球はオーバー入賞分も払うので、表示側だけで丸める。
+        let mut state = seated_state();
+        state.mode = Mode::Jackpot(JackpotState {
+            round: 2,
+            total_rounds: 4,
+            count: ROUND_COUNT + 1,
+            ticks_left: 40,
+            kakuhen: false,
+        });
+        let capped = format!("{ROUND_COUNT}/{ROUND_COUNT}");
+        let overflowed = format!("{}/{ROUND_COUNT}", ROUND_COUNT + 1);
+        for text in [board_title(&state), mode_text(&state)] {
+            assert!(text.contains(&capped), "規定数まで進んだ表示になっていない: {text}");
+            assert!(
+                !text.contains(&overflowed),
+                "オーバー入賞が規定数を超えた進捗として出ている: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_start_pocket_entry_lights_the_pocket_like_a_bounced_ball() {
+        let mut state = seated_state();
+        assert_eq!(start_pocket_color(&state), Color::Cyan);
+        state.start_flash = START_FLASH_TICKS;
+        assert_eq!(
+            start_pocket_color(&state),
+            Color::White,
+            "ヘソ入賞の演出トリガが描画に効いていない"
+        );
+        state.start_flash = 0;
+        state.mode = Mode::Jitan { spins_left: 10 };
+        assert_eq!(start_pocket_color(&state), Color::LightCyan);
+    }
+
+    #[test]
+    fn entering_a_reach_recolors_the_board_border() {
+        let mut state = seated_state();
+        assert_eq!(board_border_color(&state), ACCENT);
+        state.reach_flash = REACH_FLASH_TICKS;
+        state.reach_flash_kind = ReachKind::Super;
+        assert_eq!(
+            board_border_color(&state),
+            ReachKind::Super.color(),
+            "リーチ突入の演出トリガが描画に効いていない"
+        );
+        state.mode = Mode::Jackpot(JackpotState {
+            round: 1,
+            total_rounds: 4,
+            count: 0,
+            ticks_left: 40,
+            kakuhen: false,
+        });
+        assert_eq!(
+            board_border_color(&state),
+            Color::LightRed,
+            "大当たり中の枠がリーチの色に上書きされている"
+        );
+    }
+
+    #[test]
+    fn effect_flashes_render_without_panicking() {
+        let mut state = seated_state();
+        state.start_flash = START_FLASH_TICKS;
+        state.reach_flash = REACH_FLASH_TICKS;
+        state.reach_flash_kind = ReachKind::Premium;
+        render_to_test_backend_with_click_state(&state, 100, 40);
+        render_to_test_backend_with_click_state(&state, 40, 30);
+    }
+
+    #[test]
+    fn no_machine_reads_as_taken_until_the_player_sits_down() {
+        let mut state = PachinkoState::new();
+        logic::generate_hall(&mut state);
+        for index in 0..state.machines.len() {
+            assert_eq!(
+                machine_name_color(&state, index),
+                ACCENT,
+                "一度も着席していないのに {index} 番目の台が着席中の色になっている"
+            );
+        }
+
+        assert!(logic::sit_at(&mut state, 1));
+        assert!(logic::leave_seat(&mut state));
+        assert_eq!(machine_name_color(&state, 1), Color::LightYellow);
+        assert_eq!(machine_name_color(&state, 0), ACCENT);
     }
 
     #[test]

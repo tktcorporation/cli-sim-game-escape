@@ -58,6 +58,12 @@ pub const SIDE_POCKET_RIGHT_X: f64 = BOARD_W - 12.0;
 /// 来るため、1 tick ずつ減らすカウンタは 5 未満だと一度も描画されずに
 /// 消える可能性がある。
 pub const HIT_GLOW_TICKS: u8 = 5;
+/// ヘソに玉が入った瞬間にヘソを光らせる長さ (tick)。下限の理由は
+/// `HIT_GLOW_TICKS` と同じ。
+pub const START_FLASH_TICKS: u8 = 6;
+/// リーチに入った瞬間に盤面を光らせる長さ (tick)。1回転につき一度しか
+/// 起きない事象なので、何度も起きるヘソ入賞より長く残す。
+pub const REACH_FLASH_TICKS: u8 = 10;
 
 // ── フェーズ ───────────────────────────────────────────────────
 
@@ -395,6 +401,10 @@ pub struct PachinkoState {
     pub machines: Vec<Machine>,
     /// 着席中の台の index。`Phase::Hall` では直前に座っていた台を保持する。
     pub seat: usize,
+    /// 一度でも着席したか。`seat` は初期値 0 を持つので、この印を見ずに
+    /// 着席中の台を強調すると、まだ座っていないプレイヤーにもホールの
+    /// 先頭の台が着席中に見える。
+    pub has_seated: bool,
     /// 盤面の玉。
     pub balls: Vec<Ball>,
     /// 打ち出し中か。
@@ -423,14 +433,19 @@ pub struct PachinkoState {
     pub chain: u32,
     pub log: Vec<String>,
     pub rng_state: u32,
-    /// 演出トリガ検知用の単調増加カウンタ。render 側は前回描画時との差分の
-    /// 有無だけを見るので、logic 側は事象が起きたら増やすだけでよい。
+    /// 大当たりのたびに増える単調増加カウンタ。保存側は前回保存時との差分の
+    /// 有無だけを見るので、logic 側は当たったら増やすだけでよい。
     pub jackpot_seq: u32,
-    pub start_hit_seq: u32,
-    pub reach_seq: u32,
+    /// ヘソに玉が入った瞬間を光らせる残り tick。
+    pub start_flash: u8,
+    /// リーチに入った瞬間を光らせる残り tick。
+    pub reach_flash: u8,
+    /// `reach_flash` で光らせる色を決める格。光の有無と色を1組で持つことで、
+    /// 描画側は `Digit` の中身を辿らずに枠を塗れる。
+    pub reach_flash_kind: ReachKind,
     /// 前回の大当たりから消化したデジタル回転数 (ハマり回数)。大当たりの
-    /// たびに 0 へ戻す。演出トリガのカウンタとは別に持つ — トリガ側は
-    /// 「増えたか」しか見ない約束なので、リセットする値を兼ねさせられない。
+    /// たびに 0 へ戻す。`jackpot_seq` とは別に持つ — あちらは「増えたか」
+    /// しか見ない約束なので、0 へ戻す値を兼ねさせられない。
     pub spins_since_jackpot: u32,
     /// セーブ対象の自己記録。
     pub record: Record,
@@ -448,6 +463,7 @@ impl PachinkoState {
             // ホールの並びは `logic::generate_hall` が来店ごとに作る。
             machines: Vec::new(),
             seat: 0,
+            has_seated: false,
             balls: Vec::new(),
             firing: false,
             // 中庸な強さから始める。適正値は台の釘配置ごとに違うので、
@@ -468,9 +484,10 @@ impl PachinkoState {
             // xorshift32 は 0 が不動点なので非ゼロで始める。
             rng_state: 0x7AC1_2E5B,
             jackpot_seq: 0,
-            start_hit_seq: 0,
+            start_flash: 0,
+            reach_flash: 0,
+            reach_flash_kind: ReachKind::None,
             spins_since_jackpot: 0,
-            reach_seq: 0,
             record: Record::default(),
             hall_scroll: Cell::new(0),
             info_scroll: Cell::new(0),
