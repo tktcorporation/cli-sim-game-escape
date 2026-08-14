@@ -193,9 +193,10 @@ fn core_layer_swell(state: &StarRingState) -> f64 {
 /// 大きさの順と揃える——軽い合図を先に見ると、重い合図が出ている間だけ核が
 /// 小さく描かれる。
 ///
-/// いちばん軽いのが核脈動の拍。他の 3 つが一度きりの出来事を報せるのに対し、
-/// これは `pulse_interval` ごとに鳴り続ける装飾なので、居座る側が単発の合図を
-/// 覆い隠さない大きさと順序に置く。
+/// 重さを決めるのは、プレイヤーに次の一手を促す度合い。層開放と撃破条件の
+/// 達成は進行が動いた報せ、開放待ちの点滅は `[!]` を押させるための催促で、
+/// どれも操作へ結び付く。いちばん軽い核脈動の拍だけは押させるものが無い
+/// 装飾なので、催促を覆い隠さないところに置く。
 fn core_cue_swell(state: &StarRingState) -> f64 {
     if state.layer_flash_ticks > 0 {
         CORE_CUE_LAYER_OPEN
@@ -383,19 +384,55 @@ fn push_pulse_wave_points(
     }
 }
 
+/// 横並びで左のタブペインへ渡す割合。残りがステージ。
+const WIDE_TAB_PERCENT: u16 = 34;
+
+/// タブペインが枠とスクロール列へ使う桁数。左右の枠が 2 桁、内容が溢れた
+/// ときに `ScrollableTab` がスクロール列へ回す 1 桁。
+const TAB_CHROME_COLS: u16 = 3;
+
+/// タブ本文が要る内側の桁数。
+///
+/// タブ本文の行は説明文だけが折り返す。強化行の「ラベル + レベル + コスト」
+/// (`│ [A] 弾数  Lv.0  ✦30.0`) と武器の要約 (`  威力1.60  間隔18  斉射×1`)
+/// は 1 行に収める前提で組むので、この桁を割ると右端から黙って切り落ちる。
+/// 省略記号も出ないので、切れたこと自体が画面から読み取れない。
+///
+/// いちばん長いのが武器の要約で 26 桁。威力の桁が 1 つ伸びるぶんを足して
+/// 27 桁とる。行が実際に収まることは `no_tab_row_is_cut_off_at_any_width` が
+/// 幅を掃引して見張る。
+const TAB_MIN_INNER_COLS: u16 = 27;
+
+/// 本体を縦積みにするか。
+///
+/// 判定は「横に並べたらタブペインがタブ本文を収められるか」だけで決める。
+/// 横並びのタブペインは画面幅の 3 割ほどしか取らないので、画面のほうが先に
+/// 足りなくなることは無く、狭い端末 (`is_narrow_layout` が見る 60 桁) は
+/// この判定に含まれる。
+///
+/// 縦積みならタブ本文もステージも画面幅を丸ごと使えるので、横並びを諦めた
+/// 幅帯ではステージの横幅もむしろ広がる。削れるのはステージの高さのほう。
+fn is_stacked_layout(width: u16) -> bool {
+    wide_tab_width(width) < TAB_MIN_INNER_COLS + TAB_CHROME_COLS
+}
+
+/// 横並びにしたときのタブペインの桁数。分割そのものを走らせて測るので、
+/// 割合の刻み方が `split_body` とずれない。
+fn wide_tab_width(width: u16) -> u16 {
+    split_body(Rect::new(0, 0, width, 1), false).1.width
+}
+
 /// 本体を (ステージ, タブ内容) へ分ける。
 ///
 /// ステージ側を過半にするのは、鉱石が降ってきて砕ける様子が主役だから。
 /// タブ内容が溢れる分は `ScrollableTab` のスクロールで拾う。
-fn split_body(body: Rect, is_narrow: bool) -> (Rect, Rect) {
-    // ナローは上がステージ、ワイドは左がタブ内容で右がステージ。
-    // ワイドの左パネルは、説明文を折り返して読ませる前提で幅を詰める。
-    // 折り返さない行 (強化バー・武器ピッカー・コスト表示) が読める下限が
-    // 34% で、それ以上をステージへ回す。
-    let (dir, first, second) = if is_narrow {
+fn split_body(body: Rect, is_stacked: bool) -> (Rect, Rect) {
+    // 縦積みは上がステージ、横並びは左がタブ内容で右がステージ。
+    // 横並びの左パネルは、説明文を折り返して読ませる前提で幅を詰める。
+    let (dir, first, second) = if is_stacked {
         (Direction::Vertical, 58, 42)
     } else {
-        (Direction::Horizontal, 34, 66)
+        (Direction::Horizontal, WIDE_TAB_PERCENT, 100 - WIDE_TAB_PERCENT)
     };
     let parts = Layout::default()
         .direction(dir)
@@ -404,7 +441,7 @@ fn split_body(body: Rect, is_narrow: bool) -> (Rect, Rect) {
             Constraint::Percentage(second),
         ])
         .split(body);
-    if is_narrow {
+    if is_stacked {
         (parts[0], parts[1])
     } else {
         (parts[1], parts[0])
@@ -417,8 +454,8 @@ pub fn render(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let is_narrow = is_narrow_layout(area.width);
-    let borders = if is_narrow {
+    let is_stacked = is_stacked_layout(area.width);
+    let borders = if is_stacked {
         Borders::TOP | Borders::BOTTOM
     } else {
         Borders::ALL
@@ -426,18 +463,18 @@ pub fn render(
 
     let [header, tabs, body, footer] = split_frame(area);
 
-    render_header(state, f, header, is_narrow);
+    render_header(state, f, header);
     render_tabs(state, f, tabs, click_state);
 
-    let (stage_area, tab_area) = split_body(body, is_narrow);
-    render_stage(state, f, stage_area, borders, is_narrow, click_state);
+    let (stage_area, tab_area) = split_body(body, is_stacked);
+    render_stage(state, f, stage_area, borders, click_state);
     match state.tab {
         Tab::Armory => render_armory(state, f, tab_area, borders, click_state),
         Tab::Ring => render_ring(state, f, tab_area, borders, click_state),
         Tab::Codex => render_codex(state, f, tab_area, borders, click_state),
     }
 
-    render_footer(state, f, footer, is_narrow);
+    render_footer(state, f, footer);
 }
 
 fn format_shards(n: f64) -> String {
@@ -452,9 +489,34 @@ fn format_shards(n: f64) -> String {
     }
 }
 
-/// ヘッダー。枠を持たず 2 行で、ワイドは 1 行に畳んで残り 1 行を
-/// 本体との区切り罫にする。ナローは幅が足りないので 2 行へ折り返す。
-fn render_header(state: &StarRingState, f: &mut Frame, area: Rect, is_narrow: bool) {
+/// ヘッダーに出す層の合図。無ければ空文字。
+///
+/// 見る順は、達成した瞬間の祝いを先に、居座る状態の告知を後に置く。
+/// 撃破条件を満たしている間 `kills_ready_for_next_layer` はずっと真なので、
+/// これを `layer_ready_flash_ticks` より先に見ると、条件を満たした瞬間の
+/// 「◆条件達成」が一度も出ないまま「◆星屑不足」に吸われる。ステージ枠の
+/// 見出し (`render_stage`) も同じ順で合図を選ぶ。
+fn layer_cue(state: &StarRingState) -> &'static str {
+    if state.layer_flash_ticks > 0 {
+        " ◆層開放"
+    } else if can_unlock_next_layer(state) {
+        " ◆開放可[!]"
+    } else if state.layer_ready_flash_ticks > 0 {
+        " ◆条件達成"
+    } else if state.kills_ready_for_next_layer() {
+        " ◆星屑不足"
+    } else {
+        ""
+    }
+}
+
+/// ヘッダー。枠を持たず 2 行で、1 行へ畳めるだけの幅があれば畳んで残り 1 行を
+/// 本体との区切り罫にする。畳めない幅では 2 行へ折り返す。
+///
+/// 畳むかどうかは画面幅だけで決まる。ヘッダーは本体の分割と関係なく画面幅を
+/// まるごと使う 1 本の帯なので、本体を縦積みにしたかどうかとは無関係。
+fn render_header(state: &StarRingState, f: &mut Frame, area: Rect) {
+    let is_narrow = is_narrow_layout(area.width);
     let sps = state.shards_per_sec();
     let layer = state.layer();
     let boost = if state.boost_ticks > 0 {
@@ -462,17 +524,7 @@ fn render_header(state: &StarRingState, f: &mut Frame, area: Rect, is_narrow: bo
     } else {
         ""
     };
-    let layer_fx = if state.layer_flash_ticks > 0 {
-        " ◆層開放"
-    } else if can_unlock_next_layer(state) {
-        " ◆開放可[!]"
-    } else if state.kills_ready_for_next_layer() {
-        " ◆星屑不足"
-    } else if state.layer_ready_flash_ticks > 0 {
-        " ◆条件達成"
-    } else {
-        ""
-    };
+    let layer_fx = layer_cue(state);
 
     let ident = vec![
         Span::styled(
@@ -1350,7 +1402,6 @@ fn render_stage(
     f: &mut Frame,
     area: Rect,
     borders: Borders,
-    is_narrow: bool,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
     let layer = state.layer();
@@ -1502,8 +1553,8 @@ fn render_stage(
 
     // 背景星は上から下へ流れ、フィールド内に「降ってくる場」の向きを与える。
     // 壁の外へ散らすと鉱石が動ける範囲が曖昧になるので左右の壁で挟む。
-    // ナローは点が潰れるので数を抑える。
-    let star_count = if is_narrow {
+    // 横に狭いステージでは星が団子になって鉱石と紛れるので数を抑える。
+    let star_count = if is_narrow_layout(area.width) {
         10
     } else {
         16 + (layer.min(6) as usize) * 3
@@ -1694,10 +1745,12 @@ fn footer_hint(tab: Tab, is_narrow: bool, width: u16) -> String {
     out
 }
 
-fn render_footer(state: &StarRingState, f: &mut Frame, area: Rect, is_narrow: bool) {
+/// フッター。案内の詳しさは画面幅だけで決まる。ヘッダーと同じく、本体の
+/// 分割と関係なく画面幅をまるごと使う 1 本の帯。
+fn render_footer(state: &StarRingState, f: &mut Frame, area: Rect) {
     f.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            footer_hint(state.tab, is_narrow, area.width),
+            footer_hint(state.tab, is_narrow_layout(area.width), area.width),
             Style::default().fg(Color::DarkGray),
         ))),
         area,
@@ -1712,8 +1765,9 @@ mod tests {
 
     use crate::games::starringe::actions::buy_ring_id;
     use crate::games::starringe::logic::{
-        unlock_next_layer, ARC_PROJECTILE_RADIUS, NOVA_PROJECTILE_RADIUS, PULSE_PROJECTILE_RADIUS,
-        RAY_PROJECTILE_RADIUS, SCATTER_PROJECTILE_RADIUS,
+        purchase_ring_upgrade, purchase_weapon_stat, unlock_next_layer, ARC_PROJECTILE_RADIUS,
+        NOVA_PROJECTILE_RADIUS, PULSE_PROJECTILE_RADIUS, RAY_PROJECTILE_RADIUS,
+        SCATTER_PROJECTILE_RADIUS,
     };
     use crate::games::starringe::state::{
         Layer, Ore, OreMotion, Projectile, PulseRing, RingUpgrade, Tab, LAYER_FLASH_TICKS,
@@ -1978,6 +2032,184 @@ mod tests {
         }
     }
 
+    /// 端末サイズ `w`x`h` で `state.tab` の本文を組む `(桁数, 空行を挟むか)`。
+    /// レイアウトの分岐も枠とスクロール列の引き方も `render` と同じ手順を通す。
+    fn tab_layout_at(state: &StarRingState, w: u16, h: u16) -> (u16, bool) {
+        let stacked = is_stacked_layout(w);
+        let borders = if stacked {
+            Borders::TOP | Borders::BOTTOM
+        } else {
+            Borders::ALL
+        };
+        let tab_area = split_body(split_frame(Rect::new(0, 0, w, h))[2], stacked).1;
+        let inner = Block::default().borders(borders).inner(tab_area);
+        match state.tab {
+            // 武装タブだけは先頭 1 行を武器ピッカーへ渡し、残りを本文へ回す。
+            Tab::Armory => {
+                let body = Rect::new(
+                    inner.x,
+                    inner.y + 1,
+                    inner.width,
+                    inner.height.saturating_sub(1),
+                );
+                fit_tab_layout(body, |cols| armory_sections(state, cols))
+            }
+            Tab::Ring => fit_tab_layout(inner, |cols| ring_sections(state, cols)),
+            Tab::Codex => fit_tab_layout(inner, |cols| codex_sections(state, cols)),
+        }
+    }
+
+    /// 層と強化がある程度伸びた state。数字は桁が育つ側で行を押し広げるので、
+    /// 幅の検査は新規 state ではなくこちらで見る。星屑は購入のたびに戻して、
+    /// 資金ではなくレベルの上限だけが伸び方を決めるようにする。
+    fn mid_game_state(tab: Tab) -> StarRingState {
+        let mut state = StarRingState::new();
+        state.tab = tab;
+        state.total_kills = Layer::THRESHOLDS[1];
+        state.shards = 1e9;
+        assert!(unlock_next_layer(&mut state));
+        state.layer_flash_ticks = 0;
+        for weapon in WeaponKind::ALL {
+            for stat in WeaponStat::ALL {
+                for _ in 0..6 {
+                    state.shards = 1e9;
+                    purchase_weapon_stat(&mut state, weapon, stat);
+                }
+            }
+        }
+        for kind in RingUpgrade::ALL {
+            for _ in 0..6 {
+                state.shards = 1e9;
+                purchase_ring_upgrade(&mut state, kind);
+            }
+        }
+        state.shards = 1e9;
+        state
+    }
+
+    /// 幅を 1 桁ずつ動かして、どの幅でもタブ本文の行が切り落ちないこと。
+    ///
+    /// 折り返さない行 (強化行のラベル + レベル + コスト、武器の要約) は、
+    /// パネルが狭いと右端から黙って消える。省略記号も出ないので、代表的な
+    /// 数サイズを個別に見るだけでは間の幅帯にできた穴に気付けない。
+    #[test]
+    fn no_tab_row_is_cut_off_at_any_width() {
+        for w in 30u16..=120 {
+            for h in [22u16, 30, 36] {
+                for tab in [Tab::Armory, Tab::Ring, Tab::Codex] {
+                    let state = mid_game_state(tab);
+                    let (wrap_w, spaced) = tab_layout_at(&state, w, h);
+                    let sections = match tab {
+                        Tab::Armory => armory_sections(&state, wrap_w),
+                        Tab::Ring => ring_sections(&state, wrap_w),
+                        Tab::Codex => codex_sections(&state, wrap_w),
+                    };
+                    for line in build_list(sections, spaced).lines() {
+                        assert!(
+                            line.width() <= wrap_w as usize,
+                            "{w}x{h} {tab:?}: {wrap_w} 桁のパネルに {} 桁の行がある {}",
+                            line.width(),
+                            line.spans
+                                .iter()
+                                .map(|s| s.content.as_ref())
+                                .collect::<String>()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// 幅を 1 桁ずつ動かして、どの幅でも武器ピッカーが選択中の武器名を出すこと。
+    ///
+    /// ピッカーは 5 つのチップを横に割るので、パネルが狭いとチップ 1 つが
+    /// 全角 2 文字を置けなくなり、武器名が読めないまま選択だけができる。
+    #[test]
+    fn weapon_picker_keeps_the_selected_name_at_any_width() {
+        for w in 30u16..=120 {
+            let state = mid_game_state(Tab::Armory);
+            let mut terminal = Terminal::new(TestBackend::new(w, 30)).unwrap();
+            let cs = Rc::new(RefCell::new(ClickState::new()));
+            cs.borrow_mut().terminal_cols = w;
+            cs.borrow_mut().terminal_rows = 30;
+            terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
+            let buf = terminal.backend().buffer();
+            let picker = (0..30)
+                .map(|y| row_text(buf, y, w))
+                .find(|r| r.contains('▶'))
+                .expect("武器ピッカーの行が見つからない");
+            assert!(
+                picker.contains(state.selected_weapon.label()),
+                "{w}桁: 選択中の武器名が読めない {picker}"
+            );
+        }
+    }
+
+    /// ヘッダーの層の合図が、どの枝も実際に出せる state を持つこと。
+    ///
+    /// 撃破条件を満たしている間 `kills_ready_for_next_layer` は真のままなので、
+    /// 「◆条件達成」と「◆星屑不足」の順を取り違えると前者が一度も出ない。
+    /// 出ない枝はコードだけ読んでも動いているように見えるので、5 枝すべてを
+    /// 実際に踏んで押さえる。
+    #[test]
+    fn every_layer_cue_has_a_state_that_shows_it() {
+        use crate::games::starringe::state::LAYER_READY_FLASH_TICKS;
+
+        let fresh = StarRingState::new();
+        assert_eq!(layer_cue(&fresh), "", "条件を満たす前は合図を出さない");
+
+        let ready_state = |flash: u32, shards: f64| {
+            let mut state = StarRingState::new();
+            state.total_kills = Layer::THRESHOLDS[1];
+            state.layer_ready_flash_ticks = flash;
+            state.shards = shards;
+            state
+        };
+
+        // 条件を満たした瞬間の 18 tick。星屑が足りていなくてもここが優先される。
+        let just_reached = ready_state(LAYER_READY_FLASH_TICKS, 0.0);
+        assert_eq!(layer_cue(&just_reached), " ◆条件達成");
+
+        // 祝いが切れた後、星屑が貯まるまで居座る告知。
+        let waiting = ready_state(0, 0.0);
+        assert_eq!(layer_cue(&waiting), " ◆星屑不足");
+
+        // 星屑が揃えば、祝いの最中でも開放を促す側が勝つ。
+        let affordable = ready_state(LAYER_READY_FLASH_TICKS, 1e9);
+        assert_eq!(layer_cue(&affordable), " ◆開放可[!]");
+
+        let mut opened = ready_state(0, 1e9);
+        assert!(unlock_next_layer(&mut opened));
+        assert_eq!(layer_cue(&opened), " ◆層開放");
+    }
+
+    /// 条件達成の合図が、ヘッダーとステージ枠の見出しに同時に出ること。
+    /// 片方だけが出る状態は、同じ出来事に 2 つの読み方を与えてしまう。
+    #[test]
+    fn the_reached_cue_shows_in_the_header_and_the_stage_title() {
+        use crate::games::starringe::state::LAYER_READY_FLASH_TICKS;
+
+        let mut state = StarRingState::new();
+        state.total_kills = Layer::THRESHOLDS[1];
+        state.layer_ready_flash_ticks = LAYER_READY_FLASH_TICKS;
+        state.shards = 0.0;
+
+        let (w, h) = (108u16, 36u16);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = w;
+        cs.borrow_mut().terminal_rows = h;
+        terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
+        let buf = terminal.backend().buffer();
+        let screen: String = (0..h).map(|y| row_text(buf, y, w)).collect();
+
+        assert!(screen.contains("◆条件達成"), "ヘッダーに合図が出ていない");
+        assert!(
+            screen.contains("撃破条件達成"),
+            "ステージ枠の見出しに合図が出ていない"
+        );
+    }
+
     /// 折り返さない情報 (武器名・強化バー) が、実機幅のどれでも切り詰められずに
     /// 出ること。折り返すのは説明文だけで、1 行に収める情報はパネルの幅が
     /// 下限を割ると読めなくなる。
@@ -2004,19 +2236,8 @@ mod tests {
                 "{w}x{h}: 選択中の武器名が読めない {picker}"
             );
 
-            // バーの升目数は、実際に行を組んだ桁数から決まる。枠の内側 (ワイドは
-            // 左右 2 桁ぶん狭い) と、内容が溢れた時にスクロール列へ回る 1 桁の
-            // どちらも `render_armory` と同じ手順で引く。
-            let narrow = is_narrow_layout(w);
-            let borders = if narrow {
-                Borders::TOP | Borders::BOTTOM
-            } else {
-                Borders::ALL
-            };
-            let tab_area = split_body(split_frame(Rect::new(0, 0, w, h))[2], narrow).1;
-            let inner = Block::default().borders(borders).inner(tab_area);
-            let body = Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1);
-            let (wrap_w, _) = fit_tab_layout(body, |cols| armory_sections(&state, cols));
+            // バーの升目数は、実際に行を組んだ桁数から決まる。
+            let (wrap_w, _) = tab_layout_at(&state, w, h);
 
             let bar_row = rows
                 .iter()
@@ -2168,10 +2389,10 @@ mod tests {
         for (w, h) in [(100u16, 30u16), (40, 30), (38, 20)] {
             // レイアウトの分岐は render と同じ判定から引く。閾値が動いたときに
             // 実描画と別の Rect を検査したまま通ることがないようにする。
-            let narrow = is_narrow_layout(w);
+            let stacked = is_stacked_layout(w);
             let area = Rect::new(0, 0, w, h);
-            let (stage, _) = split_body(split_frame(area)[2], narrow);
-            let borders = if narrow {
+            let (stage, _) = split_body(split_frame(area)[2], stacked);
+            let borders = if stacked {
                 Borders::TOP | Borders::BOTTOM
             } else {
                 Borders::ALL
@@ -2223,7 +2444,15 @@ mod tests {
     /// そこへ届く手段 (直接表示 or スクロール) が残ること。
     #[test]
     fn short_viewport_keeps_tab_content_visible() {
-        let (w, h) = (38u16, 20u16);
+        // 縦積みはタブ内容へ回る高さが本体の 4 割ほどしか無い。画面が横に
+        // 広くても、行が高さで落ちる事情はモバイルと変わらないので、縦積みへ
+        // 倒れる幅帯の上端まで見る。
+        for (w, h) in [(38u16, 20u16), (60, 20), (80, 22), (86, 20)] {
+            short_viewport_reaches_every_purchase_row(w, h);
+        }
+    }
+
+    fn short_viewport_reaches_every_purchase_row(w: u16, h: u16) {
         for (tab, wanted) in [
             (
                 Tab::Armory,
@@ -2244,7 +2473,7 @@ mod tests {
 
             let buf = terminal.backend().buffer();
             let tab_area =
-                split_body(split_frame(Rect::new(0, 0, w, h))[2], is_narrow_layout(w)).1;
+                split_body(split_frame(Rect::new(0, 0, w, h))[2], is_stacked_layout(w)).1;
             let filled = (tab_area.y..tab_area.y + tab_area.height)
                 .filter(|&y| {
                     (tab_area.x..tab_area.x + tab_area.width)
@@ -2253,7 +2482,7 @@ mod tests {
                 .count();
             assert!(
                 filled >= 3,
-                "{tab:?}: タブ内側が空欄になっている (中身のある行 {filled})"
+                "{w}x{h} {tab:?}: タブ内側が空欄になっている (中身のある行 {filled})"
             );
             let Some(wanted) = wanted else {
                 continue;
@@ -2266,14 +2495,14 @@ mod tests {
                 }
                 assert!(
                     has_action(&cs, w, h, TAB_SCROLL_DOWN),
-                    "{tab:?}: 購入行が出ていないのに送る手段が無い"
+                    "{w}x{h} {tab:?}: 購入行が出ていないのに送る手段が無い"
                 );
                 state.scroll_tab(3);
                 cs.borrow_mut().targets.clear();
                 terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
                 reached = has_action(&cs, w, h, wanted);
             }
-            assert!(reached, "{tab:?}: スクロールしても購入行へ届かない");
+            assert!(reached, "{w}x{h} {tab:?}: スクロールしても購入行へ届かない");
         }
     }
 
@@ -2311,10 +2540,10 @@ mod tests {
         }
 
         for (w, h) in [(100u16, 30u16), (40, 30)] {
-            let narrow = is_narrow_layout(w);
+            let stacked = is_stacked_layout(w);
             let area = Rect::new(0, 0, w, h);
-            let (stage, _) = split_body(split_frame(area)[2], narrow);
-            let borders = if narrow {
+            let (stage, _) = split_body(split_frame(area)[2], stacked);
+            let borders = if stacked {
                 Borders::TOP | Borders::BOTTOM
             } else {
                 Borders::ALL
@@ -2613,9 +2842,9 @@ mod tests {
     /// 端末サイズ `w`x`h` でステージの枠の内側に当たる Rect。
     /// レイアウトの分岐は `render` と同じ判定から引く。
     fn stage_inner(w: u16, h: u16) -> Rect {
-        let narrow = is_narrow_layout(w);
-        let (stage, _) = split_body(split_frame(Rect::new(0, 0, w, h))[2], narrow);
-        let borders = if narrow {
+        let stacked = is_stacked_layout(w);
+        let (stage, _) = split_body(split_frame(Rect::new(0, 0, w, h))[2], stacked);
+        let borders = if stacked {
             Borders::TOP | Borders::BOTTOM
         } else {
             Borders::ALL
