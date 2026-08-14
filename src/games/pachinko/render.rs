@@ -1117,7 +1117,13 @@ fn render_jackpot_theater(
 
     // 数字を出す余地が無ければ、玉数を文字のまま1行に収める。
     if inner.height < 2 + BIG_DIGIT_H || digits_w + 6 > inner.width {
-        let text = format!(" {}玉  R {}/{} ", format_thousands(shown), j.round, j.total_rounds);
+        let text = format!(
+            " {}玉  R {}/{} {} ",
+            format_thousands(shown),
+            j.round,
+            j.total_rounds,
+            round_dots(j)
+        );
         let row = Rect::new(inner.x, inner.bottom() - 1, inner.width, 1);
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -1134,8 +1140,6 @@ fn render_jackpot_theater(
     }
 
     let invert = payout_carry_flash(state);
-    // ドット絵の下端が Canvas の下端に接すると数字が切れて見えるので、
-    // 上下に1ドットずつ余白を残す。
     let points = big_number_points(&columns, invert, BIG_DIGIT_GLYPH_TOP_DOT);
     let (x_bounds, y_bounds) = big_number_bounds(digits_w, BIG_DIGIT_H);
     let digits_area = Rect::new(
@@ -1615,13 +1619,16 @@ fn board_tab_list(state: &PachinkoState) -> ClickableList<'static> {
     // 大当たりの決算。アタッカーが閉じた時点で出玉が確定するので、
     // 大当たり中は進行中のカウンタ (`render_jackpot_theater`) に譲る。
     if !matches!(state.mode, Mode::Jackpot(_)) && state.last_jackpot_payout > 0 {
-        let chain = state.chain.max(1);
+        // 連チャンは数え直された時点で 0 に戻る。0 のまま添えると、途切れた
+        // 連チャンが1連として決算に残る。
+        let chain = if state.chain > 0 {
+            format!(" / {}連", state.chain)
+        } else {
+            String::new()
+        };
         cl.push(label_value_line(
             "前回の当たり",
-            format!(
-                "{}玉 / {chain}連",
-                format_thousands(state.last_jackpot_payout as u64)
-            ),
+            format!("{}玉{chain}", format_thousands(state.last_jackpot_payout as u64)),
             Color::LightRed,
         ));
     }
@@ -2785,6 +2792,16 @@ mod tests {
                 rows.iter().any(|row| row.contains("R 3/10")),
                 "{w}x{h}: ラウンドの進行が出ていない"
             );
+        }
+    }
+
+    #[test]
+    fn the_payout_counter_survives_an_area_too_small_to_draw_it() {
+        // 盤面が数字を置けない狭さになるのは端末を縮めた1フレームだけだが、
+        // そこで添え字が回り込むと画面ごと落ちる。
+        let state = jackpot_state(1_480);
+        for (w, h) in [(8u16, 4u16), (20u16, 8u16), (14u16, 6u16), (40u16, 12u16)] {
+            render_to_test_backend_with_click_state(&state, w, h);
         }
     }
 
