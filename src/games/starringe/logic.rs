@@ -40,6 +40,13 @@ const HIT_TOLERANCE: f64 = 1.5;
 /// 層開放の演出で立つ波が届く距離。鉱石には触れない波なので、どの脈動レベルの
 /// 到達距離とも噛み合わせず、開放の瞬間だけ上空まで駆け上がる長さを取る。
 const CEREMONY_WAVE_REACH: f64 = 70.0;
+/// 同時に描く波の本数の上限。波は点描で描かれるので、本数がそのまま1フレームの
+/// 点数になる。タップは入力イベントごとに波を立てられ、10 ticks/sec の歩みに
+/// 縛られない——上限を置かないと連打のぶんだけ描画コストが伸びる。
+const MAX_PULSE_RINGS: usize = 12;
+/// 上限を越えたときに残す本数。1本ずつ削ると連打のあいだ毎tickで削り続けるので、
+/// 一度にまとめて減らして次の切り詰めまでの間隔を空ける。
+const KEPT_PULSE_RINGS: usize = 8;
 /// 裂片が分裂する際、子を親の左右へ振り分ける幅。
 const SPLIT_SPREAD: f64 = 4.0;
 /// 分裂子は星塵を一回り小さくした個体として湧く。HP と半径へ同じ係数を掛け、
@@ -361,9 +368,16 @@ fn step_pulse_rings(state: &mut StarRingState) {
         }
     }
     state.pulse_rings.retain(|r| r.life > 0);
-    if state.pulse_rings.len() > 12 {
-        let drop = state.pulse_rings.len() - 8;
-        state.pulse_rings.drain(0..drop);
+    if state.pulse_rings.len() > MAX_PULSE_RINGS {
+        let drop = state.pulse_rings.len() - KEPT_PULSE_RINGS;
+        // 捨てるのは最も広がった波から。残りの輪帯 `[radius, reach]` へ先に
+        // ダメージを通してから消すので、タップした回数ぶんの手応えは残る。
+        let dropped: Vec<PulseRing> = state.pulse_rings.drain(0..drop).collect();
+        for ring in dropped {
+            if ring.damage > 0.0 {
+                pulse_wave_damage(state, ring.radius, ring.reach, ring.damage);
+            }
+        }
     }
 }
 
@@ -1784,6 +1798,49 @@ mod tests {
             state.ores[0].hp, before,
             "到達距離の外に居た鉱石を波が削っている y={y}"
         );
+    }
+
+    /// タップを連打しても、立てた波の数ぶんのダメージが入ること。
+    ///
+    /// タップは入力イベントごとに波を立てるので、10 ticks/sec の歩みより速く
+    /// 積み上がる。描画のために本数を切り詰めるとき、まだ広がり切っていない波を
+    /// そのまま消すと、押した回数と返ってくる手応えが噛み合わなくなる。
+    #[test]
+    fn rapid_taps_deal_damage_for_every_wave() {
+        // 1 tick の合間に一気に押す場合と、tick をまたいで押し続ける場合の両方で
+        // 本数の上限を越えさせる。
+        for (taps_per_step, steps) in [(24, 1), (3, 12)] {
+            let mut state = state_with_core_pulse(6);
+            // 層開放の演出波は鉱石に触れないが、本数の枠は食う。
+            state.pulse_rings.clear();
+            // 手動波が届く範囲の内側に、削り切られない硬い鉱石を静止させる。
+            let y = CORE_Y + state.pulse_reach() * 0.55 * 0.5;
+            push_test_ore(&mut state, CX, y, 1e6);
+            let before = state.ores[0].hp;
+
+            let mut expected = 0.0;
+            for _ in 0..steps {
+                for _ in 0..taps_per_step {
+                    manual_strike(&mut state);
+                    // タップが載せたブースト込みの値。`manual_strike` が内部で
+                    // 使う値と一致する。
+                    expected +=
+                        state.weapon_damage(WeaponKind::Pulse) * 2.2 + state.pulse_damage() * 0.6;
+                }
+                step_pulse_rings(&mut state);
+            }
+            // 残った波が広がり切るまで回す。
+            for _ in 0..64 {
+                step_pulse_rings(&mut state);
+            }
+
+            let dealt = before - state.ores[0].hp;
+            assert!(
+                (dealt - expected).abs() < 1e-6,
+                "{taps_per_step}連打×{steps}tick ぶんのダメージが入っていない \
+                 dealt={dealt} expected={expected}"
+            );
+        }
     }
 
     /// 層開放の演出で立つ波は鉱石に触れないこと。
