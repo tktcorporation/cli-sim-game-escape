@@ -7,6 +7,7 @@ pub mod factory;
 pub mod godfield;
 pub mod loopmarch;
 pub mod metropolis;
+pub mod pachinko;
 pub mod rpg;
 pub mod starringe;
 
@@ -53,6 +54,8 @@ pub enum GameChoice {
     Everlight,
     /// 星環 — 迫る鉱石を公転砲台で砕く放置ゲーム
     StarRing,
+    /// 玉響 — 釘を読んで台を選び、玉の行方に祈るパチンコ
+    Pachinko,
 }
 
 /// Top-level application state.
@@ -92,5 +95,6 @@ pub fn create_game(choice: &GameChoice) -> Box<dyn Game> {
         GameChoice::LoopMarch => Box::new(loopmarch::LoopMarchGame::new()),
         GameChoice::Everlight => Box::new(everlight::EverlightGame::new()),
         GameChoice::StarRing => Box::new(starringe::StarRingGame::new()),
+        GameChoice::Pachinko => Box::new(pachinko::PachinkoGame::new()),
     }
 }
