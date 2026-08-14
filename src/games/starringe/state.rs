@@ -23,7 +23,9 @@ pub const RING_RX: f64 = 32.0;
 pub const RING_RY: f64 = 10.0;
 /// 砲台スロット上限。
 pub const MAX_TURRETS: u32 = 8;
-/// 手前側 (視点に近い環の下半分) に描く砲台の半径。
+/// 環の最下点の下に残す余裕。`ring_radii` はこの高さを残して縦半径を頭打ちに
+/// する。砲台をどの大きさで描くかは `render` が決めるが、環が下がりきった時に
+/// 残る余裕はこの値なので、描画半径の下限もここに揃う。
 pub const TURRET_NEAR_RADIUS: f64 = 1.6;
 /// 画面シェイクの縦振れ幅。
 pub const SHAKE_MAX_Y: f64 = 0.3;
@@ -531,6 +533,10 @@ pub struct Ore {
     pub vy: f64,
     pub hp: f64,
     pub kind: OreKind,
+    /// 描画と当たり判定が読む半径。値は必ず `kind.radius()` の写しで、生成は
+    /// `logic::spawn_one` の 1 経路に閉じている。個体ごとに書き換えると
+    /// `OreKind::radius` が持つ下限 (点グリッドの上で弾と見分けがつく大きさ) を
+    /// 迂回できてしまうため、湧かせた後に触らない。
     pub radius: f64,
     pub motion: OreMotion,
     /// 横方向の速度 (符号付き)。壁で反射すると符号が入れ替わる。

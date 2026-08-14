@@ -17,8 +17,9 @@
 #![cfg(test)]
 
 use super::logic::{
-    can_unlock_next_layer, can_upgrade_ring, can_upgrade_weapon_stat, purchase_ring_upgrade,
-    purchase_weapon_stat, ring_upgrade_cost, tick, unlock_next_layer, weapon_stat_cost, MAX_ORES,
+    can_unlock_next_layer, can_upgrade_ring, can_upgrade_weapon_stat, manual_strike,
+    purchase_ring_upgrade, purchase_weapon_stat, ring_upgrade_cost, tick, unlock_next_layer,
+    weapon_stat_cost, MAX_ORES, MAX_PULSE_RINGS,
 };
 use super::state::{
     Layer, OreKind, RingUpgrade, StarRingState, WeaponKind, WeaponStat, FIELD_MARGIN,
@@ -713,6 +714,110 @@ fn strategy_comparison_report() {
             snap.unlocked_ores,
         );
     }
+}
+
+/// 連打で波を積み上げても、同時に持つ波の本数が上限のまわりに収まること。
+///
+/// タップは入力イベントごとに波を立てる (`logic::manual_strike`) ので、
+/// 10 ticks/sec の歩みに縛られずに積み上がる。`MAX_PULSE_RINGS` は描画コストの
+/// 上限で、切り詰めた波を描かせるために 1tick 残す猶予 (`logic::step_pulse_rings`)
+/// はその上限を一時的に越える——越え幅が青天井だと、切り詰めそのものが意味を
+/// 失う。脈動レベルが上がるほど波の寿命は伸びるので、伸びきった側でも測る。
+#[test]
+fn rapid_tapping_keeps_the_wave_count_bounded() {
+    const TICKS: u32 = 900;
+    const TAP_RATES: [usize; 3] = [1, 4, 12];
+
+    eprintln!("[starringe/waves] ticks={TICKS} 上限={MAX_PULSE_RINGS}");
+    for pulse_lv in [1u32, 6, 12, 20] {
+        for taps in TAP_RATES {
+            let mut state = StarRingState::new();
+            state.rng_state = 0x51DE_0001 + pulse_lv;
+            state.current_layer = 4;
+            state.ring_levels[RingUpgrade::CorePulse.index()] = pulse_lv;
+            let mut peak = 0usize;
+            for _ in 0..TICKS {
+                for _ in 0..taps {
+                    manual_strike(&mut state);
+                }
+                tick(&mut state, 1);
+                peak = peak.max(state.pulse_rings.len());
+            }
+            eprintln!("  脈Lv{pulse_lv:>2} {taps:>2}連打/tick peak_rings={peak}");
+            // 猶予は 1tick なので、上乗せはその tick に立てた本数までで頭打ちに
+            // なる。猶予が複数 tick へ伸びると、波の寿命ぶん積み上がってこの幅を
+            // 越える。
+            assert!(
+                peak <= MAX_PULSE_RINGS + taps + 2,
+                "脈Lv{pulse_lv} {taps}連打/tick で波の本数が上限から離れすぎている \
+                 peak={peak} / 上限{MAX_PULSE_RINGS}"
+            );
+        }
+    }
+}
+
+/// 裂片が湧く層で、分裂が盤面を溢れさせず迎撃圧も殺さないこと。
+///
+/// 裂片は撃破のたびに星塵を 2 体足すので、湧きの総量は他の層より上振れする。子は
+/// 通常の星塵と同じ寸法・HP で湧く (`logic::apply_damage`) ため、分裂の重さは
+/// 裂片を割った回数だけで決まる——ここが崩れると、盤面が上限へ張り付く側か、
+/// 割っても何も増えない側のどちらかへ倒れる。
+///
+/// 武装を Lv1 に固定するのは `saturated_kills` と同じ理由で、強化が積み上がって
+/// 逸失が 0 に落ちた状態では分裂の重さが撃破数へ出ないため。
+#[test]
+fn splitting_layer_keeps_the_board_playable() {
+    const RUNS: u32 = 12;
+    const TICKS: u32 = 3_000;
+
+    let mut miss_rates = Vec::with_capacity(RUNS as usize);
+    let mut kills = Vec::with_capacity(RUNS as usize);
+    let mut peaks = Vec::with_capacity(RUNS as usize);
+
+    for seed in 1..=RUNS {
+        let mut state = StarRingState::new();
+        state.rng_state = seed;
+        state.current_layer = OreKind::Splitter.unlock_layer();
+        for w in state.unlocked_weapons() {
+            state.weapon_levels[w.index()] = [1, 1, 1];
+        }
+        let mut peak = 0usize;
+        for _ in 0..TICKS {
+            tick(&mut state, 1);
+            peak = peak.max(state.ores.len());
+        }
+        let total = state.total_kills + state.missed_count;
+        miss_rates.push(state.missed_count as f64 / total.max(1) as f64);
+        kills.push(state.total_kills);
+        peaks.push(peak as u64);
+    }
+
+    let miss = median_f64(&mut miss_rates);
+    let med_kills = median_u64(&mut kills);
+    let peak = median_u64(&mut peaks);
+    eprintln!(
+        "[starringe/splitting] runs={RUNS} ticks={TICKS} layer={} \
+         median_kills={med_kills} median_miss_rate={:.1}% median_peak_ores={peak}",
+        OreKind::Splitter.unlock_layer(),
+        miss * 100.0
+    );
+
+    assert!(
+        peak <= MAX_ORES as u64,
+        "分裂で同時存在数が上限を超えた peak={peak} / 上限{MAX_ORES}"
+    );
+    // 逸失率の中央値は 62% 前後。武装 Lv1 固定の飽和状態なので取りこぼしは多く
+    // 出るが、両端へ振れれば「割っても増えない」か「割ったら手に負えない」の
+    // どちらかへ倒れている。
+    assert!(
+        (0.45..0.78).contains(&miss),
+        "裂片層の逸失率が想定帯から外れている: {:.1}%",
+        miss * 100.0
+    );
+    assert!(
+        med_kills > 0,
+        "裂片層で一体も撃破できていない kills={med_kills}"
+    );
 }
 
 #[test]
