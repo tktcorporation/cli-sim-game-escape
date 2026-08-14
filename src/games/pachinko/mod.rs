@@ -33,7 +33,7 @@ use actions::{
     HALL_SCROLL_DOWN, HALL_SCROLL_UP, INFO_SCROLL_DOWN, INFO_SCROLL_UP, LEAVE_SEAT, POWER_DOWN,
     POWER_UP, TAB_BOARD, TAB_HISTORY, TAB_RECORD, TOGGLE_FIRE,
 };
-use state::{InfoTab, PachinkoState, Phase};
+use state::{InfoTab, Mode, PachinkoState, Phase};
 
 /// スクロールキー / 矢印タップ1回で動かす行数。
 const SCROLL_STEP: i32 = 3;
@@ -225,7 +225,16 @@ impl Game for PachinkoGame {
             // 読み込みは必ず通常状態から始まるので、確定だけを保存すると
             // 「記録には残っているのに出玉が無い」食い違いだけが残る。
             self.flush_save();
-        } else if self.save_countdown > delta_ticks {
+            return;
+        }
+        if matches!(self.state.mode, Mode::Jackpot(_)) {
+            // 大当たりの最中に保存すると、加算済みの記録と取りかけの出玉だけが
+            // 残る。`save.rs` は `mode` も残りラウンドも保存しないので、その
+            // 途中の状態から読み込むと通常時で再開し、残りのラウンドと確変・
+            // 時短が消える。終了時に必ず確定させるので、その間は見送る。
+            return;
+        }
+        if self.save_countdown > delta_ticks {
             self.save_countdown -= delta_ticks;
         } else {
             self.flush_save();
@@ -545,9 +554,35 @@ mod tests {
             matches!(game.state.mode, state::Mode::Jackpot(_)),
             "大当たりの途中を試すテストなのに大当たりが終わっている"
         );
+        assert_eq!(
+            game.save_countdown, countdown_before,
+            "大当たりの確定だけで保存を確定させてはいけない"
+        );
+    }
+
+    #[test]
+    fn a_jackpot_in_progress_holds_off_the_periodic_save() {
+        // 定期保存は大当たりの途中でも回ってくる。そこで保存すると、加算済みの
+        // 記録と取りかけの出玉だけが残り、読み込んだ側は通常時で再開して残りの
+        // ラウンドと確変・時短を失う。30秒を超える大当たりでは必ず通る経路。
+        let mut game = seated();
+        game.state.mode = state::Mode::Jackpot(state::JackpotState {
+            round: 1,
+            total_rounds: 16,
+            count: 0,
+            ticks_left: state::ROUND_LIMIT_TICKS,
+            kakuhen: true,
+        });
+        game.save_countdown = 1;
+        game.tick(5);
+
         assert!(
-            game.save_countdown < countdown_before,
-            "大当たりの確定だけでは定期保存を早めない"
+            matches!(game.state.mode, state::Mode::Jackpot(_)),
+            "大当たりの途中を試すテストなのに大当たりが終わっている"
+        );
+        assert_eq!(
+            game.save_countdown, 1,
+            "大当たり中に定期保存が走っている (走ると countdown が間隔まで戻る)"
         );
     }
 
