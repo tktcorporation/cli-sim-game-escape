@@ -29,7 +29,7 @@ use super::logic::{
 };
 use super::state::{
     Layer, OreKind, ParticleKind, RingUpgrade, StarRingState, Tab, WeaponKind, WeaponStat, CORE_Y,
-    CX, FIELD_MARGIN, SPAWN_Y, WORLD_H, WORLD_W,
+    CX, FIELD_MARGIN, SHAKE_MAX_Y, SPAWN_Y, TURRET_NEAR_RADIUS, WORLD_H, WORLD_W,
 };
 
 /// 画面全体の縦分割。ヘッダー / タブ / 本体 / フッターの順に返す。
@@ -1062,7 +1062,7 @@ fn render_stage(
         0.0
     };
     let shake_y = if state.shake_ticks > 0 {
-        ((((state.elapsed_ticks / 2) % 3) as f64) - 1.0) * 0.3
+        ((((state.elapsed_ticks / 2) % 3) as f64) - 1.0) * SHAKE_MAX_Y
     } else {
         0.0
     };
@@ -1124,7 +1124,7 @@ fn render_stage(
     let mut gun_far = Vec::new();
     for &(gx, gy, depth) in &turrets {
         let near = depth <= 0.0;
-        let size = if near { 1.6 } else { 1.0 };
+        let size = if near { TURRET_NEAR_RADIUS } else { 1.0 };
         let pts = filled_circle(gx + shake_x, gy + shake_y, size, sample_step);
         if near {
             gun_near.extend(pts);

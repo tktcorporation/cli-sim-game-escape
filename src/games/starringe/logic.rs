@@ -30,6 +30,16 @@ const ORBIT_SWIRL_GAIN: f64 = 2.2;
 /// 核脈動の波面が1tickで外へ進む距離。鉱石の降下 (最大 0.55/tick) より十分
 /// 速くし、核が脈打つたびに上空を舐めていく動きとして読める速さにする。
 const PULSE_WAVE_SPEED: f64 = 4.25;
+/// 弾と鉱石の当たり判定を、両者の円が触れる距離からどれだけ甘くするか。
+///
+/// 砲台は撃つ瞬間の位置へ撃つ (`aim_dir`) ので、迎撃の手応えは「弾の飛行時間の
+/// あいだに鉱石が横へ逃げ切れるか」で決まる。的の見た目の大きさは画面の広さに
+/// 合わせて決めたいが、そこへ判定を直結させると、絵を縮めただけで迎撃が
+/// 成立しなくなる。見た目と手応えを別々に動かせるよう、余裕を独立した値で持つ。
+const HIT_TOLERANCE: f64 = 1.5;
+/// 層開放の演出で立つ波が届く距離。鉱石には触れない波なので、どの脈動レベルの
+/// 到達距離とも噛み合わせず、開放の瞬間だけ上空まで駆け上がる長さを取る。
+const CEREMONY_WAVE_REACH: f64 = 70.0;
 /// 裂片が分裂する際、子を親の左右へ振り分ける幅。
 const SPLIT_SPREAD: f64 = 4.0;
 /// 分裂子は星塵を一回り小さくした個体として湧く。HP と半径へ同じ係数を掛け、
@@ -186,12 +196,7 @@ fn play_layer_unlock_ceremony(state: &mut StarRingState) {
     burst(state, CX, CORE_Y, 22, 7.0, ParticleKind::Spark, 28);
     burst(state, CX, CORE_Y, 14, 5.0, ParticleKind::Shard, 24);
     burst(state, CX, CORE_Y, 10, 3.5, ParticleKind::Ember, 20);
-    state.pulse_rings.push(PulseRing {
-        radius: INNER_RADIUS,
-        life: 16,
-        max_life: 16,
-        damage: 0.0,
-    });
+    spawn_pulse_wave(state, CEREMONY_WAVE_REACH, 0.0);
     for w in WeaponKind::ALL {
         if w.unlock_layer() == layer {
             state.selected_weapon = w;
@@ -231,10 +236,12 @@ pub fn manual_strike(state: &mut StarRingState) {
 /// 寿命は「広がる tick 数 + 1」。最後の 1 tick は広がらず、波面が到達距離へ
 /// 着いたその tick の鉱石の動きだけを見る (`step_pulse_rings`)。
 fn spawn_pulse_wave(state: &mut StarRingState, reach: f64, damage: f64) {
+    let reach = reach.max(INNER_RADIUS);
     let expand = ((reach - INNER_RADIUS) / PULSE_WAVE_SPEED).ceil().max(1.0) as u32;
     let life = expand + 1;
     state.pulse_rings.push(PulseRing {
         radius: INNER_RADIUS,
+        reach,
         life,
         max_life: life,
         damage,
@@ -343,7 +350,10 @@ fn step_pulse_rings(state: &mut StarRingState) {
         ring.life -= 1;
         let inner = ring.radius;
         if ring.life > 0 {
-            ring.radius += PULSE_WAVE_SPEED;
+            // 最後の一歩は端数になるので、到達距離で頭打ちにする。満額進めると
+            // `pulse_reach` の外に居る鉱石まで削れ、描かれる波も強化の範囲から
+            // はみ出す。
+            ring.radius = (ring.radius + PULSE_WAVE_SPEED).min(ring.reach);
         }
         let (outer, dmg) = (ring.radius, ring.damage);
         if dmg > 0.0 {
@@ -386,7 +396,7 @@ fn step_projectiles(state: &mut StarRingState) {
         let mut hit: Option<usize> = None;
         for (oi, ore) in state.ores.iter().enumerate() {
             let d = (ore.x - px).hypot(ore.y - py);
-            if d <= ore.radius + pr {
+            if d <= ore.radius + pr + HIT_TOLERANCE {
                 hit = Some(oi);
                 break;
             }
@@ -570,9 +580,9 @@ fn spawn_one(state: &mut StarRingState, kind: OreKind, x: f64, y: f64) {
 /// 湧きの基準高さ。円の上端がちょうど `WORLD_H` に接する高さへ置く。
 ///
 /// Canvas の y_bounds の外は描画されないので、これより上げたぶんだけ湧いた直後の
-/// 大きい鉱石が上を欠いて見える。どの鉱石も半径が `WORLD_H - SPAWN_Y` より大きい
-/// ので、この高さに置けば円が採掘境界 (`SPAWN_Y`) をまたぎ、境界の向こうから
-/// 現れる見え方になる。
+/// 大きい鉱石が上を欠いて見える。円の下端はこの高さから直径ぶん下がった
+/// `WORLD_H - 2r` に来る——どの鉱石も直径が `WORLD_H - SPAWN_Y` を上回るので、
+/// 円は採掘境界 (`SPAWN_Y`) をまたぎ、境界の向こうから現れる見え方になる。
 fn spawn_base_y(kind: OreKind) -> f64 {
     WORLD_H - kind.radius()
 }
@@ -954,6 +964,7 @@ fn burst(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::games::starringe::state::{MAX_TURRETS, SHAKE_MAX_Y, TURRET_NEAR_RADIUS};
 
     #[test]
     fn spawn_ores_appear_after_interval() {
@@ -1632,6 +1643,75 @@ mod tests {
         }
     }
 
+    /// 砲台の円は、砲台数が上限でも画面シェイク込みで Canvas
+    /// (`0..WORLD_W` × `0..WORLD_H`) に収まること。
+    ///
+    /// 環の縦半径は砲台数とともに広がるので、中心だけを見て伸ばすと最下点の
+    /// 砲台が下端を割り、周回のたびに下側が欠けて描かれる。
+    #[test]
+    fn turrets_fit_inside_the_canvas_at_every_turret_count() {
+        for count in 1..=MAX_TURRETS {
+            let mut state = StarRingState::new();
+            state.weapon_levels[0][WeaponStat::Count.index()] = count - 1;
+            assert_eq!(state.turret_count(), count);
+
+            // 公転位相を一巡させ、最下点・最上点・左右端を通す。
+            for t in 0..400u64 {
+                state.elapsed_ticks = t;
+                for (x, y, depth) in turret_positions(&state) {
+                    let r = if depth <= 0.0 {
+                        TURRET_NEAR_RADIUS
+                    } else {
+                        1.0
+                    };
+                    assert!(
+                        y - r - SHAKE_MAX_Y >= 0.0 && y + r + SHAKE_MAX_Y <= WORLD_H,
+                        "砲台{count}基の円が縦にはみ出す y={y} r={r}"
+                    );
+                    assert!(
+                        x - r >= 0.0 && x + r <= WORLD_W,
+                        "砲台{count}基の円が横にはみ出す x={x} r={r}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// 波面はどの脈動レベルでも `pulse_reach` ちょうどで止まること。
+    ///
+    /// 波面は1tickに `PULSE_WAVE_SPEED` ずつ進むが、到達距離がその整数倍とは
+    /// 限らない。最後の一歩を満額進めると、`pulse_reach` が示す範囲の外に居る
+    /// 鉱石まで削れ、描かれる波も強化の効果と食い違う。
+    #[test]
+    fn pulse_wave_stops_at_its_reach_on_every_level() {
+        for lv in 1..=12u32 {
+            let mut state = state_with_core_pulse(1);
+            state.ring_levels[RingUpgrade::CorePulse.index()] = lv;
+            let reach = state.pulse_reach();
+            let dmg = state.pulse_damage();
+            // 層開放の演出波が残っていると、そちらの半径を測ってしまう。
+            state.pulse_rings.clear();
+            spawn_pulse_wave(&mut state, reach, dmg);
+
+            let mut outermost: f64 = 0.0;
+            for _ in 0..64 {
+                step_pulse_rings(&mut state);
+                match state.pulse_rings.first() {
+                    Some(ring) => outermost = outermost.max(ring.radius),
+                    None => break,
+                }
+            }
+            assert!(
+                state.pulse_rings.is_empty(),
+                "脈Lv{lv} の波が寿命内に消えていない"
+            );
+            assert!(
+                (outermost - reach).abs() < 1e-9,
+                "脈Lv{lv} の波面が到達距離とずれている outermost={outermost} reach={reach}"
+            );
+        }
+    }
+
     /// 波面が到達距離へ着いた tick に、鉱石がちょうどその距離を跨いだ場合も
     /// 削られること。
     ///
@@ -1643,13 +1723,12 @@ mod tests {
         let reach = state_with_core_pulse(3).pulse_reach();
         let dmg = state_with_core_pulse(3).pulse_damage();
         let expand = ((reach - INNER_RADIUS) / PULSE_WAVE_SPEED).ceil().max(1.0) as u32;
-        let outermost = INNER_RADIUS + expand as f64 * PULSE_WAVE_SPEED;
 
         let mut crossings = 0;
         for step in 0..90 {
-            let y = CORE_Y + outermost + step as f64 * 0.15;
+            let y = CORE_Y + reach + step as f64 * 0.15;
 
-            // 波を出さずに同じ鉱石を走らせ、波面が最外周へ着く tick
+            // 波を出さずに同じ鉱石を走らせ、波面が到達距離へ着く tick
             // (`expand` 回目の移動) にその距離を跨ぐ初期位置だけを選ぶ。
             let mut probe = state_with_core_pulse(3);
             push_test_ore(&mut probe, CX, y, 1e6);
@@ -1659,7 +1738,7 @@ mod tests {
             let entering = (probe.ores[0].y - CORE_Y).hypot(probe.ores[0].x - CX);
             step_ores(&mut probe);
             let leaving = (probe.ores[0].y - CORE_Y).hypot(probe.ores[0].x - CX);
-            if entering <= outermost || leaving > outermost {
+            if entering <= reach || leaving > reach {
                 continue;
             }
             crossings += 1;
@@ -1675,26 +1754,25 @@ mod tests {
             let dealt = before - state.ores[0].hp;
             assert!(
                 (dealt - dmg).abs() < 1e-6,
-                "最外周 {outermost:.2} を跨いだ鉱石 (y={y}) への被弾が1発ぶんでない dealt={dealt}"
+                "到達距離 {reach:.2} を跨いだ鉱石 (y={y}) への被弾が1発ぶんでない dealt={dealt}"
             );
         }
-        assert!(crossings > 0, "最外周を跨ぐ初期位置を1つも作れていない");
+        assert!(crossings > 0, "到達距離を跨ぐ初期位置を1つも作れていない");
     }
 
     /// 波の到達距離の外に居続けた鉱石は削られないこと。
     ///
-    /// 波の寿命には最外周を跨ぐ動きを見るための1tickが含まれるが、その1tickでは
+    /// 波の寿命には到達距離を跨ぐ動きを見るための1tickが含まれるが、その1tickでは
     /// 輪帯が広がらない——波が届く距離そのものは `pulse_reach` のままになる。
     #[test]
     fn pulse_wave_leaves_ores_beyond_its_reach_untouched() {
         let reach = state_with_core_pulse(3).pulse_reach();
         let dmg = state_with_core_pulse(3).pulse_damage();
         let expand = ((reach - INNER_RADIUS) / PULSE_WAVE_SPEED).ceil().max(1.0) as u32;
-        let outermost = INNER_RADIUS + expand as f64 * PULSE_WAVE_SPEED;
 
         let mut state = state_with_core_pulse(3);
         // 波が消えるまでに降りてこられない高さへ置く。
-        let y = CORE_Y + outermost + expand as f64 * 2.0 + 10.0;
+        let y = CORE_Y + reach + expand as f64 * 2.0 + 10.0;
         push_test_ore(&mut state, CX, y, 1e6);
         spawn_pulse_wave(&mut state, reach, dmg);
         let before = state.ores[0].hp;

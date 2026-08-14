@@ -23,6 +23,10 @@ pub const RING_RX: f64 = 32.0;
 pub const RING_RY: f64 = 10.0;
 /// 砲台スロット上限。
 pub const MAX_TURRETS: u32 = 8;
+/// 手前側 (視点に近い環の下半分) に描く砲台の半径。
+pub const TURRET_NEAR_RADIUS: f64 = 1.6;
+/// 画面シェイクの縦振れ幅。描画物が Canvas の上下端を割らない余白として使う。
+pub const SHAKE_MAX_Y: f64 = 0.3;
 /// 鉱石の出現高さ。
 pub const SPAWN_Y: f64 = 97.0;
 /// 出現 X のフィールド端マージン。端ぴったりに湧かせない。
@@ -402,16 +406,20 @@ impl OreKind {
     }
 
     /// 当たり判定と見た目の半径 (ワールド単位)。
+    ///
+    /// 大きさは「画面の広さに対してどう見えるか」で決める。降下距離に合わせて
+    /// 伸ばすと、盤面を広げたぶんだけ的も太り、狙って落とす手応えが薄れる。
+    /// 最小の塵石が `WORLD_W` の 2.1%、最大の新星でも 5.1% に収まる範囲に置く。
     pub fn radius(self) -> f64 {
         match self {
-            OreKind::Dust => 3.5,
-            OreKind::Rock => 4.75,
-            OreKind::Crystal => 5.75,
-            OreKind::Wisp => 4.25,
-            OreKind::Prism => 7.0,
-            OreKind::Shell => 7.5,
-            OreKind::Splitter => 6.0,
-            OreKind::Nova => 8.5,
+            OreKind::Dust => 2.1,
+            OreKind::Rock => 2.85,
+            OreKind::Crystal => 3.45,
+            OreKind::Wisp => 2.55,
+            OreKind::Prism => 4.2,
+            OreKind::Shell => 4.5,
+            OreKind::Splitter => 3.6,
+            OreKind::Nova => 5.1,
         }
     }
 
@@ -548,6 +556,8 @@ pub struct Particle {
 #[derive(Clone, Debug)]
 pub struct PulseRing {
     pub radius: f64,
+    /// 波面が届く距離。`radius` はここで頭打ちになる。
+    pub reach: f64,
     pub life: u32,
     pub max_life: u32,
     /// 波面が通過した鉱石へ与えるダメージ。0 なら演出だけの波。
@@ -697,9 +707,15 @@ impl StarRingState {
     }
 
     /// 砲台環の (X 半径, Y 半径)。砲台が増えるほど環はわずかに広がる。
+    ///
+    /// 縦半径だけは「軌道の最下点に居る手前側の砲台が、画面シェイクで下がっても
+    /// Canvas の下端 (y=0) を割らない」高さで頭打ちにする。円の中心だけを見て
+    /// 広げると、砲台の下側が周回のたびに欠けて描かれる。横半径は詰めない——
+    /// 環が横へ広い形そのものが盤面の使い方になっている。
     pub fn ring_radii(&self) -> (f64, f64) {
         let n = self.turret_count() as f64;
-        (RING_RX + n * 1.4, RING_RY + n * 0.45)
+        let ry_max = CORE_Y - TURRET_NEAR_RADIUS - SHAKE_MAX_Y;
+        (RING_RX + n * 1.4, (RING_RY + n * 0.45).min(ry_max))
     }
 
     pub fn yield_mult(&self) -> f64 {
