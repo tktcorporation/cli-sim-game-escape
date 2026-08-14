@@ -151,11 +151,18 @@ fn payout_flavor(spec: &MachineSpec) -> &'static str {
 /// 実測回転率。標本が足りない間は数字を作らず「計測中…」と出す —
 /// 少ない打込数から出した比率を回転率として見せると、観察して確かめる
 /// という判断軸そのものを誤らせる。
+///
+/// 添える打込数は回転率と同じ通常時の分 (`Machine::normal_balls_spent`)。
+/// 総打込数を添えると、通常時 50 玉から出した比率が数千玉を費やして確かめた
+/// 値のように見え、どれだけ当てになる数字なのかを読み違える。
 fn spin_rate_text(machine: Option<&Machine>) -> String {
     match machine {
         Some(m) => match logic::spin_rate(m) {
-            Some(rate) => format!("回転率 {rate:.1}回/千円  (打込 {}玉)", m.balls_spent),
-            None => format!("回転率 計測中…  (打込 {}玉)", m.balls_spent),
+            Some(rate) => format!(
+                "回転率 {rate:.1}回/千円  (通常時 {}玉)",
+                m.normal_balls_spent
+            ),
+            None => format!("回転率 計測中…  (通常時 {}玉)", m.normal_balls_spent),
         },
         None => "回転率 —".to_string(),
     }
@@ -2463,6 +2470,29 @@ mod tests {
             assisted: false,
             reels: [0, 1, 2],
         }
+    }
+
+    #[test]
+    fn the_spin_rate_reports_the_sample_it_was_measured_from() {
+        // 回転率は通常時の分だけで測る (`logic::spin_rate`)。総打込数を添えると、
+        // わずかな標本から出した比率が数千玉を費やして確かめた値のように見える。
+        let mut state = PachinkoState::new();
+        logic::generate_hall(&mut state);
+        let machine = &mut state.machines[0];
+        machine.normal_balls_spent = 60;
+        machine.normal_spins_seen = 5;
+        machine.balls_spent = 4_000;
+        machine.spins_seen = 300;
+
+        let text = spin_rate_text(Some(&state.machines[0]));
+        assert!(
+            text.contains("60玉"),
+            "回転率を出した標本の大きさが読めない ({text})"
+        );
+        assert!(
+            !text.contains("4,000") && !text.contains("4000"),
+            "電サポ中を含む総打込数を、回転率の標本として見せている ({text})"
+        );
     }
 
     #[test]
