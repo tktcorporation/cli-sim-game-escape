@@ -285,8 +285,13 @@ fn resolve_start_pocket(state: &mut PachinkoState) {
     }
     let outcome = roll_outcome(state);
     state.pending.push(Pending::new(outcome));
+    // 回転率は通常時の分だけで測る (`Machine::normal_spins_seen` 参照)。
+    let normal = state.mode == Mode::Normal;
     if let Some(machine) = state.seated_machine_mut() {
         machine.spins_seen += 1;
+        if normal {
+            machine.normal_spins_seen += 1;
+        }
     }
 }
 
@@ -747,8 +752,12 @@ fn try_fire(state: &mut PachinkoState) {
         hit_glow: 0,
     });
     state.balls_held -= 1;
+    let normal = state.mode == Mode::Normal;
     if let Some(machine) = state.seated_machine_mut() {
         machine.balls_spent += 1;
+        if normal {
+            machine.normal_balls_spent += 1;
+        }
     }
     state.fire_cooldown = FIRE_INTERVAL_TICKS;
 }
@@ -997,6 +1006,8 @@ pub fn generate_hall(state: &mut PachinkoState) {
             nails,
             balls_spent: 0,
             spins_seen: 0,
+            normal_balls_spent: 0,
+            normal_spins_seen: 0,
         });
     }
     state.machines = machines;
@@ -1006,11 +1017,17 @@ pub fn generate_hall(state: &mut PachinkoState) {
 /// 千円 (= `BALL_LOAN_COUNT` 玉) あたりの回転数。実測値なので、打ち込んだ
 /// 玉が少ないうちは当てにならない。標本が足りない間は `None` を返し、
 /// 「まだ分からない」ことを表示側でそのまま出せるようにする。
+///
+/// 通常時の分だけを数える (`Machine::normal_balls_spent` 参照)。この値は
+/// 台選びの根拠になるので、釘以外の要因で動くと判断そのものを誤らせる。
 pub fn spin_rate(machine: &Machine) -> Option<f64> {
-    if machine.balls_spent < 50 {
+    if machine.normal_balls_spent < 50 {
         return None;
     }
-    Some(machine.spins_seen as f64 * BALL_LOAN_COUNT as f64 / machine.balls_spent as f64)
+    Some(
+        machine.normal_spins_seen as f64 * BALL_LOAN_COUNT as f64
+            / machine.normal_balls_spent as f64,
+    )
 }
 
 #[cfg(test)]
@@ -1580,6 +1597,51 @@ mod tests {
                 "次の変動で消化される保留が最終ランクに届いていない"
             );
         }
+    }
+
+    #[test]
+    fn the_displayed_spin_rate_ignores_assisted_play() {
+        // 電サポ中はヘソが広がるので、全区間を混ぜた比は「釘がどれだけ開いて
+        // いるか」ではなく「どれだけ当たったか」を映す。当たった台ほど回ると
+        // 表示されると、ホールへ戻ったときの台選びが引きの強さに引きずられる。
+        let mut state = seated_state();
+        state.balls_held = 10_000;
+        state.cash = 0;
+
+        // 通常時に十分な標本を作る。盤面の玉数の上限で打ち出しが止まらない
+        // よう、飛ばした玉はその場で片付ける。
+        state.firing = true;
+        state.mode = Mode::Normal;
+        for _ in 0..400 {
+            state.fire_cooldown = 0;
+            try_fire(&mut state);
+            state.balls.clear();
+        }
+        let normal_only = spin_rate(state.seated_machine().expect("着席していない"))
+            .expect("標本が足りない");
+
+        // 同じ台で電サポ中に打ち込んでも、表示される回転率は動かない。
+        state.mode = Mode::Kakuhen { spins_left: 0 };
+        for _ in 0..400 {
+            state.fire_cooldown = 0;
+            try_fire(&mut state);
+            state.balls.clear();
+            resolve_start_pocket(&mut state);
+            state.pending.clear();
+        }
+        let after_assist = spin_rate(state.seated_machine().expect("着席していない"))
+            .expect("標本が足りない");
+
+        assert!(
+            (after_assist - normal_only).abs() < 1e-9,
+            "電サポ中の打ち込みと回転が表示回転率へ混ざっている \
+             (通常のみ {normal_only:.2} → 電サポ後 {after_assist:.2})"
+        );
+        let machine = state.seated_machine().expect("着席していない");
+        assert!(
+            machine.balls_spent > machine.normal_balls_spent,
+            "総打ち込み数は電サポ中の分も数える"
+        );
     }
 
     #[test]

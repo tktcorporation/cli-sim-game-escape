@@ -46,6 +46,8 @@ fn machine_with(spec_index: usize, nail_spread: f64, rail_bias: f64, seed: &mut 
         nails,
         balls_spent: 0,
         spins_seen: 0,
+        normal_balls_spent: 0,
+        normal_spins_seen: 0,
     }
 }
 
