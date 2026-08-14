@@ -25,8 +25,16 @@ pub const RING_RY: f64 = 10.0;
 pub const MAX_TURRETS: u32 = 8;
 /// 手前側 (視点に近い環の下半分) に描く砲台の半径。
 pub const TURRET_NEAR_RADIUS: f64 = 1.6;
-/// 画面シェイクの縦振れ幅。描画物が Canvas の上下端を割らない余白として使う。
+/// 画面シェイクの縦振れ幅。
 pub const SHAKE_MAX_Y: f64 = 0.3;
+/// 画面シェイク込みで Canvas の y_bounds (`0..WORLD_H`) に収まる高さの下限。
+///
+/// 描画は毎 tick 最大 `SHAKE_MAX_Y` だけ上下へずれる。円の端をこの範囲に収めて
+/// おかないと、揺れた tick だけ上端・下端が欠けた形で描かれる。砲台も鉱石も
+/// 「中心」ではなく「円の端」をこの範囲へ突き合わせる。
+pub const VISIBLE_Y_LO: f64 = SHAKE_MAX_Y;
+/// 画面シェイク込みで Canvas の y_bounds に収まる高さの上限。詳細は `VISIBLE_Y_LO`。
+pub const VISIBLE_Y_HI: f64 = WORLD_H - SHAKE_MAX_Y;
 /// 鉱石の出現高さ。
 pub const SPAWN_Y: f64 = 97.0;
 /// 出現 X のフィールド端マージン。端ぴったりに湧かせない。
@@ -721,13 +729,13 @@ impl StarRingState {
 
     /// 砲台環の (X 半径, Y 半径)。砲台が増えるほど環はわずかに広がる。
     ///
-    /// 縦半径だけは「軌道の最下点に居る手前側の砲台が、画面シェイクで下がっても
-    /// Canvas の下端 (y=0) を割らない」高さで頭打ちにする。円の中心だけを見て
-    /// 広げると、砲台の下側が周回のたびに欠けて描かれる。横半径は詰めない——
-    /// 環が横へ広い形そのものが盤面の使い方になっている。
+    /// 縦半径だけは「軌道の最下点に居る手前側の砲台の下端が `VISIBLE_Y_LO` を
+    /// 割らない」高さで頭打ちにする。円の中心だけを見て広げると、砲台の下側が
+    /// 周回のたびに欠けて描かれる。横半径は詰めない——環が横へ広い形そのものが
+    /// 盤面の使い方になっている。
     pub fn ring_radii(&self) -> (f64, f64) {
         let n = self.turret_count() as f64;
-        let ry_max = CORE_Y - TURRET_NEAR_RADIUS - SHAKE_MAX_Y;
+        let ry_max = CORE_Y - TURRET_NEAR_RADIUS - VISIBLE_Y_LO;
         (RING_RX + n * 1.4, (RING_RY + n * 0.45).min(ry_max))
     }
 

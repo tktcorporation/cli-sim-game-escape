@@ -29,7 +29,8 @@ use super::logic::{
 };
 use super::state::{
     Layer, OreKind, ParticleKind, RingUpgrade, StarRingState, Tab, WeaponKind, WeaponStat, CORE_Y,
-    CX, FIELD_MARGIN, SHAKE_MAX_Y, SPAWN_Y, TURRET_NEAR_RADIUS, WORLD_H, WORLD_W,
+    CX, FIELD_MARGIN, INNER_RADIUS, SHAKE_MAX_Y, SPAWN_Y, TURRET_NEAR_RADIUS, VISIBLE_Y_LO,
+    WORLD_H, WORLD_W,
 };
 
 /// 画面全体の縦分割。ヘッダー / タブ / 本体 / フッターの順に返す。
@@ -71,6 +72,118 @@ fn fill_step(inner: Rect) -> f64 {
 /// 半径で頭打ちにする。
 fn filled_circle(cx: f64, cy: f64, r: f64, step: f64) -> Vec<(f64, f64)> {
     canvas_fx::filled_ellipse_points(cx, cy, r, r, step.min(r))
+}
+
+/// ステージの描画物は「核 → 砲台 → 環」の順に大きく明るく描く。守る拠点と
+/// 自分の武装が、降ってくる鉱石や軌道の装飾と同じ粒度で並ぶと、画面のどこを
+/// 見ればよいかが決まらない。
+///
+/// 核の脈動が取りうる最大倍率。層が上がるぶんの膨らみもここで頭打ちにする —
+/// 層に上限が無い (`Layer::title` の「無限輪」) ため、青天井のまま掛けると
+/// いずれ核が Canvas の下端を割る。
+const CORE_MAX_SCALE: f64 = 1.55;
+
+/// 核本体の描画半径。
+///
+/// 鉱石が消える到達半径 (`INNER_RADIUS`) を包む大きさに取る。到達半径より
+/// 小さく描くと、鉱石が核の縁へ触れる手前で消えて吸い込まれたように見えない。
+/// 最大の鉱石 (`OreKind::Nova` の半径 5.1) より一回り大きいので、拠点と的は
+/// 色より先に大きさで読み分けられる。
+const CORE_RADIUS: f64 = INNER_RADIUS + 1.0;
+
+/// 核を囲む暈の半径。核本体との差が、核がまとう光の厚みになる。
+///
+/// 上限は「脈動で `CORE_MAX_SCALE` 倍まで膨らんでも、下端が `VISIBLE_Y_LO`
+/// (画面シェイクで下がっても Canvas に残る高さ) を割らない」ことで決まる。
+/// 核は `CORE_Y` に座っているので、下へ使える余裕はその値しかない。
+const CORE_HALO_RADIUS: f64 = 9.0;
+
+const _: () = assert!(
+    CORE_Y - CORE_HALO_RADIUS * CORE_MAX_SCALE >= VISIBLE_Y_LO,
+    "脈動しきった核の暈が Canvas の下端を割る"
+);
+const _: () = assert!(
+    CORE_RADIUS <= CORE_HALO_RADIUS,
+    "核本体が暈より大きいと暈が輪郭に見えない"
+);
+
+/// 手前側の砲台を描く半径の上限。環の点より明らかに太い塊として読めて、
+/// なお核より小さい大きさ。
+const TURRET_MAX_RADIUS: f64 = 2.6;
+
+/// 奥側の砲台を手前側から縮める割合。遠近を大きさで描き分ける。
+const TURRET_FAR_SCALE: f64 = 0.62;
+
+/// 環の点を打つ弧長間隔 (ワールド単位)。砲台の直径より広く取り、環が砲台と
+/// 同じ粒度で並んだ帯にならないようにする。
+const ORBIT_DOT_SPACING: f64 = 6.0;
+
+/// 手前側の砲台の描画半径。
+///
+/// 環の最下点にいる砲台の下端が `VISIBLE_Y_LO` を割らない範囲へ収める。砲台が
+/// 増えると環は下がるので、使える余裕はそのぶん減る。下限の
+/// `TURRET_NEAR_RADIUS` は `StarRingState::ring_radii` が環の縦半径を頭打ちに
+/// するのに使う値で、環が下がりきった時に残る余裕と一致する。
+fn turret_radius(ring_ry: f64) -> f64 {
+    (CORE_Y - ring_ry - VISIBLE_Y_LO).clamp(TURRET_NEAR_RADIUS, TURRET_MAX_RADIUS)
+}
+
+/// 核の脈動倍率。層開放・被弾・開放待ちの合図を大きさへ変える。
+fn core_scale(state: &StarRingState) -> f64 {
+    let raw = if state.layer_flash_ticks > 0 {
+        CORE_MAX_SCALE
+    } else if state.layer_ready_flash_ticks > 0 {
+        1.30
+    } else if state.core_flash_ticks > 0 {
+        1.25
+    } else if can_unlock_next_layer(state) && state.elapsed_ticks % 20 < 10 {
+        1.12
+    } else {
+        1.0 + (state.layer().saturating_sub(1) as f64) * 0.04
+    };
+    raw.min(CORE_MAX_SCALE)
+}
+
+/// ステージの描画物をワールド座標から画面座標へ移す平行移動。
+///
+/// 振れを描画物ごとに手で足すと、足し忘れた物だけが揺れずに取り残されたり、
+/// 画面外へはみ出さない上限の計算だけが振れを勘定し損ねたりする。ステージの
+/// 描画物は例外なくこの変換を通す。
+#[derive(Clone, Copy)]
+struct Shake {
+    dx: f64,
+    dy: f64,
+}
+
+impl Shake {
+    /// 衝撃の残っている間だけ振れる。横は tick ごと、縦は 2 tick ごとに位相を
+    /// 変えて同じ向きへ流れないようにし、縦の振れ幅は `SHAKE_MAX_Y` に収める。
+    fn new(state: &StarRingState) -> Self {
+        if state.shake_ticks == 0 {
+            return Self { dx: 0.0, dy: 0.0 };
+        }
+        Self {
+            dx: (((state.elapsed_ticks % 4) as f64) - 1.5) * 0.4,
+            dy: ((((state.elapsed_ticks / 2) % 3) as f64) - 1.0) * SHAKE_MAX_Y,
+        }
+    }
+
+    fn point(self, x: f64, y: f64) -> (f64, f64) {
+        (x + self.dx, y + self.dy)
+    }
+
+    /// 半径 `r` の円を塗り潰した点列。
+    fn circle(self, x: f64, y: f64, r: f64, step: f64) -> Vec<(f64, f64)> {
+        filled_circle(x + self.dx, y + self.dy, r, step)
+    }
+
+    /// 進行方向 `(vx, vy)` の反対側へ `len` 伸ばした尾の線分 `(先端, 末尾)`。
+    fn trail(self, x: f64, y: f64, vx: f64, vy: f64, len: f64) -> (f64, f64, f64, f64) {
+        let speed = vx.hypot(vy).max(0.01);
+        let (hx, hy) = self.point(x, y);
+        let (tx, ty) = self.point(x - vx / speed * len, y - vy / speed * len);
+        (hx, hy, tx, ty)
+    }
 }
 
 /// 核脈動の波面を打つ点の弧長間隔 (ワールド単位)。
@@ -369,18 +482,32 @@ fn blurb_lines(
         .collect()
 }
 
+/// 先頭に飾り (`lead`) を置き、続く本文を `width` 桁へ折り返した行。
+/// 2 行目以降は飾りの幅ぶん字下げして、本文の左端を揃える。
+///
+/// 飾りと本文で色を変えたい 1 行もの (図鑑の一覧など) はこれで組む。折り
+/// 返しを持たせておかないと、桁数の少ない端末で行の右端が黙って切り落ちる。
+fn wrapped_row(lead: Span<'static>, text: String, style: Style, width: u16) -> Vec<Line<'static>> {
+    let indent = lead.width();
+    // 全角 1 文字も置けない幅では折り返しても読めないので、下限を設けて
+    // はみ出しは描画側の切り詰めに任せる。
+    let budget = (width as usize).saturating_sub(indent).max(2);
+    wrap_by_width(&text, budget)
+        .into_iter()
+        .enumerate()
+        .map(|(i, chunk)| {
+            let head = if i == 0 {
+                lead.clone()
+            } else {
+                Span::raw(" ".repeat(indent))
+            };
+            Line::from(vec![head, Span::styled(chunk, style)])
+        })
+        .collect()
+}
+
 /// 購入行の説明文の字下げ。見出しのキー表記 (` [A] `) の下へ揃える。
 const BLURB_INDENT: usize = 6;
-
-/// `spaced` を付けた時のかたまり間の空行を含む総行数。
-fn sections_height(sections: &[Section], spaced: bool) -> usize {
-    let base: usize = sections.iter().map(|s| s.lines.len()).sum();
-    if spaced {
-        base + sections.len().saturating_sub(1)
-    } else {
-        base
-    }
-}
 
 /// かたまりを `ClickableList` へ流し込む。`spaced` の時だけ間に空行を挟む。
 fn build_list(sections: Vec<Section>, spaced: bool) -> ClickableList<'static> {
@@ -400,25 +527,29 @@ fn build_list(sections: Vec<Section>, spaced: bool) -> ClickableList<'static> {
     cl
 }
 
-/// 描画領域に合わせてかたまりを組み、空行を挟むかどうかを決める。
+/// 描画領域に合わせて決めた `(行を組む桁数, かたまり間に空行を挟むか)`。
 ///
-/// `make` は「この幅で説明文を折り返した行」を返す。`ScrollableTab` は内容が
-/// 溢れる時だけ右端 1 桁をスクロール列に使うので、溢れる場合は 1 桁狭い幅で
-/// 折り直す — 折り返し済みの行はスクロール列の下で切り詰められてしまうため。
-/// 幅を狭めれば行数は増えこそすれ減らないので、溢れる判定はそのまま成り立つ。
-fn fit_sections<F>(inner: Rect, make: F) -> (Vec<Section>, bool)
+/// `make` は「渡した桁数に収まる行」を返す契約で、桁数を狭めれば行数は
+/// 増えこそすれ減らない。`ScrollableTab` は内容が溢れる時だけ右端 1 桁を
+/// スクロール列に使うので、溢れる場合は 1 桁狭い桁数を返す — その幅で組み
+/// 直さないと、右端まで使った行がスクロール列の下で切り詰められる。
+///
+/// 行数は `build_list` が組んだ結果をそのまま数える。空行の入れ方をここへ
+/// 別に書くと、`ScrollableTab` が見る実際の行数と食い違ったときに、詰めれば
+/// 入る内容へスクロールを生やしたり末尾へ届かなくなったりする。
+fn fit_tab_layout<F>(inner: Rect, make: F) -> (u16, bool)
 where
     F: Fn(u16) -> Vec<Section>,
 {
-    let sections = make(inner.width);
     let height = inner.height as usize;
-    if sections_height(&sections, true) <= height {
-        return (sections, true);
+    let rows = |width: u16, spaced: bool| build_list(make(width), spaced).lines().len();
+    if rows(inner.width, true) <= height {
+        (inner.width, true)
+    } else if rows(inner.width, false) <= height {
+        (inner.width, false)
+    } else {
+        (inner.width.saturating_sub(1), false)
     }
-    if sections_height(&sections, false) <= height {
-        return (sections, false);
-    }
-    (make(inner.width.saturating_sub(1)), false)
 }
 
 /// 武装タブ: 先頭 1 行の武器ピッカー + 説明と強化のスクロール領域。
@@ -456,10 +587,10 @@ fn render_armory(
     }
 
     let body = Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1);
-    let (sections, spaced) = fit_sections(body, |w| armory_sections(state, w));
+    let (wrap_w, spaced) = fit_tab_layout(body, |w| armory_sections(state, w));
     let mut cs = click_state.borrow_mut();
     ScrollableTab::new(
-        build_list(sections, spaced),
+        build_list(armory_sections(state, wrap_w), spaced),
         &state.tab_scroll,
         TAB_SCROLL_UP,
         TAB_SCROLL_DOWN,
@@ -735,10 +866,10 @@ fn render_ring(
         .borders(borders)
         .border_style(Style::default().fg(Color::Yellow))
         .title(" 環 ");
-    let (sections, spaced) = fit_sections(block.inner(area), |w| ring_sections(state, w));
+    let (wrap_w, spaced) = fit_tab_layout(block.inner(area), |w| ring_sections(state, w));
     let mut cs = click_state.borrow_mut();
     ScrollableTab::new(
-        build_list(sections, spaced),
+        build_list(ring_sections(state, wrap_w), spaced),
         &state.tab_scroll,
         TAB_SCROLL_UP,
         TAB_SCROLL_DOWN,
@@ -769,17 +900,20 @@ fn ring_sections(state: &StarRingState, width: u16) -> Vec<Section> {
     );
 
     let mut sections = Vec::new();
-    let status = Line::from(Span::styled(
-        format!(" 第{}層 {}  {}", layer, Layer::title(layer), bar),
+    let mut head = wrapped_row(
+        Span::raw(" "),
+        format!("第{}層 {}  {}", layer, Layer::title(layer), bar),
         Style::default()
             .fg(layer_color(layer))
             .add_modifier(Modifier::BOLD),
-    ));
+        width,
+    );
     // 撃破進捗と湧き倍率を1行にまとめ、狭い画面で強化行が押し出されないようにする。
-    let mults = Line::from(Span::styled(
+    head.extend(wrapped_row(
+        Span::raw(" "),
         match next {
             Some(th) => format!(
-                " 撃破{}/{}  湧き×{} HP×{:.1} ✦×{:.1}",
+                "撃破{}/{}  湧き×{} HP×{:.1} ✦×{:.1}",
                 state.total_kills,
                 th,
                 Layer::spawn_batch(layer),
@@ -787,7 +921,7 @@ fn ring_sections(state: &StarRingState, width: u16) -> Vec<Section> {
                 Layer::value_mult(layer)
             ),
             None => format!(
-                " 撃破{}  湧き×{} HP×{:.1} ✦×{:.1}",
+                "撃破{}  湧き×{} HP×{:.1} ✦×{:.1}",
                 state.total_kills,
                 Layer::spawn_batch(layer),
                 Layer::hp_mult(layer),
@@ -795,8 +929,9 @@ fn ring_sections(state: &StarRingState, width: u16) -> Vec<Section> {
             ),
         },
         Style::default().fg(Color::DarkGray),
+        width,
     ));
-    sections.push(Section::plain(vec![status, mults]));
+    sections.push(Section::plain(head));
 
     if let Some(th) = next {
         let next_layer = layer + 1;
@@ -813,44 +948,48 @@ fn ring_sections(state: &StarRingState, width: u16) -> Vec<Section> {
             };
             let label = if can {
                 format!(
-                    " [!] 第{}層「{}」を開放 ✦{}",
+                    "[!] 第{}層「{}」を開放 ✦{}",
                     next_layer,
                     Layer::title(next_layer),
                     format_shards(cost)
                 )
             } else {
                 format!(
-                    " [!] 第{}層「{}」 要✦{} (不足)",
+                    "[!] 第{}層「{}」 要✦{} (不足)",
                     next_layer,
                     Layer::title(next_layer),
                     format_shards(cost)
                 )
             };
-            let line = vec![Line::from(Span::styled(label, style))];
+            let line = wrapped_row(Span::raw(" "), label, style, width);
             sections.push(if can {
                 Section::clickable(line, OPEN_LAYER)
             } else {
                 Section::plain(line)
             });
         } else {
-            sections.push(Section::plain(vec![Line::from(Span::styled(
+            sections.push(Section::plain(wrapped_row(
+                Span::raw(" "),
                 format!(
-                    " 次層「{}」 撃破{} ✦{}",
+                    "次層「{}」 撃破{} ✦{}",
                     Layer::title(next_layer),
                     th,
                     format_shards(cost)
                 ),
                 Style::default().fg(Color::DarkGray),
-            ))]));
+                width,
+            )));
         }
     }
 
-    sections.push(Section::plain(vec![Line::from(Span::styled(
-        " 環の強化",
+    sections.push(Section::plain(wrapped_row(
+        Span::raw(" "),
+        "環の強化".to_string(),
         Style::default()
             .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD),
-    ))]));
+        width,
+    )));
 
     let keys = ['1', '2'];
     for (i, kind) in RingUpgrade::ALL.iter().copied().enumerate() {
@@ -918,10 +1057,10 @@ fn render_codex(
         .borders(borders)
         .border_style(Style::default().fg(Color::Yellow))
         .title(" 図鑑 ");
-    let (sections, spaced) = fit_sections(block.inner(area), |_| codex_sections(state));
+    let (wrap_w, spaced) = fit_tab_layout(block.inner(area), |w| codex_sections(state, w));
     let mut cs = click_state.borrow_mut();
     ScrollableTab::new(
-        build_list(sections, spaced),
+        build_list(codex_sections(state, wrap_w), spaced),
         &state.tab_scroll,
         TAB_SCROLL_UP,
         TAB_SCROLL_DOWN,
@@ -932,68 +1071,78 @@ fn render_codex(
 }
 
 /// 図鑑の行。進捗 / 鉱石 / 累計 / 武装の 4 かたまりに分ける。
-fn codex_sections(state: &StarRingState) -> Vec<Section> {
+/// `width` は行を折り返す桁数。
+fn codex_sections(state: &StarRingState, width: u16) -> Vec<Section> {
     let unlocked = state.unlocked_ore_kinds();
     let layer = state.layer();
+    let dim = Style::default().fg(Color::DarkGray);
 
-    let progress = Section::plain(vec![Line::from(Span::styled(
+    let progress = Section::plain(wrapped_row(
+        Span::raw(" "),
         format!(
-            " 第{}層  累計撃破 {}  逸失 {}",
+            "第{}層  累計撃破 {}  逸失 {}",
             layer, state.total_kills, state.missed_count
         ),
-        Style::default().fg(Color::DarkGray),
-    ))]);
+        dim,
+        width,
+    ));
 
     let mut ores = Vec::new();
     for kind in OreKind::ALL {
-        let open = unlocked.contains(&kind);
-        if open {
-            ores.push(Line::from(vec![
-                Span::styled(" ◆ ", Style::default().fg(ore_color(kind))),
+        if unlocked.contains(&kind) {
+            ores.extend(wrapped_row(
                 Span::styled(
-                    format!("{} ", kind.label()),
+                    format!(" ◆ {} ", kind.label()),
                     Style::default()
                         .fg(ore_color(kind))
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(
-                    format!(
-                        "価値{} HP{:.0}",
-                        kind.base_value(),
-                        kind.base_hp() * Layer::hp_mult(layer)
-                    ),
-                    Style::default().fg(Color::Gray),
+                format!(
+                    "価値{} HP{:.0}",
+                    kind.base_value(),
+                    kind.base_hp() * Layer::hp_mult(layer)
                 ),
-            ]));
+                Style::default().fg(Color::Gray),
+                width,
+            ));
         } else {
-            ores.push(Line::from(Span::styled(
-                format!(" ？ 第{}層で出現", kind.unlock_layer()),
-                Style::default().fg(Color::DarkGray),
-            )));
+            ores.extend(wrapped_row(
+                Span::styled(" ？ ", dim),
+                format!("第{}層で出現", kind.unlock_layer()),
+                dim,
+                width,
+            ));
         }
     }
 
-    let earned = Section::plain(vec![Line::from(Span::styled(
-        format!(" 獲得累計 ✦{}", format_shards(state.shards_earned)),
-        Style::default().fg(Color::DarkGray),
-    ))]);
+    let earned = Section::plain(wrapped_row(
+        Span::raw(" "),
+        format!("獲得累計 ✦{}", format_shards(state.shards_earned)),
+        dim,
+        width,
+    ));
 
-    let mut weapons = vec![Line::from(Span::styled(
-        " 武装解放",
+    let mut weapons = wrapped_row(
+        Span::raw(" "),
+        "武装解放".to_string(),
         Style::default().fg(Color::Yellow),
-    ))];
+        width,
+    );
     for w in WeaponKind::ALL {
-        let open = state.is_weapon_unlocked(w);
-        if open {
-            weapons.push(Line::from(Span::styled(
-                format!("  {} {} 解放済", w.glyph(), w.label()),
+        if state.is_weapon_unlocked(w) {
+            weapons.extend(wrapped_row(
+                Span::styled(format!("  {} ", w.glyph()), Style::default().fg(weapon_color(w))),
+                format!("{} 解放済", w.label()),
                 Style::default().fg(weapon_color(w)),
-            )));
+                width,
+            ));
         } else {
-            weapons.push(Line::from(Span::styled(
-                format!("  ？ {}  第{}層", w.label(), w.unlock_layer()),
-                Style::default().fg(Color::DarkGray),
-            )));
+            weapons.extend(wrapped_row(
+                Span::styled("  ？ ", dim),
+                format!("{}  第{}層", w.label(), w.unlock_layer()),
+                dim,
+                width,
+            ));
         }
     }
 
@@ -1055,47 +1204,24 @@ fn render_stage(
     }
 
     let sample_step = fill_step(inner);
+    let shake = Shake::new(state);
+    let (core_x, core_y) = shake.point(CX, CORE_Y);
 
-    let shake_x = if state.shake_ticks > 0 {
-        (((state.elapsed_ticks % 4) as f64) - 1.5) * 0.4
-    } else {
-        0.0
-    };
-    let shake_y = if state.shake_ticks > 0 {
-        ((((state.elapsed_ticks / 2) % 3) as f64) - 1.0) * SHAKE_MAX_Y
-    } else {
-        0.0
-    };
-
-    // 砲台環。コアを中心とする横長の楕円で、砲台の通り道をなぞる。
+    // 砲台環。コアを中心とする横長の楕円で、砲台の通り道をなぞる。点は弧長
+    // 一定で打つ。角度を一定に刻むと横長の楕円では上下だけ点が開き、砲台が
+    // 通る帯で環の粒度が変わってしまう。
     let (ring_rx, ring_ry) = state.ring_radii();
     let mut orbit_pts = Vec::new();
-    for i in 0..64 {
-        let a = i as f64 * std::f64::consts::TAU / 64.0;
-        orbit_pts.push((
-            CX + a.cos() * ring_rx + shake_x,
-            CORE_Y + a.sin() * ring_ry + shake_y,
-        ));
+    let mut orbit_a = 0.0;
+    while orbit_a < std::f64::consts::TAU {
+        let (sin, cos) = orbit_a.sin_cos();
+        orbit_pts.push(shake.point(CX + cos * ring_rx, CORE_Y + sin * ring_ry));
+        orbit_a += ORBIT_DOT_SPACING / (ring_rx * sin).hypot(ring_ry * cos).max(0.01);
     }
 
-    let core_scale = if state.layer_flash_ticks > 0 {
-        1.55
-    } else if state.layer_ready_flash_ticks > 0 {
-        1.30
-    } else if state.core_flash_ticks > 0 {
-        1.25
-    } else if can_unlock_next_layer(state) && state.elapsed_ticks % 20 < 10 {
-        1.12
-    } else {
-        1.0 + (layer.saturating_sub(1) as f64) * 0.04
-    };
-    let core_pts = filled_circle(
-        CX + shake_x,
-        CORE_Y + shake_y,
-        3.0 * core_scale,
-        sample_step,
-    );
-    let core_ring = canvas_fx::ring_points(CX + shake_x, CORE_Y + shake_y, 4.8 * core_scale, 0.26);
+    let core_scale = core_scale(state);
+    let core_pts = shake.circle(CX, CORE_Y, CORE_RADIUS * core_scale, sample_step);
+    let core_halo = canvas_fx::ring_points(core_x, core_y, CORE_HALO_RADIUS * core_scale, 0.26);
 
     // 採掘境界。鉱石が湧いてくる高さに水平の点線を引き、そこから上が
     // 今の層の外側だと示す。層が上がるほど点が詰まって濃くなる。
@@ -1103,7 +1229,7 @@ fn render_stage(
     let boundary_step = (3.4 - (layer.min(7).saturating_sub(1) as f64) * 0.4).max(1.2);
     let mut bx = FIELD_MARGIN;
     while bx <= WORLD_W - FIELD_MARGIN {
-        boundary_pts.push((bx + shake_x, SPAWN_Y + shake_y));
+        boundary_pts.push(shake.point(bx, SPAWN_Y));
         bx += boundary_step;
     }
 
@@ -1113,19 +1239,23 @@ fn render_stage(
     let mut wall_pts = Vec::new();
     let mut wy = 0.0;
     while wy <= WORLD_H {
-        wall_pts.push((FIELD_MARGIN + shake_x, wy + shake_y));
-        wall_pts.push((WORLD_W - FIELD_MARGIN + shake_x, wy + shake_y));
+        wall_pts.push(shake.point(FIELD_MARGIN, wy));
+        wall_pts.push(shake.point(WORLD_W - FIELD_MARGIN, wy));
         wy += 12.0;
     }
 
     // 砲台。環の下半分 (sin < 0) が視点に近い手前側。
-    let turrets = turret_positions(state);
+    let near_radius = turret_radius(ring_ry);
     let mut gun_near = Vec::new();
     let mut gun_far = Vec::new();
-    for &(gx, gy, depth) in &turrets {
+    for &(gx, gy, depth) in &turret_positions(state) {
         let near = depth <= 0.0;
-        let size = if near { TURRET_NEAR_RADIUS } else { 1.0 };
-        let pts = filled_circle(gx + shake_x, gy + shake_y, size, sample_step);
+        let r = if near {
+            near_radius
+        } else {
+            near_radius * TURRET_FAR_SCALE
+        };
+        let pts = shake.circle(gx, gy, r, sample_step);
         if near {
             gun_near.extend(pts);
         } else {
@@ -1134,38 +1264,30 @@ fn render_stage(
     }
 
     let mut ore_groups: Vec<(Vec<(f64, f64)>, Color)> = Vec::new();
-    let mut approach_trails: Vec<(f64, f64, f64, f64, Color)> = Vec::new();
+    let mut approach_trails: Vec<((f64, f64, f64, f64), Color)> = Vec::new();
     for ore in &state.ores {
         let color = ore_color(ore.kind);
-        let pts = filled_circle(ore.x + shake_x, ore.y + shake_y, ore.radius, sample_step);
+        let pts = shake.circle(ore.x, ore.y, ore.radius, sample_step);
         if let Some(g) = ore_groups.iter_mut().find(|(_, c)| *c == color) {
             g.0.extend(pts);
         } else {
             ore_groups.push((pts, color));
         }
-        let speed = ore.vx.hypot(ore.vy).max(0.01);
-        let trail = ore.radius * 2.8 + speed * 3.0;
-        approach_trails.push((
-            ore.x + shake_x,
-            ore.y + shake_y,
-            ore.x - ore.vx / speed * trail + shake_x,
-            ore.y - ore.vy / speed * trail + shake_y,
-            color,
-        ));
+        let len = ore.radius * 2.8 + ore.vx.hypot(ore.vy).max(0.01) * 3.0;
+        approach_trails.push((shake.trail(ore.x, ore.y, ore.vx, ore.vy, len), color));
     }
 
     // 飛翔弾を武器色で描画
     let mut proj_groups: Vec<(Vec<(f64, f64)>, Color)> = Vec::new();
-    let mut proj_trails: Vec<(f64, f64, f64, f64, Color)> = Vec::new();
+    let mut proj_trails: Vec<((f64, f64, f64, f64), Color)> = Vec::new();
     for p in &state.projectiles {
         let color = weapon_color(p.kind);
-        let pts = filled_circle(p.x + shake_x, p.y + shake_y, p.radius, sample_step);
+        let pts = shake.circle(p.x, p.y, p.radius, sample_step);
         if let Some(g) = proj_groups.iter_mut().find(|(_, c)| *c == color) {
             g.0.extend(pts);
         } else {
             proj_groups.push((pts, color));
         }
-        let speed = p.vx.hypot(p.vy).max(0.01);
         // 尾の長さは弾半径の倍数で持つ。尾は「弾本体より何倍長いか」で見え方が
         // 決まるので、ワールド単位の固定長にすると弾の大きさを変えた途端に尾が
         // 本体へ飲まれ、飛んでいる向きが読めなくなる。
@@ -1177,13 +1299,7 @@ fn render_stage(
                 WeaponKind::Pulse => 3.3,
                 WeaponKind::Nova => 2.2,
             };
-        proj_trails.push((
-            p.x + shake_x,
-            p.y + shake_y,
-            p.x - p.vx / speed * len + shake_x,
-            p.y - p.vy / speed * len + shake_y,
-            color,
-        ));
+        proj_trails.push((shake.trail(p.x, p.y, p.vx, p.vy, len), color));
     }
 
     let mut sparks = Vec::new();
@@ -1191,7 +1307,7 @@ fn render_stage(
     let mut shards = Vec::new();
     let mut embers = Vec::new();
     for p in &state.particles {
-        let pt = (p.x + shake_x, p.y + shake_y);
+        let pt = shake.point(p.x, p.y);
         match p.kind {
             ParticleKind::Spark => sparks.push(pt),
             ParticleKind::Dust => dust.push(pt),
@@ -1206,13 +1322,7 @@ fn render_stage(
     for ring in &state.pulse_rings {
         let alpha = ring.life as f64 / ring.max_life.max(1) as f64;
         let density = if alpha > 0.5 { 1.0 } else { 1.7 };
-        push_pulse_wave_points(
-            CX + shake_x,
-            CORE_Y + shake_y,
-            ring.radius,
-            density,
-            &mut pulse_ring_pts,
-        );
+        push_pulse_wave_points(core_x, core_y, ring.radius, density, &mut pulse_ring_pts);
     }
 
     // 背景星は上から下へ流れ、フィールド内に「降ってくる場」の向きを与える。
@@ -1232,7 +1342,7 @@ fn render_stage(
         let fx = (seed * 11.0).sin().abs();
         let x = star_lo + (star_hi - star_lo) * fx;
         let y = (seed * 17.3 - drift).rem_euclid(WORLD_H);
-        stars.push((x, y));
+        stars.push(shake.point(x, y));
     }
 
     let core_color = if state.layer_flash_ticks > 0 {
@@ -1285,16 +1395,16 @@ fn render_stage(
             if !orbit_pts.is_empty() {
                 ctx.draw(&Points {
                     coords: &orbit_pts,
-                    color: Color::Indexed(240),
+                    color: Color::Indexed(238),
                 });
             }
             if !gun_far.is_empty() {
                 ctx.draw(&Points {
                     coords: &gun_far,
-                    color: Color::Gray,
+                    color: Color::Indexed(250),
                 });
             }
-            for &(x1, y1, x2, y2, color) in &approach_trails {
+            for &((x1, y1, x2, y2), color) in &approach_trails {
                 ctx.draw(&CanvasLine {
                     x1,
                     y1,
@@ -1311,7 +1421,7 @@ fn render_stage(
                     });
                 }
             }
-            for &(x1, y1, x2, y2, color) in &proj_trails {
+            for &((x1, y1, x2, y2), color) in &proj_trails {
                 ctx.draw(&CanvasLine {
                     x1,
                     y1,
@@ -1328,16 +1438,18 @@ fn render_stage(
                     });
                 }
             }
+            // 核の暈は背景側の装飾なので砲台より先に置く。手前を通る砲台が
+            // 暈の点で虫食いになると、何基あるかを数える手がかりが濁る。
+            if !core_halo.is_empty() {
+                ctx.draw(&Points {
+                    coords: &core_halo,
+                    color: Color::DarkGray,
+                });
+            }
             if !gun_near.is_empty() {
                 ctx.draw(&Points {
                     coords: &gun_near,
                     color: Color::White,
-                });
-            }
-            if !core_ring.is_empty() {
-                ctx.draw(&Points {
-                    coords: &core_ring,
-                    color: Color::DarkGray,
                 });
             }
             if !core_pts.is_empty() {
@@ -1436,7 +1548,7 @@ mod tests {
     use ratzilla::ratatui::Terminal;
 
     use crate::games::starringe::actions::buy_ring_id;
-    use crate::games::starringe::logic::{unlock_next_layer, PULSE_PROJECTILE_RADIUS};
+    use crate::games::starringe::logic::{unlock_next_layer, NOVA_PROJECTILE_RADIUS};
     use crate::games::starringe::state::{Layer, Ore, OreMotion, RingUpgrade, Tab};
 
     fn render_frame(state: &StarRingState, width: u16, height: u16) -> Rc<RefCell<ClickState>> {
@@ -1576,19 +1688,56 @@ mod tests {
     }
 
     /// 内容が溢れる領域では、`ScrollableTab` がスクロール列へ回す 1 桁を
-    /// 差し引いた幅で折り返すこと。ここがずれると折り返した行の右端が
-    /// スクロール列に隠れる。
+    /// 差し引いた幅で行を組むこと。ここがずれると行の右端がスクロール列に隠れる。
     #[test]
-    fn fit_sections_leaves_room_for_the_scroll_column() {
+    fn fit_tab_layout_leaves_room_for_the_scroll_column() {
         let state = StarRingState::new();
         let inner = Rect::new(0, 0, 33, 6);
-        let (fitted, spaced) = fit_sections(inner, |w| armory_sections(&state, w));
+        let (wrap_w, spaced) = fit_tab_layout(inner, |w| armory_sections(&state, w));
         assert!(!spaced, "溢れている時に装飾の空行は挟まない");
         assert_eq!(
-            sections_height(&fitted, false),
-            sections_height(&armory_sections(&state, inner.width - 1), false),
-            "スクロール列の 1 桁を引いた幅で折り返していない"
+            wrap_w,
+            inner.width - 1,
+            "スクロール列の 1 桁を引いた幅で組んでいない"
         );
+    }
+
+    /// 3 タブとも、`fit_tab_layout` に渡した桁数へ収まる行を返すこと。
+    ///
+    /// この契約が崩れると、溢れた時の「1 桁狭い幅で組み直す」が同じ結果を
+    /// 作り直すだけの空振りになり、右端がスクロール列の下へ隠れる。
+    ///
+    /// 桁数はタブペインが実際に取る値の範囲で見る。下限の 32 桁は、いちばん
+    /// 狭いモバイル (幅 33) でスクロール列へ 1 桁を回した時の幅。数字は
+    /// 桁が伸びる側で効くので、累計が大きく育った state で見る。
+    #[test]
+    fn every_tab_builds_rows_that_fit_the_width_it_is_given() {
+        let mut state = StarRingState::new();
+        state.total_kills = Layer::THRESHOLDS[1];
+        state.shards = 1e9;
+        assert!(unlock_next_layer(&mut state));
+        state.total_kills = 123_456;
+        state.missed_count = 98_765;
+        state.shards_earned = 1.2e7;
+
+        for (label, make) in [
+            (
+                "armory",
+                armory_sections as fn(&StarRingState, u16) -> Vec<Section>,
+            ),
+            ("ring", ring_sections),
+            ("codex", codex_sections),
+        ] {
+            for width in [32u16, 33, 34, 41, 72] {
+                for line in build_list(make(&state, width), false).lines() {
+                    assert!(
+                        line.width() <= width as usize,
+                        "{label} ({width}桁): 行が幅を超えている ({}桁) {line:?}",
+                        line.width()
+                    );
+                }
+            }
+        }
     }
 
     /// 折り返して増えた説明行も、見出し行と同じ購入のクリック領域に入ること。
@@ -1686,12 +1835,25 @@ mod tests {
                 "{w}x{h}: 選択中の武器名が読めない {picker}"
             );
 
-            let tab_area = split_body(split_frame(Rect::new(0, 0, w, h))[2], is_narrow_layout(w)).1;
+            // バーの升目数は、実際に行を組んだ桁数から決まる。枠の内側 (ワイドは
+            // 左右 2 桁ぶん狭い) と、内容が溢れた時にスクロール列へ回る 1 桁の
+            // どちらも `render_armory` と同じ手順で引く。
+            let narrow = is_narrow_layout(w);
+            let borders = if narrow {
+                Borders::TOP | Borders::BOTTOM
+            } else {
+                Borders::ALL
+            };
+            let tab_area = split_body(split_frame(Rect::new(0, 0, w, h))[2], narrow).1;
+            let inner = Block::default().borders(borders).inner(tab_area);
+            let body = Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 1);
+            let (wrap_w, _) = fit_tab_layout(body, |cols| armory_sections(&state, cols));
+
             let bar_row = rows
                 .iter()
                 .find(|r| r.contains('弾') && r.contains('威'))
                 .expect("強化バーの行が見つからない");
-            let cells = bar_cells(tab_area.width);
+            let cells = bar_cells(wrap_w);
             assert_eq!(
                 bar_row.matches('░').count(),
                 cells * 3,
@@ -1739,41 +1901,6 @@ mod tests {
                 rows >= 2,
                 "{tab:?}: 購入項目の当たり判定が {rows} 行しかない (見出し+説明の2行を想定)"
             );
-        }
-    }
-
-    /// `sections_height` の見積もりと `build_list` の実際の行数が一致すること。
-    ///
-    /// この 2 つは空行の入れ方を別々に持っている。ずれると `spaced` の判定と
-    /// `ScrollableTab` のスクロール上限が同時に狂い、詰めれば入る内容にスクロールを
-    /// 生やしたり、逆に末尾へ届かなくなったりする。
-    #[test]
-    fn section_height_matches_the_list_it_builds() {
-        let mut state = StarRingState::new();
-        state.total_kills = Layer::THRESHOLDS[1];
-        state.shards = 1e9;
-        assert!(unlock_next_layer(&mut state));
-
-        for (label, make) in [
-            (
-                "armory",
-                armory_sections as fn(&StarRingState, u16) -> Vec<Section>,
-            ),
-            ("ring", ring_sections),
-            ("codex", |s: &StarRingState, _w: u16| codex_sections(s)),
-        ] {
-            // 折り返しは幅で行数を変えるので、実機で使う幅の両端を含めて見る。
-            for width in [20u16, 33, 34, 41, 72] {
-                for spaced in [false, true] {
-                    let sections = make(&state, width);
-                    let expected = sections_height(&sections, spaced);
-                    let actual = build_list(sections, spaced).lines().len();
-                    assert_eq!(
-                        expected, actual,
-                        "{label} ({width}桁 spaced={spaced}): 見積もり {expected} 行 / 実際 {actual} 行"
-                    );
-                }
-            }
         }
     }
 
@@ -2073,12 +2200,12 @@ mod tests {
         }
     }
 
-    /// Braille セルのビット列を、ステージ全体を覆う点のオン/オフ表へ展開する。
+    /// braille 1 セルが灯している点の `(列, 行)` オフセット。
     ///
     /// `Marker::Braille` は 1 セルへ 2×4 の点を詰めるので、セル単位で数えると
     /// 「見かけの大きさ」が 4 分の 1 の粗さでしか測れない。点の単位まで開くと、
-    /// 円がどれだけの点を占めているかをそのまま数えられる。
-    fn braille_dots(buf: &ratzilla::ratatui::buffer::Buffer, w: u16, h: u16) -> Vec<bool> {
+    /// 描画物がどれだけの点を占めているかをそのまま数えられる。
+    fn cell_dots(symbol: &str) -> Vec<(usize, usize)> {
         // Unicode の braille は「左列を上から 1・2・3、右列を上から 4・5・6、
         // 最下段を左 7・右 8」の順にビットが並ぶ。行×列の位置へ並べ替える。
         const DOT_BITS: [[u16; 2]; 4] = [
@@ -2088,28 +2215,95 @@ mod tests {
             [0x0040, 0x0080],
         ];
         const BRAILLE_BASE: u32 = 0x2800;
+        let Some(c) = symbol.chars().next() else {
+            return Vec::new();
+        };
+        let cp = c as u32;
+        if !(BRAILLE_BASE..BRAILLE_BASE + 0x100).contains(&cp) {
+            return Vec::new();
+        }
+        let bits = (cp - BRAILLE_BASE) as u16;
+        let mut out = Vec::new();
+        for (row, cols) in DOT_BITS.iter().enumerate() {
+            for (col, bit) in cols.iter().enumerate() {
+                if bits & bit != 0 {
+                    out.push((col, row));
+                }
+            }
+        }
+        out
+    }
+
+    /// バッファ全体を覆う点のオン/オフ表。
+    fn braille_dots(buf: &ratzilla::ratatui::buffer::Buffer, w: u16, h: u16) -> Vec<bool> {
         let mut grid = vec![false; (w as usize * 2) * (h as usize * 4)];
         for y in 0..h {
             for x in 0..w {
-                let Some(c) = buf[(x, y)].symbol().chars().next() else {
-                    continue;
-                };
-                let cp = c as u32;
-                if !(BRAILLE_BASE..BRAILLE_BASE + 0x100).contains(&cp) {
-                    continue;
-                }
-                let bits = (cp - BRAILLE_BASE) as u16;
-                for (row, cols) in DOT_BITS.iter().enumerate() {
-                    for (col, bit) in cols.iter().enumerate() {
-                        if bits & bit != 0 {
-                            grid[(y as usize * 4 + row) * (w as usize * 2) + x as usize * 2 + col] =
-                                true;
-                        }
-                    }
+                for (col, row) in cell_dots(buf[(x, y)].symbol()) {
+                    grid[(y as usize * 4 + row) * (w as usize * 2) + x as usize * 2 + col] = true;
                 }
             }
         }
         grid
+    }
+
+    /// `inner` の中で `color` に塗られたセルが灯している点の座標。
+    ///
+    /// ステージの描画物は色で塗り分かれているので、色で絞ってから点へ開くと
+    /// 物ごとの占有を測れる。重なった部分は後から描いた物の色になるため、
+    /// 手前の物が奥の物を隠した結果がそのまま出る。
+    fn colored_dots(
+        buf: &ratzilla::ratatui::buffer::Buffer,
+        inner: Rect,
+        color: Color,
+    ) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        for y in inner.y..inner.y + inner.height {
+            for x in inner.x..inner.x + inner.width {
+                if buf[(x, y)].fg != color {
+                    continue;
+                }
+                for (col, row) in cell_dots(buf[(x, y)].symbol()) {
+                    out.push((x as usize * 2 + col, y as usize * 4 + row));
+                }
+            }
+        }
+        out
+    }
+
+    /// 点の集合を上下左右に繋がった塊へ分け、塊ごとの点数を返す。
+    /// 塊の数がそのまま「いくつの物として見えるか」になる。
+    fn blob_sizes(pts: &[(usize, usize)]) -> Vec<usize> {
+        use std::collections::HashSet;
+        let mut left: HashSet<(usize, usize)> = pts.iter().copied().collect();
+        let mut sizes = Vec::new();
+        while let Some(&seed) = left.iter().next() {
+            left.remove(&seed);
+            let mut stack = vec![seed];
+            let mut n = 0usize;
+            while let Some((x, y)) = stack.pop() {
+                n += 1;
+                for (dx, dy) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
+                    let nb = (
+                        (x as i64 + dx).max(0) as usize,
+                        (y as i64 + dy).max(0) as usize,
+                    );
+                    if left.remove(&nb) {
+                        stack.push(nb);
+                    }
+                }
+            }
+            sizes.push(n);
+        }
+        sizes
+    }
+
+    /// 点の集合の外接幅 (点の単位)。
+    fn dot_span_w(pts: &[(usize, usize)]) -> usize {
+        match (pts.iter().map(|p| p.0).min(), pts.iter().map(|p| p.0).max()) {
+            (Some(lo), Some(hi)) => hi - lo + 1,
+            _ => 0,
+        }
     }
 
     /// 半径 `radius` の円を `(x, y)` へ 1 つ置いたときに増える点を数え、
@@ -2224,6 +2418,139 @@ mod tests {
     /// デスクトップ幅のステージ。
     const DESKTOP_STAGE: (u16, u16) = (108, 36);
 
+    /// 端末サイズ `w`x`h` でステージの枠の内側に当たる Rect。
+    /// レイアウトの分岐は `render` と同じ判定から引く。
+    fn stage_inner(w: u16, h: u16) -> Rect {
+        let narrow = is_narrow_layout(w);
+        let (stage, _) = split_body(split_frame(Rect::new(0, 0, w, h))[2], narrow);
+        let borders = if narrow {
+            Borders::TOP | Borders::BOTTOM
+        } else {
+            Borders::ALL
+        };
+        Block::default().borders(borders).inner(stage)
+    }
+
+    /// ステージが「核 > 砲台 > 環」の順に読めること。
+    ///
+    /// 守る拠点も自分の武装も、降ってくる鉱石や軌道の装飾と同じ粒度で並ぶと、
+    /// 画面のどこを見ればよいかが決まらない。核は最大の鉱石より太く、砲台は
+    /// 環の点より太い塊で、しかも基数を数えられるだけ離れていること。
+    #[test]
+    fn the_stage_reads_as_core_over_turret_over_orbit() {
+        const CORE: Color = Color::Yellow;
+        const ORBIT: Color = Color::Indexed(238);
+        const TURRET: Color = Color::White;
+
+        let big = *kinds_by_radius().last().unwrap();
+        let ore_hue = ore_color(big);
+        assert!(
+            ![CORE, ORBIT, TURRET].contains(&ore_hue),
+            "鉱石の色が核・環・砲台のどれかと同じでは、色で物を分けられない"
+        );
+
+        let mut state = StarRingState::new();
+        state.weapon_levels[0][0] = 3;
+        state.ores.push(Ore {
+            x: 30.0,
+            y: 78.0,
+            // 速度 0 なら尾が 1 点へ潰れ、測るのは鉱石そのものの占有だけになる。
+            vx: 0.0,
+            vy: 0.0,
+            hp: 5.0,
+            kind: big,
+            radius: big.radius(),
+            motion: OreMotion::Spiral,
+            sway: 0.0,
+            age: 0,
+        });
+        let near_guns = turret_positions(&state)
+            .iter()
+            .filter(|(_, _, depth)| *depth <= 0.0)
+            .count();
+        assert!(
+            near_guns >= 2,
+            "手前側の砲台が {near_guns} 基では基数を数える検査にならない"
+        );
+
+        for (w, h) in [DESKTOP_STAGE, PHONE_STAGE] {
+            let inner = stage_inner(w, h);
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            let cs = Rc::new(RefCell::new(ClickState::new()));
+            cs.borrow_mut().terminal_cols = w;
+            cs.borrow_mut().terminal_rows = h;
+            terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
+            let buf = terminal.backend().buffer();
+
+            let core = dot_span_w(&colored_dots(buf, inner, CORE));
+            let ore = dot_span_w(&colored_dots(buf, inner, ore_hue));
+            assert!(
+                core >= ore + 2,
+                "{w}x{h}: 核 {core}点幅 と最大の鉱石 {ore}点幅 が同じ大きさに見える"
+            );
+
+            let guns = blob_sizes(&colored_dots(buf, inner, TURRET));
+            assert_eq!(
+                guns.len(),
+                near_guns,
+                "{w}x{h}: 手前側の砲台 {near_guns} 基が {} 個の塊にしか見えない",
+                guns.len()
+            );
+            let thinnest_gun = guns.iter().copied().min().unwrap_or(0);
+            let thickest_orbit = blob_sizes(&colored_dots(buf, inner, ORBIT))
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0);
+            assert!(
+                thinnest_gun >= thickest_orbit * 3,
+                "{w}x{h}: 砲台 {thinnest_gun}点 が環の点 {thickest_orbit}点 に埋もれる"
+            );
+        }
+    }
+
+    /// 砲台の下端が、環がどれだけ下がっても `VISIBLE_Y_LO` を割らないこと。
+    /// 欠けると、武装がフレームに削られた形で描かれる。
+    ///
+    /// 核側の同じ不変条件は定数の隣の `const` アサートが持つ。
+    #[test]
+    fn turrets_never_reach_below_the_field() {
+        let mut state = StarRingState::new();
+        for count in 0..=7u32 {
+            state.weapon_levels[0][0] = count;
+            let (_, ring_ry) = state.ring_radii();
+            let bottom = CORE_Y - ring_ry - turret_radius(ring_ry);
+            // 余裕を使い切る砲台数では下端ちょうどに接するので、丸め誤差ぶんを許す。
+            assert!(
+                bottom >= VISIBLE_Y_LO - 1e-9,
+                "砲台 {} 基で環の最下点の砲台が下端を割る (y={bottom})",
+                state.turret_count()
+            );
+        }
+    }
+
+    /// 核は最大の鉱石より大きく、層をいくら重ねても脈動の上限を超えないこと。
+    #[test]
+    fn the_core_outgrows_every_ore_at_any_layer() {
+        let widest = OreKind::ALL
+            .iter()
+            .map(|k| k.radius())
+            .fold(0.0f64, f64::max);
+        assert!(
+            CORE_RADIUS >= widest * 1.25,
+            "核 {CORE_RADIUS} が最大の鉱石 {widest} と同格に見える"
+        );
+
+        let mut state = StarRingState::new();
+        for layer in [1u32, 8, 40, 400] {
+            state.current_layer = layer;
+            assert!(
+                core_scale(&state) <= CORE_MAX_SCALE,
+                "第{layer}層で核の脈動が上限を超える"
+            );
+        }
+    }
+
     /// 半径の小さい順に並べた鉱石。大きさの比較はこの順で見る。
     fn kinds_by_radius() -> Vec<OreKind> {
         let mut kinds = OreKind::ALL.to_vec();
@@ -2231,19 +2558,19 @@ mod tests {
         kinds
     }
 
-    /// 最小の鉱石は、最初に手にする武器の弾より確実に大きく描かれる。
+    /// 最小の鉱石は、いちばん大きい弾より確実に大きく描かれる。
     ///
-    /// 星塵と流星弾は色と尾の向きでも違うが、降ってくる的と自分の撃った弾を
+    /// 星塵と弾は色と尾の向きでも違うが、降ってくる的と自分の撃った弾を
     /// 見分ける最初の手がかりは大きさになる。端数をどうずらしても外接矩形が
     /// 2 点ぶん離れていれば、弾と的が同じ塊に見えることはない。
     #[test]
     fn the_smallest_ore_outgrows_a_shot_on_a_phone_sized_stage() {
         let (w, h) = PHONE_STAGE;
         let ore = footprint_stats(OreKind::Dust.radius(), w, h);
-        let shot = footprint_stats(PULSE_PROJECTILE_RADIUS, w, h);
+        let shot = footprint_stats(NOVA_PROJECTILE_RADIUS, w, h);
         assert!(
             ore.min_w >= shot.max_w + 2 && ore.min_h >= shot.max_h + 2,
-            "星塵 {}x{}点 と流星弾 {}x{}点 が紛らわしい",
+            "星塵 {}x{}点 と最大の弾 (新星弾) {}x{}点 が紛らわしい",
             ore.min_w,
             ore.min_h,
             shot.max_w,

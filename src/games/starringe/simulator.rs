@@ -22,7 +22,7 @@ use super::logic::{
 };
 use super::state::{
     Layer, OreKind, RingUpgrade, StarRingState, WeaponKind, WeaponStat, FIELD_MARGIN,
-    RING_UPGRADE_COUNT, SPAWN_X_MARGIN, SPAWN_Y, WORLD_H, WORLD_W,
+    RING_UPGRADE_COUNT, SPAWN_X_MARGIN, SPAWN_Y, VISIBLE_Y_HI, VISIBLE_Y_LO, WORLD_W,
 };
 
 /// 購入方策。感度分析で「どの強化が効いているか」を切り分ける。
@@ -745,7 +745,8 @@ fn new_ore_kinds_appear_over_long_run() {
 ///
 /// 横も下端も、中心だけでなく円の全体を見る。中心が内側にあっても半径ぶんが
 /// Canvas の bounds (`0..WORLD_W` × `0..WORLD_H`) を越えていれば、その鉱石は
-/// 端で欠けて描かれる。
+/// 端で欠けて描かれる。縦は画面シェイクで振れた tick も欠けないよう
+/// `VISIBLE_Y_LO`/`VISIBLE_Y_HI` を境界に取る。
 #[test]
 fn ores_stay_inside_the_field_over_a_long_run() {
     const TICKS: u32 = 6_000;
@@ -773,8 +774,8 @@ fn ores_stay_inside_the_field_over_a_long_run() {
                 ore.kind
             );
             assert!(
-                ore.y - ore.radius >= 0.0 && ore.y <= WORLD_H + EPS,
-                "tick {t}: 鉱石が Canvas の下端を割った y={} r={} kind={:?}",
+                ore.y - ore.radius >= VISIBLE_Y_LO && ore.y <= VISIBLE_Y_HI + EPS,
+                "tick {t}: 鉱石が描画範囲の下端を割った y={} r={} kind={:?}",
                 ore.y,
                 ore.radius,
                 ore.kind

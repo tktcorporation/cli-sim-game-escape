@@ -3,7 +3,8 @@
 use super::state::{
     Layer, Ore, OreKind, OreMotion, Particle, ParticleKind, Projectile, PulseRing, RingUpgrade,
     StarRingState, WeaponKind, WeaponStat, BOOST_DURATION, CORE_Y, CX, FIELD_MARGIN, INNER_RADIUS,
-    LAYER_FLASH_TICKS, LAYER_READY_FLASH_TICKS, SPAWN_X_MARGIN, SPAWN_Y, WORLD_H, WORLD_W,
+    LAYER_FLASH_TICKS, LAYER_READY_FLASH_TICKS, SPAWN_X_MARGIN, SPAWN_Y, VISIBLE_Y_HI,
+    VISIBLE_Y_LO, WORLD_H, WORLD_W,
 };
 
 /// 鉱石の同時存在上限。これを超えると湧きも分裂も止める。
@@ -27,13 +28,32 @@ const HEAVY_FALL_MULT: f64 = 0.85;
 const CORE_PULL_RATIO: f64 = 1.5;
 /// Orbit の接線方向の回り込みの強さ (落下速度に対する倍率)。
 const ORBIT_SWIRL_GAIN: f64 = 2.2;
-/// 核脈動の波面が1tickで外へ進む距離。鉱石の降下 (最大 0.55/tick) より十分
-/// 速くし、核が脈打つたびに上空を舐めていく動きとして読める速さにする。
+/// 核脈動の波面が1tickで外へ進む距離。
+///
+/// 波が舐めるのは中心距離なので、比べる相手は落下速度そのものではなく「中心
+/// 距離が1tickで詰まる量」になる。詰まり方は落下と引き寄せの合成 (`step_ores`)
+/// で `fall_speed × Layer::fall_mult × (1 + CORE_PULL_RATIO × ramp)`——引き寄せが
+/// 最大 (`ramp` = 1) の星塵なら第7層で約 1.79/tick まで伸びる。核が脈打つたびに
+/// 上空を舐めていく動きとして読めるよう、波はその倍以上の速さで外へ抜ける。
+/// `Layer::fall_mult` は層とともに線形に伸びるので、深い層ほど差は詰まる。
 const PULSE_WAVE_SPEED: f64 = 4.25;
-/// 流星弾の半径。最初に触れる武器の弾なので、これが「弾の大きさ」の基準になる。
-/// 最小の鉱石 (`OreKind::Dust`) はこれより明確に大きく描かれる必要があり、
-/// 両者の関係は `render` のテストが押さえている。
+
+// 弾の半径 (ワールド単位)。鉱石 (`OreKind::radius`) と同じく「画面の広さに対して
+// どう見えるか」で決め、`WORLD_W` の 1.25%〜1.75% の帯へ5種を並べる。
+//
+// 帯の上端は「弾より的が確実に大きい」から決まる。最小の鉱石 (`OreKind::Dust`)
+// は `WORLD_W` の 3.0% で、幅33桁のモバイルでは 4×4 点に描かれる。弾がそこで
+// 3 点に届くと的と同じ塊に見えてしまうので、端数がどこに落ちても 2 点に収まる
+// 大きさ (半径 1.8 未満) を上限に取る。帯の中の並びは武器の性格に沿わせ、
+// ばら撒く散弾がいちばん小さく、着弾で爆ぜる新星がいちばん大きい。
+//
+// 当たり判定はこの半径に `HIT_TOLERANCE` を足して取るので、見た目の大きさと
+// 迎撃の手応えは別々に動かせる。
+pub(super) const SCATTER_PROJECTILE_RADIUS: f64 = 1.25;
 pub(super) const PULSE_PROJECTILE_RADIUS: f64 = 1.375;
+pub(super) const ARC_PROJECTILE_RADIUS: f64 = 1.5;
+pub(super) const RAY_PROJECTILE_RADIUS: f64 = 1.625;
+pub(super) const NOVA_PROJECTILE_RADIUS: f64 = 1.75;
 /// 弾と鉱石の当たり判定を、両者の円が触れる距離からどれだけ甘くするか。
 ///
 /// 砲台は撃つ瞬間の位置へ撃つ (`aim_dir`) ので、迎撃の手応えは「弾の飛行時間の
@@ -347,42 +367,61 @@ fn step_particles(state: &mut StarRingState) {
 /// 核へ吸い込まれる直前の鉱石だけが極端に有利になり、上空へ広がる波という
 /// 見た目と噛み合わない。
 ///
+/// 「1度きり」が成り立つのは、1本の波が1tickに1つの輪帯しか通さず、その輪帯が
+/// 前 tick の輪帯と継ぎ目なく隣り合うからで、判定そのものに当たった記録は無い
+/// (`pulse_wave_damage`)。1本につき `pulse_wave_damage` の呼び出しを1度に保つ
+/// ことが不変条件の実体なので、この関数はどの経路を通っても波1本あたり1回しか
+/// 呼ばない形にしてある。
+///
 /// 最後の1tickだけは広がらず、幅ゼロの輪帯 `[reach, reach]` で判定する。
 /// `pulse_wave_damage` は前 tick の移動区間を見るので、波面が到達距離へ
 /// 着いた tick に鉱石がその距離を跨ぐ動きは、次の tick でしか見えない——
 /// この 1tick が無いと、波面が追い越したはずの鉱石が到達距離の際でだけ
 /// すり抜ける。輪帯の幅がゼロなので、波が届く距離自体は伸びない。
+///
+/// 本数が上限を越えたら、最も広がった波から畳む。畳む波はこの tick が最後の
+/// 一歩になり、進む先が `radius + PULSE_WAVE_SPEED` ではなく `reach` へ変わる。
+/// 残りの輪帯をこの tick の輪帯と地続きの1区間として通すので、タップした回数
+/// ぶんの手応えを残しながら、同じ鉱石を2度削ることもない。
 fn step_pulse_rings(state: &mut StarRingState) {
+    // 畳む本数は波を広げる前に決める。この tick で寿命が尽きる波は放っておいても
+    // 消えるので、数えるのは生き残る波だけにする。
+    let surviving = state.pulse_rings.iter().filter(|r| r.life > 1).count();
+    let mut to_retire = if surviving > MAX_PULSE_RINGS {
+        surviving - KEPT_PULSE_RINGS
+    } else {
+        0
+    };
+
     for i in 0..state.pulse_rings.len() {
         let ring = &mut state.pulse_rings[i];
         if ring.life == 0 {
             continue;
         }
         ring.life -= 1;
+        // 畳むのは最も広がった波から。古い順に並んでいるので先頭から取る。
+        let retiring = ring.life > 0 && to_retire > 0;
+        if retiring {
+            to_retire -= 1;
+            ring.life = 0;
+        }
         let inner = ring.radius;
-        if ring.life > 0 {
+        ring.radius = if retiring {
+            ring.reach
+        } else if ring.life > 0 {
             // 最後の一歩は端数になるので、到達距離で頭打ちにする。満額進めると
             // `pulse_reach` の外に居る鉱石まで削れ、描かれる波も強化の範囲から
             // はみ出す。
-            ring.radius = (ring.radius + PULSE_WAVE_SPEED).min(ring.reach);
-        }
+            (inner + PULSE_WAVE_SPEED).min(ring.reach)
+        } else {
+            inner
+        };
         let (outer, dmg) = (ring.radius, ring.damage);
         if dmg > 0.0 {
             pulse_wave_damage(state, inner, outer, dmg);
         }
     }
     state.pulse_rings.retain(|r| r.life > 0);
-    if state.pulse_rings.len() > MAX_PULSE_RINGS {
-        let drop = state.pulse_rings.len() - KEPT_PULSE_RINGS;
-        // 捨てるのは最も広がった波から。残りの輪帯 `[radius, reach]` へ先に
-        // ダメージを通してから消すので、タップした回数ぶんの手応えは残る。
-        let dropped: Vec<PulseRing> = state.pulse_rings.drain(0..drop).collect();
-        for ring in dropped {
-            if ring.damage > 0.0 {
-                pulse_wave_damage(state, ring.radius, ring.reach, ring.damage);
-            }
-        }
-    }
 }
 
 fn step_projectiles(state: &mut StarRingState) {
@@ -524,14 +563,14 @@ fn step_ores(state: &mut StarRingState) {
 ///
 /// 判定の取り方は 2 つで意味が違う。コア到達は中心距離で取る——核へ吸い込まれた
 /// かどうかの判定であり、核そのものが描かれている位置なので欠けは起きない。
-/// 場外落下は円の下端で取る——中心が 0 に届くまで待つと、Canvas の y_bounds
-/// (`0..WORLD_H`) を割った半径ぶんが下端で切れた鉱石として何十 tick も描かれる。
+/// 場外落下は円の下端で取る——中心が `VISIBLE_Y_LO` へ届くまで待つと、その下へ
+/// はみ出した半径ぶんが切れた鉱石として何十 tick も描かれる。
 fn resolve_arrivals(state: &mut StarRingState) {
     let mut i = 0;
     while i < state.ores.len() {
         let ore = &state.ores[i];
         let reached_core = (ore.x - CX).hypot(ore.y - CORE_Y) <= INNER_RADIUS;
-        if reached_core || ore.y - ore.radius <= 0.0 {
+        if reached_core || ore.y - ore.radius <= VISIBLE_Y_LO {
             let ore = state.ores.remove(i);
             state.missed_count += 1;
             burst(state, ore.x, ore.y, 4, 1.5, ParticleKind::Dust, 10);
@@ -595,14 +634,16 @@ fn spawn_one(state: &mut StarRingState, kind: OreKind, x: f64, y: f64) {
     });
 }
 
-/// 湧きの基準高さ。円の上端がちょうど `WORLD_H` に接する高さへ置く。
+/// 湧きの基準高さ。円の上端がちょうど `VISIBLE_Y_HI` に接する高さへ置く。
 ///
-/// Canvas の y_bounds の外は描画されないので、これより上げたぶんだけ湧いた直後の
-/// 大きい鉱石が上を欠いて見える。円の下端はこの高さから直径ぶん下がった
-/// `WORLD_H - 2r` に来る——どの鉱石も直径が `WORLD_H - SPAWN_Y` を上回るので、
-/// 円は採掘境界 (`SPAWN_Y`) をまたぎ、境界の向こうから現れる見え方になる。
+/// 画面シェイクで上へ振れた tick も含めて Canvas の y_bounds に収めたいので、
+/// 突き合わせる相手は `WORLD_H` ではなくシェイクを見込んだ `VISIBLE_Y_HI` に
+/// なる。これより上げたぶんだけ、湧いた直後の大きい鉱石が上を欠いて見える。
+/// 円の下端はこの高さから直径ぶん下がった位置に来る——どの鉱石も直径が
+/// `VISIBLE_Y_HI - SPAWN_Y` を上回るので、円は採掘境界 (`SPAWN_Y`) をまたぎ、
+/// 境界の向こうから現れる見え方になる。
 fn spawn_base_y(kind: OreKind) -> f64 {
-    WORLD_H - kind.radius()
+    VISIBLE_Y_HI - kind.radius()
 }
 
 /// 湧きの x の有効範囲。`spawn_base_y` と同じく円の端で取る。
@@ -711,7 +752,8 @@ fn fire_core_pulse(state: &mut StarRingState) {
 ///
 /// 鉱石も同じ tick に核へ近づくので、判定はその移動ぶんを含めた掃引で取る。
 /// 中心距離の瞬間値だけを見ると、波面のわずかに外に居た鉱石が次の tick までに
-/// 旧 `outer` の内側へ入り込み、波が通り抜けたのに一度も削られない個体が出る。
+/// 前 tick の `outer` の内側へ入り込み、波が通り抜けたのに一度も削られない
+/// 個体が出る。
 /// 当たりが tick の位相任せになると、核脈動という強化の効きが読めなくなる。
 ///
 /// `prev` は `vx`/`vy` から復元した前 tick の中心距離。ある tick の `dist` は
@@ -793,7 +835,7 @@ fn fire_ray(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize, 
             vy: uy * speed,
             damage: dmg,
             life: 28,
-            radius: 1.75,
+            radius: RAY_PROJECTILE_RADIUS,
             pierce: 2,
             splash: 0.0,
             kind: WeaponKind::Ray,
@@ -826,7 +868,7 @@ fn fire_scatter(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usi
             vy: ang.sin() * speed,
             damage: dmg,
             life: 18,
-            radius: 1.25,
+            radius: SCATTER_PROJECTILE_RADIUS,
             pierce: 0,
             splash: 0.0,
             kind: WeaponKind::Scatter,
@@ -852,7 +894,7 @@ fn fire_arc(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize, 
             vy: uy * speed,
             damage: dmg,
             life: 30,
-            radius: 1.625,
+            radius: ARC_PROJECTILE_RADIUS,
             pierce: 1,
             splash: 0.0,
             kind: WeaponKind::Arc,
@@ -877,7 +919,7 @@ fn fire_nova(state: &mut StarRingState, guns: &[(f64, f64, f64)], volley: usize,
             vy: uy * speed,
             damage: dmg,
             life: 26,
-            radius: 2.75,
+            radius: NOVA_PROJECTILE_RADIUS,
             pierce: 0,
             splash: 13.75,
             kind: WeaponKind::Nova,
@@ -982,7 +1024,7 @@ fn burst(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::games::starringe::state::{MAX_TURRETS, SHAKE_MAX_Y, TURRET_NEAR_RADIUS};
+    use crate::games::starringe::state::{MAX_TURRETS, TURRET_NEAR_RADIUS};
 
     #[test]
     fn spawn_ores_appear_after_interval() {
@@ -998,9 +1040,10 @@ mod tests {
     }
 
     /// 湧いた鉱石は最初の tick から円の全体が Canvas (`0..WORLD_W` × `0..WORLD_H`)
-    /// に収まること。上端がはみ出すと、降りてくるまでの数十 tick は大きい鉱石ほど
-    /// 上を欠いた形で描かれる。左右も同じで、はみ出したまま降り始めた鉱石は
-    /// 端で欠けて見える。
+    /// に収まること。縦は画面シェイクの振れ (`VISIBLE_Y_LO`/`VISIBLE_Y_HI`) 込みで
+    /// 見る。上端がはみ出すと、降りてくるまでの数十 tick は大きい鉱石ほど上を
+    /// 欠いた形で描かれる。左右も同じで、はみ出したまま降り始めた鉱石は端で
+    /// 欠けて見える。
     ///
     /// 湧いた後も内側に留まり続けることは
     /// `simulator::ores_stay_inside_the_field_over_a_long_run` が見る。
@@ -1009,8 +1052,8 @@ mod tests {
         for kind in OreKind::ALL {
             let base = spawn_base_y(kind);
             assert!(
-                (base + kind.radius() - WORLD_H).abs() < 1e-9,
-                "{kind:?} の湧き高さが Canvas の上端に接していない top={}",
+                (base + kind.radius() - VISIBLE_Y_HI).abs() < 1e-9,
+                "{kind:?} の湧き高さが描画範囲の上端に接していない top={}",
                 base + kind.radius()
             );
             // 円が採掘境界をまたぐこと。半径が小さすぎると境界より上へ丸ごと
@@ -1036,7 +1079,7 @@ mod tests {
             tick(&mut state, 1);
             for ore in state.ores.iter().filter(|o| o.age == 0) {
                 assert!(
-                    ore.y + ore.radius <= WORLD_H + 1e-9 && ore.y - ore.radius >= 0.0,
+                    ore.y + ore.radius <= VISIBLE_Y_HI + 1e-9 && ore.y - ore.radius >= VISIBLE_Y_LO,
                     "湧いた鉱石が画面からはみ出している y={} r={}",
                     ore.y,
                     ore.radius
@@ -1683,7 +1726,7 @@ mod tests {
                         1.0
                     };
                     assert!(
-                        y - r - SHAKE_MAX_Y >= 0.0 && y + r + SHAKE_MAX_Y <= WORLD_H,
+                        y - r >= VISIBLE_Y_LO && y + r <= VISIBLE_Y_HI,
                         "砲台{count}基の円が縦にはみ出す y={y} r={r}"
                     );
                     assert!(
@@ -1804,47 +1847,94 @@ mod tests {
         );
     }
 
-    /// タップを連打しても、立てた波の数ぶんのダメージが入ること。
+    /// タップを連打しても、立てた波それぞれが鉱石をちょうど1度ずつ削ること。
     ///
     /// タップは入力イベントごとに波を立てるので、10 ticks/sec の歩みより速く
     /// 積み上がる。描画のために本数を切り詰めるとき、まだ広がり切っていない波を
-    /// そのまま消すと、押した回数と返ってくる手応えが噛み合わなくなる。
+    /// そのまま消すと押した回数ぶんの手応えが消え、逆に残りの輪帯をその tick の
+    /// 輪帯と重ねて通すと同じ鉱石が2度削られる。どちらへ転んでも合計が合わなく
+    /// なるので、過不足の両方をダメージの一致で見る。
+    ///
+    /// 鉱石を静止させたまま回すと前 tick の中心距離が現在値と一致し、輪帯の
+    /// 掃引判定が素通りしてしまう。tick と同じ順序で `step_ores` を挟み、波面を
+    /// 実際に跨がせて測る。二重計上は「その tick に波面を内側へ跨いだ鉱石」で
+    /// だけ起きるので、跨ぐ位相が切り詰めの tick と噛み合うよう初期高さを
+    /// 1tick ぶんの詰まり幅より細かく振って舐める。
     #[test]
     fn rapid_taps_deal_damage_for_every_wave() {
         // 1 tick の合間に一気に押す場合と、tick をまたいで押し続ける場合の両方で
         // 本数の上限を越えさせる。
         for (taps_per_step, steps) in [(24, 1), (3, 12)] {
-            let mut state = state_with_core_pulse(6);
-            // 層開放の演出波は鉱石に触れないが、本数の枠は食う。
-            state.pulse_rings.clear();
-            // 手動波が届く範囲の内側に、削り切られない硬い鉱石を静止させる。
-            let y = CORE_Y + state.pulse_reach() * 0.55 * 0.5;
-            push_test_ore(&mut state, CX, y, 1e6);
-            let before = state.ores[0].hp;
+            for phase in 0..12 {
+                let mut state = state_with_core_pulse(6);
+                // 層開放の演出波は鉱石に触れないが、本数の枠は食う。
+                state.pulse_rings.clear();
+                // 手動波が届く範囲の内側に、削り切られない硬い鉱石を置く。波面が
+                // 下から追い越していくので、降りてくる鉱石と必ずすれ違う。
+                let reach = state.pulse_reach() * 0.55;
+                let y = CORE_Y + reach * 0.75 + phase as f64 * 0.45;
+                push_test_ore(&mut state, CX, y, 1e6);
+                let before = state.ores[0].hp;
 
-            let mut expected = 0.0;
-            for _ in 0..steps {
-                for _ in 0..taps_per_step {
-                    manual_strike(&mut state);
-                    // タップが載せたブースト込みの値。`manual_strike` が内部で
-                    // 使う値と一致する。
-                    expected +=
-                        state.weapon_damage(WeaponKind::Pulse) * 2.2 + state.pulse_damage() * 0.6;
+                let mut expected = 0.0;
+                for _ in 0..steps {
+                    for _ in 0..taps_per_step {
+                        manual_strike(&mut state);
+                        // タップが載せたブースト込みの値。`manual_strike` が内部で
+                        // 使う値と一致する。
+                        expected += state.weapon_damage(WeaponKind::Pulse) * 2.2
+                            + state.pulse_damage() * 0.6;
+                    }
+                    step_pulse_rings(&mut state);
+                    step_ores(&mut state);
                 }
-                step_pulse_rings(&mut state);
-            }
-            // 残った波が広がり切るまで回す。
-            for _ in 0..64 {
-                step_pulse_rings(&mut state);
-            }
+                // 残った波が広がり切るまで回す。
+                while !state.pulse_rings.is_empty() {
+                    step_pulse_rings(&mut state);
+                    step_ores(&mut state);
+                }
 
-            let dealt = before - state.ores[0].hp;
+                let dealt = before - state.ores[0].hp;
+                assert!(
+                    (dealt - expected).abs() < 1e-6,
+                    "{taps_per_step}連打×{steps}tick (phase={phase}) のダメージが \
+                     波の本数と合わない dealt={dealt} expected={expected}"
+                );
+            }
+        }
+    }
+
+    /// 弾は5種とも鉱石より一回り小さく、武器ごとの大小関係を保つこと。
+    ///
+    /// 弾と鉱石は同じ画面に同時に居るので、寸法が近づくと「降ってくる的」と
+    /// 「自分の撃った弾」の区別が色だけになる。点グリッドの上で見分けがつくかは
+    /// `render` のテストが押さえるので、ここは寸法そのものの並びを見る。
+    #[test]
+    fn projectiles_stay_smaller_than_every_ore() {
+        let ladder = [
+            SCATTER_PROJECTILE_RADIUS,
+            PULSE_PROJECTILE_RADIUS,
+            ARC_PROJECTILE_RADIUS,
+            RAY_PROJECTILE_RADIUS,
+            NOVA_PROJECTILE_RADIUS,
+        ];
+        for pair in ladder.windows(2) {
             assert!(
-                (dealt - expected).abs() < 1e-6,
-                "{taps_per_step}連打×{steps}tick ぶんのダメージが入っていない \
-                 dealt={dealt} expected={expected}"
+                pair[0] < pair[1],
+                "弾の大小関係が崩れている {} >= {}",
+                pair[0],
+                pair[1]
             );
         }
+
+        let smallest_ore = OreKind::ALL
+            .iter()
+            .map(|k| k.radius())
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            NOVA_PROJECTILE_RADIUS * 1.5 <= smallest_ore,
+            "最大の弾 {NOVA_PROJECTILE_RADIUS} が最小の鉱石 {smallest_ore} に迫っている"
+        );
     }
 
     /// 層開放の演出で立つ波は鉱石に触れないこと。
