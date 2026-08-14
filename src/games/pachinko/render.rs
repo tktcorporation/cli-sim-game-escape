@@ -23,7 +23,7 @@ use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::symbols::Marker;
 use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::canvas::{Canvas, Context, Line as CanvasLine, Points};
-use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
+use ratzilla::ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratzilla::ratatui::Frame;
 
 use crate::canvas_fx;
@@ -963,14 +963,26 @@ const BIG_DIGIT_ROWS: [[u8; 5]; 10] = [
 
 /// ドット絵の高さ (行数)。
 const BIG_DIGIT_ROW_COUNT: usize = 5;
-/// 出玉カウンタに割く高さ (セル)。braille は 1 セル = 横2×縦4 の疑似ピクセル
-/// なので、2 セルで縦 8 ピクセルが使える。
-const BIG_DIGIT_H: u16 = 2;
-/// ドット絵1行分の縦のピクセル数。5行を縦 8 ピクセルへ引き伸ばす倍率。
-const BIG_DIGIT_ROW_PX: f64 = 1.4;
-/// 疑似ピクセル1つを塗るときのサンプリング間隔。braille の 1 点より細かく
-/// することで、引き伸ばした数字の縁が欠けない。
-const BIG_DIGIT_STEP: f64 = 0.3;
+/// 出玉カウンタに割く高さ (セル)。braille は 1 セル = 縦4ドットなので、
+/// 3 セルでドット絵の1行を縦2ドットずつに割り当てられる。1行を割り切れない
+/// 高さにすると、隣り合う行の隙間が丸めで潰れて数字が塊になる。
+const BIG_DIGIT_H: u16 = 3;
+/// ドット絵1行が占める縦のドット数。
+const BIG_DIGIT_ROW_DOTS: i32 = 2;
+/// ドット絵1列が占める横のドット数。braille の点をそのまま1列に当てると
+/// 1桁が 1.5 セルにしかならず、点の粗さに数字の形が負ける。縦2ドットと
+/// 揃えることで、3×5 の字形の縦横比がそのまま出る。
+const BIG_DIGIT_COL_DOTS: usize = 2;
+/// 文字と文字の間に空けるドット数。
+const BIG_DIGIT_GAP_DOTS: usize = 2;
+/// ドット絵の最上段を置くドット行 (Canvas の下端から数えた位置)。割り当てた
+/// 高さのうち字形が使わない分を、上下へ均等に余白として残す。下端に接すると
+/// 数字が切れて見える。
+const BIG_DIGIT_GLYPH_TOP_DOT: i32 = {
+    let total = BIG_DIGIT_H as i32 * 4;
+    let glyph = BIG_DIGIT_ROW_COUNT as i32 * BIG_DIGIT_ROW_DOTS;
+    total - 1 - (total - glyph) / 2
+};
 
 /// 数字列を縦 `BIG_DIGIT_ROW_COUNT` の点灯パターンへ展開する。1要素が
 /// 1ピクセル列で、下位ビットから順に上の行にあたる。
@@ -989,39 +1001,56 @@ fn big_number_columns(text: &str) -> Vec<u8> {
                             bits |= 1 << row;
                         }
                     }
-                    columns.push(bits);
+                    for _ in 0..BIG_DIGIT_COL_DOTS {
+                        columns.push(bits);
+                    }
                 }
             }
-            // コンマは最下行の1点だけ。桁区切りが数字と同じ大きさで並ぶと、
+            // コンマは最下行だけ。桁区切りが数字と同じ大きさで並ぶと、
             // どこが桁の切れ目なのか却って読めなくなる。
-            None => columns.push(1 << (BIG_DIGIT_ROW_COUNT - 1)),
+            None => {
+                for _ in 0..BIG_DIGIT_COL_DOTS {
+                    columns.push(1 << (BIG_DIGIT_ROW_COUNT - 1));
+                }
+            }
         }
-        columns.push(0);
+        columns.extend(std::iter::repeat_n(0, BIG_DIGIT_GAP_DOTS));
     }
-    columns.pop();
+    columns.truncate(columns.len().saturating_sub(BIG_DIGIT_GAP_DOTS));
     columns
 }
 
 /// 展開した点灯パターンを Canvas の点群にする。`invert` を立てると点灯と
 /// 消灯を入れ替え、数字が塗り潰しから抜けた形になる。
-fn big_number_points(columns: &[u8], invert: bool, top_y: f64) -> Vec<(f64, f64)> {
+///
+/// 座標は braille のドット位置そのもの。Canvas は世界座標をドットへ丸めて
+/// 描くので、整数のドット位置を直接指すことで数字の縦棒が1ドットの幅に
+/// 収まり、隣り合う行の隙間が丸めで埋まらない。呼び出し側は
+/// `big_number_bounds` の値を `x_bounds` / `y_bounds` へ渡す。
+fn big_number_points(columns: &[u8], invert: bool, top_dot: i32) -> Vec<(f64, f64)> {
     let mut points = Vec::new();
     for (col, bits) in columns.iter().enumerate() {
         for row in 0..BIG_DIGIT_ROW_COUNT {
             if (bits & (1 << row) != 0) == invert {
                 continue;
             }
-            let y = top_y - (row + 1) as f64 * BIG_DIGIT_ROW_PX;
-            points.extend(canvas_fx::filled_rect_points(
-                col as f64,
-                y,
-                col as f64 + 1.0,
-                y + BIG_DIGIT_ROW_PX,
-                BIG_DIGIT_STEP,
-            ));
+            for dot in 0..BIG_DIGIT_ROW_DOTS {
+                let y = top_dot - row as i32 * BIG_DIGIT_ROW_DOTS - dot;
+                points.push((col as f64, f64::from(y)));
+            }
         }
     }
     points
+}
+
+/// `big_number_points` の座標をそのままドットへ落とすための Canvas の範囲。
+/// braille のドット解像度は 1 セルにつき横2×縦4 で、両端のドットが範囲の
+/// 両端に対応する。
+fn big_number_bounds(cells_w: u16, cells_h: u16) -> ([f64; 2], [f64; 2]) {
+    (
+        [0.0, f64::from(cells_w) * 2.0 - 1.0],
+        [0.0, f64::from(cells_h) * 4.0 - 1.0],
+    )
 }
 
 /// 桁上がりで数字を反転させる tick 数。
@@ -1105,22 +1134,26 @@ fn render_jackpot_theater(
     }
 
     let invert = payout_carry_flash(state);
-    let points = big_number_points(&columns, invert, BIG_DIGIT_H as f64 * 4.0 - 0.5);
-    let width_px = columns.len() as f64;
-    let digits_x = inner.x + (inner.width - digits_w) / 2;
+    // ドット絵の下端が Canvas の下端に接すると数字が切れて見えるので、
+    // 上下に1ドットずつ余白を残す。
+    let points = big_number_points(&columns, invert, BIG_DIGIT_GLYPH_TOP_DOT);
+    let (x_bounds, y_bounds) = big_number_bounds(digits_w, BIG_DIGIT_H);
     let digits_area = Rect::new(
-        digits_x,
+        inner.x + (inner.width - digits_w) / 2,
         inner.bottom() - 1 - BIG_DIGIT_H,
         digits_w,
         BIG_DIGIT_H,
     );
     let canvas = Canvas::default()
-        .x_bounds([0.0, width_px])
-        .y_bounds([0.0, BIG_DIGIT_H as f64 * 4.0])
+        .x_bounds(x_bounds)
+        .y_bounds(y_bounds)
         .marker(Marker::Braille)
         .paint(move |ctx| {
             draw_points(ctx, &points, Color::LightYellow);
         });
+    // Canvas は点が乗らないセルを塗らないので、下の盤面が数字の隙間から
+    // 透けて字形が崩れる。数字を置く区画だけ先に空ける。
+    f.render_widget(Clear, digits_area);
     f.render_widget(canvas, digits_area);
 
     // 数字の左に単位を添える。数字だけでは持ち玉との区別が付かない。
@@ -1130,7 +1163,7 @@ fn render_jackpot_theater(
                 "出玉",
                 Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
             ))),
-            Rect::new(digits_area.x - 5, digits_area.y, 4, 1),
+            Rect::new(digits_area.x - 5, digits_area.y + 1, 4, 1),
         );
     }
     f.render_widget(
@@ -2769,8 +2802,8 @@ mod tests {
 
         let columns = big_number_columns("1,002");
         assert_ne!(
-            big_number_points(&columns, false, 7.5),
-            big_number_points(&columns, true, 7.5),
+            big_number_points(&columns, false, BIG_DIGIT_GLYPH_TOP_DOT),
+            big_number_points(&columns, true, BIG_DIGIT_GLYPH_TOP_DOT),
             "反転しても同じ絵になっている"
         );
     }
@@ -2931,55 +2964,6 @@ mod tests {
                 "{} 保留に信頼度らしき値が出ている: {drawn}",
                 rank.label()
             );
-        }
-    }
-    #[test]
-    #[ignore = "目視用"]
-    fn dump_screens() {
-        let dump = |state: &PachinkoState, w: u16, h: u16, title: &str| {
-            let cs = Rc::new(RefCell::new(ClickState::new()));
-            cs.borrow_mut().terminal_cols = w;
-            cs.borrow_mut().terminal_rows = h;
-            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
-            t.draw(|f| render(state, f, f.area(), &cs)).unwrap();
-            let buf = t.backend().buffer();
-            eprintln!("=== {title} ({w}x{h}) ===");
-            for y in 0..h {
-                let row: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
-                eprintln!("|{row}|");
-            }
-        };
-
-        let mut state = seated_state();
-        state.balls_held = 400;
-        state.pending.push(Pending::new(outcome(PendingRank::White, StopStyle::Plain)));
-        state.pending.push(Pending::new(outcome(PendingRank::Red, StopStyle::Plain)));
-        state.pending.push(Pending::new(outcome(PendingRank::Gold, StopStyle::Plain)));
-        state.pending[0].rank = PendingRank::White;
-        state.pending[1].rank = PendingRank::Red;
-        state.pending[1].promote_flash = PENDING_PROMOTE_FLASH_TICKS;
-        state.pending[2].rank = PendingRank::Gold;
-        dump(&state, 100, 40, "保留ワイド");
-        dump(&state, 40, 30, "保留ナロー");
-
-        let mut j = jackpot_state(1480);
-        j.jackpot_payout_shown = 1237.4;
-        dump(&j, 100, 40, "大当たりワイド");
-        dump(&j, 40, 30, "大当たりナロー");
-
-        let mut small = jackpot_state(84);
-        small.jackpot_payout_shown = 84.0;
-        dump(&small, 100, 40, "大当たり2桁");
-
-        let c = confirmed_state();
-        dump(&c, 40, 30, "確定ナロー");
-
-        let mut slip = seated_state();
-        let mut o = outcome(PendingRank::White, StopStyle::Slip);
-        o.hit = true; o.reach = ReachKind::Super; o.reels = [7,7,7];
-        for tl in (1..=2).rev() {
-            slip.digit = Digit::Spinning { ticks_left: tl, outcome: o };
-            dump(&slip, 40, 30, &format!("滑り t={tl}"));
         }
     }
 }

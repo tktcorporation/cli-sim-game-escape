@@ -303,11 +303,17 @@ fn seated_spec(state: &PachinkoState) -> MachineSpec {
 /// 決まり、演出が後から説明する」構造をそのまま写している。
 pub fn roll_outcome(state: &mut PachinkoState) -> SpinOutcome {
     let spec = seated_spec(state);
-    let odds = match state.mode {
-        Mode::Kakuhen { .. } => spec.kakuhen_odds,
-        _ => spec.normal_odds,
+    // 大当たり中に貯まった保留は、ラウンドが終わってから消化される。抽選を
+    // 引く時点のモードで決めると、確変が約束されている大当たり中に貯めた
+    // 保留だけが通常確率になり、当たっても連チャンが数え直される — 実際に
+    // 消化されるのは電サポへ入った直後なのに、確変の恩恵を受けられない。
+    let (odds, assisted) = match state.mode {
+        Mode::Kakuhen { .. } => (spec.kakuhen_odds, true),
+        Mode::Jitan { .. } => (spec.normal_odds, true),
+        Mode::Jackpot(j) if j.kakuhen => (spec.kakuhen_odds, true),
+        Mode::Jackpot(_) => (spec.normal_odds, true),
+        Mode::Normal => (spec.normal_odds, false),
     };
-    let assisted = state.mode.is_assisted();
     let seed = &mut state.rng_state;
     let hit = rng_below(seed, odds.max(1)) == 0;
     let reach = pick_reach(hit, seed);
@@ -1722,6 +1728,48 @@ mod tests {
             "電サポ中に引いた当たりが初当たり扱いになり、連チャンが数え直された"
         );
         assert_eq!(state.record.best_chain, 2);
+    }
+
+    #[test]
+    fn a_pending_drawn_during_a_jackpot_belongs_to_the_mode_that_follows_it() {
+        // 大当たり中に貯まった保留はラウンドが終わってから消化される。抽選を
+        // 引いた時点のモードで見ると、確変が約束されている最中に貯めた保留が
+        // 通常確率になり、当たっても連チャンが数え直される。
+        let mut state = seated_state();
+        let spec = state.seated_machine().expect("着席していない").spec;
+        state.mode = Mode::Jackpot(JackpotState {
+            round: 1,
+            total_rounds: 16,
+            count: 0,
+            ticks_left: ROUND_LIMIT_TICKS,
+            kakuhen: true,
+            payout: 0,
+        });
+
+        let mut hits = 0u32;
+        const TRIALS: u32 = 20_000;
+        for _ in 0..TRIALS {
+            let outcome = roll_outcome(&mut state);
+            assert!(
+                outcome.assisted,
+                "大当たり中に引いた保留が電サポ外の抽選として記録され、消化時に連チャンが切れる"
+            );
+            if outcome.hit {
+                hits += 1;
+            }
+        }
+
+        // 確変の分母で引けているかを、通常の分母との中間に閾値を置いて見る。
+        // 乱数の揺れで判定が裏返らないよう、両者の間隔を使って余裕を取る。
+        let observed = TRIALS as f64 / hits.max(1) as f64;
+        let midpoint = (spec.kakuhen_odds + spec.normal_odds) as f64 / 2.0;
+        assert!(
+            observed < midpoint,
+            "確変が約束された大当たり中の保留が通常確率で抽選されている \
+             (実測 1/{observed:.1} 確変 1/{} 通常 1/{})",
+            spec.kakuhen_odds,
+            spec.normal_odds
+        );
     }
 
     #[test]
