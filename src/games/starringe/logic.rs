@@ -481,12 +481,17 @@ fn step_ores(state: &mut StarRingState) {
 }
 
 /// コア到達と場外落下: 報酬なしで消える (逸失)。星屑は減らない——防衛失敗ではない。
+///
+/// 判定の取り方は 2 つで意味が違う。コア到達は中心距離で取る——核へ吸い込まれた
+/// かどうかの判定であり、核そのものが描かれている位置なので欠けは起きない。
+/// 場外落下は円の下端で取る——中心が 0 に届くまで待つと、Canvas の y_bounds
+/// (`0..WORLD_H`) を割った半径ぶんが下端で切れた鉱石として何十 tick も描かれる。
 fn resolve_arrivals(state: &mut StarRingState) {
     let mut i = 0;
     while i < state.ores.len() {
         let ore = &state.ores[i];
         let reached_core = (ore.x - CX).hypot(ore.y - CORE_Y) <= INNER_RADIUS;
-        if reached_core || ore.y < 0.0 {
+        if reached_core || ore.y - ore.radius <= 0.0 {
             let ore = state.ores.remove(i);
             state.missed_count += 1;
             burst(state, ore.x, ore.y, 4, 1.5, ParticleKind::Dust, 10);
@@ -1029,6 +1034,52 @@ mod tests {
                 ore.radius
             );
         }
+    }
+
+    /// 下端へ抜ける鉱石は、円が Canvas を割る前に消えること。
+    ///
+    /// 核から遠い壁際を降りた鉱石は引き寄せの上向き成分が落下速度に届かず、
+    /// 核へ吸い込まれないまま下端へ抜ける。中心が 0 に達するまで残すと、その間
+    /// ずっと半径ぶんを欠いた鉱石が下端に描かれる。
+    ///
+    /// 長期運転で内側に留まり続けることは
+    /// `simulator::ores_stay_inside_the_field_over_a_long_run` が見る。
+    #[test]
+    fn ores_leaving_the_bottom_vanish_before_the_circle_is_clipped() {
+        let mut fell_out = 0u32;
+        for kind in OreKind::ALL {
+            let mut state = StarRingState::new();
+            // 核と同じ高さの壁際から降ろす。核への向きがほぼ真横になるので
+            // 引き寄せが落下を止められず、下端へ抜ける経路に入る。
+            spawn_one(&mut state, kind, FIELD_MARGIN + kind.radius(), CORE_Y);
+            state.ores[0].sway = 0.0;
+
+            let mut last = (state.ores[0].x, state.ores[0].y);
+            let mut vanished = false;
+            for _ in 0..1_000 {
+                step_ores(&mut state);
+                resolve_arrivals(&mut state);
+                let Some(ore) = state.ores.first() else {
+                    vanished = true;
+                    break;
+                };
+                assert!(
+                    ore.y - ore.radius > 0.0,
+                    "{kind:?} が下端で欠けたまま残っている y={} r={}",
+                    ore.y,
+                    ore.radius
+                );
+                last = (ore.x, ore.y);
+            }
+            assert!(vanished, "{kind:?} が消えずに残り続けた last={last:?}");
+            if (last.0 - CX).hypot(last.1 - CORE_Y) > INNER_RADIUS {
+                fell_out += 1;
+            }
+        }
+        assert!(
+            fell_out > 0,
+            "どの鉱石も核へ吸い込まれてしまい、下端の逸失経路を通っていない"
+        );
     }
 
     #[test]

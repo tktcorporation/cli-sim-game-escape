@@ -740,11 +740,12 @@ fn new_ore_kinds_appear_over_long_run() {
 ///
 /// 横は左右の反射壁 (`FIELD_MARGIN`)、縦はコア到達 / 場外落下の判定
 /// (`logic::resolve_arrivals`) で回収されるので、tick の切れ目では常に
-/// `0 <= y <= WORLD_H` かつ壁の内側にいる。画面外へ流れる鉱石があると
+/// Canvas の内側かつ壁の内側にいる。画面外へ流れる鉱石があると
 /// 「どこから何が降ってきているか」を目で追えなくなる。
 ///
-/// 横は中心だけでなく円の全体を見る。中心が壁の内側でも半径ぶんが Canvas の
-/// x_bounds (`0..WORLD_W`) を越えていれば、その鉱石は端で欠けて描かれる。
+/// 横も下端も、中心だけでなく円の全体を見る。中心が内側にあっても半径ぶんが
+/// Canvas の bounds (`0..WORLD_W` × `0..WORLD_H`) を越えていれば、その鉱石は
+/// 端で欠けて描かれる。
 #[test]
 fn ores_stay_inside_the_field_over_a_long_run() {
     const TICKS: u32 = 6_000;
@@ -772,9 +773,10 @@ fn ores_stay_inside_the_field_over_a_long_run() {
                 ore.kind
             );
             assert!(
-                ore.y >= 0.0 && ore.y <= WORLD_H + EPS,
-                "tick {t}: 鉱石が上下へ抜けた y={} kind={:?}",
+                ore.y - ore.radius >= 0.0 && ore.y <= WORLD_H + EPS,
+                "tick {t}: 鉱石が Canvas の下端を割った y={} r={} kind={:?}",
                 ore.y,
+                ore.radius,
                 ore.kind
             );
             assert!(ore.x.is_finite() && ore.y.is_finite());
