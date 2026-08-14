@@ -92,17 +92,25 @@ pub fn launch_velocity(power: u8) -> (f64, f64) {
     (-(0.55 + p * 1.30), -0.75 - p * 0.55)
 }
 
-/// ヘソの実効受け口半幅。台の釘の開きと電サポの有無で変わる。
-pub fn effective_pocket_half_w(state: &PachinkoState) -> f64 {
-    let spread = state.seated_machine().map(|m| m.nail_spread).unwrap_or(0.5);
-    let base = START_POCKET_BASE_HALF_W + spread * POCKET_SPREAD_GAIN;
-    if state.mode.is_assisted() {
+/// ヘソの受け口半幅。決まるのは台のヘソ釘の開きと電サポの有無だけなので、
+/// 着席中の台に限らずホールに並ぶ台にも同じ式で引ける — ホールの盤面
+/// プレビューが着席後と同じヘソを描けるのはこのため。
+pub fn pocket_half_w(nail_spread: f64, assisted: bool) -> f64 {
+    let base = START_POCKET_BASE_HALF_W + nail_spread * POCKET_SPREAD_GAIN;
+    if assisted {
         // 電サポ中は羽根が開いてヘソが広がる。確変・時短の価値をヘソの
         // 見た目そのもので伝えるため、確率ではなく受け口を触る。
         base + 1.0
     } else {
         base
     }
+}
+
+/// 着席中の台のヘソの実効受け口半幅。台に着いていない間は中庸な開きの台と
+/// して扱い、受け口が 0 幅に潰れた盤面を描かせない。
+pub fn effective_pocket_half_w(state: &PachinkoState) -> f64 {
+    let spread = state.seated_machine().map(|m| m.nail_spread).unwrap_or(0.5);
+    pocket_half_w(spread, state.mode.is_assisted())
 }
 
 /// サブステップの前後で入賞口の高さを跨いだか。矩形の内包判定にすると、
@@ -599,6 +607,9 @@ pub fn sit_at(state: &mut PachinkoState, index: usize) -> bool {
         return false;
     }
     state.seat = index;
+    // 数字キーやタップで直接座った場合も選択を合わせる。席を立った直後の
+    // ホールで、今まで打っていた台とは別の台のプレビューが出るのを防ぐ。
+    state.hall_cursor = index;
     state.has_seated = true;
     state.phase = Phase::Playing;
     reset_seat(state);
@@ -712,9 +723,9 @@ pub fn generate_nails(seed: &mut u32, nail_spread: f64, rail_bias: f64) -> Vec<N
     }
 
     // ヘソ釘。この2本の間隔が「開いて見える」ことが釘読みの手がかりになるので、
-    // 実効受け口 (`effective_pocket_half_w` の通常時) の外側へ釘半径分だけ
-    // 逃がした位置に置き、見た目と当たり判定を一致させる。
-    let mouth = START_POCKET_BASE_HALF_W + nail_spread * POCKET_SPREAD_GAIN + NAIL_R;
+    // 通常時の受け口 (`pocket_half_w`) の外側へ釘半径分だけ逃がした位置に
+    // 置き、見た目と当たり判定を一致させる。
+    let mouth = pocket_half_w(nail_spread, false) + NAIL_R;
     for side in [-1.0, 1.0] {
         nails.push(Nail {
             x: START_POCKET_X + side * mouth,

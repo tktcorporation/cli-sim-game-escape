@@ -29,9 +29,9 @@ use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
 use actions::{
-    decode_machine_select, BOARD_TAP, BUY_BALLS, HALL_SCROLL_DOWN, HALL_SCROLL_UP,
-    INFO_SCROLL_DOWN, INFO_SCROLL_UP, LEAVE_SEAT, POWER_DOWN, POWER_UP, TAB_BOARD, TAB_HISTORY,
-    TAB_RECORD, TOGGLE_FIRE,
+    decode_machine_select, BOARD_TAP, BUY_BALLS, HALL_CURSOR_DOWN, HALL_CURSOR_UP,
+    HALL_SCROLL_DOWN, HALL_SCROLL_UP, INFO_SCROLL_DOWN, INFO_SCROLL_UP, LEAVE_SEAT, POWER_DOWN,
+    POWER_UP, TAB_BOARD, TAB_HISTORY, TAB_RECORD, TOGGLE_FIRE,
 };
 use state::{InfoTab, PachinkoState, Phase};
 
@@ -102,10 +102,12 @@ impl PachinkoGame {
 
     fn handle_hall_key(&mut self, key: char) -> bool {
         match key {
-            ' ' => {
-                let seat = self.state.seat;
-                logic::sit_at(&mut self.state, seat)
-            }
+            // 選択中の台にそのまま座る。プレビューで釘を読んでから座る
+            // 流れが、カーソル移動と同じ手だけで閉じる。
+            ' ' => match self.state.clamped_hall_cursor() {
+                Some(index) => logic::sit_at(&mut self.state, index),
+                None => false,
+            },
             // 台の並び順そのものがショートカットになる。ホールの台数を
             // 超える数字は `sit_at` が弾く。
             '1'..='9' => {
@@ -114,14 +116,8 @@ impl PachinkoGame {
             }
             // 大文字も受けるのは、index.html の高速スワイプが大文字キーを
             // 送るため。
-            'k' | 'K' => {
-                self.state.scroll_hall(-SCROLL_STEP);
-                true
-            }
-            'j' | 'J' => {
-                self.state.scroll_hall(SCROLL_STEP);
-                true
-            }
+            'k' | 'K' => self.state.move_hall_cursor(-1),
+            'j' | 'J' => self.state.move_hall_cursor(1),
             '!' => logic::buy_balls(&mut self.state),
             // 'q' はここへ落ちる。消費しないことで main.rs がメニューへ戻す。
             _ => false,
@@ -179,6 +175,8 @@ impl PachinkoGame {
             TAB_BOARD => self.switch_tab(InfoTab::Board),
             TAB_HISTORY => self.switch_tab(InfoTab::History),
             TAB_RECORD => self.switch_tab(InfoTab::Record),
+            HALL_CURSOR_UP => self.state.move_hall_cursor(-1),
+            HALL_CURSOR_DOWN => self.state.move_hall_cursor(1),
             HALL_SCROLL_UP => {
                 self.state.scroll_hall(-SCROLL_STEP);
                 true
@@ -354,6 +352,58 @@ mod tests {
     }
 
     #[test]
+    fn hall_cursor_moves_and_seats_the_selected_machine() {
+        // 釘のプレビューは選択中の台を描く。選択を動かして座るまでが
+        // 繋がっていないと、読み比べた台とは別の台に座ることになる。
+        let mut game = PachinkoGame::new();
+        assert_eq!(game.state.hall_cursor, 0);
+        assert!(game.handle_input(&InputEvent::Key('j')));
+        assert_eq!(game.state.hall_cursor, 1);
+        assert!(game.handle_input(&click(HALL_CURSOR_DOWN)));
+        assert_eq!(game.state.hall_cursor, 2);
+        assert!(game.handle_input(&InputEvent::Key('K')));
+        assert_eq!(game.state.hall_cursor, 1);
+
+        assert!(game.handle_input(&InputEvent::Key(' ')));
+        assert_eq!(game.state.phase, Phase::Playing);
+        assert_eq!(game.state.seat, 1);
+    }
+
+    #[test]
+    fn hall_cursor_stops_at_both_ends() {
+        let mut game = PachinkoGame::new();
+        for _ in 0..HALL_SIZE + 3 {
+            assert!(game.handle_input(&click(HALL_CURSOR_UP)));
+        }
+        assert_eq!(game.state.hall_cursor, 0);
+        for _ in 0..HALL_SIZE + 3 {
+            assert!(game.handle_input(&click(HALL_CURSOR_DOWN)));
+        }
+        assert_eq!(game.state.hall_cursor, HALL_SIZE - 1);
+    }
+
+    #[test]
+    fn hall_cursor_follows_the_machine_the_player_sat_at() {
+        // 席を立った直後のホールで、今まで打っていた台とは別の台の釘が
+        // 出ていると、次にどこへ座るかの比較の起点がずれる。
+        let mut game = PachinkoGame::new();
+        assert!(game.handle_input(&click(actions::machine_select_id(HALL_SIZE - 1))));
+        assert!(game.handle_input(&InputEvent::Key('q')));
+        assert_eq!(game.state.phase, Phase::Hall);
+        assert_eq!(game.state.hall_cursor, HALL_SIZE - 1);
+    }
+
+    #[test]
+    fn hall_cursor_keys_are_inert_without_machines() {
+        // ホール生成前でもキーは届く。台を前提に添え字を引くと落ちる。
+        let mut game = PachinkoGame::new();
+        game.state.machines.clear();
+        assert!(!game.handle_input(&InputEvent::Key('j')));
+        assert!(!game.handle_input(&InputEvent::Key(' ')));
+        assert_eq!(game.state.phase, Phase::Hall);
+    }
+
+    #[test]
     fn power_moves_in_both_directions() {
         let mut game = seated();
         let base = game.state.power;
@@ -412,10 +462,6 @@ mod tests {
         assert!(game.handle_input(&click(HALL_SCROLL_DOWN)));
         assert_eq!(game.state.hall_scroll.get(), step);
         assert!(game.handle_input(&click(HALL_SCROLL_UP)));
-        assert_eq!(game.state.hall_scroll.get(), 0);
-        assert!(game.handle_input(&InputEvent::Key('J')));
-        assert_eq!(game.state.hall_scroll.get(), step);
-        assert!(game.handle_input(&InputEvent::Key('K')));
         assert_eq!(game.state.hall_scroll.get(), 0);
 
         let mut game = seated();

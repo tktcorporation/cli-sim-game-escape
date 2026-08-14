@@ -25,6 +25,10 @@ pub const HALL_SCROLL_UP: u16 = 10;
 pub const HALL_SCROLL_DOWN: u16 = 11;
 pub const INFO_SCROLL_UP: u16 = 12;
 pub const INFO_SCROLL_DOWN: u16 = 13;
+/// ホールで見る台を1台ずつ動かす。着席せずに盤面プレビューの釘を読み
+/// 比べるための操作なので、スクロールとは別に持つ。
+pub const HALL_CURSOR_UP: u16 = 14;
+pub const HALL_CURSOR_DOWN: u16 = 15;
 /// ホールの台選択ベース + 台の index。
 pub const MACHINE_SELECT_BASE: u16 = 100;
 
@@ -60,5 +64,6 @@ mod tests {
         assert_eq!(decode_machine_select(TOGGLE_FIRE), None);
         assert_eq!(decode_machine_select(BOARD_TAP), None);
         assert_eq!(decode_machine_select(INFO_SCROLL_DOWN), None);
+        assert_eq!(decode_machine_select(HALL_CURSOR_DOWN), None);
     }
 }

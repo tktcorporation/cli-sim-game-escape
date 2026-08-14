@@ -405,6 +405,14 @@ pub struct PachinkoState {
     /// 着席中の台を強調すると、まだ座っていないプレイヤーにもホールの
     /// 先頭の台が着席中に見える。
     pub has_seated: bool,
+    /// ホールで選択中の台の index。盤面プレビューはこの台を描くので、
+    /// 着席しなくても釘を読める。台の並びは来店ごとに引き直され、選択も
+    /// その場限りの見ている位置でしかないため保存しない。
+    ///
+    /// 台数より大きい値になっていても落とさず末尾へ丸める
+    /// (`clamped_hall_cursor`) — 台数はホールの生成でしか変わらないので、
+    /// 書き手側で毎回突き合わせるより読み手側で丸める方が漏れがない。
+    pub hall_cursor: usize,
     /// 盤面の玉。
     pub balls: Vec<Ball>,
     /// 打ち出し中か。
@@ -469,6 +477,7 @@ impl PachinkoState {
             machines: Vec::new(),
             seat: 0,
             has_seated: false,
+            hall_cursor: 0,
             balls: Vec::new(),
             firing: false,
             // 中庸な強さから始める。適正値は台の釘配置ごとに違うので、
@@ -513,6 +522,29 @@ impl PachinkoState {
 
     pub fn scroll_info(&self, delta: i32) {
         adjust_scroll(&self.info_scroll, delta);
+    }
+
+    /// ホールで選択中の台の index を、実際に並んでいる台数へ丸めて返す。
+    /// 台が1台も無い間は `None`。
+    pub fn clamped_hall_cursor(&self) -> Option<usize> {
+        let last = self.machines.len().checked_sub(1)?;
+        Some(self.hall_cursor.min(last))
+    }
+
+    /// ホールで選択中の台。
+    pub fn hall_cursor_machine(&self) -> Option<&Machine> {
+        self.machines.get(self.clamped_hall_cursor()?)
+    }
+
+    /// ホールの選択を上下に動かす。動かせた (台が並んでいる) なら true。
+    pub fn move_hall_cursor(&mut self, delta: i32) -> bool {
+        let Some(current) = self.clamped_hall_cursor() else {
+            return false;
+        };
+        let last = self.machines.len() - 1;
+        let next = (current as i32 + delta).clamp(0, last as i32) as usize;
+        self.hall_cursor = next;
+        true
     }
 
     /// 着席中の台。`machines` が空 (ホール生成前) や seat が範囲外でも

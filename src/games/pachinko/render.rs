@@ -22,7 +22,7 @@ use ratzilla::ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::symbols::Marker;
 use ratzilla::ratatui::text::{Line, Span};
-use ratzilla::ratatui::widgets::canvas::{Canvas, Line as CanvasLine, Points};
+use ratzilla::ratatui::widgets::canvas::{Canvas, Context, Line as CanvasLine, Points};
 use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
 use ratzilla::ratatui::Frame;
 
@@ -152,6 +152,193 @@ fn spin_rate_text(machine: Option<&Machine>) -> String {
     }
 }
 
+// ── 盤面の静止画 (遊技画面とホールのプレビューで共有) ──────────
+
+/// アウト口へ向かう漏斗の上端。アタッカーから下は入賞判定を持たない
+/// 落下区間なので、線だけで「最後にどこへ落ちるか」を見せる。ここに
+/// 置くのは描画のためだけの座標で、玉の当たり判定は増やさない。
+const FUNNEL_TOP_Y: f64 = ATTACKER_Y + 4.0;
+/// アウト口の口元の高さと半幅。
+const OUT_MOUTH_Y: f64 = BOARD_H - 3.0;
+const OUT_HALF_W: f64 = 5.0;
+/// 漏斗の中に落とす山形の目印の数。玉が流れていない間も下向きの流れが
+/// 読めるようにするためのもので、段数を増やすほど線が密になる。
+const FUNNEL_CHEVRONS: usize = 3;
+
+/// 盤面のうち、玉と大当たり演出を除いた静止部分。
+///
+/// 遊技画面とホールのプレビューがこの1組を共有することで、プレビューで
+/// 読んだヘソの開きが着席後の盤面とそのまま一致する。別々に組むと、
+/// 片方だけ直したときに釘読みが嘘になる。
+struct BoardStatics {
+    guide_lines: Vec<(f64, f64, f64, f64)>,
+    nails: Vec<(f64, f64)>,
+    side_pockets: Vec<(f64, f64)>,
+    start_pocket: Vec<(f64, f64)>,
+    attacker: Vec<(f64, f64)>,
+    out_mouth: Vec<(f64, f64)>,
+}
+
+/// 盤面の静止部分を Canvas 座標の点群として組む。`paint` は move クロージャ
+/// なので、描くものは全て所有権付きの Vec で先に組む。
+///
+/// `aspect` は釘を真円に見せるための y 半径の倍率 (`round_aspect`)、
+/// `pocket_half_w` はヘソの受け口半幅 (`logic::pocket_half_w`)。
+fn board_statics(
+    machine: Option<&Machine>,
+    pocket_half_w: f64,
+    aspect: f64,
+    attacker_open: bool,
+) -> BoardStatics {
+    let center = BOARD_W / 2.0;
+
+    // 打ち出し口から天井へ回り込むレールと、アタッカーの下からアウト口へ
+    // 絞り込む漏斗。玉が飛んでいない時にも玉道の入口と出口が読める。
+    let mut guide_lines: Vec<(f64, f64, f64, f64)> = vec![
+        (
+            LAUNCH_X,
+            board_to_canvas_y(LAUNCH_Y),
+            LAUNCH_X,
+            board_to_canvas_y(1.5),
+        ),
+        (
+            LAUNCH_X,
+            board_to_canvas_y(1.5),
+            3.0,
+            board_to_canvas_y(1.5),
+        ),
+        (
+            2.0,
+            board_to_canvas_y(FUNNEL_TOP_Y),
+            center - OUT_HALF_W,
+            board_to_canvas_y(OUT_MOUTH_Y),
+        ),
+        (
+            BOARD_W - 2.0,
+            board_to_canvas_y(FUNNEL_TOP_Y),
+            center + OUT_HALF_W,
+            board_to_canvas_y(OUT_MOUTH_Y),
+        ),
+    ];
+    for i in 0..FUNNEL_CHEVRONS {
+        let t = (i + 1) as f64 / (FUNNEL_CHEVRONS + 1) as f64;
+        let y = FUNNEL_TOP_Y + (OUT_MOUTH_Y - FUNNEL_TOP_Y) * t;
+        // 漏斗が狭まるのに合わせて山形も縮める。壁の線と交差させないための幅。
+        let half = 4.5 - t * 2.0;
+        guide_lines.push((
+            center - half,
+            board_to_canvas_y(y - 1.4),
+            center,
+            board_to_canvas_y(y + 1.4),
+        ));
+        guide_lines.push((
+            center + half,
+            board_to_canvas_y(y - 1.4),
+            center,
+            board_to_canvas_y(y + 1.4),
+        ));
+    }
+
+    let nails: Vec<(f64, f64)> = machine
+        .map(|m| {
+            m.nails
+                .iter()
+                .flat_map(|n| {
+                    canvas_fx::filled_ellipse_points(
+                        n.x,
+                        board_to_canvas_y(n.y),
+                        NAIL_R * 0.6,
+                        NAIL_R * 0.6 * aspect,
+                        0.2,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let side_pockets: Vec<(f64, f64)> = [SIDE_POCKET_LEFT_X, SIDE_POCKET_RIGHT_X]
+        .into_iter()
+        .flat_map(|cx| {
+            canvas_fx::filled_rect_points(
+                cx - SIDE_POCKET_HALF_W,
+                board_to_canvas_y(SIDE_POCKET_Y - 0.8),
+                cx + SIDE_POCKET_HALF_W,
+                board_to_canvas_y(SIDE_POCKET_Y + 0.8),
+                0.4,
+            )
+        })
+        .collect();
+
+    // ヘソの受け口は当たり判定と同じ幅で描く。見た目と判定が食い違うと、
+    // 釘を読んで台を選ぶという判断そのものが嘘になる。
+    let start_pocket = canvas_fx::filled_rect_points(
+        START_POCKET_X - pocket_half_w,
+        board_to_canvas_y(START_POCKET_Y - 0.9),
+        START_POCKET_X + pocket_half_w,
+        board_to_canvas_y(START_POCKET_Y + 0.9),
+        0.35,
+    );
+
+    // アタッカーは開放中だけ厚みを持たせ、閉じている間は細い線にする。
+    let attacker_half_h = if attacker_open { 1.4 } else { 0.2 };
+    let attacker = canvas_fx::filled_rect_points(
+        ATTACKER_X - ATTACKER_HALF_W,
+        board_to_canvas_y(ATTACKER_Y - attacker_half_h),
+        ATTACKER_X + ATTACKER_HALF_W,
+        board_to_canvas_y(ATTACKER_Y + attacker_half_h),
+        0.4,
+    );
+
+    // アウト口は玉を飲み込む格子として粗い点で描く。塗り潰すと盤面の底が
+    // 一枚の板に見え、玉の行き先ではなくなる。
+    let out_mouth = canvas_fx::filled_rect_points(
+        START_POCKET_X - OUT_HALF_W,
+        board_to_canvas_y(OUT_MOUTH_Y),
+        START_POCKET_X + OUT_HALF_W,
+        board_to_canvas_y(BOARD_H - 0.5),
+        0.8,
+    );
+
+    BoardStatics {
+        guide_lines,
+        nails,
+        side_pockets,
+        start_pocket,
+        attacker,
+        out_mouth,
+    }
+}
+
+fn draw_points(ctx: &mut Context, coords: &[(f64, f64)], color: Color) {
+    if !coords.is_empty() {
+        ctx.draw(&Points { coords, color });
+    }
+}
+
+/// 静止部分を描く。色だけは遊技中の状態 (ヘソの点灯・アタッカーの開放) で
+/// 変わるので、呼び出し側から渡す。
+fn draw_board_statics(
+    ctx: &mut Context,
+    statics: &BoardStatics,
+    start_pocket_color: Color,
+    attacker_color: Color,
+) {
+    for &(x1, y1, x2, y2) in &statics.guide_lines {
+        ctx.draw(&CanvasLine {
+            x1,
+            y1,
+            x2,
+            y2,
+            color: Color::DarkGray,
+        });
+    }
+    draw_points(ctx, &statics.out_mouth, Color::DarkGray);
+    draw_points(ctx, &statics.nails, Color::Gray);
+    draw_points(ctx, &statics.side_pockets, Color::Blue);
+    draw_points(ctx, &statics.start_pocket, start_pocket_color);
+    draw_points(ctx, &statics.attacker, attacker_color);
+}
+
 // ── ホール画面 ─────────────────────────────────────────────────
 
 fn render_hall(
@@ -176,8 +363,68 @@ fn render_hall(
         .split(area);
 
     render_hall_header(state, f, chunks[0], borders, narrow);
-    render_hall_list(state, f, chunks[1], borders, click_state);
+    if narrow {
+        // ナロー幅ではプレビューを出す余地が無いので、リストの可読性を
+        // 優先する。釘の手がかりは行内のヘソの開き (`nail_spread_gauge`)
+        // だけになる。
+        render_hall_list(state, f, chunks[1], borders, click_state);
+    } else {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(24), Constraint::Length(HALL_PREVIEW_W)])
+            .split(chunks[1]);
+        render_hall_list(state, f, cols[0], borders, click_state);
+        render_hall_preview(state, f, cols[1]);
+    }
     render_hall_footer(state, f, chunks[2], narrow, click_state);
+}
+
+/// 盤面プレビューに割く列数。ヘソ釘2本の間隔は盤面幅 (`BOARD_W`) の 1割にも
+/// 満たないので、狭いと台ごとの開きの差が braille の1点差まで潰れて読めなく
+/// なる。台名と実測回転率しか出さないリスト側 (`Constraint::Min`) より優先
+/// して確保する。
+const HALL_PREVIEW_W: u16 = 40;
+
+/// 選択中の台の盤面プレビュー。遊技中の盤面 (`render_board`) と同じ
+/// `board_statics` を描くので、ここで読んだヘソの開きは着席後の盤面と
+/// そのまま一致する。
+///
+/// 描くのは釘と入賞口だけの静止画で、玉やアタッカーの開放状態のような
+/// 遊技中にしか存在しない要素は持たない。クリック判定も持たない純粋な
+/// 装飾なので、別 DOM 要素は生やさず盤面と同じ `<pre>` 上に描く。
+fn render_hall_preview(state: &PachinkoState, f: &mut Frame, area: Rect) {
+    let machine = state.hall_cursor_machine();
+    let title = match machine {
+        Some(m) => format!(" {} の釘 ", m.name),
+        None => " 釘 ".to_string(),
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(Span::styled(title, Style::default().fg(Color::Gray)));
+    let inner = block.inner(area);
+    let Some(machine) = machine else {
+        f.render_widget(block, area);
+        return;
+    };
+
+    // ホールから見えるのは通常時の盤面。電サポでヘソが広がった姿を見せると、
+    // 座る前に読んだ開きより実際が狭く、釘読みが当てにならなくなる。
+    let statics = board_statics(
+        Some(machine),
+        logic::pocket_half_w(machine.nail_spread, false),
+        round_aspect(inner),
+        false,
+    );
+    let canvas = Canvas::default()
+        .x_bounds([0.0, BOARD_W])
+        .y_bounds([0.0, BOARD_H])
+        .marker(Marker::Braille)
+        .paint(move |ctx| {
+            draw_board_statics(ctx, &statics, Color::Cyan, Color::DarkGray);
+        })
+        .block(block);
+    f.render_widget(canvas, area);
 }
 
 fn render_hall_header(
@@ -244,6 +491,29 @@ fn machine_name_color(state: &PachinkoState, index: usize) -> Color {
     }
 }
 
+/// ヘソ釘の開きを釘2本の間隔として文字で描く。プレビューを出せない
+/// ナロー幅ではこれが唯一の釘の手がかりになり、プレビューを出せる幅でも
+/// 並んだ台を1画面で見比べる手がかりとして効く (プレビューが描くのは
+/// 選択中の1台だけなので、台をまたいだ比較は記憶に頼ることになる)。
+///
+/// 数値ではなく間隔で見せるのは、盤面を観察して読むというこのゲームの
+/// 判断を、数字の大小比較にすり替えないため。
+fn nail_spread_gauge(nail_spread: f64) -> String {
+    /// 間隔の下限と上限 (空白の数)。下限を 0 にすると最も渋い台が「釘2本が
+    /// くっついた1つの塊」に見えて開きの差が読めなくなる。
+    const MIN_GAP: usize = 1;
+    const MAX_GAP: usize = 7;
+
+    let (lo, hi) = logic::NAIL_SPREAD_RANGE;
+    let t = if hi > lo {
+        ((nail_spread - lo) / (hi - lo)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let gap = MIN_GAP + (t * (MAX_GAP - MIN_GAP) as f64).round() as usize;
+    format!("│{}│", " ".repeat(gap))
+}
+
 fn render_hall_list(
     state: &PachinkoState,
     f: &mut Frame,
@@ -251,6 +521,7 @@ fn render_hall_list(
     borders: Borders,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let cursor = state.clamped_hall_cursor();
     let mut cl = ClickableList::new();
     if state.machines.is_empty() {
         cl.push(Line::from(Span::styled(
@@ -262,11 +533,18 @@ fn render_hall_list(
         let action_id = actions::machine_select_id(index);
         let key = char::from_digit(index as u32 + 1, 10).unwrap_or('?');
         let name_color = machine_name_color(state, index);
-        // 2行とも同じ台へ結び付ける。台名と実測値のどちらを触っても座れる
+        // 選択中の台は行頭の印で示す。どの台の釘をプレビューが描いているか
+        // が分からないと、釘を読み比べても結び付ける先が無い。
+        let selected = cursor == Some(index);
+        let marker = if selected { "▶" } else { " " };
+        // 3行とも同じ台へ結び付ける。台名と実測値のどちらを触っても座れる
         // 方が、指が行を跨いだ時に「押したのに何も起きない」を避けられる。
         cl.push_clickable(
             Line::from(vec![
-                Span::styled(format!(" [{key}] "), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("{marker}[{key}] "),
+                    Style::default().fg(if selected { ACCENT } else { Color::DarkGray }),
+                ),
                 Span::styled(
                     machine.name,
                     Style::default().fg(name_color).add_modifier(Modifier::BOLD),
@@ -274,6 +552,16 @@ fn render_hall_list(
                 Span::styled(
                     format!("  {}・{}", odds_flavor(&machine.spec), payout_flavor(&machine.spec)),
                     Style::default().fg(Color::Gray),
+                ),
+            ]),
+            action_id,
+        );
+        cl.push_clickable(
+            Line::from(vec![
+                Span::styled("     ヘソ ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    nail_spread_gauge(machine.nail_spread),
+                    Style::default().fg(Color::Cyan),
                 ),
             ]),
             action_id,
@@ -319,16 +607,29 @@ fn render_hall_footer(
         .split(area);
 
     let buy_label = if narrow { "[!]玉借り" } else { "[!]玉を借りる" };
+    let up_label = if narrow { "[K]前" } else { "[K]前の台" };
+    let down_label = if narrow { "[J]次" } else { "[J]次の台" };
     {
         let mut cs = click_state.borrow_mut();
-        render_key_row(f, rows[0], &mut cs, &[(buy_label, actions::BUY_BALLS)]);
+        render_key_row(
+            f,
+            rows[0],
+            &mut cs,
+            &[
+                (up_label, actions::HALL_CURSOR_UP),
+                (down_label, actions::HALL_CURSOR_DOWN),
+                (buy_label, actions::BUY_BALLS),
+            ],
+        );
     }
 
     if rows[1].height > 0 {
         let hint = if state.machines.is_empty() {
             "台を待っている"
+        } else if narrow {
+            "ヘソの開きで台を選ぶ"
         } else {
-            "台をタップして着席する"
+            "選んだ台の釘を右で読み、台をタップして着席する"
         };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -458,82 +759,14 @@ fn render_board(
 
     // ── paint は move クロージャなので、描くものは全て所有権付きの Vec で先に組む ──
 
-    // 打ち出し口から天井、そしてアウト口までの導線。玉がどこから入って
-    // どこへ消えるのかを、玉が飛んでいない時にも読めるようにする。
-    let guide_lines: Vec<(f64, f64, f64, f64)> = vec![
-        (
-            LAUNCH_X,
-            board_to_canvas_y(LAUNCH_Y),
-            LAUNCH_X,
-            board_to_canvas_y(1.5),
-        ),
-        (
-            LAUNCH_X,
-            board_to_canvas_y(1.5),
-            3.0,
-            board_to_canvas_y(1.5),
-        ),
-        (
-            2.0,
-            board_to_canvas_y(BOARD_H - 1.0),
-            BOARD_W - 2.0,
-            board_to_canvas_y(BOARD_H - 1.0),
-        ),
-    ];
-
-    let nail_pts: Vec<(f64, f64)> = state
-        .seated_machine()
-        .map(|m| {
-            m.nails
-                .iter()
-                .flat_map(|n| {
-                    canvas_fx::filled_ellipse_points(
-                        n.x,
-                        board_to_canvas_y(n.y),
-                        NAIL_R * 0.6,
-                        NAIL_R * 0.6 * aspect,
-                        0.2,
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let side_pocket_pts: Vec<(f64, f64)> = [SIDE_POCKET_LEFT_X, SIDE_POCKET_RIGHT_X]
-        .into_iter()
-        .flat_map(|cx| {
-            canvas_fx::filled_rect_points(
-                cx - SIDE_POCKET_HALF_W,
-                board_to_canvas_y(SIDE_POCKET_Y - 0.8),
-                cx + SIDE_POCKET_HALF_W,
-                board_to_canvas_y(SIDE_POCKET_Y + 0.8),
-                0.4,
-            )
-        })
-        .collect();
-
-    // ヘソの受け口は当たり判定と同じ幅で描く。見た目と判定が食い違うと、
-    // 釘を読んで台を選ぶという判断そのものが嘘になる。
-    let pocket_half_w = logic::effective_pocket_half_w(state);
-    let start_pocket_pts = canvas_fx::filled_rect_points(
-        START_POCKET_X - pocket_half_w,
-        board_to_canvas_y(START_POCKET_Y - 0.9),
-        START_POCKET_X + pocket_half_w,
-        board_to_canvas_y(START_POCKET_Y + 0.9),
-        0.35,
+    let attacker_open = jackpot.is_some();
+    let statics = board_statics(
+        state.seated_machine(),
+        logic::effective_pocket_half_w(state),
+        aspect,
+        attacker_open,
     );
     let start_pocket_color = start_pocket_color(state);
-
-    // アタッカーは開放中だけ厚みを持たせ、閉じている間は細い線にする。
-    let attacker_open = jackpot.is_some();
-    let attacker_half_h = if attacker_open { 1.4 } else { 0.2 };
-    let attacker_pts = canvas_fx::filled_rect_points(
-        ATTACKER_X - ATTACKER_HALF_W,
-        board_to_canvas_y(ATTACKER_Y - attacker_half_h),
-        ATTACKER_X + ATTACKER_HALF_W,
-        board_to_canvas_y(ATTACKER_Y + attacker_half_h),
-        0.4,
-    );
     let attacker_color = if attacker_open {
         Color::LightRed
     } else {
@@ -577,57 +810,10 @@ fn render_board(
         .y_bounds([0.0, BOARD_H])
         .marker(Marker::Braille)
         .paint(move |ctx| {
-            for &(x1, y1, x2, y2) in &guide_lines {
-                ctx.draw(&CanvasLine {
-                    x1,
-                    y1,
-                    x2,
-                    y2,
-                    color: Color::DarkGray,
-                });
-            }
-            if !nail_pts.is_empty() {
-                ctx.draw(&Points {
-                    coords: &nail_pts,
-                    color: Color::Gray,
-                });
-            }
-            if !side_pocket_pts.is_empty() {
-                ctx.draw(&Points {
-                    coords: &side_pocket_pts,
-                    color: Color::Blue,
-                });
-            }
-            if !start_pocket_pts.is_empty() {
-                ctx.draw(&Points {
-                    coords: &start_pocket_pts,
-                    color: start_pocket_color,
-                });
-            }
-            if !attacker_pts.is_empty() {
-                ctx.draw(&Points {
-                    coords: &attacker_pts,
-                    color: attacker_color,
-                });
-            }
-            if !ball_pts.is_empty() {
-                ctx.draw(&Points {
-                    coords: &ball_pts,
-                    color: Color::Gray,
-                });
-            }
-            if !glow_pts.is_empty() {
-                ctx.draw(&Points {
-                    coords: &glow_pts,
-                    color: Color::White,
-                });
-            }
-            if !jackpot_ring.is_empty() {
-                ctx.draw(&Points {
-                    coords: &jackpot_ring,
-                    color: Color::LightRed,
-                });
-            }
+            draw_board_statics(ctx, &statics, start_pocket_color, attacker_color);
+            draw_points(ctx, &ball_pts, Color::Gray);
+            draw_points(ctx, &glow_pts, Color::White);
+            draw_points(ctx, &jackpot_ring, Color::LightRed);
         })
         .block(block);
 
@@ -1176,6 +1362,133 @@ mod tests {
         let state = seated_state();
         render_to_test_backend_with_click_state(&state, 100, 40);
         render_to_test_backend_with_click_state(&state, 40, 30);
+    }
+
+    /// 同じ `Rect` へ盤面 (遊技中) とホールのプレビューをそれぞれ描き、
+    /// 記号だけを取り出す。色と枠の見出しは画面ごとに違ってよいので、
+    /// 比較するのは「どこに何が描かれたか」だけにする。
+    fn board_symbols(area_w: u16, area_h: u16, hall_preview: bool) -> Vec<Vec<String>> {
+        let state = seated_state();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = area_w;
+        cs.borrow_mut().terminal_rows = area_h;
+        let mut terminal = Terminal::new(TestBackend::new(area_w, area_h)).unwrap();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                if hall_preview {
+                    render_hall_preview(&state, f, area);
+                } else {
+                    render_board(&state, f, area, &cs);
+                }
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..area_h)
+            .map(|y| {
+                (0..area_w)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_hall_preview_draws_the_same_board_as_the_seat() {
+        // 座る前に読んだ釘と座った後の盤面がずれると、釘読みという判断軸
+        // そのものが嘘になる。両者が同じ絵を描いていることを記号単位で
+        // 突き合わせて固定する。
+        let (w, h) = (34u16, 28u16);
+        let seat = board_symbols(w, h, false);
+        let preview = board_symbols(w, h, true);
+        // 枠の見出し (0行目) と、盤面にだけ重なる案内バナー (1行目) は
+        // 画面ごとに違ってよい。
+        for y in 2..h as usize {
+            assert_eq!(
+                seat[y], preview[y],
+                "{y} 行目でホールのプレビューと着席後の盤面が食い違っている"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hall_preview_shows_the_nails_of_the_selected_machine() {
+        // 選ぶ台を変えても同じ絵しか出ないなら、並んだ台を釘で見分けられない。
+        let mut state = PachinkoState::new();
+        logic::generate_hall(&mut state);
+        // 開きの上限と下限の台を並べ、最も差が付く2台で見比べる。
+        let (lo, hi) = logic::NAIL_SPREAD_RANGE;
+        for (index, spread) in [(0usize, lo), (1usize, hi)] {
+            let mut seed = 12_345 + index as u32;
+            state.machines[index].nail_spread = spread;
+            state.machines[index].nails =
+                logic::generate_nails(&mut seed, spread, state.machines[index].rail_bias);
+        }
+
+        let render_preview = |state: &PachinkoState| -> Vec<String> {
+            let (w, h) = (30u16, 26u16);
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal
+                .draw(|f| render_hall_preview(state, f, f.area()))
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            (0..h)
+                .map(|y| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect())
+                .collect()
+        };
+
+        state.hall_cursor = 0;
+        let narrow_nails = render_preview(&state);
+        state.hall_cursor = 1;
+        let wide_nails = render_preview(&state);
+        assert_ne!(
+            narrow_nails, wide_nails,
+            "ヘソ釘の開きが違う台を選んでもプレビューの見た目が変わっていない"
+        );
+    }
+
+    #[test]
+    fn the_hall_preview_registers_no_click_target() {
+        // プレビューは純粋な装飾。ここにタップ判定を置くと、台を選ぶ操作が
+        // リストとプレビューの2箇所に分かれる。
+        let mut state = PachinkoState::new();
+        logic::generate_hall(&mut state);
+        let (w, h) = (100u16, 40u16);
+        let cs = render_to_test_backend_with_click_state(&state, w, h);
+        assert!(
+            !has_click_target(&cs, w, h, actions::BOARD_TAP),
+            "ホールに盤面のタップ対象が登録されている"
+        );
+    }
+
+    #[test]
+    fn the_hall_list_shows_the_nail_spread_as_a_gap() {
+        // ナロー幅ではプレビューを出せないので、ヘソの開きはこの行だけが
+        // 伝える。消えると台を釘で見分ける手がかりが無くなる。
+        let (lo, hi) = logic::NAIL_SPREAD_RANGE;
+        let tight = nail_spread_gauge(lo);
+        let loose = nail_spread_gauge(hi);
+        assert!(
+            tight.chars().count() < loose.chars().count(),
+            "開いた台のヘソが渋い台より広く見えていない: {tight} / {loose}"
+        );
+        assert!(!tight.chars().any(|c| c.is_ascii_digit()), "開きが数値で出ている");
+
+        let mut state = PachinkoState::new();
+        logic::generate_hall(&mut state);
+        state.machines[0].nail_spread = hi;
+        let (w, h) = (40u16, 30u16);
+        let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = w;
+        cs.borrow_mut().terminal_rows = h;
+        terminal.draw(|f| render(&state, f, f.area(), &cs)).unwrap();
+        let buf = terminal.backend().buffer();
+        let drawn = (0..h).any(|y| {
+            let row: String = (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect();
+            row.contains(&loose)
+        });
+        assert!(drawn, "ナローの台リストにヘソの開きが描かれていない");
     }
 
     #[test]
