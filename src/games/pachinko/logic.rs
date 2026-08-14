@@ -441,8 +441,7 @@ fn decay_assist(state: &mut PachinkoState) {
         Mode::Kakuhen { spins_left } if spins_left > 0 => {
             let left = spins_left - 1;
             if left == 0 {
-                state.mode = Mode::Normal;
-                state.add_log("確変終了");
+                end_assist(state, "確変終了");
             } else {
                 state.mode = Mode::Kakuhen { spins_left: left };
             }
@@ -450,14 +449,23 @@ fn decay_assist(state: &mut PachinkoState) {
         Mode::Jitan { spins_left } => {
             let left = spins_left.saturating_sub(1);
             if left == 0 {
-                state.mode = Mode::Normal;
-                state.add_log("時短終了");
+                end_assist(state, "時短終了");
             } else {
                 state.mode = Mode::Jitan { spins_left: left };
             }
         }
         _ => {}
     }
+}
+
+/// 電サポを終えて通常時へ戻す。連チャンは電サポが続いている間だけ伸びる
+/// ものなので、ここで数え直しに戻す — 残したままだと通常時の画面が
+/// 終わった連チャンを続いているものとして出し続ける。自己記録
+/// (`record.best_chain`) は当たりのたびに更新済みなので失われない。
+fn end_assist(state: &mut PachinkoState, reason: &str) {
+    state.mode = Mode::Normal;
+    state.chain = 0;
+    state.add_log(reason);
 }
 
 /// 大当たりのラウンド進行。玉が入らないまま時間切れになったラウンドも
@@ -1084,6 +1092,27 @@ mod tests {
 
     fn jackpot(rounds: u32) -> SpinOutcome {
         SpinOutcome { hit: true, rounds, kakuhen: false, reach: ReachKind::Super, reels: [7, 7, 7] }
+    }
+
+    #[test]
+    fn the_chain_ends_together_with_the_assistance_it_was_built_on() {
+        let mut state = seated_state();
+        // 時短つきの当たりを引き、電サポ中にもう1回当てて連チャンを伸ばす。
+        resolve_spin(&mut state, jackpot(5));
+        state.mode = Mode::Jitan { spins_left: 2 };
+        resolve_spin(&mut state, jackpot(5));
+        state.mode = Mode::Jitan { spins_left: 2 };
+        assert_eq!(state.chain, 2);
+
+        resolve_spin(&mut state, miss(ReachKind::None));
+        resolve_spin(&mut state, miss(ReachKind::None));
+
+        assert_eq!(state.mode, Mode::Normal, "時短が切れて通常時に戻っていない");
+        assert_eq!(
+            state.chain, 0,
+            "電サポが切れても連チャン数が残り、通常時の画面が終わった連チャンを続いているものとして出し続ける"
+        );
+        assert_eq!(state.record.best_chain, 2, "自己記録まで巻き戻してはいけない");
     }
 
     #[test]
