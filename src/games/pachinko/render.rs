@@ -1302,8 +1302,9 @@ fn digit_char(value: u8) -> char {
     char::from_digit(value as u32 % 10, 10).unwrap_or('0')
 }
 
-/// 中桁の停止まで残り `ticks_to_stop` tick の時点で、出目から何コマ手前に
-/// いるか。`MIDDLE_SLOW_HOLDS` の滞留時間を停止側から積み上げて逆に引く。
+/// 中桁の停止まで残り `ticks_to_stop` tick の時点で、止まる目から何コマ手前に
+/// いるか。停止側から `MIDDLE_SLOW_HOLDS` の滞留時間を積み上げ、残り tick が
+/// 収まった段のコマ数を返す。
 fn middle_slow_offset(ticks_to_stop: u32) -> u32 {
     let mut acc = 0;
     for (index, &hold) in MIDDLE_SLOW_HOLDS.iter().enumerate() {
@@ -1359,8 +1360,8 @@ fn spinning_style(outcome: &SpinOutcome) -> Style {
 /// (`last_reels`) を出し続ける。
 ///
 /// 追加の回転時間 (`StopStyle::extra_ticks`) は末尾に確保されているものとして
-/// 扱う。基本の回転で一度出目まで持っていき、そこから滑る・戻るという順序が
-/// 「止まったと思わせてから動かす」型の前提になる。
+/// 扱う。基本の回転で一度 `middle_pre_stop` の目まで持っていき、残りの時間で
+/// そこから動かす — この順序が「止まったと思わせてから動かす」型の前提になる。
 fn reel_view(digit: &Digit, last_reels: [u8; 3]) -> ReelView {
     let Digit::Spinning {
         ticks_left,
