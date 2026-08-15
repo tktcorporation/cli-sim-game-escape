@@ -9,18 +9,22 @@
 //! - **核脈動の寄与**: 環武装 (コア AOE) の有無で撃破がどう変わるか
 //! - **武装ステの寄与**: 弾数 / 連射 / 威力の優先比較
 //! - **層進行カーブ**: 撃破＋星屑開放で武装・鉱石種が解放されるペース
-//! - **逸失率**: 中心到達で報酬を逃す割合
+//! - **逸失率**: コア到達で報酬を逃す割合
+//! - **迎撃圧の時間推移**: 逸失率が序盤から終盤にかけてどう下がるか
 //!
 //! `cargo test starringe::simulator -- --nocapture` でレポートを確認できる。
 
 #![cfg(test)]
 
 use super::logic::{
-    can_unlock_next_layer, can_upgrade_ring, can_upgrade_weapon_stat, purchase_ring_upgrade,
-    purchase_weapon_stat, ring_upgrade_cost, tick, unlock_next_layer, weapon_stat_cost,
+    can_unlock_next_layer, can_upgrade_ring, can_upgrade_weapon_stat, manual_strike,
+    purchase_ring_upgrade, purchase_weapon_stat, ring_upgrade_cost, tick, unlock_next_layer,
+    weapon_stat_cost, MAX_ORES, MAX_PULSE_RINGS,
 };
 use super::state::{
-    Layer, OreKind, RingUpgrade, StarRingState, WeaponKind, WeaponStat, RING_UPGRADE_COUNT,
+    Layer, OreKind, RingUpgrade, StarRingState, WeaponKind, WeaponStat, FIELD_MARGIN,
+    RING_UPGRADE_COUNT, SPAWN_X_MARGIN, SPAWN_Y, VISIBLE_X_HI, VISIBLE_X_LO, VISIBLE_Y_HI,
+    VISIBLE_Y_LO, WORLD_W,
 };
 
 /// 購入方策。感度分析で「どの強化が効いているか」を切り分ける。
@@ -501,11 +505,39 @@ fn yield_ablation_report() {
     );
 }
 
-/// 最安買い (核脈動を含む) vs 核脈動なし。
+/// 湧きが刈り取りを上回る飽和状態を作り、核脈動のレベルだけを変えて撃破数を測る。
+///
+/// 武装を Lv1 に固定した第5層は湧き (`Layer::spawn_batch`) が砲台の火力を上回るので、
+/// 撃破数が湧き量へ張り付かない。核脈動が上空の降下レーンをどこまで舐められて
+/// いるかが、そのまま撃破数の差として出る。
+fn saturated_kills(pulse_lv: u32, seed: u32) -> u64 {
+    const TICKS: u32 = 3_000;
+    let mut state = StarRingState::new();
+    state.rng_state = seed;
+    state.current_layer = 5;
+    state.ring_levels[RingUpgrade::CorePulse.index()] = pulse_lv;
+    for w in state.unlocked_weapons() {
+        state.weapon_levels[w.index()] = [1, 1, 1];
+    }
+    for _ in 0..TICKS {
+        tick(&mut state, 1);
+    }
+    state.total_kills
+}
+
+/// 最安買い (核脈動を含む) vs 核脈動なし + 飽和状態での核脈動の寄与。
+///
+/// 通常進行の撃破数は湧き量に張り付く (`interception_pressure_over_time_report` の
+/// とおり t≈1200 以降の逸失はほぼ 0) ため、削る力を上げても最安買いの撃破数は
+/// ほとんど動かない。核脈動が実際に鉱石を砕けているかは、湧きが刈り取りを上回る
+/// 飽和状態を別に作らないと測れない。
 #[test]
 fn core_pulse_ablation_report() {
     const RUNS: u32 = 14;
     const TICKS: u32 = 5_000;
+    const SAT_RUNS: u32 = 10;
+    /// 飽和側で比較する核脈動レベル。最安買い bot が 5000tick で積む水準に合わせる。
+    const SAT_PULSE_LV: u32 = 6;
 
     let no_pulse = BuyPolicy::BlockRing(&[RingUpgrade::CorePulse]);
 
@@ -536,17 +568,36 @@ fn core_pulse_ablation_report() {
         (kw as f64 - ko as f64) / ko as f64 * 100.0
     };
 
+    let mut sat_with = Vec::with_capacity(SAT_RUNS as usize);
+    let mut sat_without = Vec::with_capacity(SAT_RUNS as usize);
+    for seed in 1..=SAT_RUNS {
+        sat_with.push(saturated_kills(SAT_PULSE_LV, seed));
+        sat_without.push(saturated_kills(0, seed));
+    }
+    let sw = median_u64(&mut sat_with);
+    let so = median_u64(&mut sat_without);
+    let sat_delta = (sw as f64 - so as f64) / so.max(1) as f64 * 100.0;
+
     eprintln!(
         "[starringe/pulse-ablation] ticks={TICKS} runs={RUNS} median_pulse_lv={pl}\n\
          cheapest:  median_kills={kw} median_earned={ew:.1}\n\
          no-pulse:  median_kills={ko} median_earned={eo:.1}\n\
-         delta kills={kill_delta:+.1}%"
+         delta kills={kill_delta:+.1}%\n\
+         saturated (第5層/武装Lv1固定, runs={SAT_RUNS}): 脈Lv{SAT_PULSE_LV} median_kills={sw} \
+         vs 脈なし {so}  delta kills={sat_delta:+.1}%"
     );
 
     assert!(pl >= 1, "最安買い bot が核脈動を積めていない");
     assert!(
         kill_delta > -15.0,
         "核脈動込みが壊滅的に弱い: delta={kill_delta:.1}%"
+    );
+    // 飽和状態での寄与は実測 +250% 前後。波が届く高さを縮めると、上空で降下する
+    // 鉱石を舐められなくなってここが落ちる — 核脈動が環強化として仕事をして
+    // いることの下限として置く。
+    assert!(
+        sat_delta > 150.0,
+        "核脈動が飽和状態でも鉱石を砕けていない: delta={sat_delta:.1}%"
     );
 }
 
@@ -666,24 +717,108 @@ fn strategy_comparison_report() {
     }
 }
 
+/// 連打で波を積み上げても、同時に持つ波の本数が上限のまわりに収まること。
+///
+/// タップは入力イベントごとに波を立てる (`logic::manual_strike`) ので、
+/// 10 ticks/sec の歩みに縛られずに積み上がる。`MAX_PULSE_RINGS` は描画コストの
+/// 上限で、切り詰めた波を描かせるために 1tick 残す猶予 (`logic::step_pulse_rings`)
+/// はその上限を一時的に越える——越え幅が青天井だと、切り詰めそのものが意味を
+/// 失う。脈動レベルが上がるほど波の寿命は伸びるので、伸びきった側でも測る。
 #[test]
-fn miss_rate_stays_bounded_under_cheapest_bot() {
-    const RUNS: u32 = 16;
-    const TICKS: u32 = 4_000;
-    let mut rates = Vec::new();
-    for seed in 1..=RUNS {
-        let snap = run_snapshot(TICKS, BuyPolicy::Cheapest, seed);
-        rates.push(snap.miss_rate());
+fn rapid_tapping_keeps_the_wave_count_bounded() {
+    const TICKS: u32 = 900;
+    const TAP_RATES: [usize; 3] = [1, 4, 12];
+
+    eprintln!("[starringe/waves] ticks={TICKS} 上限={MAX_PULSE_RINGS}");
+    for pulse_lv in [1u32, 6, 12, 20] {
+        for taps in TAP_RATES {
+            let mut state = StarRingState::new();
+            state.rng_state = 0x51DE_0001 + pulse_lv;
+            state.current_layer = 4;
+            state.ring_levels[RingUpgrade::CorePulse.index()] = pulse_lv;
+            let mut peak = 0usize;
+            for _ in 0..TICKS {
+                for _ in 0..taps {
+                    manual_strike(&mut state);
+                }
+                tick(&mut state, 1);
+                peak = peak.max(state.pulse_rings.len());
+            }
+            eprintln!("  脈Lv{pulse_lv:>2} {taps:>2}連打/tick peak_rings={peak}");
+            // 猶予は 1tick なので、上乗せはその tick に立てた本数までで頭打ちに
+            // なる。猶予が複数 tick へ伸びると、波の寿命ぶん積み上がってこの幅を
+            // 越える。
+            assert!(
+                peak <= MAX_PULSE_RINGS + taps + 2,
+                "脈Lv{pulse_lv} {taps}連打/tick で波の本数が上限から離れすぎている \
+                 peak={peak} / 上限{MAX_PULSE_RINGS}"
+            );
+        }
     }
-    let med = median_f64(&mut rates);
+}
+
+/// 裂片が湧く層で、分裂が盤面を溢れさせず迎撃圧も殺さないこと。
+///
+/// 裂片は撃破のたびに星塵を残り枠のぶんだけ (最大 2 体) 足すので、湧きの総量は
+/// 他の層より上振れする。子は通常の星塵と同じ寸法・HP で湧く
+/// (`logic::apply_damage`) ため、分裂の重さは裂片を割った回数と盤面の空きで
+/// 決まる——ここが崩れると、盤面が上限へ張り付く側か、割っても何も増えない側の
+/// どちらかへ倒れる。
+///
+/// 武装を Lv1 に固定するのは `saturated_kills` と同じ理由で、強化が積み上がって
+/// 逸失が 0 に落ちた状態では分裂の重さが撃破数へ出ないため。
+#[test]
+fn splitting_layer_keeps_the_board_playable() {
+    const RUNS: u32 = 12;
+    const TICKS: u32 = 3_000;
+
+    let mut miss_rates = Vec::with_capacity(RUNS as usize);
+    let mut kills = Vec::with_capacity(RUNS as usize);
+    let mut peaks = Vec::with_capacity(RUNS as usize);
+
+    for seed in 1..=RUNS {
+        let mut state = StarRingState::new();
+        state.rng_state = seed;
+        state.current_layer = OreKind::Splitter.unlock_layer();
+        for w in state.unlocked_weapons() {
+            state.weapon_levels[w.index()] = [1, 1, 1];
+        }
+        let mut peak = 0usize;
+        for _ in 0..TICKS {
+            tick(&mut state, 1);
+            peak = peak.max(state.ores.len());
+        }
+        let total = state.total_kills + state.missed_count;
+        miss_rates.push(state.missed_count as f64 / total.max(1) as f64);
+        kills.push(state.total_kills);
+        peaks.push(peak as u64);
+    }
+
+    let miss = median_f64(&mut miss_rates);
+    let med_kills = median_u64(&mut kills);
+    let peak = median_u64(&mut peaks);
     eprintln!(
-        "[starringe/miss-rate] ticks={TICKS} runs={RUNS} median_miss_rate={:.1}%",
-        med * 100.0
+        "[starringe/splitting] runs={RUNS} ticks={TICKS} layer={} \
+         median_kills={med_kills} median_miss_rate={:.1}% median_peak_ores={peak}",
+        OreKind::Splitter.unlock_layer(),
+        miss * 100.0
+    );
+
+    assert!(
+        peak <= MAX_ORES as u64,
+        "分裂で同時存在数が上限を超えた peak={peak} / 上限{MAX_ORES}"
+    );
+    // 逸失率の中央値は 62% 前後。武装 Lv1 固定の飽和状態なので取りこぼしは多く
+    // 出るが、両端へ振れれば「割っても増えない」か「割ったら手に負えない」の
+    // どちらかへ倒れている。
+    assert!(
+        (0.45..0.78).contains(&miss),
+        "裂片層の逸失率が想定帯から外れている: {:.1}%",
+        miss * 100.0
     );
     assert!(
-        med < 0.85,
-        "逸失率が高すぎて刈り取りが成立していない: {:.1}%",
-        med * 100.0
+        med_kills > 0,
+        "裂片層で一体も撃破できていない kills={med_kills}"
     );
 }
 
@@ -701,5 +836,208 @@ fn new_ore_kinds_appear_over_long_run() {
         snap.layer >= OreKind::Wisp.unlock_layer(),
         "浮遊片層に届くはず layer={}",
         snap.layer
+    );
+}
+
+// ---------------------------------------------------------------------------
+// フィールドモデルの不変条件
+// ---------------------------------------------------------------------------
+
+/// 鉱石はワールドの内側に留まる。
+///
+/// 横は左右の反射壁 (`FIELD_MARGIN`)、縦はコア到達 / 場外落下の判定
+/// (`logic::resolve_arrivals`) で回収されるので、tick の切れ目では常に
+/// Canvas の内側かつ壁の内側にいる。画面外へ流れる鉱石があると
+/// 「どこから何が降ってきているか」を目で追えなくなる。
+///
+/// 見るのは中心ではなく円の全体。中心が内側にあっても半径ぶんが Canvas の
+/// bounds (`0..WORLD_W` × `0..WORLD_H`) を越えていれば、その鉱石は端で欠けて
+/// 描かれる。画面シェイクで振れた tick も欠けないよう、境界は縦横それぞれの
+/// 振れ幅を見込んだ `VISIBLE_X_LO`/`VISIBLE_X_HI`・`VISIBLE_Y_LO`/`VISIBLE_Y_HI`
+/// に取る。
+#[test]
+fn ores_stay_inside_the_field_over_a_long_run() {
+    const TICKS: u32 = 6_000;
+    const EPS: f64 = 1e-6;
+    let mut state = StarRingState::new();
+    state.rng_state = 0x5EED_1234;
+    let mut checked = 0u64;
+    for t in 0..TICKS {
+        bot_spend(&mut state, BuyPolicy::Cheapest, 4);
+        tick(&mut state, 1);
+        for ore in &state.ores {
+            assert!(
+                ore.x - ore.radius() >= FIELD_MARGIN - EPS
+                    && ore.x + ore.radius() <= WORLD_W - FIELD_MARGIN + EPS,
+                "tick {t}: 鉱石が左右の壁を越えた x={} r={} kind={:?}",
+                ore.x,
+                ore.radius(),
+                ore.kind
+            );
+            assert!(
+                ore.x - ore.radius() >= VISIBLE_X_LO - EPS
+                    && ore.x + ore.radius() <= VISIBLE_X_HI + EPS,
+                "tick {t}: 鉱石が描画範囲の横幅からはみ出した x={} r={} kind={:?}",
+                ore.x,
+                ore.radius(),
+                ore.kind
+            );
+            assert!(
+                ore.y - ore.radius() >= VISIBLE_Y_LO - EPS
+                    && ore.y + ore.radius() <= VISIBLE_Y_HI + EPS,
+                "tick {t}: 鉱石が描画範囲の上下からはみ出した y={} r={} kind={:?}",
+                ore.y,
+                ore.radius(),
+                ore.kind
+            );
+            assert!(ore.x.is_finite() && ore.y.is_finite());
+            checked += 1;
+        }
+    }
+    assert!(
+        checked > 10_000,
+        "検査対象が少なすぎてフィールド外判定が効いていない n={checked}"
+    );
+}
+
+/// 出現 x は横幅全体へ散る。
+///
+/// 湧きが一箇所へ寄ると、迎撃が「その一点を撃つだけ」に退化する。
+/// 上空から降り始めた鉱石だけを数え、幅を5区画に割って偏りを見る
+/// (裂片の分裂で生まれる子は親の位置に依存するので対象外)。
+#[test]
+fn spawn_x_spreads_across_the_whole_width() {
+    const TICKS: u32 = 6_000;
+    const BUCKETS: usize = 5;
+    let mut hist = [0u64; BUCKETS];
+    let lo = FIELD_MARGIN;
+    let span = WORLD_W - FIELD_MARGIN * 2.0;
+    for seed in 1..=4u32 {
+        let mut state = StarRingState::new();
+        state.rng_state = seed;
+        for _ in 0..TICKS {
+            bot_spend(&mut state, BuyPolicy::Cheapest, 4);
+            tick(&mut state, 1);
+            for ore in state.ores.iter().filter(|o| o.age == 0 && o.y > SPAWN_Y - 8.0) {
+                let i = (((ore.x - lo) / span * BUCKETS as f64) as usize).min(BUCKETS - 1);
+                hist[i] += 1;
+            }
+        }
+    }
+    let total: u64 = hist.iter().sum();
+    eprintln!("[starringe/spawn-x] total={total} buckets={hist:?}");
+    assert!(total > 2_000, "湧きの標本が足りない total={total}");
+
+    // 出現 x は鉱石ごとに [SPAWN_X_MARGIN + 半径, WORLD_W - SPAWN_X_MARGIN - 半径]
+    // の一様分布なので、端の区画は大きい鉱石ほど狭くなる。最も大きい鉱石が端の
+    // 区画へ湧く割合を下限の基準に取る。
+    let r_max = OreKind::ALL
+        .iter()
+        .map(|k| k.radius())
+        .fold(0.0f64, f64::max);
+    let edge_margin = SPAWN_X_MARGIN + r_max;
+    let edge_share =
+        (span / BUCKETS as f64 - (edge_margin - FIELD_MARGIN)) / (WORLD_W - edge_margin * 2.0);
+    let floor = edge_share * 0.55;
+    for (i, &n) in hist.iter().enumerate() {
+        let share = n as f64 / total as f64;
+        assert!(
+            share > floor,
+            "区画 {i} への湧きが少なすぎる share={:.1}% floor={:.1}%",
+            share * 100.0,
+            floor * 100.0
+        );
+        assert!(
+            share < 0.35,
+            "区画 {i} へ湧きが偏っている share={:.1}%",
+            share * 100.0
+        );
+    }
+}
+
+/// 迎撃圧の時間推移。
+///
+/// 逸失率は序盤に高く、強化が積み上がるほど下がる——「守る」ではなく
+/// 「刈り取る」ゲームなので、投資が実った終盤に取りこぼしが消えるのは設計どおり。
+/// 検証したいのは 3 点: 序盤に迎撃の駆け引きが成立していること (下限)、序盤でも
+/// 刈り取りが立ち上がること (上限)、そして終盤には取りこぼしが消えていること。
+#[test]
+fn interception_pressure_over_time_report() {
+    const RUNS: u32 = 32;
+    const EDGES: [u32; 6] = [0, 500, 1_000, 2_000, 4_000, 8_000];
+
+    let mut window = vec![(0u64, 0u64); EDGES.len() - 1];
+    let mut opening_rates = Vec::with_capacity(RUNS as usize);
+    let mut peak_ores = Vec::with_capacity(RUNS as usize);
+
+    for seed in 1..=RUNS {
+        let mut state = StarRingState::new();
+        state.rng_state = seed;
+        let mut prev = (0u64, 0u64);
+        let mut wi = 0usize;
+        let mut peak = 0usize;
+        for t in 1..=EDGES[EDGES.len() - 1] {
+            bot_spend(&mut state, BuyPolicy::Cheapest, 4);
+            tick(&mut state, 1);
+            peak = peak.max(state.ores.len());
+            if t == EDGES[wi + 1] {
+                window[wi].0 += state.total_kills - prev.0;
+                window[wi].1 += state.missed_count - prev.1;
+                prev = (state.total_kills, state.missed_count);
+                if EDGES[wi + 1] == 1_000 {
+                    let total = state.total_kills + state.missed_count;
+                    opening_rates.push(state.missed_count as f64 / total.max(1) as f64);
+                }
+                wi += 1;
+            }
+        }
+        peak_ores.push(peak as u64);
+    }
+
+    eprintln!("[starringe/pressure] runs={RUNS} policy=cheapest");
+    for (wi, &(k, m)) in window.iter().enumerate() {
+        eprintln!(
+            "  t={:>5}-{:<5} kills={:>6} missed={:>5} miss={:>5.1}%",
+            EDGES[wi],
+            EDGES[wi + 1],
+            k / RUNS as u64,
+            m / RUNS as u64,
+            m as f64 / (k + m).max(1) as f64 * 100.0
+        );
+    }
+    let opening = median_f64(&mut opening_rates);
+    let peak = median_u64(&mut peak_ores);
+    eprintln!(
+        "  opening(t<1000) median_miss_rate={:.1}% median_peak_ores={peak}",
+        opening * 100.0
+    );
+
+    // 序盤の逸失率の中央値は 12.5% 前後。上下 2 倍弱の幅に収め、迎撃圧が体感で
+    // 消える側 (数%) へ緩んでも、逆に序盤が刈り取れない側へ振れても検知する。
+    // シードは 1..=RUNS 固定なので、閾値に触れるのはバランスを動かした時だけ。
+    assert!(
+        opening > 0.06,
+        "序盤の取りこぼしが減りすぎて迎撃の駆け引きが薄い: {:.1}%",
+        opening * 100.0
+    );
+    assert!(
+        opening < 0.19,
+        "序盤の取りこぼしが多すぎて刈り取りが立ち上がらない: {:.1}%",
+        opening * 100.0
+    );
+    // 終盤 (最後の窓) の逸失は実測 0%。刈り取りが実る終盤に取りこぼしが消えるのが
+    // このゲームの狙いなので、そこが崩れて「守る」ゲームへ寄り始めたら検知する。
+    let (late_k, late_m) = window[window.len() - 1];
+    let late_rate = late_m as f64 / (late_k + late_m).max(1) as f64;
+    assert!(
+        late_rate < 0.02,
+        "終盤に取りこぼしが残っている: {:.1}%",
+        late_rate * 100.0
+    );
+    // 同時存在数の中央値は 20 前後。上限 (`MAX_ORES`) へ張り付くのは湧きが
+    // 刈り取りに勝っている状態なので、上限に届く手前で検知する。
+    assert!(
+        peak < (MAX_ORES * 3 / 4) as u64,
+        "同時存在数が上限に迫っている peak={peak} / 上限{MAX_ORES}"
     );
 }

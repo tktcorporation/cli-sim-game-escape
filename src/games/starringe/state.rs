@@ -1,29 +1,56 @@
 //! 星環 (Star Ring) の状態定義。
 //!
-//! 外周を螺旋漂流する鉱石を、公転する武装の連射で砕いて星屑を稼ぐ放置ゲーム。
-//! 「守る」ではなく「刈り取る」——中心の星は採掘の核であり、防衛対象ではない。
+//! 画面下部の核とそれを公転する武装が、上空の広い範囲から降ってくる鉱石を
+//! 迎撃して星屑を稼ぐ放置ゲーム。
+//! 「守る」ではなく「刈り取る」——下の星は採掘の核であり、防衛対象ではない。
 //! 脅威の増加はプレイヤー強化ではなく「層」開放が担う。
 
 use std::cell::Cell;
 
 /// ワールド幅 (Canvas x_bounds)。
-pub const WORLD_W: f64 = 60.0;
+pub const WORLD_W: f64 = 100.0;
 /// ワールド高さ (Canvas y_bounds)。
-pub const WORLD_H: f64 = 80.0;
-/// 中心 X。
+pub const WORLD_H: f64 = 100.0;
+/// コアの X。
 pub const CX: f64 = WORLD_W * 0.5;
-/// 中心 Y。
-pub const CY: f64 = WORLD_H * 0.5;
-/// 中心到達半径。ここに達した鉱石は逸失 (報酬なし・ペナルティなし) で消える。
-pub const INNER_RADIUS: f64 = 5.5;
-/// 砲台の基準軌道半径。
-pub const BASE_RING_R: f64 = 12.0;
-/// 軌道の Y 方向潰し (立体感)。
-pub const ORBIT_Y_SQUASH: f64 = 0.45;
+/// コアの Y。画面下部に置き、上空を鉱石の降下レーンとして丸ごと使う。
+pub const CORE_Y: f64 = 15.0;
+/// コア到達半径。ここに達した鉱石は逸失 (報酬なし・ペナルティなし) で消える。
+pub const INNER_RADIUS: f64 = 6.0;
+/// 砲台環の基準 X 半径。
+pub const RING_RX: f64 = 32.0;
+/// 砲台環の基準 Y 半径。横長にして環全体を画面下部へ収める。
+pub const RING_RY: f64 = 10.0;
 /// 砲台スロット上限。
 pub const MAX_TURRETS: u32 = 8;
-/// 鉱石の出現外半径。
-pub const SPAWN_RADIUS: f64 = 36.0;
+/// 環の最下点の下に残す余裕。`ring_radii` はこの高さを残して縦半径を頭打ちに
+/// する。砲台をどの大きさで描くかは `render` が決めるが、環が下がりきった時に
+/// 残る余裕はこの値なので、描画半径の下限もここに揃う。
+pub const TURRET_NEAR_RADIUS: f64 = 1.6;
+/// 画面シェイクの横振れ幅。
+pub const SHAKE_MAX_X: f64 = 0.6;
+/// 画面シェイクの縦振れ幅。
+pub const SHAKE_MAX_Y: f64 = 0.3;
+/// 画面シェイク込みで Canvas の x_bounds (`0..WORLD_W`) に収まる位置の下限。
+///
+/// 描画は毎 tick 最大 `SHAKE_MAX_X` だけ左右へ、`SHAKE_MAX_Y` だけ上下へずれる。
+/// 円の端をこの範囲に収めておかないと、揺れた tick だけ端が欠けた形で描かれる。
+/// 砲台も鉱石も「中心」ではなく「円の端」をこの範囲へ突き合わせる。振れ幅は縦横で
+/// 違うので、境界も縦横それぞれで持つ。
+pub const VISIBLE_X_LO: f64 = SHAKE_MAX_X;
+/// 画面シェイク込みで Canvas の x_bounds に収まる位置の上限。詳細は `VISIBLE_X_LO`。
+pub const VISIBLE_X_HI: f64 = WORLD_W - SHAKE_MAX_X;
+/// 画面シェイク込みで Canvas の y_bounds (`0..WORLD_H`) に収まる高さの下限。
+/// 詳細は `VISIBLE_X_LO`。
+pub const VISIBLE_Y_LO: f64 = SHAKE_MAX_Y;
+/// 画面シェイク込みで Canvas の y_bounds に収まる高さの上限。詳細は `VISIBLE_X_LO`。
+pub const VISIBLE_Y_HI: f64 = WORLD_H - SHAKE_MAX_Y;
+/// 鉱石の出現高さ。
+pub const SPAWN_Y: f64 = 97.0;
+/// 出現 X のフィールド端マージン。端ぴったりに湧かせない。
+pub const SPAWN_X_MARGIN: f64 = 5.0;
+/// 左右の反射壁の位置 (フィールド端からの距離)。鉱石を横へ逃がさない。
+pub const FIELD_MARGIN: f64 = 2.0;
 /// 手動タップの火力ブースト持続 (tick)。
 pub const BOOST_DURATION: u32 = 40;
 /// 武器種数。
@@ -179,7 +206,7 @@ impl WeaponStat {
 pub enum RingUpgrade {
     /// 収率 (撃破時の星屑倍率)
     Yield = 0,
-    /// 核脈動 — 中心から周期 AOE (第2層で解放)
+    /// 核脈動 — 核から上空へ広がる周期波 (第2層で解放)
     CorePulse = 1,
 }
 
@@ -207,7 +234,7 @@ impl RingUpgrade {
     pub fn blurb(self) -> &'static str {
         match self {
             RingUpgrade::Yield => "砕いた星屑が増える",
-            RingUpgrade::CorePulse => "核が波打って近くの鉱石を削る",
+            RingUpgrade::CorePulse => "核が波打ち、上空へ広がって鉱石を砕く",
         }
     }
 
@@ -326,8 +353,8 @@ impl Layer {
         1.0 + (layer.saturating_sub(1) as f64) * 0.50
     }
 
-    /// 螺旋の沈み速度倍率 (層が深いほどわずかに速い)。
-    pub fn radial_mult(layer: u32) -> f64 {
+    /// 落下速度の倍率 (層が深いほどわずかに速い)。
+    pub fn fall_mult(layer: u32) -> f64 {
         1.0 + (layer.saturating_sub(1) as f64) * 0.05
     }
 }
@@ -396,44 +423,66 @@ impl OreKind {
         }
     }
 
+    /// 当たり判定と見た目の半径 (ワールド単位)。
+    ///
+    /// 大きさは「画面の広さに対してどう見えるか」で決める。降下距離に合わせて
+    /// 伸ばすと、盤面を広げたぶんだけ的も太り、狙って落とす手応えが薄れる。
+    /// 最小の星塵が `WORLD_W` の 3.0%、最大の新星核でも 5.1% に収まる範囲に置く。
+    ///
+    /// 下限は braille の点グリッドが決める。ステージは狭い端末ほど点数が減り、
+    /// 幅 33 桁のモバイルではワールド 100 幅が 66 点しかない。円の直径がそこで
+    /// 3 点を割ると、円が点へ落ちる位相しだいで見かけの大きさが 2 点と 3 点の
+    /// 間を行き来し、降下中に脈打って見える。加えて飛翔弾がそこでは 2 点にしか
+    /// ならないので、最小の鉱石は 4 点ぶんの直径を確保して「弾より確実に
+    /// 大きい」を成り立たせる。
+    ///
+    /// 8 種を下限と上限のあいだへ並べる刻みは、およそ 0.3 を基準にしつつ
+    /// 前後させてある。円が占める点数は半径に対して連続には増えず、標本が
+    /// 点へ落ちる位相の都合で段状に飛ぶ (`fill_step` の刻みが点間隔から
+    /// 決まるため)。等間隔に並べると同じ段へ二種が乗り、大きさで見分けられ
+    /// なくなる組ができるので、段の変わり目へ寄せて置く。
     pub fn radius(self) -> f64 {
         match self {
-            OreKind::Dust => 1.4,
-            OreKind::Rock => 1.9,
-            OreKind::Crystal => 2.3,
-            OreKind::Wisp => 1.7,
-            OreKind::Prism => 2.8,
-            OreKind::Shell => 3.0,
-            OreKind::Splitter => 2.4,
-            OreKind::Nova => 3.4,
+            OreKind::Dust => 3.0,
+            OreKind::Rock => 3.65,
+            OreKind::Crystal => 3.9,
+            OreKind::Wisp => 3.4,
+            OreKind::Prism => 4.5,
+            OreKind::Shell => 4.8,
+            OreKind::Splitter => 4.25,
+            OreKind::Nova => 5.1,
         }
     }
 
-    /// 軌道上の角速度 (rad/tick)。符号はスポーン時に決める。
-    pub fn ang_speed(self) -> f64 {
+    /// 横方向へ漂う基準速度 (ワールド単位/tick)。符号はスポーン時に決める。
+    ///
+    /// 砲台は撃つ瞬間の鉱石の位置へまっすぐ撃つ (`logic::aim_dir`) ので、弾の
+    /// 飛行時間ぶんだけ横へ動く鉱石は自動照準を外せる。降下速度と同じ桁の
+    /// 横速度を持たせて、遠い鉱石ほど当たりにくい状態を作る。
+    pub fn sway_speed(self) -> f64 {
         match self {
-            OreKind::Dust => 0.035,
-            OreKind::Rock => 0.028,
-            OreKind::Crystal => 0.022,
-            OreKind::Wisp => 0.042,
-            OreKind::Prism => 0.030,
-            OreKind::Shell => 0.016,
-            OreKind::Splitter => 0.026,
-            OreKind::Nova => 0.014,
+            OreKind::Dust => 0.26,
+            OreKind::Rock => 0.21,
+            OreKind::Crystal => 0.165,
+            OreKind::Wisp => 0.315,
+            OreKind::Prism => 0.225,
+            OreKind::Shell => 0.12,
+            OreKind::Splitter => 0.195,
+            OreKind::Nova => 0.105,
         }
     }
 
-    /// 内側へ沈む速度 (負 = 中心方向)。一直線突進ではなくゆるい螺旋。
-    pub fn radial_speed(self) -> f64 {
+    /// 降下速度 (ワールド単位/tick)。一直線突進ではなくゆるい降下。
+    pub fn fall_speed(self) -> f64 {
         match self {
-            OreKind::Dust => -0.22,
-            OreKind::Rock => -0.17,
-            OreKind::Crystal => -0.12,
-            OreKind::Wisp => -0.040,
-            OreKind::Prism => -0.14,
-            OreKind::Shell => -0.085,
-            OreKind::Splitter => -0.13,
-            OreKind::Nova => -0.07,
+            OreKind::Dust => 0.55,
+            OreKind::Rock => 0.425,
+            OreKind::Crystal => 0.30,
+            OreKind::Wisp => 0.10,
+            OreKind::Prism => 0.35,
+            OreKind::Shell => 0.2125,
+            OreKind::Splitter => 0.325,
+            OreKind::Nova => 0.175,
         }
     }
 
@@ -469,17 +518,17 @@ impl OreKind {
     }
 }
 
-/// 鉱石の軌道パターン。どれも「外周を漂いながらゆっくり沈む」系で、
-/// 中心への一直線ミサイルにはしない。
+/// 鉱石の降下パターン。どれも「横へ漂いながら降りてくる」系で、
+/// コアへの一直線ミサイルにはしない。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OreMotion {
-    /// 螺旋漂流 (基本)
+    /// 長い周期で左右へうねりながら降下 (基本)
     Spiral,
-    /// ほぼ周回、沈みはごく遅い
+    /// コア付近で横へ回り込み、一度旋回してから吸い込まれる
     Orbit,
-    /// 螺旋 + 半径の呼吸
+    /// 短い周期で鋭く左右へ振れる (振れ幅そのものは Spiral より狭い)
     Zigzag,
-    /// 重く遅い螺旋
+    /// 横揺れがほとんど無く、重くゆっくり降りる
     Heavy,
 }
 
@@ -492,11 +541,38 @@ pub struct Ore {
     pub vy: f64,
     pub hp: f64,
     pub kind: OreKind,
-    pub radius: f64,
     pub motion: OreMotion,
-    /// 角速度 (符号付き)。
-    pub ang_vel: f64,
+    /// 横方向の速度 (符号付き)。壁で反射すると符号が入れ替わる。
+    pub sway: f64,
     pub age: u32,
+}
+
+impl Ore {
+    /// 種から決まる値 (寸法・降下パターン) を埋めて 1 体を組み立てる。
+    ///
+    /// 個体ごとに違うのは位置・HP・横速度だけなので、それ以外は引数に取らない。
+    pub fn new(kind: OreKind, x: f64, y: f64, hp: f64, sway: f64) -> Self {
+        Self {
+            x,
+            y,
+            vx: 0.0,
+            vy: 0.0,
+            hp,
+            kind,
+            motion: kind.default_motion(),
+            sway,
+            age: 0,
+        }
+    }
+
+    /// 描画と当たり判定が読む半径。
+    ///
+    /// 種から毎回引き直すので、個体ごとに別の値を持たせる余地がない。値を写した
+    /// フィールドを持つと、`OreKind::radius` が守っている下限 (点グリッドの上で
+    /// 弾と見分けがつく大きさ) をその個体だけ下回らせる書き換え経路になる。
+    pub fn radius(&self) -> f64 {
+        self.kind.radius()
+    }
 }
 
 /// 飛翔弾。武装から飛び、鉱石に当たって消える (または貫通する)。
@@ -534,12 +610,22 @@ pub struct Particle {
     pub kind: ParticleKind,
 }
 
-/// 核脈動の波紋演出。
+/// 核脈動の波。核から外へ広がりながら、波面が通過した鉱石を削る。
 #[derive(Clone, Debug)]
 pub struct PulseRing {
     pub radius: f64,
+    /// 波面が届く距離。`radius` はここで頭打ちになる。
+    pub reach: f64,
     pub life: u32,
     pub max_life: u32,
+    /// 波面が通過した鉱石へ与えるダメージ。0 なら演出だけの波。
+    pub damage: f64,
+    /// 本数の上限で畳まれた波 (`logic::step_pulse_rings`)。
+    ///
+    /// 畳んだ波の `life` は残寿命ではなく、一息に削った半径を一度描かせるための
+    /// 猶予 1tick になる。`life / max_life` を経過の割合として読む描画は、この
+    /// 波だけ寿命の終わりではなく「畳んだ結果」として扱う。
+    pub folded: bool,
 }
 
 /// UI タブ。
@@ -574,7 +660,11 @@ pub struct StarRingState {
     pub elapsed_ticks: u64,
     pub rng_state: u32,
     pub shake_ticks: u32,
-    pub core_flash_ticks: u32,
+    /// 核脈動が波を撃った拍の残り。立てるのは `logic::fire_core_pulse` だけで、
+    /// 読むのは核の膨らみ (`render` の合図) だけ。層の合図は専用のフラグ
+    /// (`layer_flash_ticks`/`layer_ready_flash_ticks`) を持つので、ここには
+    /// 混ぜない——混ぜると、読む側が「どの出来事の拍か」を特定できなくなる。
+    pub core_pulse_flash_ticks: u32,
     pub boost_ticks: u32,
     /// 層開放時の到達演出残り。
     pub layer_flash_ticks: u32,
@@ -585,8 +675,9 @@ pub struct StarRingState {
     pub tab: Tab,
     /// 武装タブで選択中の武器。
     pub selected_weapon: WeaponKind,
-    /// 環タブの縦スクロール位置。セーブしない (リロード時は先頭へ戻す)。
-    pub ring_scroll: Cell<u16>,
+    /// 表示中タブの縦スクロール位置。タブを切り替えると先頭へ戻すので
+    /// 3 タブで 1 つを共有する。セーブしない (リロード時は先頭へ戻す)。
+    pub tab_scroll: Cell<u16>,
     /// 直近の星屑獲得量 (shards/sec 表示用、リングバッファ)。
     pub recent_gain: [f64; 20],
     pub recent_gain_idx: usize,
@@ -611,23 +702,25 @@ impl StarRingState {
             elapsed_ticks: 0,
             rng_state: 0xC0FFEE42,
             shake_ticks: 0,
-            core_flash_ticks: 0,
+            core_pulse_flash_ticks: 0,
             boost_ticks: 0,
             layer_flash_ticks: 0,
             layer_ready_flash_ticks: 0,
             layer_ready_latched: false,
             tab: Tab::Armory,
             selected_weapon: WeaponKind::Pulse,
-            ring_scroll: Cell::new(0),
+            tab_scroll: Cell::new(0),
             recent_gain: [0.0; 20],
             recent_gain_idx: 0,
             tick_gain: 0.0,
         }
     }
 
-    pub fn scroll_ring(&self, delta: i32) {
-        let cur = self.ring_scroll.get() as i32;
-        self.ring_scroll.set(cur.saturating_add(delta).max(0) as u16);
+    /// タブ内容を縦に送る。上限は描画時に `ScrollableTab` が実際の内容高さで
+    /// 丸めるので、ここでは 0 未満だけを止める。
+    pub fn scroll_tab(&self, delta: i32) {
+        let cur = self.tab_scroll.get() as i32;
+        self.tab_scroll.set(cur.saturating_add(delta).max(0) as u16);
     }
 
     pub fn layer(&self) -> u32 {
@@ -681,8 +774,16 @@ impl StarRingState {
         0.028 * (1.0 + 0.08 * self.turret_count().saturating_sub(1) as f64)
     }
 
-    pub fn ring_radius(&self) -> f64 {
-        BASE_RING_R + self.turret_count() as f64 * 0.55
+    /// 砲台環の (X 半径, Y 半径)。砲台が増えるほど環はわずかに広がる。
+    ///
+    /// 縦半径だけは「軌道の最下点に居る手前側の砲台の下端が `VISIBLE_Y_LO` を
+    /// 割らない」高さで頭打ちにする。円の中心だけを見て広げると、砲台の下側が
+    /// 周回のたびに欠けて描かれる。横半径は詰めない——環が横へ広い形そのものが
+    /// 盤面の使い方になっている。
+    pub fn ring_radii(&self) -> (f64, f64) {
+        let n = self.turret_count() as f64;
+        let ry_max = CORE_Y - TURRET_NEAR_RADIUS - VISIBLE_Y_LO;
+        (RING_RX + n * 1.4, (RING_RY + n * 0.45).min(ry_max))
     }
 
     pub fn yield_mult(&self) -> f64 {
@@ -698,9 +799,12 @@ impl StarRingState {
         Some((22u64.saturating_sub(lv as u64)).max(8))
     }
 
-    pub fn pulse_radius(&self) -> f64 {
+    /// 核脈動の波が届く距離。核は画面下端に座っているので、この値がそのまま
+    /// 「上空のどの高さまで波が舐めるか」になる。鉱石は降下の大半を高い位置で
+    /// 過ごすため、届く高さが収穫量を決める。
+    pub fn pulse_reach(&self) -> f64 {
         let lv = self.ring_level(RingUpgrade::CorePulse) as f64;
-        8.5 + lv * 1.10
+        34.0 + lv * 4.5
     }
 
     pub fn pulse_damage(&self) -> f64 {

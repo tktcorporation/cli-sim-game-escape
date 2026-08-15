@@ -1,6 +1,7 @@
-//! 星環 — 螺旋漂流する鉱石を公転武装の連射で砕く放置ゲーム。
+//! 星環 — 上空から降る鉱石を公転武装の連射で砕く放置ゲーム。
 //!
-//! 外周を漂う鉱石を軌道上の武装で刈り取り、星屑を得る。
+//! 画面下部の核を公転する武装が、上空の広い範囲から漂い降りる鉱石を刈り取り、
+//! 星屑を得る。
 //! 層は撃破条件を満たしたうえで星屑を払って開放する。進むと敵の数・強さ・報酬が
 //! 段で切り替わり、新しい武装と環武装が解放される。
 //! 各武装は弾数・連射・威力を個別に強化できる。
@@ -24,11 +25,11 @@ use crate::games::{Game, GameChoice};
 use crate::input::{ClickState, InputEvent};
 
 use actions::{
-    ring_for_buy_id, weapon_for_select_id, weapon_stat_for_buy_id, OPEN_LAYER, RING_SCROLL_DOWN,
-    RING_SCROLL_UP, TAB_ARMORY, TAB_CODEX, TAB_RING, TAP_STRIKE, WEAPON_NEXT, WEAPON_PREV,
+    ring_for_buy_id, weapon_for_select_id, weapon_stat_for_buy_id, OPEN_LAYER, TAB_ARMORY,
+    TAB_CODEX, TAB_RING, TAB_SCROLL_DOWN, TAB_SCROLL_UP, TAP_STRIKE, WEAPON_NEXT, WEAPON_PREV,
 };
 
-const RING_SCROLL_STEP: i32 = 3;
+const TAB_SCROLL_STEP: i32 = 3;
 use state::{RingUpgrade, StarRingState, Tab, WeaponKind, WeaponStat};
 
 pub struct StarRingGame {
@@ -60,23 +61,25 @@ impl StarRingGame {
         match key {
             '{' | 'u' | 'U' => {
                 self.state.tab = Tab::Armory;
+                self.state.tab_scroll.set(0);
                 true
             }
             '|' | 'r' | 'R' => {
                 self.state.tab = Tab::Ring;
-                self.state.ring_scroll.set(0);
+                self.state.tab_scroll.set(0);
                 true
             }
             '}' | 'c' | 'C' => {
                 self.state.tab = Tab::Codex;
+                self.state.tab_scroll.set(0);
                 true
             }
-            'k' | 'K' if self.state.tab == Tab::Ring => {
-                self.state.scroll_ring(-RING_SCROLL_STEP);
+            'k' | 'K' => {
+                self.state.scroll_tab(-TAB_SCROLL_STEP);
                 true
             }
-            'j' | 'J' if self.state.tab == Tab::Ring => {
-                self.state.scroll_ring(RING_SCROLL_STEP);
+            'j' | 'J' => {
+                self.state.scroll_tab(TAB_SCROLL_STEP);
                 true
             }
             ' ' | 't' | 'T' => {
@@ -133,15 +136,17 @@ impl StarRingGame {
         match action_id {
             TAB_ARMORY => {
                 self.state.tab = Tab::Armory;
+                self.state.tab_scroll.set(0);
                 true
             }
             TAB_RING => {
                 self.state.tab = Tab::Ring;
-                self.state.ring_scroll.set(0);
+                self.state.tab_scroll.set(0);
                 true
             }
             TAB_CODEX => {
                 self.state.tab = Tab::Codex;
+                self.state.tab_scroll.set(0);
                 true
             }
             TAP_STRIKE => {
@@ -149,12 +154,12 @@ impl StarRingGame {
                 true
             }
             OPEN_LAYER => logic::unlock_next_layer(&mut self.state),
-            RING_SCROLL_UP => {
-                self.state.scroll_ring(-RING_SCROLL_STEP);
+            TAB_SCROLL_UP => {
+                self.state.scroll_tab(-TAB_SCROLL_STEP);
                 true
             }
-            RING_SCROLL_DOWN => {
-                self.state.scroll_ring(RING_SCROLL_STEP);
+            TAB_SCROLL_DOWN => {
+                self.state.scroll_tab(TAB_SCROLL_STEP);
                 true
             }
             WEAPON_PREV => {
