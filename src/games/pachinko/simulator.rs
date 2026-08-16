@@ -21,7 +21,7 @@ use super::logic::{self, NAIL_SPREAD_RANGE, RAIL_BIAS_RANGE};
 use super::state::{
     Digit, Machine, Mode, PachinkoState, PendingRank, ReachKind, StopStyle, BALL_LOAN_COUNT,
     BALL_LOAN_YEN, BALL_R, BOARD_H, BOARD_W, FIRE_INTERVAL_TICKS, HALL_SIZE, HIT_GLOW_TICKS,
-    MACHINE_SPECS, MAX_BALLS, MAX_PENDING,
+    MACHINE_SPECS, MAX_BALLS, MAX_PENDING, START_POCKET_Y,
 };
 
 // ── 自動プレイ ─────────────────────────────────────────────────
@@ -211,6 +211,9 @@ struct Flight {
     contact_ticks: u32,
     /// ヘソの縁で揺れていた tick 数。「入りそう」が見える長さ。
     teeter_ticks: u32,
+    /// ヘソの高さを初めて跨いだ x。同じ強度でもこの値が分かれることが、
+    /// 一本の溝に全弾が落ちていない証拠になる。
+    x_at_pocket_y: Option<f64>,
     /// tick ごとの移動距離。描画は tick 単位なので、この値がそのまま
     /// 「1コマで玉がどれだけ飛ぶか」になる。
     steps: Vec<f64>,
@@ -239,6 +242,7 @@ fn measure_flight(state: &mut PachinkoState) -> Flight {
         ticks: 1,
         contact_ticks: 0,
         teeter_ticks: 0,
+        x_at_pocket_y: None,
         steps: Vec::new(),
     };
     // 盤面の上端から下端まで落ちても足りる長さ。無限ループの保険。
@@ -252,6 +256,9 @@ fn measure_flight(state: &mut PachinkoState) -> Flight {
         };
         let (dx, dy) = (after.x - before.x, after.y - before.y);
         flight.steps.push((dx * dx + dy * dy).sqrt());
+        if flight.x_at_pocket_y.is_none() && before.y <= START_POCKET_Y && after.y > START_POCKET_Y {
+            flight.x_at_pocket_y = Some(after.x);
+        }
         // `decay_glow` が tick の頭で 1 減らした後に `step_balls` が焼き直すので、
         // tick 終わりに満タンなら この tick で釘に触れている。
         if after.hit_glow == HIT_GLOW_TICKS {
@@ -422,6 +429,7 @@ fn ball_motion_report() {
     let mut steps = Vec::new();
     let mut nail_counts = Vec::new();
     let mut teetered = 0u32;
+    let mut pocket_xs = Vec::new();
 
     for layout in 1..=LAYOUTS {
         let mut nail_seed = layout.wrapping_mul(2_654_435_761);
@@ -436,6 +444,9 @@ fn ball_motion_report() {
             teeters.push(flight.teeter_ticks as f64);
             if flight.teeter_ticks > 0 {
                 teetered += 1;
+            }
+            if let Some(x) = flight.x_at_pocket_y {
+                pocket_xs.push(x);
             }
             steps.extend(flight.steps);
         }
@@ -474,6 +485,16 @@ fn ball_motion_report() {
         if teetered_only.is_empty() { 0.0 } else { percentile(&teetered_only, 0.5) },
         if teetered_only.is_empty() { 0.0 } else { percentile(&teetered_only, 0.9) },
     );
+    if !pocket_xs.is_empty() {
+        eprintln!(
+            "  ヘソ高さのx:    標本={} 平均={:.1} 標準偏差={:.1} 幅={:.1}〜{:.1}",
+            pocket_xs.len(),
+            mean(&pocket_xs),
+            stddev(&pocket_xs),
+            pocket_xs.iter().copied().fold(f64::INFINITY, f64::min),
+            pocket_xs.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+        );
+    }
     eprintln!(
         "  1tickの移動:    平均={:.2} (玉の直径の{:.1}倍 / 盤面高の{:.1}%) \
          中央={:.2} p90={:.2} 最大={:.2} (直径の{:.1}倍)",
@@ -1221,12 +1242,41 @@ fn boards_stay_sparse_enough_to_see_the_ball() {
     }
     let avg = counts.iter().sum::<usize>() as f64 / counts.len() as f64;
     assert!(
-        avg < 52.0,
+        avg < 42.0,
         "釘が密すぎて玉の弧が見えない (平均={avg:.1}本, 内訳={counts:?})"
     );
     assert!(
-        avg > 28.0,
+        avg > 22.0,
         "釘が疏すぎてヘソへの道が消える (平均={avg:.1}本, 内訳={counts:?})"
+    );
+}
+
+#[test]
+fn balls_bounce_a_few_times_on_the_way_down() {
+    // 隙間を真っ直ぐ落ちると跳ねる絵が無い。毎コマ釘に触れると密すぎる。
+    // 滞空のあいだ数回かすめるのが、弧が見える密度。
+    let mut contacts = Vec::new();
+    let mut flights = Vec::new();
+    for layout in 1..=6u32 {
+        let mut nail_seed = layout.wrapping_mul(2_654_435_761);
+        let machine = machine_with(0, 0.55, 0.0, &mut nail_seed);
+        let mut state = seated_state(layout.wrapping_mul(40_503), machine);
+        state.cash = 0;
+        for _ in 0..24u32 {
+            let flight = measure_flight(&mut state);
+            contacts.push(flight.contact_ticks as f64);
+            flights.push(flight.ticks as f64);
+        }
+    }
+    let avg_c = mean(&contacts);
+    let avg_f = mean(&flights);
+    assert!(
+        avg_c >= 2.0,
+        "釘にほとんど当たらず隙間を落ちている (平均接触={avg_c:.1}回 / 滞空={avg_f:.1}tick)"
+    );
+    assert!(
+        avg_c / avg_f < 0.45,
+        "釘に触れている時間が長すぎて弧が見えない (平均接触={avg_c:.1}回 / 滞空={avg_f:.1}tick)"
     );
 }
 
@@ -1262,6 +1312,35 @@ fn some_balls_teeter_on_the_start_pocket_lip() {
         teeter_ticks >= teetered * 2,
         "縁に乗ってもすぐ消えて揺れが見えない \
          ({teetered}発で合計{teeter_ticks}tick)"
+    );
+}
+
+#[test]
+fn same_power_shots_do_not_share_one_groove() {
+    // 同じ強度・同じ釘でも着地点が分かれる。溝が1本だと打ち出しのたびに
+    // 同じ絵が繰り返され、跳ねる楽しさが消える。
+    let mut nail_seed = 0xC0FF_EE00;
+    let machine = machine_with(0, 0.55, 0.0, &mut nail_seed);
+    let mut state = seated_state(0x5EED_1234, machine);
+    state.cash = 0;
+    state.power = 62;
+    let mut xs = Vec::new();
+    for _ in 0..40u32 {
+        let flight = measure_flight(&mut state);
+        if let Some(x) = flight.x_at_pocket_y {
+            xs.push(x);
+        }
+    }
+    assert!(
+        xs.len() >= 24,
+        "ヘソの高さを跨いだ玉が少なすぎる ({})",
+        xs.len()
+    );
+    let std = stddev(&xs);
+    assert!(
+        std > 4.0,
+        "同じ強度の玉が1本の溝を落ちている (std={std:.2}, n={})",
+        xs.len()
     );
 }
 

@@ -61,31 +61,32 @@ pub const PHYSICS_SUBSTEPS: u32 = 5;
 /// 瞬間が絵として残らない。`simulator::ball_motion_report` がこの移動距離を
 /// 実測する。
 ///
-/// 速さを決める定数は `GRAVITY` 単体ではない。`launch_velocity` /
-/// `HORIZONTAL_DRAG` / `NAIL_SCATTER` と組で「玉道の形」を決めており、
-/// どれか1つだけを触ると形が変わって回転率が動く。玉道を保ったまま T 倍の
-/// 時間をかけさせたい場合は、位置が速度の積分・速度が加速度の積分である
-/// ことから、速度を 1/T・加速度を 1/T²・1サブステップあたりの減衰を T 乗根
-/// にした組で動かす。
-const GRAVITY: f64 = 0.030;
+/// 重力は控えめに取る。加速が大きいと釘と釘の間の弧が 1 コマで飛び、
+/// 「ポンポン跳ねる」より「落ちる」だけに見える。速さを決める定数は
+/// `GRAVITY` 単体ではない。`launch_velocity` / `HORIZONTAL_DRAG` /
+/// `NAIL_SCATTER` と組で「玉道の形」を決めており、どれか1つだけを触ると
+/// 形が変わって回転率が動く。玉道を保ったまま T 倍の時間をかけさせたい
+/// 場合は、位置が速度の積分・速度が加速度の積分であることから、速度を
+/// 1/T・加速度を 1/T²・1サブステップあたりの減衰を T 乗根にした組で動かす。
+const GRAVITY: f64 = 0.0135;
 /// 釘との衝突の反発係数。弾かれた玉が次の釘まで飛ぶ軌跡が絵として残る程度に
 /// 跳ね返す。上げすぎると玉が釘の上で跳ね続けて落ちてこない。
 const NAIL_RESTITUTION: f64 = 0.80;
 /// 法線速度がこれ未満の衝突は「絡み」。実機では起こした釘の根元に玉が絡み、
 /// 盤面へ擦りながら落ちる。反発を落とすことで、速い衝突の「ポン」と遅い
 /// 衝突の「引っかかり」を同じ式で出し分ける。
-const NAIL_TANGLE_VN: f64 = 0.18;
-const NAIL_TANGLE_RESTITUTION: f64 = 0.42;
+const NAIL_TANGLE_VN: f64 = 0.12;
+const NAIL_TANGLE_RESTITUTION: f64 = 0.40;
 /// 接線方向の速度を残す割合。1 だと表面を滑って去り、0 だと釘に貼り付く。
 /// 実機の玉は釘の側面を転がって方向を変えるので、跳ね返しだけでは出ない
 /// 「沿って落ちる」動きをここで作る。
-const NAIL_TANGENTIAL_KEEP: f64 = 0.82;
+const NAIL_TANGENTIAL_KEEP: f64 = 0.84;
 /// 壁・天井との衝突の反発係数。
 const WALL_RESTITUTION: f64 = 0.45;
 /// 速度の上限。`CONTACT_DIST` 以下に収めてあるので、釘へ真っ直ぐ向かう玉は
 /// 必ず1回はサブステップの標本が接触範囲へ入る。ここが接触距離を超えると
 /// 速い玉だけが釘をすり抜け、釘に当たるかどうかが速度で変わってしまう。
-const MAX_SPEED: f64 = 1.14;
+const MAX_SPEED: f64 = 0.96;
 /// 釘に当たった時に横方向へ乗るばらつきの最大幅。同じ軌道で入っても結果が
 /// 割れる「パチンコらしさ」の源で、0 にすると釘配置だけで結果が決まる
 /// 決定論的な機械になってしまう。速度と同じ次元なので、落下の速さを変える
@@ -93,7 +94,7 @@ const MAX_SPEED: f64 = 1.14;
 ///
 /// 実機の玉は盤面とガラスの 2.5mm 隙間で面外に揺れ、2D では再現できない。
 /// その代わりに衝突のたびに横kickを乗せ、一本の溝に全弾が落ちるのを防ぐ。
-const NAIL_SCATTER: f64 = 0.30;
+const NAIL_SCATTER: f64 = 0.18;
 /// `nail_spread` がヘソの受け口へ効く強さ。ヘソ釘の位置 (`generate_nails`)
 /// と当たり判定の幅 (`effective_pocket_half_w`) は同じ係数を共有しないと、
 /// 見た目の開きと実際の入りやすさが食い違って釘読みが嘘になる。
@@ -104,11 +105,18 @@ const CONTACT_DIST: f64 = BALL_R + NAIL_R;
 /// 横切る間に抜け、玉は釘の間をほぼ真下へ落ちていく。減衰が無いと初速の
 /// まま左端まで飛んで壁沿いに落ちるだけになり、ハンドル強度が「どこへ
 /// 落とすか」を決める操作にならない。
-const HORIZONTAL_DRAG: f64 = 0.955;
+const HORIZONTAL_DRAG: f64 = 0.978;
 /// 打ち出し1発ごとの初速のばらつき (割合)。同じ強度でも玉道が完全に一致
 /// すると、釘の間に一本の溝ができて全弾が同じ場所へ落ちる。実機のハンドル
 /// と同じく、わずかな揺らぎが玉道を散らす。
-const LAUNCH_JITTER: f64 = 0.03;
+const LAUNCH_SPEED_JITTER: f64 = 0.11;
+/// 打ち出し方向の横kick。速さだけを振ると同じ角度のまま着地点がほとんど
+/// 動かない。左右に独立した分を足して、同じ強度でも落ちる列が分かれる
+/// ようにする。
+const LAUNCH_VX_JITTER: f64 = 0.16;
+/// 打ち出しの縦成分のばらつき。天井へ届くかどうかの境をまたぐと、折り返し
+/// 位置が大きく割れ、同じ強度でも落ちる列が分かれる。
+const LAUNCH_VY_JITTER: f64 = 0.08;
 /// 縁揺れの最短 / 最長 (tick)。最短は `delta_ticks` の上限 (5) より長くし、
 /// 遅れをまとめて消化しても「縁に乗っている」絵が1フレームは残るようにする。
 const TEETER_TICKS_MIN: u8 = 6;
@@ -142,7 +150,16 @@ const _: () = assert!(TEETER_TICKS_MIN as u32 > 5);
 /// 良し悪しの判断は盤面に委ねる。
 pub fn launch_velocity(power: u8) -> (f64, f64) {
     let p = (power as f64 / 100.0).clamp(0.0, 1.0);
-    (-(0.407 + p * 0.963), -0.556 - p * 0.407)
+    // 縦成分は `LAUNCH_VY_JITTER` を足したときに、一部は天井へ届き一部は
+    // 届かない範囲に置く。全員が天井で折り返すと横移動が揃い、溝になる。
+    (-(0.360 + p * 0.860), -0.420 - p * 0.220)
+}
+
+fn jitter_launch((vx, vy): (f64, f64), seed: &mut u32) -> (f64, f64) {
+    let speed = 1.0 + (rand01(seed) - 0.5) * 2.0 * LAUNCH_SPEED_JITTER;
+    let vx = vx * speed + (rand01(seed) - 0.5) * 2.0 * LAUNCH_VX_JITTER;
+    let vy = vy * speed + (rand01(seed) - 0.5) * 2.0 * LAUNCH_VY_JITTER;
+    (vx, vy)
 }
 
 /// ヘソの受け口半幅。決まるのは台のヘソ釘の開きと電サポの有無だけなので、
@@ -864,10 +881,8 @@ fn try_fire(state: &mut PachinkoState) {
     if !state.firing || state.balls_held == 0 || state.balls.len() >= MAX_BALLS {
         return;
     }
-    let (vx, vy) = launch_velocity(state.power);
     let seed = &mut state.rng_state;
-    let jitter = |seed: &mut u32| 1.0 + (rand01(seed) - 0.5) * 2.0 * LAUNCH_JITTER;
-    let (vx, vy) = (vx * jitter(seed), vy * jitter(seed));
+    let (vx, vy) = jitter_launch(launch_velocity(state.power), seed);
     let fired_in_normal = state.mode == Mode::Normal;
     let tint = BallTint::ALL[rng_below(seed, BallTint::ALL.len() as u32) as usize];
     state.balls.push(Ball::falling(
@@ -1016,17 +1031,56 @@ pub fn cash_out(state: &mut PachinkoState) -> bool {
 /// 左右へ弾かれながら落ちるので、弧が見え、ヘソへは届くが毎発は入らない。
 /// 下部釘は回転率に効かないので、盤面を疏に保つ側から間引く。
 const RAIL_ROWS: usize = 5;
-const RAIL_TOP_Y: f64 = 18.0;
-const RAIL_BOTTOM_Y: f64 = 44.0;
-/// 偶数段の寄り釘。盤面中央からの x。中央は空け、右端 (発射側 x=60) まで届ける。
-const RAIL_EVEN_OFFSETS: [f64; 7] = [-20.0, -12.0, -4.0, 4.0, 12.0, 20.0, 28.0];
-/// 奇数段の寄り釘。中央にゲートを置き、偶数段の隙間と互い違いにする。
-const RAIL_ODD_OFFSETS: [f64; 7] = [-24.0, -16.0, -8.0, 0.0, 8.0, 16.0, 24.0];
-/// 下側2段。中央を広く空け、ステージとヘソ釘が最終ゲートになる余地を残す。
+/// 段の基準 y。等間隔にしない。等間隔だと次の段までの飛行時間が揃い、
+/// 同じ位相で次の釘へ入る。
+const RAIL_ROW_Y: [f64; RAIL_ROWS] = [15.4, 22.2, 29.5, 36.0, 43.1];
+const RAIL_TOP_Y: f64 = RAIL_ROW_Y[0];
+const RAIL_BOTTOM_Y: f64 = RAIL_ROW_Y[RAIL_ROWS - 1];
+const _: () = assert!(RAIL_BOTTOM_Y > RAIL_TOP_Y);
+/// 1本の寄り釘。(盤面中央からの x, 段の基準 y からのずらす量)。
+/// 近い2本は対になって隙間をかすめさせ、次の段の釘は一つ上の隙間の中心から
+/// ずらして置き、真正面ではなく側面で弾く。
+type RailSpec = (f64, f64);
+/// 最上段。打ち出しが天井で折り返した先を受ける。左はまだ玉が来ないので空け、
+/// 14〜17 の対は隙間が玉1個分よりやや広く、かすめて跳ねる。
+const RAIL_ENTRY: [RailSpec; 6] = [
+    (-11.0, -0.55),
+    (-3.0, 0.70),
+    (6.6, -0.40),
+    (14.0, 0.85),
+    (17.3, -0.60),
+    (26.7, 0.15),
+];
+/// 偶数段。中央を空け、右端 (発射側 x≈59) まで届ける。間隔は均等にしない。
+const RAIL_EVEN: [RailSpec; 6] = [
+    (-20.6, 0.50),
+    (-11.0, -0.75),
+    (-3.4, 0.35),
+    (7.2, -0.50),
+    (16.0, 0.80),
+    (26.5, -0.15),
+];
+/// 奇数段。中央にゲートを置き、偶数段の隙間の中心からずらす。真正面の衝突
+/// より側面の跳ねが多くなり、左右へ割れる。
+const RAIL_ODD: [RailSpec; 6] = [
+    (-14.8, -0.40),
+    (-5.6, 0.65),
+    (0.0, 0.10),
+    (10.0, -0.70),
+    (19.6, 0.45),
+    (26.4, -0.25),
+];
+/// 最下段。中央を広く空け、ステージとヘソ釘が最終ゲートになる余地を残す。
 /// 上の段と同じ幅だと、最下段とステージが縦に重なって針の穴になり、
-/// 届く玉が打ち出し位置の運だけで決まってしまう。上段のジグザグで散らした
-/// 玉が、この隙間からヘソ釘の選別に乗る。
-const RAIL_LAST_OFFSETS: [f64; 6] = [-24.0, -16.0, -8.5, 8.5, 16.0, 24.0];
+/// 届く玉が打ち出し位置の運だけで決まってしまう。
+const RAIL_LAST: [RailSpec; 6] = [
+    (-20.0, 0.30),
+    (-10.6, -0.55),
+    (-3.6, 0.60),
+    (6.2, -0.45),
+    (15.6, 0.40),
+    (26.4, 0.20),
+];
 /// `rail_bias` が最大のときに外側の釘を中央へ寄せる割合。中央の釘は動かず、
 /// 端ほど大きく動くので、盤面では「上部の釘が中央へ傾いている」形に見える。
 ///
@@ -1043,9 +1097,10 @@ const RAIL_BIAS_PULL: f64 = 0.03;
 /// 「見えない寄り釘のズレ」になり、盤面から回りやすさを読むという判断軸が
 /// 成立しなくなる。`simulator::nail_spread_correlates_with_spin_rate` が
 /// その退行を検知する。疏な並びでは 1 本のズレが弧の見え方に効くので、
-/// 格子を崩すのに足りて読みを壊さない幅に留める。
-const NAIL_JITTER: f64 = 0.35;
-const NAIL_Y_JITTER: f64 = 0.50;
+/// 格子を崩すのに足りて読みを壊さない幅に留める。段ごとの対と y のずらしが
+/// 跳ね方を決める本体で、揺らぎは台差用の仕上げ。
+const NAIL_JITTER: f64 = 0.48;
+const NAIL_Y_JITTER: f64 = 0.55;
 
 /// 下部釘の段数と本数。ヘソより下にあり回転率に効かないので、盤面を疏に
 /// 保つ側から間引く。左右の一般入賞口へ玉を振り分ける道が見える本数。
@@ -1064,22 +1119,28 @@ pub fn generate_nails(seed: &mut u32, nail_spread: f64, rail_bias: f64) -> Vec<N
 
     // 寄り釘。偶数段は中央を空け、奇数段は中央にゲートを置く。
     // 同じ x に全段並べると縦溝か壁かの二択になる。
-    for row in 0..RAIL_ROWS {
-        let t = row as f64 / (RAIL_ROWS - 1) as f64;
-        let y = RAIL_TOP_Y + (RAIL_BOTTOM_Y - RAIL_TOP_Y) * t;
-        let offsets: &[f64] = if row + 2 >= RAIL_ROWS {
-            &RAIL_LAST_OFFSETS
+    for (row, &y) in RAIL_ROW_Y.iter().enumerate() {
+        let specs: &[RailSpec] = if row + 1 == RAIL_ROWS {
+            &RAIL_LAST
+        } else if row == 0 {
+            &RAIL_ENTRY
         } else if row % 2 == 0 {
-            &RAIL_EVEN_OFFSETS
+            &RAIL_EVEN
         } else {
-            &RAIL_ODD_OFFSETS
+            &RAIL_ODD
         };
-        for &off in offsets {
+        for &(off, dy) in specs {
             let base_x = center + off;
             let pulled = center + (base_x - center) * (1.0 - rail_bias * RAIL_BIAS_PULL);
+            // 中央ゲートは揺らぎで消さない。壁か縦溝かに落ちる。
+            let j = if off.abs() < 0.5 {
+                NAIL_JITTER * 0.3
+            } else {
+                NAIL_JITTER
+            };
             nails.push(Nail {
-                x: pulled + rand_range(seed, -NAIL_JITTER, NAIL_JITTER),
-                y: y + rand_range(seed, -NAIL_Y_JITTER, NAIL_Y_JITTER),
+                x: pulled + rand_range(seed, -j, j),
+                y: y + dy + rand_range(seed, -NAIL_Y_JITTER, NAIL_Y_JITTER),
             });
         }
     }
@@ -1350,7 +1411,7 @@ mod tests {
             let mut s = seed;
             let nails = generate_nails(&mut s, 0.55, 0.0);
             assert!(
-                (36..=52).contains(&nails.len()),
+                (24..=40).contains(&nails.len()),
                 "釘の本数が疏密の想定から外れている (seed={seed}, {}本)",
                 nails.len()
             );
@@ -1365,7 +1426,7 @@ mod tests {
             let mut s = seed;
             generate_nails(&mut s, 0.5, 0.0)
                 .into_iter()
-                .filter(|n| (n.y - RAIL_TOP_Y).abs() < 1.8)
+        .filter(|n| (n.y - RAIL_TOP_Y).abs() < 2.8)
                 .map(|n| (n.x, n.y))
                 .collect::<Vec<_>>()
         };
@@ -1386,6 +1447,70 @@ mod tests {
     }
 
     #[test]
+    fn rail_nail_gaps_are_irregular() {
+        // 等間隔だと玉は隙間の真ん中を滑り落ち、跳ねる弧が見えない。
+        // 設計上の間隔が揃っていないことを、揺らぎを除いた座標で見る。
+        let xs: Vec<f64> = RAIL_EVEN.iter().map(|(off, _)| *off).collect();
+        let mut gaps = Vec::new();
+        for pair in xs.windows(2) {
+            gaps.push(pair[1] - pair[0]);
+        }
+        let min = gaps.iter().copied().fold(f64::INFINITY, f64::min);
+        let max = gaps.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            max - min > 2.0,
+            "偶数段の釘間隔がほぼ均等 (gaps={gaps:?})"
+        );
+        let entry: Vec<f64> = RAIL_ENTRY.iter().map(|(off, _)| *off).collect();
+        let pair_gap = entry[4] - entry[3];
+        assert!(
+            pair_gap > CONTACT_DIST && pair_gap < CONTACT_DIST + 2.4,
+            "最上段の対の隙間がかすめて跳ねる幅から外れている (gap={pair_gap:.2})"
+        );
+    }
+
+    #[test]
+    fn same_power_launches_fan_out_across_the_board() {
+        // 同じハンドル強度でも釘帯へ入る列が分かれる。速さだけを振ると角度が
+        // 固定されたまま、釘の間に一本の溝ができる。測定は天井折り返し直後
+        // ではなく釘帯の上端。折り返し地点は横移動が短く、ばらけが見えない。
+        let mut xs = Vec::new();
+        for i in 0..36u32 {
+            let mut state = state_with_nails(Vec::new());
+            state.rng_state = 0xA11C_E5ED ^ i.wrapping_mul(0x9E37);
+            state.power = 62;
+            state.balls_held = 8;
+            state.firing = true;
+            state.fire_cooldown = 0;
+            try_fire(&mut state);
+            assert_eq!(state.balls.len(), 1, "打ち出されていない");
+            for _ in 0..800 {
+                step_balls(&mut state);
+                let Some(ball) = state.balls.first() else {
+                    break;
+                };
+                if ball.vy > 0.0 && ball.y >= RAIL_TOP_Y {
+                    xs.push(ball.x);
+                    break;
+                }
+            }
+        }
+        assert!(
+            xs.len() >= 30,
+            "釘帯まで届いた玉が少なすぎる ({})",
+            xs.len()
+        );
+        let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+        let var = xs.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / (xs.len() - 1) as f64;
+        let std = var.sqrt();
+        assert!(
+            std > 2.5,
+            "同じ強度の打ち出しが同じ列へ落ちている (std={std:.2}, n={})",
+            xs.len()
+        );
+    }
+
+    #[test]
     fn rail_nails_alternate_a_center_gate() {
         // 偶数段が中央を開け、奇数段も中央を開けると縦溝になる。
         // 逆に全段が中央を塞ぐとヘソへ届かない。段ごとにゲートと隙間が
@@ -1396,12 +1521,12 @@ mod tests {
         let nearest = |y_target: f64| {
             nails
                 .iter()
-                .filter(|n| (n.y - y_target).abs() < 2.2)
+                .filter(|n| (n.y - y_target).abs() < 2.8)
                 .map(|n| (n.x - center).abs())
                 .fold(f64::INFINITY, f64::min)
         };
-        let even_y = RAIL_TOP_Y;
-        let odd_y = RAIL_TOP_Y + (RAIL_BOTTOM_Y - RAIL_TOP_Y) / (RAIL_ROWS - 1) as f64;
+        let even_y = RAIL_ROW_Y[0];
+        let odd_y = RAIL_ROW_Y[1];
         let even_gap = nearest(even_y);
         let odd_gap = nearest(odd_y);
         assert!(
