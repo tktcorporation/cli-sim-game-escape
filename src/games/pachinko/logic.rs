@@ -71,16 +71,17 @@ pub const PHYSICS_SUBSTEPS: u32 = 5;
 const GRAVITY: f64 = 0.0135;
 /// 釘との衝突の反発係数。弾かれた玉が次の釘まで飛ぶ軌跡が絵として残る程度に
 /// 跳ね返す。上げすぎると玉が釘の上で跳ね続けて落ちてこない。
-const NAIL_RESTITUTION: f64 = 0.80;
+const NAIL_RESTITUTION: f64 = 0.93;
 /// 法線速度がこれ未満の衝突は「絡み」。実機では起こした釘の根元に玉が絡み、
 /// 盤面へ擦りながら落ちる。反発を落とすことで、速い衝突の「ポン」と遅い
 /// 衝突の「引っかかり」を同じ式で出し分ける。
 const NAIL_TANGLE_VN: f64 = 0.12;
-const NAIL_TANGLE_RESTITUTION: f64 = 0.40;
+const NAIL_TANGLE_RESTITUTION: f64 = 0.55;
 /// 接線方向の速度を残す割合。1 だと表面を滑って去り、0 だと釘に貼り付く。
 /// 実機の玉は釘の側面を転がって方向を変えるので、跳ね返しだけでは出ない
-/// 「沿って落ちる」動きをここで作る。
-const NAIL_TANGENTIAL_KEEP: f64 = 0.84;
+/// 「沿って落ちる」動きをここで作る。ここを上げすぎると寄り釘で横へ弾かれて
+/// ヘソへ届く玉が減り、ヘソ釘の開きを読む判断軸が弱くなる。
+const NAIL_TANGENTIAL_KEEP: f64 = 0.86;
 /// 壁・天井との衝突の反発係数。
 const WALL_RESTITUTION: f64 = 0.45;
 /// 速度の上限。`CONTACT_DIST` 以下に収めてあるので、釘へ真っ直ぐ向かう玉は
@@ -1329,6 +1330,27 @@ mod tests {
             ball.y < 30.0,
             "玉が釘をすり抜けて下へ抜けている (y={:.2})",
             ball.y
+        );
+    }
+
+    #[test]
+    fn a_downward_hit_rebounds_up_with_most_of_its_speed() {
+        // 釘に当たってもすぐ下へ滑ると、跳ねる弧が見えない。速い衝突は
+        // 入射の大部分を保って上へ返し、次の釘まで飛ぶ軌跡を残す。
+        let incoming = 0.45;
+        let mut ball = test_ball(32.0, 30.0 - CONTACT_DIST + 0.02, 0.0, incoming);
+        let nails = [Nail { x: 32.0, y: 30.0 }];
+        let mut seed = 1u32;
+        bounce_nails(&mut ball, &nails, &mut seed);
+        assert!(
+            ball.vy < 0.0,
+            "下向きの衝突なのに上へ跳ねていない (vy={:.3})",
+            ball.vy
+        );
+        let returned = -ball.vy;
+        assert!(
+            returned > incoming * 0.90,
+            "釘の跳ねが弱く、弧が見えない (入射={incoming:.3} 跳ね={returned:.3})"
         );
     }
 

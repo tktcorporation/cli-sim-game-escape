@@ -211,6 +211,9 @@ struct Flight {
     contact_ticks: u32,
     /// ヘソの縁で揺れていた tick 数。「入りそう」が見える長さ。
     teeter_ticks: u32,
+    /// 釘に触れた tick のうち、玉の y が減った (上へ跳ねた) 回数。
+    /// 接触してもすぐ下へ滑ると跳ねる弧が見えない。
+    hop_ticks: u32,
     /// ヘソの高さを初めて跨いだ x。同じ強度でもこの値が分かれることが、
     /// 一本の溝に全弾が落ちていない証拠になる。
     x_at_pocket_y: Option<f64>,
@@ -242,6 +245,7 @@ fn measure_flight(state: &mut PachinkoState) -> Flight {
         ticks: 1,
         contact_ticks: 0,
         teeter_ticks: 0,
+        hop_ticks: 0,
         x_at_pocket_y: None,
         steps: Vec::new(),
     };
@@ -263,6 +267,9 @@ fn measure_flight(state: &mut PachinkoState) -> Flight {
         // tick 終わりに満タンなら この tick で釘に触れている。
         if after.hit_glow == HIT_GLOW_TICKS {
             flight.contact_ticks += 1;
+            if after.y < before.y {
+                flight.hop_ticks += 1;
+            }
         }
         if after.teeter > 0 {
             flight.teeter_ticks += 1;
@@ -425,6 +432,7 @@ fn ball_motion_report() {
 
     let mut flight_ticks = Vec::new();
     let mut contacts = Vec::new();
+    let mut hops = Vec::new();
     let mut teeters = Vec::new();
     let mut steps = Vec::new();
     let mut nail_counts = Vec::new();
@@ -441,6 +449,7 @@ fn ball_motion_report() {
             let flight = measure_flight(&mut state);
             flight_ticks.push(flight.ticks as f64);
             contacts.push(flight.contact_ticks as f64);
+            hops.push(flight.hop_ticks as f64);
             teeters.push(flight.teeter_ticks as f64);
             if flight.teeter_ticks > 0 {
                 teetered += 1;
@@ -454,6 +463,7 @@ fn ball_motion_report() {
 
     let f = sorted(flight_ticks);
     let c = sorted(contacts);
+    let h = sorted(hops);
     let t = sorted(teeters);
     let s = sorted(steps);
     let teetered_only: Vec<f64> = t.iter().copied().filter(|v| *v > 0.0).collect();
@@ -477,6 +487,11 @@ fn ball_motion_report() {
         percentile(&c, 0.5),
         percentile(&c, 0.9),
         mean(&c) / mean(&f) * 100.0,
+    );
+    eprintln!(
+        "  上へ跳ねたtick: 平均={:.1}回 (接触の{:.0}%)",
+        mean(&h),
+        mean(&h) / mean(&c).max(1e-9) * 100.0,
     );
     eprintln!(
         "  ヘソの縁揺れ:   {teetered}/{}発が揺れた 揺れた玉の平均={:.1}tick 中央={:.0}tick p90={:.0}tick",
@@ -1256,6 +1271,7 @@ fn balls_bounce_a_few_times_on_the_way_down() {
     // 隙間を真っ直ぐ落ちると跳ねる絵が無い。毎コマ釘に触れると密すぎる。
     // 滞空のあいだ数回かすめるのが、弧が見える密度。
     let mut contacts = Vec::new();
+    let mut hops = Vec::new();
     let mut flights = Vec::new();
     for layout in 1..=6u32 {
         let mut nail_seed = layout.wrapping_mul(2_654_435_761);
@@ -1265,10 +1281,12 @@ fn balls_bounce_a_few_times_on_the_way_down() {
         for _ in 0..24u32 {
             let flight = measure_flight(&mut state);
             contacts.push(flight.contact_ticks as f64);
+            hops.push(flight.hop_ticks as f64);
             flights.push(flight.ticks as f64);
         }
     }
     let avg_c = mean(&contacts);
+    let avg_h = mean(&hops);
     let avg_f = mean(&flights);
     assert!(
         avg_c >= 2.0,
@@ -1277,6 +1295,11 @@ fn balls_bounce_a_few_times_on_the_way_down() {
     assert!(
         avg_c / avg_f < 0.45,
         "釘に触れている時間が長すぎて弧が見えない (平均接触={avg_c:.1}回 / 滞空={avg_f:.1}tick)"
+    );
+    assert!(
+        avg_h >= avg_c * 0.20,
+        "釘に当たっても上へ跳ねず、すぐ下へ滑っている \
+         (上へ跳ね={avg_h:.1}回 / 接触={avg_c:.1}回)"
     );
 }
 
