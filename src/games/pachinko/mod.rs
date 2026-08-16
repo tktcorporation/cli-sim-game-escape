@@ -11,8 +11,12 @@
 //!      席を立つかを決める
 
 pub mod actions;
+pub mod board;
 pub mod logic;
+pub mod nails;
+mod physics;
 pub mod render;
+mod rng;
 pub mod save;
 pub mod state;
 

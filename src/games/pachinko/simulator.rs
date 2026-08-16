@@ -17,7 +17,9 @@
 
 #![cfg(test)]
 
-use super::logic::{self, NAIL_SPREAD_RANGE, RAIL_BIAS_RANGE};
+use super::board::Playfield;
+use super::logic;
+use super::nails::{self, NAIL_SPREAD_RANGE, RAIL_BIAS_RANGE};
 use super::state::{
     Digit, Machine, Mode, PachinkoState, PendingRank, ReachKind, StopStyle, BALL_LOAN_COUNT,
     BALL_LOAN_YEN, BALL_R, BOARD_H, FIRE_INTERVAL_TICKS, HALL_SIZE, HIT_GLOW_TICKS, MACHINE_SPECS,
@@ -37,7 +39,7 @@ const REPORT_TICK_LIMIT: u32 = 250_000;
 /// 乱数で振るため、比較したい軸だけを動かす測定には使えない。
 fn machine_with(spec_index: usize, nail_spread: f64, rail_bias: f64, seed: &mut u32) -> Machine {
     let (name, spec) = MACHINE_SPECS[spec_index];
-    let nails = logic::generate_nails(seed, nail_spread, rail_bias);
+    let nails = nails::generate_nails(seed, nail_spread, rail_bias);
     Machine {
         name,
         spec,
@@ -154,7 +156,7 @@ fn play_until_broke(state: &mut PachinkoState, limit: u32) -> RunResult {
 }
 
 /// ヘソへの入りやすさだけを測る。毎 tick 保留とデジタルを捨てるのは、
-/// 電サポ中はヘソの受け口が広がる (`logic::effective_pocket_half_w`) ため、
+/// 電サポ中はヘソの受け口が広がる (`board::effective_pocket_half_w`) ため、
 /// 当たりを引くと「釘の開き」ではなく「引きの強さ」を測ってしまうから。
 fn measure_raw_spin_rate(nail_spread: f64, rail_bias: f64, seed: u32, ticks: u32) -> f64 {
     let mut nail_seed = seed ^ 0x5EED_1234;
@@ -206,7 +208,7 @@ fn measure_payout_ratio(
 struct Flight {
     /// 盤面に居た tick 数。10 ticks/sec なのでそのまま滞空時間になる。
     ticks: u32,
-    /// 釘に触れた tick 数。1 tick は `logic::PHYSICS_SUBSTEPS` 回の判定を
+    /// 釘に触れた tick 数。1 tick は `physics::PHYSICS_SUBSTEPS` 回の判定を
     /// 含むため、同じ tick に複数本の釘へ当たっても 1 と数える。
     contact_ticks: u32,
     /// ヘソの縁で揺れていた tick 数。「入りそう」が見える長さ。
@@ -859,7 +861,7 @@ fn long_run_never_panics_and_keeps_invariants() {
                 ball.vy
             );
             assert!(
-                logic::in_playfield(ball.x, ball.y, 0.0) && ball.y <= BOARD_H,
+                Playfield::TABLE.contains(ball.x, ball.y, 0.0) && ball.y <= BOARD_H,
                 "玉が盤面の外へ出た — 壁の反射か釘の押し出しが盤外へ飛ばした疑い \
                  (tick={t}, pos=({:.2}, {:.2}))",
                 ball.x,

@@ -1,7 +1,7 @@
 //! 玉響 (Tamayura) — ゲーム状態。
 //!
-//! 純粋なデータ定義とパラメータ関数のみ。物理・抽選・状態遷移は logic.rs、
-//! 描画は render.rs に置く (Pure Logic Pattern)。
+//! 純粋なデータ定義とパラメータ関数のみ。空間は board、釘は nails、運動は
+//! physics、当落と席は logic、描画は render に置く (Pure Logic Pattern)。
 //!
 //! ## 盤面座標系
 //! 盤面は連続座標 (`f64`) の縦長で、上部は楕円アーチの逆U字、その下は矩形。
@@ -12,7 +12,7 @@
 //!
 //! ## 台の個性の見せ方
 //! 台ごとの回りやすさは `Machine::nail_spread` / `rail_bias` が持つが、
-//! これらは数値として UI に出さない。`logic::generate_nails` が釘の座標へ
+//! これらは数値として UI に出さない。`nails::generate_nails` が釘の座標へ
 //! 反映し、プレイヤーは盤面の見た目から読む。実際の回転率は打って計測して
 //! 初めて分かる (`logic::spin_rate`)。
 
@@ -47,11 +47,11 @@ pub const LAUNCH_Y: f64 = 12.0;
 pub const START_POCKET_X: f64 = BOARD_W / 2.0;
 pub const START_POCKET_Y: f64 = 54.0;
 /// ヘソの基本の受け口半幅。台ごとの `nail_spread` と電サポの有無を加えた値が
-/// 実効幅になる (`logic::effective_pocket_half_w`)。
+/// 実効幅になる (`board::effective_pocket_half_w`)。
 ///
 /// 回転率はこの幅とヘソ手前の釘の当たり方の積で決まる。ヘソ釘に当たった玉は
 /// 弾かれて受け口を外れるので、玉が速くて釘の判定をすり抜けるほど回転率は
-/// 上がる — 玉の速さ (`logic` の `GRAVITY` / `MAX_SPEED`) を変えたら、この幅も
+/// 上がる。玉の速さ (`physics` の `GRAVITY` / `MAX_SPEED`) を変えたら、この幅も
 /// 測り直して合わせる。`simulator::spin_rate_report` の対照が実測値を出す。
 pub const START_POCKET_BASE_HALF_W: f64 = 1.20;
 
@@ -186,7 +186,7 @@ pub struct Machine {
     /// 寄り釘の傾き。-1.0 (外へ逃がす) 〜 1.0 (中央へ寄せる)。
     /// 描画上は上部釘の x オフセットの傾きとして現れる。
     pub rail_bias: f64,
-    /// 釘の配置。`logic::generate_nails` が seed から生成する。
+    /// 釘の配置。`nails::generate_nails` が seed から生成する。
     pub nails: Vec<Nail>,
     /// この台で打った累計と、その間に回った累計。台を離れても持ち越す。
     pub balls_spent: u32,
@@ -194,7 +194,7 @@ pub struct Machine {
     /// 通常時に限った打ち込みと回転数。回転率 (`logic::spin_rate`) はこちらを
     /// 使う。
     ///
-    /// 電サポ中はヘソの受け口が広がる (`logic::pocket_half_w`) ため、全区間を
+    /// 電サポ中はヘソの受け口が広がる (`board::pocket_half_w`) ため、全区間を
     /// 混ぜた比は「釘がどれだけ開いているか」ではなく「どれだけ当たったか」を
     /// 映してしまう。当たった台ほど回るように見えると、ホールへ戻ったときの
     /// 台選びが釘読みではなく直前の引きの強さに引きずられる。

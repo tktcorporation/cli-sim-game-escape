@@ -1,7 +1,7 @@
 //! 玉響 — 描画 (読み取り専用)。
 //!
 //! 盤面は `ratatui::widgets::canvas::Canvas` + `Marker::Braille` の疑似
-//! ピクセルで、logic.rs が持つ連続座標のまま描く。盤面全面は `Clickable` で
+//! ピクセルで、board が持つ連続座標のまま描く。盤面全面は `Clickable` で
 //! 1つのタップ対象にし、別 DOM 要素を生やさずに「盤面を触ると打ち出しが
 //! 切り替わる」操作を成立させる。
 //!
@@ -33,7 +33,9 @@ use crate::theme;
 use crate::widgets::{Clickable, ClickableList, ScrollableTab, TabBar};
 
 use super::actions;
+use super::board::{self, Arch};
 use super::logic;
+use super::nails;
 use super::state::{
     BallTint, Digit, InfoTab, JackpotState, Machine, MachineSpec, Mode, PachinkoState, PendingRank,
     Phase, SpinOutcome, StopStyle, ATTACKER_HALF_W, ATTACKER_X, ATTACKER_Y, BALL_R, BOARD_H,
@@ -202,7 +204,7 @@ struct BoardStatics {
 /// なので、描くものは全て所有権付きの Vec で先に組む。
 ///
 /// `aspect` は釘を真円に見せるための y 半径の倍率 (`round_aspect`)、
-/// `pocket_half_w` はヘソの受け口半幅 (`logic::pocket_half_w`)。
+/// `pocket_half_w` はヘソの受け口半幅 (`board::pocket_half_w`)。
 fn board_statics(
     machine: Option<&Machine>,
     pocket_half_w: f64,
@@ -215,7 +217,7 @@ fn board_statics(
     // 打ち出した玉は右肩のカーブに当たって釘帯へ落ちるので、入口の形を
     // 平面の天井ではなくアーチとして見せる。
     let mut guide_lines: Vec<(f64, f64, f64, f64)> = Vec::new();
-    let arch = logic::arch_polyline(28);
+    let arch = Arch::TABLE.polyline(28);
     for w in arch.windows(2) {
         guide_lines.push((
             w[0].0,
@@ -227,13 +229,13 @@ fn board_statics(
     // アーチの足から漏斗まで、左右の壁。
     guide_lines.push((
         0.4,
-        board_to_canvas_y(logic::ARCH_B),
+        board_to_canvas_y(Arch::TABLE.b),
         0.4,
         board_to_canvas_y(FUNNEL_TOP_Y),
     ));
     guide_lines.push((
         BOARD_W - 0.4,
-        board_to_canvas_y(logic::ARCH_B),
+        board_to_canvas_y(Arch::TABLE.b),
         BOARD_W - 0.4,
         board_to_canvas_y(FUNNEL_TOP_Y),
     ));
@@ -447,7 +449,7 @@ fn render_hall_preview(state: &PachinkoState, f: &mut Frame, area: Rect) {
     // 座る前に読んだ開きより実際が狭く、釘読みが当てにならなくなる。
     let statics = board_statics(
         Some(machine),
-        logic::pocket_half_w(machine.nail_spread, false),
+        board::pocket_half_w(machine.nail_spread, false),
         round_aspect(inner),
         false,
     );
@@ -539,7 +541,7 @@ fn nail_spread_gauge(nail_spread: f64) -> String {
     const MIN_GAP: usize = 1;
     const MAX_GAP: usize = 7;
 
-    let (lo, hi) = logic::NAIL_SPREAD_RANGE;
+    let (lo, hi) = nails::NAIL_SPREAD_RANGE;
     let t = if hi > lo {
         ((nail_spread - lo) / (hi - lo)).clamp(0.0, 1.0)
     } else {
@@ -910,7 +912,7 @@ fn render_board(
     let attacker_open = jackpot.is_some();
     let statics = board_statics(
         state.seated_machine(),
-        logic::effective_pocket_half_w(state),
+        board::effective_pocket_half_w(state),
         aspect,
         attacker_open,
     );
@@ -2028,12 +2030,12 @@ mod tests {
         let mut state = PachinkoState::new();
         logic::generate_hall(&mut state);
         // 開きの上限と下限の台を並べ、最も差が付く2台で見比べる。
-        let (lo, hi) = logic::NAIL_SPREAD_RANGE;
+        let (lo, hi) = nails::NAIL_SPREAD_RANGE;
         for (index, spread) in [(0usize, lo), (1usize, hi)] {
             let mut seed = 12_345 + index as u32;
             state.machines[index].nail_spread = spread;
             state.machines[index].nails =
-                logic::generate_nails(&mut seed, spread, state.machines[index].rail_bias);
+                nails::generate_nails(&mut seed, spread, state.machines[index].rail_bias);
         }
 
         let render_preview = |state: &PachinkoState| -> Vec<String> {
@@ -2076,7 +2078,7 @@ mod tests {
     fn the_hall_list_shows_the_nail_spread_as_a_gap() {
         // ナロー幅ではプレビューを出せないので、ヘソの開きはこの行だけが
         // 伝える。消えると台を釘で見分ける手がかりが無くなる。
-        let (lo, hi) = logic::NAIL_SPREAD_RANGE;
+        let (lo, hi) = nails::NAIL_SPREAD_RANGE;
         let tight = nail_spread_gauge(lo);
         let loose = nail_spread_gauge(hi);
         assert!(
