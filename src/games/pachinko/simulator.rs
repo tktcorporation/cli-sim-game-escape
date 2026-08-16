@@ -20,8 +20,8 @@
 use super::logic::{self, NAIL_SPREAD_RANGE, RAIL_BIAS_RANGE};
 use super::state::{
     Digit, Machine, Mode, PachinkoState, PendingRank, ReachKind, StopStyle, BALL_LOAN_COUNT,
-    BALL_LOAN_YEN, BALL_R, BOARD_H, BOARD_W, FIRE_INTERVAL_TICKS, HALL_SIZE, HIT_GLOW_TICKS,
-    MACHINE_SPECS, MAX_BALLS, MAX_PENDING, START_POCKET_Y,
+    BALL_LOAN_YEN, BALL_R, BOARD_H, FIRE_INTERVAL_TICKS, HALL_SIZE, HIT_GLOW_TICKS, MACHINE_SPECS,
+    MAX_BALLS, MAX_PENDING, START_POCKET_Y,
 };
 
 // ── 自動プレイ ─────────────────────────────────────────────────
@@ -859,7 +859,7 @@ fn long_run_never_panics_and_keeps_invariants() {
                 ball.vy
             );
             assert!(
-                (0.0..=BOARD_W).contains(&ball.x) && ball.y <= BOARD_H,
+                logic::in_playfield(ball.x, ball.y, 0.0) && ball.y <= BOARD_H,
                 "玉が盤面の外へ出た — 壁の反射か釘の押し出しが盤外へ飛ばした疑い \
                  (tick={t}, pos=({:.2}, {:.2}))",
                 ball.x,

@@ -82,8 +82,18 @@ const NAIL_TANGLE_RESTITUTION: f64 = 0.55;
 /// 「沿って落ちる」動きをここで作る。ここを上げすぎると寄り釘で横へ弾かれて
 /// ヘソへ届く玉が減り、ヘソ釘の開きを読む判断軸が弱くなる。
 const NAIL_TANGENTIAL_KEEP: f64 = 0.86;
-/// 壁・天井との衝突の反発係数。
+/// 左右の垂直壁との衝突の反発係数。
 const WALL_RESTITUTION: f64 = 0.45;
+/// アーチ内壁の反発係数。釘より落とす。高いとカーブを滑って中央のヘソ
+/// 真上へ集まり、出玉率が 1 を超える。
+const ARCH_RESTITUTION: f64 = 0.55;
+/// アーチに沿う接線速度を残す割合。1 だと天井を滑って中央のヘソ真上へ
+/// 集まり、0 だと当たった場所から真下へ落ちる。強度で「どこまで回るか」
+/// を残しつつ、ヘソ真上への収束は避ける。
+const ARCH_TANGENTIAL_KEEP: f64 = 0.50;
+/// アーチ衝突時の横kick。同じ強度・同じ肩でも落ちる列が割れる。
+/// 釘の `NAIL_SCATTER` と同じ役割を、釘帯へ入る前の入口で担う。
+const ARCH_SCATTER: f64 = 0.14;
 /// 速度の上限。`CONTACT_DIST` 以下に収めてあるので、釘へ真っ直ぐ向かう玉は
 /// 必ず1回はサブステップの標本が接触範囲へ入る。ここが接触距離を超えると
 /// 速い玉だけが釘をすり抜け、釘に当たるかどうかが速度で変わってしまう。
@@ -102,6 +112,56 @@ const NAIL_SCATTER: f64 = 0.18;
 const POCKET_SPREAD_GAIN: f64 = 2.0;
 /// 玉と釘が接触する距離。
 const CONTACT_DIST: f64 = BALL_R + NAIL_R;
+/// 盤面上部の逆U字。楕円の上半分が天井と左右の肩になり、その下は垂直の壁。
+/// 打ち出した玉は右端に沿って上がり、肩のカーブに当たって釘帯へ落ちる。
+/// 平面の天井は反射角が揃い、同じ列へ落ちる。
+pub const ARCH_CX: f64 = BOARD_W / 2.0;
+pub const ARCH_A: f64 = BOARD_W / 2.0;
+pub const ARCH_B: f64 = 15.0;
+pub const ARCH_CY: f64 = ARCH_B;
+
+/// 天井の y (下向き正)。中央が最も浅く、左右の肩で `ARCH_B` まで下がる。
+pub fn arch_ceiling_y(x: f64) -> f64 {
+    let u = ((x - ARCH_CX) / ARCH_A).clamp(-1.0, 1.0);
+    ARCH_B * (1.0 - (1.0 - u * u).sqrt())
+}
+
+/// 逆U字の上端を左足から右足まで辿る折れ線。描画と物理が同じ楕円を共有する。
+pub fn arch_polyline(segments: usize) -> Vec<(f64, f64)> {
+    let n = segments.max(8);
+    (0..=n)
+        .map(|i| {
+            let theta = std::f64::consts::PI * (1.0 + i as f64 / n as f64);
+            (
+                ARCH_CX + ARCH_A * theta.cos(),
+                ARCH_CY + ARCH_B * theta.sin(),
+            )
+        })
+        .collect()
+}
+
+/// 玉の中心が盤面の内側にいるか。アーチより上の角は切り欠きなので、
+/// 矩形の内包だけでは足りない。
+pub fn in_playfield(x: f64, y: f64, radius: f64) -> bool {
+    if !(radius..=BOARD_W - radius).contains(&x) || !(0.0..=BOARD_H).contains(&y) {
+        return false;
+    }
+    if y >= ARCH_B {
+        return true;
+    }
+    let rx = ARCH_A - radius;
+    let ry = ARCH_B - radius;
+    if rx <= 0.0 || ry <= 0.0 {
+        return false;
+    }
+    let dx = x - ARCH_CX;
+    let dy = y - ARCH_CY;
+    if dy > 0.0 {
+        return true;
+    }
+    (dx / rx) * (dx / rx) + (dy / ry) * (dy / ry) <= 1.0 + 1e-6
+}
+
 /// 1サブステップごとに横方向の速度へ掛かる減衰。打ち出した勢いは盤面を
 /// 横切る間に抜け、玉は釘の間をほぼ真下へ落ちていく。減衰が無いと初速の
 /// まま左端まで飛んで壁沿いに落ちるだけになり、ハンドル強度が「どこへ
@@ -114,10 +174,11 @@ const LAUNCH_SPEED_JITTER: f64 = 0.11;
 /// 打ち出し方向の横kick。速さだけを振ると同じ角度のまま着地点がほとんど
 /// 動かない。左右に独立した分を足して、同じ強度でも落ちる列が分かれる
 /// ようにする。
-const LAUNCH_VX_JITTER: f64 = 0.18;
-/// 打ち出しの縦成分のばらつき。天井へ届くかどうかの境をまたぐと、折り返し
-/// 位置が大きく割れ、同じ強度でも落ちる列が分かれる。
-const LAUNCH_VY_JITTER: f64 = 0.08;
+const LAUNCH_VX_JITTER: f64 = 0.12;
+/// 打ち出しの縦成分のばらつき。アーチの高い位置まで届くかどうかの境を
+/// またぐと、右肩で落ちるか中央近くまで回るかが割れ、同じ強度でも落ちる
+/// 列が分かれる。
+const LAUNCH_VY_JITTER: f64 = 0.14;
 /// 縁揺れの最短 / 最長 (tick)。最短は `delta_ticks` の上限 (5) より長くし、
 /// 遅れをまとめて消化しても「縁に乗っている」絵が1フレームは残るようにする。
 const TEETER_TICKS_MIN: u8 = 6;
@@ -145,15 +206,15 @@ const _: () = assert!(MAX_SPEED <= BALL_R + NAIL_R);
 const _: () = assert!(TEETER_TICKS_MIN as u32 > 5);
 
 /// ハンドル強度 (0〜100) から打ち出し初速 (1サブステップあたり) を決める。
-/// 玉は天井で折り返し、`HORIZONTAL_DRAG` で横の勢いが抜けたところから釘の
-/// 間へ落ちるので、強度は「盤面のどこへ落とすか」を決める操作になる。
+/// 玉は逆U字の右肩に当たり、`HORIZONTAL_DRAG` で横の勢いが抜けたところから
+/// 釘の間へ落ちるので、強度は「盤面のどこへ落とすか」を決める操作になる。
 /// 適正値は台ごとの釘配置で変わるため、ここでは素直な線形写像だけを行い、
 /// 良し悪しの判断は盤面に委ねる。
 pub fn launch_velocity(power: u8) -> (f64, f64) {
     let p = (power as f64 / 100.0).clamp(0.0, 1.0);
-    // 縦成分は `LAUNCH_VY_JITTER` を足したときに、一部は天井へ届き一部は
-    // 届かない範囲に置く。全員が天井で折り返すと横移動が揃い、溝になる。
-    (-(0.390 + p * 0.920), -0.530 - p * 0.350)
+    // 横は右端から離れない程度。左へ出すと空中で失速し、肩に当たらない。
+    // 縦が主で、当たったあとの跳ねが強度で「どこまで回るか」を分ける。
+    (-(0.05 + p * 0.22), -0.72 - p * 0.42)
 }
 
 fn jitter_launch((vx, vy): (f64, f64), seed: &mut u32) -> (f64, f64) {
@@ -226,7 +287,7 @@ fn step_balls(state: &mut PachinkoState) {
             ball.x += ball.vx;
             ball.y += ball.vy;
             ball.vx *= HORIZONTAL_DRAG;
-            bounce_walls(ball);
+            bounce_walls(ball, seed);
             bounce_nails(ball, &nails, seed);
             clamp_speed(ball);
 
@@ -339,7 +400,8 @@ fn slip_off_lip(ball: &mut Ball) {
     ball.y = START_POCKET_Y + POCKET_MOUTH_BELOW + 0.15;
 }
 
-fn bounce_walls(ball: &mut Ball) {
+fn bounce_walls(ball: &mut Ball, seed: &mut u32) {
+    bounce_arch(ball, seed);
     if ball.x < BALL_R {
         ball.x = BALL_R;
         ball.vx = -ball.vx * WALL_RESTITUTION;
@@ -347,11 +409,55 @@ fn bounce_walls(ball: &mut Ball) {
         ball.x = BOARD_W - BALL_R;
         ball.vx = -ball.vx * WALL_RESTITUTION;
     }
-    if ball.y < BALL_R {
-        // 天井。打ち出した玉はレールを駆け上がってここで折り返す。
-        ball.y = BALL_R;
-        ball.vy = -ball.vy * WALL_RESTITUTION;
+    // 平面の天井は持たない。上部は楕円アーチが受け止める。
+    // y < 0 は数値誤差の逃げ。
+    if ball.y < 0.0 {
+        ball.y = 0.0;
+        if ball.vy < 0.0 {
+            ball.vy = -ball.vy * WALL_RESTITUTION;
+        }
     }
+}
+
+/// 逆U字の内壁。楕円の上半分を玉半径だけ縮めた面に押し戻し、外向き速度を
+/// 跳ね返す。縮めないと、中心が楕円上に乗ったときに玉の上半分が盤外へ出る。
+fn bounce_arch(ball: &mut Ball, seed: &mut u32) {
+    let rx = ARCH_A - BALL_R;
+    let ry = ARCH_B - BALL_R;
+    if rx <= 0.0 || ry <= 0.0 {
+        return;
+    }
+    let dx = ball.x - ARCH_CX;
+    let dy = ball.y - ARCH_CY;
+    if dy > 0.0 {
+        return;
+    }
+    let fx = dx / rx;
+    let fy = dy / ry;
+    let f = fx * fx + fy * fy;
+    if f <= 1.0 {
+        return;
+    }
+    let inv = 1.0 / f.sqrt();
+    ball.x = ARCH_CX + dx * inv;
+    ball.y = ARCH_CY + dy * inv;
+    let gx = dx / (rx * rx);
+    let gy = dy / (ry * ry);
+    let glen = (gx * gx + gy * gy).sqrt().max(1e-9);
+    let nx = gx / glen;
+    let ny = gy / glen;
+    let vn = ball.vx * nx + ball.vy * ny;
+    if vn > 0.0 {
+        ball.vx -= (1.0 + ARCH_RESTITUTION) * vn * nx;
+        ball.vy -= (1.0 + ARCH_RESTITUTION) * vn * ny;
+        ball.vx += (rand01(seed) - 0.5) * 2.0 * ARCH_SCATTER;
+    }
+    let tx = -ny;
+    let ty = nx;
+    let vt = ball.vx * tx + ball.vy * ty;
+    let lost = vt * (1.0 - ARCH_TANGENTIAL_KEEP);
+    ball.vx -= lost * tx;
+    ball.vy -= lost * ty;
 }
 
 fn bounce_nails(ball: &mut Ball, nails: &[Nail], seed: &mut u32) {
@@ -1048,6 +1154,7 @@ const RAIL_ROW_DY: f64 = 5.196;
 const RAIL_BOTTOM_Y: f64 = RAIL_TOP_Y + RAIL_ROW_DY * (RAIL_ROWS as f64 - 1.0);
 const _: () = assert!(RAIL_BOTTOM_Y > RAIL_TOP_Y);
 const _: () = assert!(RAIL_PITCH / 2.0 <= CONTACT_DIST * 2.0 + BALL_R);
+const _: () = assert!(ARCH_B <= RAIL_TOP_Y);
 /// 偶数段。中央は空け、右端 (発射側 x≈59) まで届ける。
 const RAIL_EVEN_OFFSETS: [f64; 10] = [-27.0, -21.0, -15.0, -9.0, -3.0, 3.0, 9.0, 15.0, 21.0, 27.0];
 /// 奇数段。偶数段の隙間の中央に置き、中央にゲートを置く。
@@ -1340,6 +1447,116 @@ mod tests {
     }
 
     #[test]
+    fn arch_ceiling_is_an_inverted_u() {
+        // 中央が最も浅く、左右の肩で下がる。平面だと打ち出しの反射角が揃う。
+        let center = arch_ceiling_y(BOARD_W / 2.0);
+        let side = arch_ceiling_y(4.0);
+        assert!(
+            center < 0.5,
+            "アーチの頂点が天井から離れている (y={center:.2})"
+        );
+        assert!(
+            side > ARCH_B * 0.4,
+            "左右の肩がカーブしていない (y={side:.2})"
+        );
+        assert!(side > center + 4.0, "逆U字になっていない");
+        let pts = arch_polyline(16);
+        assert_eq!(pts.len(), 17);
+        assert!((pts[0].0 - 0.0).abs() < 0.2 && (pts[0].1 - ARCH_B).abs() < 0.2);
+        assert!(
+            (pts[8].0 - ARCH_CX).abs() < 0.2 && pts[8].1 < 0.5,
+            "折れ線の頂点が中央の天井に無い ({:?})",
+            pts[8]
+        );
+        assert!((pts[16].0 - BOARD_W).abs() < 0.2 && (pts[16].1 - ARCH_B).abs() < 0.2);
+    }
+
+    fn shrunk_arch_factor(x: f64, y: f64) -> f64 {
+        let rx = ARCH_A - BALL_R;
+        let ry = ARCH_B - BALL_R;
+        let fx = (x - ARCH_CX) / rx;
+        let fy = (y - ARCH_CY) / ry;
+        fx * fx + fy * fy
+    }
+
+    #[test]
+    fn a_ball_going_up_the_right_hits_the_arch_and_falls() {
+        // 右肩のカーブに当たってから落ちる。空中で重力だけで折り返すと
+        // 反射角が無く、落ちる列が初速だけで決まる。
+        // 衝突はサブステップ内で完結するので、tick 境界の vy 反転位置ではなく
+        // 天井へ最も近づいた距離で当たったことを見る。
+        let mut state = state_with_nails(Vec::new());
+        let (vx, vy) = launch_velocity(62);
+        state.balls.push(test_ball(LAUNCH_X, LAUNCH_Y, vx, vy));
+        let mut min_gap = f64::MAX;
+        let mut closest = (LAUNCH_X, LAUNCH_Y);
+        let mut min_y = LAUNCH_Y;
+        for _ in 0..120 {
+            step_balls(&mut state);
+            let Some(ball) = state.balls.first() else {
+                break;
+            };
+            min_y = min_y.min(ball.y);
+            let gap = ball.y - arch_ceiling_y(ball.x);
+            if gap < min_gap {
+                min_gap = gap;
+                closest = (ball.x, ball.y);
+            }
+            if ball.y >= RAIL_TOP_Y && ball.vy > 0.0 {
+                break;
+            }
+        }
+        assert!(
+            min_gap < BALL_R * 2.5,
+            "アーチに当たっていない (min_gap={min_gap:.2} at x={:.2} y={:.2} 天井={:.2} min_y={min_y:.2})",
+            closest.0,
+            closest.1,
+            arch_ceiling_y(closest.0)
+        );
+        assert!(
+            closest.0 > BOARD_W * 0.7,
+            "右肩以外で天井に近づいている (x={:.2} y={:.2})",
+            closest.0,
+            closest.1
+        );
+        let f = shrunk_arch_factor(closest.0, closest.1);
+        assert!(
+            f > 0.85,
+            "空中で失速して落ちている (x={:.2} y={:.2} f={f:.2})",
+            closest.0,
+            closest.1
+        );
+    }
+
+    #[test]
+    fn a_ball_that_hits_the_arch_falls_into_the_playfield() {
+        // 肩に当たった玉は右端に張り付かず、釘帯の内側へ落ちる。
+        let mut state = state_with_nails(Vec::new());
+        let (vx, vy) = launch_velocity(62);
+        state.balls.push(test_ball(LAUNCH_X, LAUNCH_Y, vx, vy));
+        let mut x_at_nails = None;
+        for _ in 0..200 {
+            step_balls(&mut state);
+            let Some(ball) = state.balls.first() else {
+                break;
+            };
+            if ball.vy > 0.0 && ball.y >= RAIL_TOP_Y {
+                x_at_nails = Some(ball.x);
+                break;
+            }
+        }
+        let x = x_at_nails.expect("釘帯まで届いていない");
+        assert!(
+            x < LAUNCH_X - 1.0,
+            "アーチに当たった玉が右端へ戻っている (x={x:.2})"
+        );
+        assert!(
+            x > BOARD_W * 0.35,
+            "右肩から落ちた玉が左へ飛びすぎている (x={x:.2})"
+        );
+    }
+
+    #[test]
     fn balls_stay_inside_the_board() {
         let mut state = seated_state();
         state.firing = true;
@@ -1348,8 +1565,8 @@ mod tests {
             tick(&mut state);
             for ball in &state.balls {
                 assert!(
-                    ball.x >= 0.0 && ball.x <= BOARD_W && ball.y >= 0.0 && ball.y <= BOARD_H,
-                    "玉が盤面の外へ出た ({:.2}, {:.2})",
+                    in_playfield(ball.x, ball.y, 0.0),
+                    "玉が逆U字の盤面の外へ出た ({:.2}, {:.2})",
                     ball.x,
                     ball.y
                 );
@@ -1539,7 +1756,7 @@ mod tests {
     #[test]
     fn same_power_launches_fan_out_across_the_board() {
         // 同じハンドル強度でも釘帯へ入る列が分かれる。速さだけを振ると角度が
-        // 固定されたまま、釘の間に一本の溝ができる。測定は天井折り返し直後
+        // 固定されたまま、釘の間に一本の溝ができる。測定はアーチ折り返し直後
         // ではなく釘帯の上端。折り返し地点は横移動が短く、ばらけが見えない。
         let mut xs = Vec::new();
         for i in 0..36u32 {

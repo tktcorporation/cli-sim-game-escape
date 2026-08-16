@@ -37,7 +37,7 @@ use super::logic;
 use super::state::{
     BallTint, Digit, InfoTab, JackpotState, Machine, MachineSpec, Mode, PachinkoState, PendingRank,
     Phase, SpinOutcome, StopStyle, ATTACKER_HALF_W, ATTACKER_X, ATTACKER_Y, BALL_R, BOARD_H,
-    BOARD_W, LAUNCH_X, LAUNCH_Y, MAX_PENDING, NAIL_R, PENDING_PROMOTE_FLASH_TICKS, ROUND_COUNT,
+    BOARD_W, MAX_PENDING, NAIL_R, PENDING_PROMOTE_FLASH_TICKS, ROUND_COUNT,
     SIDE_POCKET_HALF_W, SIDE_POCKET_LEFT_X, SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y, START_POCKET_X,
     START_POCKET_Y,
 };
@@ -74,7 +74,7 @@ pub fn render(
     }
 }
 
-/// 盤面のワールド y (下向きが正、0=天井) を Canvas の y (上向きが正) へ
+/// 盤面のワールド y (下向きが正、0=アーチの頂点) を Canvas の y (上向きが正) へ
 /// 反転する。x は左右そのままなので変換しない。
 fn board_to_canvas_y(world_y: f64) -> f64 {
     BOARD_H - world_y
@@ -211,34 +211,47 @@ fn board_statics(
 ) -> BoardStatics {
     let center = BOARD_W / 2.0;
 
-    // 打ち出し口から天井へ回り込むレールと、アタッカーの下からアウト口へ
-    // 絞り込む漏斗。玉が飛んでいない時にも玉道の入口と出口が読める。
-    let mut guide_lines: Vec<(f64, f64, f64, f64)> = vec![
+    // 逆U字のアーチと、アタッカーの下からアウト口へ絞り込む漏斗。
+    // 打ち出した玉は右肩のカーブに当たって釘帯へ落ちるので、入口の形を
+    // 平面の天井ではなくアーチとして見せる。
+    let mut guide_lines: Vec<(f64, f64, f64, f64)> = Vec::new();
+    let arch = logic::arch_polyline(28);
+    for w in arch.windows(2) {
+        guide_lines.push((
+            w[0].0,
+            board_to_canvas_y(w[0].1),
+            w[1].0,
+            board_to_canvas_y(w[1].1),
+        ));
+    }
+    // アーチの足から漏斗まで、左右の壁。
+    guide_lines.push((
+        0.4,
+        board_to_canvas_y(logic::ARCH_B),
+        0.4,
+        board_to_canvas_y(FUNNEL_TOP_Y),
+    ));
+    guide_lines.push((
+        BOARD_W - 0.4,
+        board_to_canvas_y(logic::ARCH_B),
+        BOARD_W - 0.4,
+        board_to_canvas_y(FUNNEL_TOP_Y),
+    ));
+    let mut funnel: Vec<(f64, f64, f64, f64)> = vec![
         (
-            LAUNCH_X,
-            board_to_canvas_y(LAUNCH_Y),
-            LAUNCH_X,
-            board_to_canvas_y(1.5),
-        ),
-        (
-            LAUNCH_X,
-            board_to_canvas_y(1.5),
-            3.0,
-            board_to_canvas_y(1.5),
-        ),
-        (
-            2.0,
+            0.4,
             board_to_canvas_y(FUNNEL_TOP_Y),
             center - OUT_HALF_W,
             board_to_canvas_y(OUT_MOUTH_Y),
         ),
         (
-            BOARD_W - 2.0,
+            BOARD_W - 0.4,
             board_to_canvas_y(FUNNEL_TOP_Y),
             center + OUT_HALF_W,
             board_to_canvas_y(OUT_MOUTH_Y),
         ),
     ];
+    guide_lines.append(&mut funnel);
     for i in 0..FUNNEL_CHEVRONS {
         let t = (i + 1) as f64 / (FUNNEL_CHEVRONS + 1) as f64;
         let y = FUNNEL_TOP_Y + (OUT_MOUTH_Y - FUNNEL_TOP_Y) * t;
