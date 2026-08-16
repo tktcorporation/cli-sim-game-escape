@@ -35,10 +35,11 @@ use crate::widgets::{Clickable, ClickableList, ScrollableTab, TabBar};
 use super::actions;
 use super::logic;
 use super::state::{
-    Digit, InfoTab, JackpotState, Machine, MachineSpec, Mode, PachinkoState, PendingRank, Phase,
-    SpinOutcome, StopStyle, ATTACKER_HALF_W, ATTACKER_X, ATTACKER_Y, BALL_R, BOARD_H, BOARD_W, LAUNCH_X, LAUNCH_Y, MAX_PENDING, NAIL_R,
-    PENDING_PROMOTE_FLASH_TICKS, ROUND_COUNT, SIDE_POCKET_HALF_W, SIDE_POCKET_LEFT_X,
-    SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y, START_POCKET_X, START_POCKET_Y,
+    BallTint, Digit, InfoTab, JackpotState, Machine, MachineSpec, Mode, PachinkoState, PendingRank,
+    Phase, SpinOutcome, StopStyle, ATTACKER_HALF_W, ATTACKER_X, ATTACKER_Y, BALL_R, BOARD_H,
+    BOARD_W, LAUNCH_X, LAUNCH_Y, MAX_PENDING, NAIL_R, PENDING_PROMOTE_FLASH_TICKS, ROUND_COUNT,
+    SIDE_POCKET_HALF_W, SIDE_POCKET_LEFT_X, SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y, START_POCKET_X,
+    START_POCKET_Y,
 };
 
 /// 玉響のアクセント色 (銀玉の色)。盤面の枠・選択中タブ・見出しで共有する。
@@ -51,7 +52,15 @@ const ACCENT: Color = theme::accent(&GameChoice::Pachinko);
 /// 玉が数点まとまった塊になり、隣り合った玉どうしが1つに融合して数を見失う。
 /// 判定より小さく描く分には、釘のどちら側を抜けたかという読み取りは変わらない
 /// — 玉の中心が動く軌跡は同じで、見えるのがその周りの塗りだけになる。
-const BALL_DRAW_SCALE: f64 = 0.7;
+const BALL_DRAW_SCALE: f64 = 0.78;
+/// 縁で揺れている玉は少し大きく描き、「今まさに入りかけている」1個へ視線を集める。
+const TEETER_DRAW_SCALE: f64 = 0.95;
+/// 釘の色。暗い茶灰にして、金・銀・真珠の玉と点描の粒が混ざらないようにする。
+const NAIL_COLOR: Color = Color::Rgb(92, 84, 70);
+const BALL_GOLD: Color = Color::Rgb(255, 214, 70);
+const BALL_SILVER: Color = Color::Rgb(236, 240, 248);
+const BALL_PEARL: Color = Color::Rgb(150, 214, 255);
+const BALL_TEETER: Color = Color::Rgb(255, 130, 210);
 
 pub fn render(
     state: &PachinkoState,
@@ -257,9 +266,9 @@ fn board_statics(
                     canvas_fx::filled_ellipse_points(
                         n.x,
                         board_to_canvas_y(n.y),
-                        NAIL_R * 0.6,
-                        NAIL_R * 0.6 * aspect,
-                        0.2,
+                        NAIL_R * 0.5,
+                        NAIL_R * 0.5 * aspect,
+                        0.22,
                     )
                 })
                 .collect()
@@ -346,7 +355,7 @@ fn draw_board_statics(
     // 釘は盤面に固定された構造物なので暗く沈める。玉と同じ明るさで描くと、
     // 点描の粒がどちらのものか判別できず、玉が釘の間を落ちていく動きを
     // 目で追えなくなる。
-    draw_points(ctx, &statics.nails, Color::DarkGray);
+    draw_points(ctx, &statics.nails, NAIL_COLOR);
     draw_points(ctx, &statics.side_pockets, Color::Blue);
     draw_points(ctx, &statics.start_pocket, start_pocket_color);
     draw_points(ctx, &statics.attacker, attacker_color);
@@ -850,10 +859,13 @@ fn shaken_area(state: &PachinkoState, area: Rect) -> Rect {
 
 /// ヘソの色。玉が入った直後だけ白く光らせる。釘に弾かれた玉
 /// (`Ball::hit_glow`) と同じ見せ方にすることで、盤面の白さが一貫して
-/// 「今この瞬間に何かが当たった」印になる。
+/// 「今この瞬間に何かが当たった」印になる。縁で揺れている玉があるときは
+/// 口そのものを色を変えて、「入りそう」の対象を釘の隙間から拾えるようにする。
 fn start_pocket_color(state: &PachinkoState) -> Color {
     if state.start_flash > 0 {
         Color::White
+    } else if state.balls.iter().any(|b| b.teeter > 0) {
+        BALL_TEETER
     } else if state.mode.is_assisted() {
         Color::LightCyan
     } else {
@@ -897,20 +909,35 @@ fn render_board(
     };
 
     // 釘に弾かれた直後の玉だけ白く光らせ、どこで跳ねたかを目で追えるようにする。
-    let mut ball_pts: Vec<(f64, f64)> = Vec::new();
+    // 色を3種に分けるのは、同じ軌道に乗った複数の玉が1つの塊に融合しないため。
+    let mut gold_pts: Vec<(f64, f64)> = Vec::new();
+    let mut silver_pts: Vec<(f64, f64)> = Vec::new();
+    let mut pearl_pts: Vec<(f64, f64)> = Vec::new();
     let mut glow_pts: Vec<(f64, f64)> = Vec::new();
+    let mut teeter_pts: Vec<(f64, f64)> = Vec::new();
     for ball in &state.balls {
+        let scale = if ball.teeter > 0 {
+            TEETER_DRAW_SCALE
+        } else {
+            BALL_DRAW_SCALE
+        };
         let pts = canvas_fx::filled_ellipse_points(
             ball.x,
             board_to_canvas_y(ball.y),
-            BALL_R * BALL_DRAW_SCALE,
-            BALL_R * BALL_DRAW_SCALE * aspect,
-            0.25,
+            BALL_R * scale,
+            BALL_R * scale * aspect,
+            0.22,
         );
-        if ball.hit_glow > 0 {
+        if ball.teeter > 0 {
+            teeter_pts.extend(pts);
+        } else if ball.hit_glow > 0 {
             glow_pts.extend(pts);
         } else {
-            ball_pts.extend(pts);
+            match ball.tint {
+                BallTint::Gold => gold_pts.extend(pts),
+                BallTint::Silver => silver_pts.extend(pts),
+                BallTint::Pearl => pearl_pts.extend(pts),
+            }
         }
     }
 
@@ -937,8 +964,11 @@ fn render_board(
             // 玉は盤面で唯一動くものなので、固定物 (釘・入賞口) より明るく
             // 描いて視線を集める。弾かれた瞬間だけさらに白く飛ばすことで、
             // 「今この瞬間に当たった」印はヘソの入賞と同じ白で統一される。
-            draw_points(ctx, &ball_pts, Color::LightYellow);
+            draw_points(ctx, &gold_pts, BALL_GOLD);
+            draw_points(ctx, &silver_pts, BALL_SILVER);
+            draw_points(ctx, &pearl_pts, BALL_PEARL);
             draw_points(ctx, &glow_pts, Color::White);
+            draw_points(ctx, &teeter_pts, BALL_TEETER);
             draw_points(ctx, &jackpot_ring, Color::LightRed);
         })
         .block(block);
@@ -1875,8 +1905,8 @@ mod tests {
     use ratzilla::ratatui::Terminal;
 
     use crate::games::pachinko::state::{
-        Ball, Digit, Pending, PendingRank, ReachKind, SpinOutcome, StopStyle, INITIAL_REELS,
-        REACH_FLASH_TICKS, START_FLASH_TICKS,
+        Ball, BallTint, Digit, Pending, PendingRank, ReachKind, SpinOutcome, StopStyle,
+        INITIAL_REELS, REACH_FLASH_TICKS, START_FLASH_TICKS,
     };
 
     /// `Game::render` ではなく `render` を直接叩く。前者は `crate::time::now_ms()`
@@ -2143,22 +2173,9 @@ mod tests {
                 reels: [7, 7, 7],
             },
         };
-        state.balls.push(Ball {
-            x: 30.0,
-            y: 40.0,
-            vx: -0.4,
-            vy: 0.6,
-            hit_glow: 3,
-            fired_in_normal: true,
-        });
-        state.balls.push(Ball {
-            x: 12.0,
-            y: 70.0,
-            vx: 0.2,
-            vy: 0.9,
-            hit_glow: 0,
-            fired_in_normal: true,
-        });
+        state.balls.push(Ball::falling(30.0, 40.0, -0.4, 0.6, true, BallTint::Gold));
+        state.balls.last_mut().expect("玉を積んだ").hit_glow = 3;
+        state.balls.push(Ball::falling(12.0, 70.0, 0.2, 0.9, true, BallTint::Pearl));
         state.pending.push(Pending::new(SpinOutcome {
             hit: false,
             rounds: 0,
@@ -2345,6 +2362,14 @@ mod tests {
         state.start_flash = 0;
         state.mode = Mode::Jitan { spins_left: 10 };
         assert_eq!(start_pocket_color(&state), Color::LightCyan);
+        state.mode = Mode::Normal;
+        state.balls.push(Ball::falling(START_POCKET_X, START_POCKET_Y, 0.0, 0.0, true, BallTint::Silver));
+        state.balls[0].teeter = 8;
+        assert_eq!(
+            start_pocket_color(&state),
+            BALL_TEETER,
+            "縁で揺れている玉があるのにヘソの色が変わっていない"
+        );
     }
 
     #[test]

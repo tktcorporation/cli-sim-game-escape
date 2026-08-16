@@ -27,9 +27,14 @@ pub const BOARD_W: f64 = 64.0;
 pub const BOARD_H: f64 = 96.0;
 
 /// 玉の半径。釘との衝突判定 `BALL_R + NAIL_R` に使う。
-pub const BALL_R: f64 = 0.9;
-/// 釘の半径。
-pub const NAIL_R: f64 = 0.7;
+///
+/// 盤面幅 (`BOARD_W`) に対して大きいと、釘の隙間を玉が塞いでしまい、
+/// 1本1本に弾かれる弧が見えなくなる。実機の 11mm 玉は釘間隔より一回り
+/// 小さく、隙間を抜けたり縁に乗ったりする余地がある。ここも同じ比率に
+/// 寄せて、穴へ「入りかける」動きが物理として起きるようにする。
+pub const BALL_R: f64 = 0.68;
+/// 釘の半径。玉より小さく描き、隙間から玉道が読めるようにする。
+pub const NAIL_R: f64 = 0.48;
 
 /// 発射レールの出口 (右上)。ここから初速を与えて打ち出す。
 pub const LAUNCH_X: f64 = BOARD_W - 3.0;
@@ -45,7 +50,7 @@ pub const START_POCKET_Y: f64 = 54.0;
 /// 弾かれて受け口を外れるので、玉が速くて釘の判定をすり抜けるほど回転率は
 /// 上がる — 玉の速さ (`logic` の `GRAVITY` / `MAX_SPEED`) を変えたら、この幅も
 /// 測り直して合わせる。`simulator::spin_rate_report` の対照が実測値を出す。
-pub const START_POCKET_BASE_HALF_W: f64 = 1.2;
+pub const START_POCKET_BASE_HALF_W: f64 = 1.20;
 
 /// アタッカー (大当たり中のみ開放)。
 pub const ATTACKER_X: f64 = BOARD_W / 2.0;
@@ -151,6 +156,22 @@ pub struct Nail {
     pub y: f64,
 }
 
+/// 盤面の玉を互いに見分ける色。打ち出しのたびに振り、同じ軌道に乗った
+/// 複数の玉が1つの塊に見えないようにする。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BallTint {
+    /// 金色。釘 (暗い茶灰) との差が最も大きい。
+    Gold,
+    /// 銀色。実機の鋼玉に近い。
+    Silver,
+    /// 青白い真珠色。金・銀の中間で3個並んでも連続しない。
+    Pearl,
+}
+
+impl BallTint {
+    pub const ALL: [BallTint; 3] = [BallTint::Gold, BallTint::Silver, BallTint::Pearl];
+}
+
 /// 1台の遊技機。釘配置とスペックを持つ。
 #[derive(Clone, Debug)]
 pub struct Machine {
@@ -196,6 +217,33 @@ pub struct Ball {
     /// 始まることもある。打ち出し時と入賞時のモードを別々に見ると、分母を
     /// 増やさなかった玉が分子だけ増やす — 標本が小さいうちほど比率が歪む。
     pub fired_in_normal: bool,
+    /// ヘソの縁で揺れている残り tick。0 なら通常の落下。
+    ///
+    /// 実機では盤面とガラスの隙間で玉が三次元に揺れ、入賞口の縁に乗ってから
+    /// 落ちる。2D ではその「入りそう」を、口へ到達した瞬間の即時判定ではなく
+    /// 縁での横揺れとして残す。
+    pub teeter: u8,
+    /// 揺れの中心 x。`teeter > 0` のあいだだけ意味を持つ。
+    pub teeter_x: f64,
+    /// 描画用の色。物理には使わない。
+    pub tint: BallTint,
+}
+
+impl Ball {
+    /// 盤面を落ちていく玉を1つ作る。揺れと発光は落ち始めてから付く。
+    pub fn falling(x: f64, y: f64, vx: f64, vy: f64, fired_in_normal: bool, tint: BallTint) -> Self {
+        Self {
+            x,
+            y,
+            vx,
+            vy,
+            hit_glow: 0,
+            fired_in_normal,
+            teeter: 0,
+            teeter_x: x,
+            tint,
+        }
+    }
 }
 
 // ── デジタル抽選 ───────────────────────────────────────────────
