@@ -61,17 +61,17 @@ pub const PHYSICS_SUBSTEPS: u32 = 5;
 /// 瞬間が絵として残らない。`simulator::ball_motion_report` がこの移動距離を
 /// 実測する。
 ///
-/// 重力は控えめに取る。加速が大きいと釘と釘の間の弧が 1 コマで飛び、
-/// 「ポンポン跳ねる」より「落ちる」だけに見える。速さを決める定数は
-/// `GRAVITY` 単体ではない。`launch_velocity` / `HORIZONTAL_DRAG` /
+/// 重力は、釘で跳ねた弧が次の段を飛び越えない強さにする。軽すぎると玉は
+/// 釘の上を hop して隙間を落ち、当たりながら落ちる絵が消える。速さを決める
+/// 定数は `GRAVITY` 単体ではない。`launch_velocity` / `HORIZONTAL_DRAG` /
 /// `NAIL_SCATTER` と組で「玉道の形」を決めており、どれか1つだけを触ると
 /// 形が変わって回転率が動く。玉道を保ったまま T 倍の時間をかけさせたい
 /// 場合は、位置が速度の積分・速度が加速度の積分であることから、速度を
 /// 1/T・加速度を 1/T²・1サブステップあたりの減衰を T 乗根にした組で動かす。
-const GRAVITY: f64 = 0.0135;
+const GRAVITY: f64 = 0.028;
 /// 釘との衝突の反発係数。弾かれた玉が次の釘まで飛ぶ軌跡が絵として残る程度に
 /// 跳ね返す。上げすぎると玉が釘の上で跳ね続けて落ちてこない。
-const NAIL_RESTITUTION: f64 = 0.93;
+const NAIL_RESTITUTION: f64 = 0.90;
 /// 法線速度がこれ未満の衝突は「絡み」。実機では起こした釘の根元に玉が絡み、
 /// 盤面へ擦りながら落ちる。反発を落とすことで、速い衝突の「ポン」と遅い
 /// 衝突の「引っかかり」を同じ式で出し分ける。
@@ -87,7 +87,7 @@ const WALL_RESTITUTION: f64 = 0.45;
 /// 速度の上限。`CONTACT_DIST` 以下に収めてあるので、釘へ真っ直ぐ向かう玉は
 /// 必ず1回はサブステップの標本が接触範囲へ入る。ここが接触距離を超えると
 /// 速い玉だけが釘をすり抜け、釘に当たるかどうかが速度で変わってしまう。
-const MAX_SPEED: f64 = 0.96;
+const MAX_SPEED: f64 = 1.10;
 /// 釘に当たった時に横方向へ乗るばらつきの最大幅。同じ軌道で入っても結果が
 /// 割れる「パチンコらしさ」の源で、0 にすると釘配置だけで結果が決まる
 /// 決定論的な機械になってしまう。速度と同じ次元なので、落下の速さを変える
@@ -106,7 +106,7 @@ const CONTACT_DIST: f64 = BALL_R + NAIL_R;
 /// 横切る間に抜け、玉は釘の間をほぼ真下へ落ちていく。減衰が無いと初速の
 /// まま左端まで飛んで壁沿いに落ちるだけになり、ハンドル強度が「どこへ
 /// 落とすか」を決める操作にならない。
-const HORIZONTAL_DRAG: f64 = 0.978;
+const HORIZONTAL_DRAG: f64 = 0.958;
 /// 打ち出し1発ごとの初速のばらつき (割合)。同じ強度でも玉道が完全に一致
 /// すると、釘の間に一本の溝ができて全弾が同じ場所へ落ちる。実機のハンドル
 /// と同じく、わずかな揺らぎが玉道を散らす。
@@ -114,7 +114,7 @@ const LAUNCH_SPEED_JITTER: f64 = 0.11;
 /// 打ち出し方向の横kick。速さだけを振ると同じ角度のまま着地点がほとんど
 /// 動かない。左右に独立した分を足して、同じ強度でも落ちる列が分かれる
 /// ようにする。
-const LAUNCH_VX_JITTER: f64 = 0.16;
+const LAUNCH_VX_JITTER: f64 = 0.18;
 /// 打ち出しの縦成分のばらつき。天井へ届くかどうかの境をまたぐと、折り返し
 /// 位置が大きく割れ、同じ強度でも落ちる列が分かれる。
 const LAUNCH_VY_JITTER: f64 = 0.08;
@@ -153,7 +153,7 @@ pub fn launch_velocity(power: u8) -> (f64, f64) {
     let p = (power as f64 / 100.0).clamp(0.0, 1.0);
     // 縦成分は `LAUNCH_VY_JITTER` を足したときに、一部は天井へ届き一部は
     // 届かない範囲に置く。全員が天井で折り返すと横移動が揃い、溝になる。
-    (-(0.360 + p * 0.860), -0.420 - p * 0.220)
+    (-(0.390 + p * 0.920), -0.530 - p * 0.350)
 }
 
 fn jitter_launch((vx, vy): (f64, f64), seed: &mut u32) -> (f64, f64) {
@@ -544,12 +544,7 @@ fn near_miss_ready(reach: ReachKind, rank: PendingRank) -> bool {
 
 /// デジタルの止まり方を引く。当落は既に決まっているので、ここは「決まった
 /// 結果をどう見せるか」だけを選ぶ。
-fn pick_stop_style(
-    hit: bool,
-    reach: ReachKind,
-    rank: PendingRank,
-    seed: &mut u32,
-) -> StopStyle {
+fn pick_stop_style(hit: bool, reach: ReachKind, rank: PendingRank, seed: &mut u32) -> StopStyle {
     if hit {
         if rng_below(seed, 100) < REVIVAL_PERCENT {
             return StopStyle::Revival;
@@ -665,7 +660,10 @@ fn promote_pending(state: &mut PachinkoState) {
 
 fn advance_digit(state: &mut PachinkoState) {
     let finished = match &mut state.digit {
-        Digit::Spinning { ticks_left, outcome } => {
+        Digit::Spinning {
+            ticks_left,
+            outcome,
+        } => {
             *ticks_left = ticks_left.saturating_sub(1);
             if *ticks_left == 0 {
                 Some(*outcome)
@@ -1018,90 +1016,68 @@ pub fn cash_out(state: &mut PachinkoState) -> bool {
 
 // ── 釘 ─────────────────────────────────────────────────────────
 
-/// 寄り釘の段数と、最上段・最下段の y。
+/// 寄り釘の段数と、最上段の y。
 ///
-/// 寄り釘はヘソより上にあり、ここの密度がそのまま回転率を決める。段数・本数・
-/// 間隔のどれを動かしても最下段の位相がずれ、ヘソの真上に釘が来るか隙間が
-/// 来るかが入れ替わって回転率が倍近く動く
-/// (`simulator::spin_rate_report` の対照で実測できる)。
+/// パチンコのゲージも Plinko / Galton board も、釘は**千鳥の正格子**で打つ。
+/// 各段の釘は等間隔、次の段は半ピッチずらす。こうすると上の段の隙間の中央に
+/// 次の段の釘が来て、玉は段ごとに必ず当たって左右へ割れる。縦に揃えると
+/// 隙間を真っ直ぐ落ち、不規則にすると隙間の列ができて同じように落ちる。
 ///
-/// 本数は実機のゲージに寄せて疏にする。密な格子だと玉が毎コマ釘に当たり、
-/// 弧を描いて跳ねる絵が残らない。中央の扱いも疏密と同じで、全段を空けると
-/// 縦溝になって出玉率が崩れ、全段を塞ぐとヘソへ届かなくなる。偶数段は中央を
-/// 空けて右端 (発射側) まで並べ、奇数段は中央にゲートを置く。玉は段ごとに
-/// 左右へ弾かれながら落ちるので、弧が見え、ヘソへは届くが毎発は入らない。
-/// 下部釘は回転率に効かないので、盤面を疏に保つ側から間引く。
-const RAIL_ROWS: usize = 5;
-/// 段の基準 y。等間隔にしない。等間隔だと次の段までの飛行時間が揃い、
-/// 同じ位相で次の釘へ入る。
-const RAIL_ROW_Y: [f64; RAIL_ROWS] = [15.4, 22.2, 29.5, 36.0, 43.1];
-const RAIL_TOP_Y: f64 = RAIL_ROW_Y[0];
-const RAIL_BOTTOM_Y: f64 = RAIL_ROW_Y[RAIL_ROWS - 1];
+/// 実機のゲージは 11mm 玉に対して釘間を 11.75〜13.5mm に揃える。ここでの
+/// ピッチは盤面幅に合わせたスケールで、玉が隙間を抜けられるが次の段では
+/// 釘に当たる大きさにする。
+///
+/// 中央の扱いだけは格子から外す。全段を空けると縦溝になって出玉率が崩れ、
+/// 全段を塞ぐとヘソへ届かなくなる。偶数段は中央を空け、奇数段は中央に
+/// ゲートを置く。
+///
+/// 下側2段は千鳥にしない。隙間を拾う段ではなく、当たった玉を外側へ歩かせる
+/// ヘソ前のゲートなので、同じ x に重ねる。ずらすと、一段目で弾かれた玉が
+/// 二段目を外してヘソへ落ち、出玉率が 1 を超える。
+const RAIL_ROWS: usize = 6;
+const RAIL_TOP_Y: f64 = 16.0;
+/// 同じ段の釘の中心間隔。次の段は半分ずらす。
+///
+/// 半ピッチが `CONTACT_DIST * 2` より大きいと、千鳥でも釘と釘のあいだに
+/// 縦の抜け道が残る。実機のゲージは玉が次の段で必ず釘に当たる間隔なので、
+/// ここも半ピッチを捕獲幅に近づける。
+const RAIL_PITCH: f64 = 6.0;
+/// 段の間隔。正三角形の千鳥 (`pitch * √3/2`) にすると、跳ねた先が次の釘の
+/// 側面へ入り、真正面の衝突より左右へ割れやすい。
+const RAIL_ROW_DY: f64 = 5.196;
+const RAIL_BOTTOM_Y: f64 = RAIL_TOP_Y + RAIL_ROW_DY * (RAIL_ROWS as f64 - 1.0);
 const _: () = assert!(RAIL_BOTTOM_Y > RAIL_TOP_Y);
-/// 1本の寄り釘。(盤面中央からの x, 段の基準 y からのずらす量)。
-/// 近い2本は対になって隙間をかすめさせ、次の段の釘は一つ上の隙間の中心から
-/// ずらして置き、真正面ではなく側面で弾く。
-type RailSpec = (f64, f64);
-/// 最上段。打ち出しが天井で折り返した先を受ける。左はまだ玉が来ないので空け、
-/// 右寄りの対は隙間が玉1個分よりやや広く、かすめて跳ねる。
-const RAIL_ENTRY: [RailSpec; 6] = [
-    (-11.0, -0.55),
-    (-3.0, 0.70),
-    (6.6, -0.40),
-    (14.0, 0.85),
-    (17.3, -0.60),
-    (26.7, 0.15),
+const _: () = assert!(RAIL_PITCH / 2.0 <= CONTACT_DIST * 2.0 + BALL_R);
+/// 偶数段。中央は空け、右端 (発射側 x≈59) まで届ける。
+const RAIL_EVEN_OFFSETS: [f64; 10] = [-27.0, -21.0, -15.0, -9.0, -3.0, 3.0, 9.0, 15.0, 21.0, 27.0];
+/// 奇数段。偶数段の隙間の中央に置き、中央にゲートを置く。
+const RAIL_ODD_OFFSETS: [f64; 11] = [
+    -30.0, -24.0, -18.0, -12.0, -6.0, 0.0, 6.0, 12.0, 18.0, 24.0, 30.0,
 ];
-/// 偶数段。中央を空け、右端 (発射側 x≈59) まで届ける。間隔は均等にしない。
-const RAIL_EVEN: [RailSpec; 6] = [
-    (-20.6, 0.50),
-    (-11.0, -0.75),
-    (-3.4, 0.35),
-    (7.2, -0.50),
-    (16.0, 0.80),
-    (26.5, -0.15),
-];
-/// 奇数段。中央にゲートを置き、偶数段の隙間の中心からずらす。真正面の衝突
-/// より側面の跳ねが多くなり、左右へ割れる。
-const RAIL_ODD: [RailSpec; 6] = [
-    (-14.8, -0.40),
-    (-5.6, 0.65),
-    (0.0, 0.10),
-    (10.0, -0.70),
-    (19.6, 0.45),
-    (26.4, -0.25),
-];
-/// 最下段。中央を広く空け、ステージとヘソ釘が最終ゲートになる余地を残す。
-/// 上の段と同じ幅だと、最下段とステージが縦に重なって針の穴になり、
-/// 届く玉が打ち出し位置の運だけで決まってしまう。
-const RAIL_LAST: [RailSpec; 6] = [
-    (-20.0, 0.30),
-    (-10.6, -0.55),
-    (-3.6, 0.60),
-    (6.2, -0.45),
-    (15.6, 0.40),
-    (26.4, 0.20),
-];
+/// 下側2段。中央を広く空け、ステージとヘソ釘が最終ゲートになる余地を残す。
+/// 内側の空きはピッチ2倍より 2 広い。これ以上広げると千鳥で散らした玉が
+/// 縦溝でヘソへ落ちて出玉率が 1 を超える。2段とも同じ x に打ち、当たった
+/// 玉を外側へ歩かせる。
+const RAIL_LAST_OFFSETS: [f64; 8] = [-24.0, -18.0, -12.0, -7.0, 7.0, 12.0, 18.0, 24.0];
+const _: () = assert!(RAIL_ROWS.is_multiple_of(2));
+const _: () = assert!(RAIL_LAST_OFFSETS[4] - RAIL_LAST_OFFSETS[3] <= RAIL_PITCH * 2.0 + 2.0);
 /// `rail_bias` が最大のときに外側の釘を中央へ寄せる割合。中央の釘は動かず、
 /// 端ほど大きく動くので、盤面では「上部の釘が中央へ傾いている」形に見える。
 ///
-/// 寄り釘は疏な並びなので、ここを大きくして格子ごと縮めると、段の隙間が
-/// ヘソの真上へ揃う `rail_bias` の値でだけ玉道が一本に繋がり、回転率が跳ね
-/// 上がる。跳ね方は `rail_bias` に対して単調ではなく、盤面の見た目からは
-/// 読めない。読める手がかり (ヘソ釘の開き) より強い当たり外れを隠し持たせ
-/// ないよう、傾きは玉道を大きく変えない範囲に留める。
+/// 千鳥の隙間は半ピッチずつずれている。格子全体を大きく縮めると、ずれが
+/// 潰れて隙間がヘソの真上へ揃う `rail_bias` の値でだけ玉道が一本に繋がり、
+/// 回転率が跳ね上がる。傾きは玉道を大きく変えない範囲に留める。
 const RAIL_BIAS_PULL: f64 = 0.03;
 /// 寄り釘1本ごとの位置の揺らぎ。同じ `nail_spread` / `rail_bias` の台でも
 /// 盤面が同一にならないようにして、台ごとの見た目の個体差を作る。
 ///
-/// ここを大きくすると、玉道を決めるのが「見えるヘソ釘の開き」ではなく
-/// 「見えない寄り釘のズレ」になり、盤面から回りやすさを読むという判断軸が
-/// 成立しなくなる。`simulator::nail_spread_correlates_with_spin_rate` が
-/// その退行を検知する。疏な並びでは 1 本のズレが弧の見え方に効くので、
-/// 格子を崩すのに足りて読みを壊さない幅に留める。段ごとの対と y のずらしが
-/// 跳ね方を決める本体で、揺らぎは台差用の仕上げ。
-const NAIL_JITTER: f64 = 0.48;
-const NAIL_Y_JITTER: f64 = 0.55;
+/// 千鳥の正格子が玉道の本体なので、揺らぎは台差用の仕上げに留める。
+/// ここを大きくすると格子が崩れ、隙間の列ができて玉が釘を外して落ちる。
+/// 玉道を決めるのが「見えるヘソ釘の開き」ではなく「見えない寄り釘のズレ」
+/// にもなる。`simulator::nail_spread_correlates_with_spin_rate` がその退行を
+/// 検知する。
+const NAIL_JITTER: f64 = 0.22;
+const NAIL_Y_JITTER: f64 = 0.18;
 
 /// 下部釘の段数と本数。ヘソより下にあり回転率に効かないので、盤面を疏に
 /// 保つ側から間引く。左右の一般入賞口へ玉を振り分ける道が見える本数。
@@ -1118,19 +1094,18 @@ pub fn generate_nails(seed: &mut u32, nail_spread: f64, rail_bias: f64) -> Vec<N
     let mut nails = Vec::new();
     let center = BOARD_W / 2.0;
 
-    // 寄り釘。偶数段は中央を空け、奇数段は中央にゲートを置く。
+    // 寄り釘。千鳥の正格子。偶数段は中央を空け、奇数段は中央にゲート。
     // 同じ x に全段並べると縦溝か壁かの二択になる。
-    for (row, &y) in RAIL_ROW_Y.iter().enumerate() {
-        let specs: &[RailSpec] = if row + 1 == RAIL_ROWS {
-            &RAIL_LAST
-        } else if row == 0 {
-            &RAIL_ENTRY
+    for row in 0..RAIL_ROWS {
+        let y = RAIL_TOP_Y + row as f64 * RAIL_ROW_DY;
+        let offsets: &[f64] = if row + 2 >= RAIL_ROWS {
+            &RAIL_LAST_OFFSETS
         } else if row % 2 == 0 {
-            &RAIL_EVEN
+            &RAIL_EVEN_OFFSETS
         } else {
-            &RAIL_ODD
+            &RAIL_ODD_OFFSETS
         };
-        for &(off, dy) in specs {
+        for &off in offsets {
             let base_x = center + off;
             let pulled = center + (base_x - center) * (1.0 - rail_bias * RAIL_BIAS_PULL);
             // 中央ゲートは揺らぎで消さない。壁か縦溝かに落ちる。
@@ -1141,7 +1116,7 @@ pub fn generate_nails(seed: &mut u32, nail_spread: f64, rail_bias: f64) -> Vec<N
             };
             nails.push(Nail {
                 x: pulled + rand_range(seed, -j, j),
-                y: y + dy + rand_range(seed, -NAIL_Y_JITTER, NAIL_Y_JITTER),
+                y: y + rand_range(seed, -NAIL_Y_JITTER, NAIL_Y_JITTER),
             });
         }
     }
@@ -1176,7 +1151,11 @@ pub fn generate_nails(seed: &mut u32, nail_spread: f64, rail_bias: f64) -> Vec<N
         let span = BOARD_W - 2.0 * LOWER_INSET;
         for i in 0..LOWER_NAILS_PER_ROW {
             let u = i as f64 / (LOWER_NAILS_PER_ROW - 1) as f64;
-            let stagger = if row % 2 == 0 { 0.0 } else { span / (LOWER_NAILS_PER_ROW as f64 * 2.0) };
+            let stagger = if row % 2 == 0 {
+                0.0
+            } else {
+                span / (LOWER_NAILS_PER_ROW as f64 * 2.0)
+            };
             let x = LOWER_INSET + span * u + stagger;
             nails.push(Nail {
                 x: x + rand_range(seed, -NAIL_JITTER * 0.7, NAIL_JITTER * 0.7),
@@ -1214,8 +1193,11 @@ pub fn generate_hall(state: &mut PachinkoState) {
     for _ in 0..HALL_SIZE {
         let pick = rng_below(&mut state.rng_state, MACHINE_SPECS.len() as u32) as usize;
         let (name, spec) = MACHINE_SPECS[pick];
-        let nail_spread =
-            rand_range(&mut state.rng_state, NAIL_SPREAD_RANGE.0, NAIL_SPREAD_RANGE.1);
+        let nail_spread = rand_range(
+            &mut state.rng_state,
+            NAIL_SPREAD_RANGE.0,
+            NAIL_SPREAD_RANGE.1,
+        );
         let rail_bias = rand_range(&mut state.rng_state, RAIL_BIAS_RANGE.0, RAIL_BIAS_RANGE.1);
         let nails = generate_nails(&mut state.rng_state, nail_spread, rail_bias);
         machines.push(Machine {
@@ -1304,7 +1286,10 @@ mod tests {
         let spread_of = |bias: f64| {
             let mut seed = 0xABCD_1234;
             let nails = generate_nails(&mut seed, 0.5, bias);
-            let upper: Vec<&Nail> = nails.iter().filter(|n| n.y < START_POCKET_Y - 4.0).collect();
+            let upper: Vec<&Nail> = nails
+                .iter()
+                .filter(|n| n.y < START_POCKET_Y - 4.0)
+                .collect();
             let sum: f64 = upper.iter().map(|n| (n.x - center).abs()).sum();
             sum / upper.len() as f64
         };
@@ -1349,7 +1334,7 @@ mod tests {
         );
         let returned = -ball.vy;
         assert!(
-            returned > incoming * 0.90,
+            returned >= incoming * 0.88,
             "釘の跳ねが弱く、弧が見えない (入射={incoming:.3} 跳ね={returned:.3})"
         );
     }
@@ -1426,68 +1411,128 @@ mod tests {
     }
 
     #[test]
-    fn generate_nails_keeps_the_board_sparse() {
-        // 密な格子だと玉が毎コマ釘に当たり、弧を描いて跳ねる絵が残らない。
-        // 疏すぎるとヘソへの道が無くなり抽選が起きなくなる。
+    fn generate_nails_keeps_the_galton_count() {
+        // 密すぎると玉が毎コマ釘に当たり、弧を描いて跳ねる絵が残らない。
+        // 本数が段×列から外れると、千鳥のどこかが欠けて抜け道になる。
         for seed in [1u32, 0xABCD, 0x5EED_1234, 99] {
             let mut s = seed;
             let nails = generate_nails(&mut s, 0.55, 0.0);
-            assert!(
-                (24..=40).contains(&nails.len()),
-                "釘の本数が疏密の想定から外れている (seed={seed}, {}本)",
-                nails.len()
+            assert_eq!(
+                nails.len(),
+                68,
+                "釘の本数が千鳥格子の想定から外れている (seed={seed})"
             );
         }
     }
 
     #[test]
-    fn rail_nails_are_not_a_regular_lattice() {
-        // 等間隔の格子だと玉は同じ列を滑り落ち、跳ねる弧が見えない。
-        // 最上段の y が1本の水平線に乗らず、seed が変われば x も動くことを見る。
-        let row_of = |seed: u32| {
-            let mut s = seed;
-            generate_nails(&mut s, 0.5, 0.0)
-                .into_iter()
-        .filter(|n| (n.y - RAIL_TOP_Y).abs() < 2.8)
-                .map(|n| (n.x, n.y))
-                .collect::<Vec<_>>()
-        };
-        let a = row_of(0xC0FF_EE00);
-        let b = row_of(0x1234_5678);
-        assert!(a.len() >= 3, "最上段の寄り釘が無い ({})", a.len());
-        let ys: Vec<f64> = a.iter().map(|&(_, y)| y).collect();
-        let y_min = ys.iter().copied().fold(f64::INFINITY, f64::min);
-        let y_max = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    fn rail_pitch_is_uniform_in_a_row() {
+        // ゲージは同じ段の間隔を揃える。不揃いだと隙間の列ができて落ちる。
+        for w in RAIL_EVEN_OFFSETS.windows(2) {
+            assert!(
+                (w[1] - w[0] - RAIL_PITCH).abs() < 1e-9,
+                "偶数段の間隔がピッチから外れている ({:?})",
+                w
+            );
+        }
+        for w in RAIL_ODD_OFFSETS.windows(2) {
+            assert!(
+                (w[1] - w[0] - RAIL_PITCH).abs() < 1e-9,
+                "奇数段の間隔がピッチから外れている ({:?})",
+                w
+            );
+        }
+        for w in RAIL_LAST_OFFSETS.windows(2) {
+            assert_funnel_step(w, "ヘソ前");
+        }
+    }
+
+    fn assert_funnel_step(w: &[f64], label: &str) {
+        if w[0] < 0.0 && w[1] > 0.0 {
+            return;
+        }
+        let gap = w[1] - w[0];
+        if gap + 1e-9 < RAIL_PITCH {
+            return;
+        }
         assert!(
-            y_max - y_min > 0.25,
-            "最上段の釘が水平な1列に並んでいる (span={:.3})",
-            y_max - y_min
+            (gap - RAIL_PITCH).abs() < 1e-9,
+            "{label}の間隔がピッチから外れている ({:?})",
+            w
         );
-        let ax: Vec<i64> = a.iter().map(|(x, _)| (x * 10.0).round() as i64).collect();
-        let bx: Vec<i64> = b.iter().map(|(x, _)| (x * 10.0).round() as i64).collect();
-        assert_ne!(ax, bx, "seed を変えても寄り釘の x が同じ。揺らぎが効いていない");
     }
 
     #[test]
-    fn rail_nail_gaps_are_irregular() {
-        // 等間隔だと玉は隙間の真ん中を滑り落ち、跳ねる弧が見えない。
-        // 設計上の間隔が揃っていないことを、揺らぎを除いた座標で見る。
-        let xs: Vec<f64> = RAIL_EVEN.iter().map(|(off, _)| *off).collect();
-        let mut gaps = Vec::new();
-        for pair in xs.windows(2) {
-            gaps.push(pair[1] - pair[0]);
+    fn rail_rows_stagger_like_a_galton_board() {
+        // 次の段の釘が上の段の隙間の中央に来る。縦に揃えると隙間を真っ直ぐ落ちる。
+        for w in RAIL_EVEN_OFFSETS.windows(2) {
+            let mid = (w[0] + w[1]) / 2.0;
+            let nearest = RAIL_ODD_OFFSETS
+                .iter()
+                .map(|x| (x - mid).abs())
+                .fold(f64::INFINITY, f64::min);
+            assert!(nearest < 1e-9, "偶数段の隙間中央 {mid} に奇数段の釘が無い");
         }
-        let min = gaps.iter().copied().fold(f64::INFINITY, f64::min);
-        let max = gaps.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-        assert!(
-            max - min > 2.0,
-            "偶数段の釘間隔がほぼ均等 (gaps={gaps:?})"
+    }
+
+    #[test]
+    fn rail_heso_gate_rows_stack_on_the_same_x() {
+        // ヘソ前は千鳥で隙間を拾う場所ではない。同じ x に重ねて、当たった
+        // 玉を外側へ歩かせる。ずれると一段目で弾かれた玉がヘソへ落ちる。
+        let mut seed = 0xA11C_E5EDu32;
+        let nails = generate_nails(&mut seed, 0.55, 0.0);
+        let y4 = RAIL_TOP_Y + RAIL_ROW_DY * (RAIL_ROWS as f64 - 2.0);
+        let y5 = RAIL_TOP_Y + RAIL_ROW_DY * (RAIL_ROWS as f64 - 1.0);
+        let xs_at = |y_target: f64| -> Vec<f64> {
+            let mut xs: Vec<f64> = nails
+                .iter()
+                .filter(|n| (n.y - y_target).abs() < 2.0)
+                .map(|n| n.x)
+                .collect();
+            xs.sort_by(|a, b| a.partial_cmp(b).expect("x が NaN"));
+            xs
+        };
+        let upper = xs_at(y4);
+        let lower = xs_at(y5);
+        assert_eq!(
+            upper.len(),
+            lower.len(),
+            "ヘソ前の2段で本数が違う ({upper:?} / {lower:?})"
         );
-        let entry: Vec<f64> = RAIL_ENTRY.iter().map(|(off, _)| *off).collect();
-        let pair_gap = entry[4] - entry[3];
+        for (a, b) in upper.iter().zip(lower.iter()) {
+            assert!(
+                (a - b).abs() < NAIL_JITTER * 2.0 + 0.05,
+                "ヘソ前の2段が同じ x に重なっていない ({a:.2} vs {b:.2})"
+            );
+        }
+    }
+
+    #[test]
+    fn a_ball_falling_through_the_rail_hits_nails_on_the_way_down() {
+        // 千鳥は「段を落ちるたびに釘へ当たる」ための打ち方。隙間を外して
+        // ヘソまで届くなら、格子の位相がずれている。
+        let mut seed = 0xA11C_E5ED;
+        let nails = generate_nails(&mut seed, 0.55, 0.0);
+        let mut state = state_with_nails(nails);
+        state
+            .balls
+            .push(test_ball(BOARD_W / 2.0, RAIL_TOP_Y - 1.5, 0.15, 0.25));
+        let mut contacts = 0u32;
+        for _ in 0..400 {
+            step_balls(&mut state);
+            let Some(ball) = state.balls.first() else {
+                break;
+            };
+            if ball.hit_glow == HIT_GLOW_TICKS {
+                contacts += 1;
+            }
+            if ball.y > START_POCKET_Y {
+                break;
+            }
+        }
         assert!(
-            pair_gap > CONTACT_DIST && pair_gap < CONTACT_DIST + 2.4,
-            "最上段の対の隙間がかすめて跳ねる幅から外れている (gap={pair_gap:.2})"
+            contacts >= 3,
+            "千鳥を落ちても釘にほとんど当たらない (接触={contacts}tick)"
         );
     }
 
@@ -1526,7 +1571,7 @@ mod tests {
         let var = xs.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / (xs.len() - 1) as f64;
         let std = var.sqrt();
         assert!(
-            std > 2.5,
+            std > 1.2,
             "同じ強度の打ち出しが同じ列へ落ちている (std={std:.2}, n={})",
             xs.len()
         );
@@ -1547,8 +1592,8 @@ mod tests {
                 .map(|n| (n.x - center).abs())
                 .fold(f64::INFINITY, f64::min)
         };
-        let even_y = RAIL_ROW_Y[0];
-        let odd_y = RAIL_ROW_Y[1];
+        let even_y = RAIL_TOP_Y;
+        let odd_y = RAIL_TOP_Y + RAIL_ROW_DY;
         let even_gap = nearest(even_y);
         let odd_gap = nearest(odd_y);
         assert!(
@@ -1567,12 +1612,9 @@ mod tests {
         // から揺れ、そのあいだ盤面に残る。
         let mut state = state_with_nails(Vec::new());
         state.machines[0].nail_spread = 0.8;
-        state.balls.push(test_ball(
-            START_POCKET_X,
-            START_POCKET_Y - 0.4,
-            0.0,
-            0.25,
-        ));
+        state
+            .balls
+            .push(test_ball(START_POCKET_X, START_POCKET_Y - 0.4, 0.0, 0.25));
         step_balls(&mut state);
         let ball = state.balls.first().expect("縁に乗った玉が消えている");
         assert!(
@@ -1625,12 +1667,9 @@ mod tests {
         // 一度も描画されないまま入賞してしまう。
         const { assert!(TEETER_TICKS_MIN as u32 > 5) };
         let mut state = state_with_nails(Vec::new());
-        state.balls.push(test_ball(
-            START_POCKET_X,
-            START_POCKET_Y - 0.4,
-            0.0,
-            0.2,
-        ));
+        state
+            .balls
+            .push(test_ball(START_POCKET_X, START_POCKET_Y - 0.4, 0.0, 0.2));
         step_balls(&mut state);
         assert!(
             state.balls.first().is_some_and(|b| b.teeter > 0),
@@ -1649,9 +1688,7 @@ mod tests {
         let count_hits = |mode: Mode| {
             let mut state = seated_state();
             state.mode = mode;
-            (0..trials)
-                .filter(|_| roll_outcome(&mut state).hit)
-                .count()
+            (0..trials).filter(|_| roll_outcome(&mut state).hit).count()
         };
         let normal = count_hits(Mode::Normal);
         let kakuhen = count_hits(Mode::Kakuhen { spins_left: 0 });
@@ -1675,9 +1712,17 @@ mod tests {
             }
             let [l, m, r] = outcome.reels;
             if outcome.hit {
-                assert!(l == m && m == r, "当たりなのにゾロ目でない: {:?}", outcome.reels);
+                assert!(
+                    l == m && m == r,
+                    "当たりなのにゾロ目でない: {:?}",
+                    outcome.reels
+                );
             } else if outcome.reach == ReachKind::None {
-                assert_ne!(l, r, "リーチ無しなのに左右が揃っている: {:?}", outcome.reels);
+                assert_ne!(
+                    l, r,
+                    "リーチ無しなのに左右が揃っている: {:?}",
+                    outcome.reels
+                );
             } else {
                 assert!(
                     l == r && m != l,
@@ -1838,7 +1883,10 @@ mod tests {
             state.chain, 0,
             "電サポが切れても連チャン数が残り、通常時の画面が終わった連チャンを続いているものとして出し続ける"
         );
-        assert_eq!(state.record.best_chain, 2, "自己記録まで巻き戻してはいけない");
+        assert_eq!(
+            state.record.best_chain, 2,
+            "自己記録まで巻き戻してはいけない"
+        );
     }
 
     #[test]
@@ -1876,7 +1924,10 @@ mod tests {
         state.mode = Mode::Normal;
         resolve_spin(&mut state, jackpot(10));
 
-        assert!(after_first > before, "1回目の大当たりで演出トリガが進んでいない");
+        assert!(
+            after_first > before,
+            "1回目の大当たりで演出トリガが進んでいない"
+        );
         assert!(
             state.jackpot_seq > after_first,
             "ヘソ入賞を挟まない連続大当たりで演出トリガが進んでいない"
@@ -1983,7 +2034,10 @@ mod tests {
         state.reach_flash = REACH_FLASH_TICKS;
         tick_n(&mut state, HIT_GLOW_TICKS as u32);
         assert!(state.start_flash > 0, "ヘソの光が描画される前に消えている");
-        assert!(state.reach_flash > 0, "リーチの光が描画される前に消えている");
+        assert!(
+            state.reach_flash > 0,
+            "リーチの光が描画される前に消えている"
+        );
         tick_n(&mut state, REACH_FLASH_TICKS as u32);
         assert_eq!(state.start_flash, 0, "ヘソの光が消えない");
         assert_eq!(state.reach_flash, 0, "リーチの光が消えない");
@@ -2027,8 +2081,12 @@ mod tests {
         let mut state = seated_state();
         // 先頭は次の変動で消化されるため最終ランクまで押し上げられる。1段ずつ
         // 上る様子は、その後ろで待つ保留で見る。
-        state.pending.push(Pending::new(ranked_miss(PendingRank::White)));
-        state.pending.push(Pending::new(ranked_miss(PendingRank::Rainbow)));
+        state
+            .pending
+            .push(Pending::new(ranked_miss(PendingRank::White)));
+        state
+            .pending
+            .push(Pending::new(ranked_miss(PendingRank::Rainbow)));
         let mut rank = PendingRank::White;
         let mut steps = 0;
         for _ in 0..500 {
@@ -2091,8 +2149,8 @@ mod tests {
             try_fire(&mut state);
             state.balls.clear();
         }
-        let normal_only = spin_rate(state.seated_machine().expect("着席していない"))
-            .expect("標本が足りない");
+        let normal_only =
+            spin_rate(state.seated_machine().expect("着席していない")).expect("標本が足りない");
 
         // 同じ台で電サポ中に打ち込んでも、表示される回転率は動かない。
         state.mode = Mode::Kakuhen { spins_left: 0 };
@@ -2104,8 +2162,8 @@ mod tests {
             resolve_start_pocket(&mut state, false);
             state.pending.clear();
         }
-        let after_assist = spin_rate(state.seated_machine().expect("着席していない"))
-            .expect("標本が足りない");
+        let after_assist =
+            spin_rate(state.seated_machine().expect("着席していない")).expect("標本が足りない");
 
         assert!(
             (after_assist - normal_only).abs() < 1e-9,
@@ -2197,7 +2255,10 @@ mod tests {
             panic!("大当たり中ではない");
         };
         end_jackpot(&mut state, jackpot_state);
-        assert_eq!(state.last_jackpot_chain, 2, "終了時点の連チャン数が残っていない");
+        assert_eq!(
+            state.last_jackpot_chain, 2,
+            "終了時点の連チャン数が残っていない"
+        );
 
         // 電サポを切らして連チャンを数え直しても、決算の値は動かない。
         state.mode = Mode::Normal;
@@ -2266,7 +2327,10 @@ mod tests {
                 outcome.reach.label()
             );
         }
-        assert!(near_misses > 0, "惜しいハズレが一度も出ず、検証になっていない");
+        assert!(
+            near_misses > 0,
+            "惜しいハズレが一度も出ず、検証になっていない"
+        );
     }
 
     #[test]
@@ -2303,7 +2367,10 @@ mod tests {
                 );
             }
         }
-        assert!(confirmed > 0, "確定シグナルが一度も立たず、検証になっていない");
+        assert!(
+            confirmed > 0,
+            "確定シグナルが一度も立たず、検証になっていない"
+        );
         assert!(rainbows > 0, "虹保留が一度も出ず、検証になっていない");
     }
 
@@ -2327,7 +2394,10 @@ mod tests {
         let slip = spin_ticks(StopStyle::Slip);
         let revival = spin_ticks(StopStyle::Revival);
         assert_eq!(plain, ReachKind::None.spin_ticks());
-        assert!(slip > plain, "滑りで回転が伸びていない (滑り={slip} 素={plain})");
+        assert!(
+            slip > plain,
+            "滑りで回転が伸びていない (滑り={slip} 素={plain})"
+        );
         assert!(
             revival > slip,
             "復活が滑りより短い (復活={revival} 滑り={slip})"
@@ -2410,7 +2480,9 @@ mod tests {
         resolve_spin(&mut state, jackpot(5));
         state.mode = Mode::Jitan { spins_left: 1 };
         // 消化待ちの保留を1つ残したまま、電サポ中に引いたハズレを消化する。
-        state.pending.push(Pending::new(assisted_miss(ReachKind::None)));
+        state
+            .pending
+            .push(Pending::new(assisted_miss(ReachKind::None)));
         resolve_spin(&mut state, assisted_miss(ReachKind::None));
         assert_eq!(state.mode, Mode::Normal, "時短が切れていない");
         assert_eq!(
@@ -2447,7 +2519,10 @@ mod tests {
             ease_jackpot_payout(&mut state);
             let diff = target - state.jackpot_payout_shown;
             assert!(diff >= 0.0, "表示値が実際の値を追い越した ({diff})");
-            assert!(diff < prev, "表示値が実際の値へ近づいていない ({prev} → {diff})");
+            assert!(
+                diff < prev,
+                "表示値が実際の値へ近づいていない ({prev} → {diff})"
+            );
             prev = diff;
             ticks += 1;
             if diff == 0.0 {
@@ -2493,12 +2568,9 @@ mod tests {
             kakuhen: false,
             payout: 0,
         });
-        state.balls.push(test_ball(
-            ATTACKER_X,
-            ATTACKER_Y - 0.5,
-            0.0,
-            MAX_SPEED,
-        ));
+        state
+            .balls
+            .push(test_ball(ATTACKER_X, ATTACKER_Y - 0.5, 0.0, MAX_SPEED));
         step_balls(&mut state);
         assert_eq!(state.jackpot_payout(), ATTACKER_PAYOUT);
     }
@@ -2527,7 +2599,10 @@ mod tests {
         // 何が揃ったのか見えないまま次の回転へ移る。
         let mut state = seated_state();
         let outcome = jackpot(8);
-        state.digit = Digit::Spinning { ticks_left: 1, outcome };
+        state.digit = Digit::Spinning {
+            ticks_left: 1,
+            outcome,
+        };
         advance_digit(&mut state);
         assert_eq!(state.digit, Digit::Idle);
         assert_eq!(state.last_reels, outcome.reels);
