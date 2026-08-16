@@ -298,24 +298,27 @@ fn step_teeter(ball: &mut Ball, pocket_half_w: f64, seed: &mut u32) -> TeeterEnd
 
     let offset = (ball.x - START_POCKET_X).abs();
     if offset > pocket_half_w {
-        ball.teeter = 0;
-        ball.vx = (ball.x - START_POCKET_X).signum() * 0.38;
-        ball.vy = 0.28;
-        ball.y = START_POCKET_Y + 0.25;
+        slip_off_lip(ball);
         return TeeterEnd::Stay;
     }
     if ball.teeter == 0 {
         let arrival = (ball.teeter_x - START_POCKET_X).abs() / pocket_half_w.max(0.1);
         if arrival > TEETER_SLIP_EDGE && rng_below(seed, 100) < TEETER_SLIP_PERCENT {
-            ball.vx = (ball.teeter_x - START_POCKET_X).signum() * 0.38;
-            ball.vy = 0.28;
-            ball.y = START_POCKET_Y + 0.25;
+            slip_off_lip(ball);
             return TeeterEnd::Stay;
         }
         TeeterEnd::Capture
     } else {
         TeeterEnd::Stay
     }
+}
+
+/// 縁から外す。口の判定矩形の外へ出さないと、次の tick でまた縁に乗ってしまう。
+fn slip_off_lip(ball: &mut Ball) {
+    ball.teeter = 0;
+    ball.vx = (ball.x - START_POCKET_X).signum() * 0.38;
+    ball.vy = 0.28;
+    ball.y = START_POCKET_Y + POCKET_MOUTH_BELOW + 0.15;
 }
 
 fn bounce_walls(ball: &mut Ball) {
@@ -1459,11 +1462,14 @@ mod tests {
         let ball = state.balls.first().expect("口の外へ出た玉が消えている");
         assert_eq!(ball.teeter, 0, "口の外なのに縁揺れが続いている");
         assert!(
-            ball.y > START_POCKET_Y,
-            "口の外へ出た玉が下へ落ちていない (y={:.2})",
+            ball.y > START_POCKET_Y + POCKET_MOUTH_BELOW,
+            "口の外へ出た玉が判定矩形の中に残っている (y={:.2})",
             ball.y
         );
         assert_eq!(state.pending.len(), before, "口の外の玉が入賞している");
+        step_balls(&mut state);
+        let ball = state.balls.first().expect("落下中の玉が消えている");
+        assert_eq!(ball.teeter, 0, "滑り落ちた玉が再び縁に乗っている");
     }
 
     #[test]
