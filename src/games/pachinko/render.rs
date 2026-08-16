@@ -1962,6 +1962,36 @@ mod tests {
         state
     }
 
+    fn frame_text(state: &PachinkoState, width: u16, height: u16) -> String {
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = width;
+        cs.borrow_mut().terminal_rows = height;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| {
+                render(state, f, f.area(), &cs);
+            })
+            .unwrap();
+        crate::tui_inspect::buffer_text(terminal.backend().buffer())
+    }
+
+    /// 着席画面とホールを文字として出す。見た目の判断はこの出力で行う。
+    ///
+    /// `cargo test --lib games::pachinko::render::tests::dump_hall_and_playing_screens -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_hall_and_playing_screens() {
+        let mut hall = PachinkoState::new();
+        logic::generate_hall(&mut hall);
+        eprintln!("=== hall 100x40 ===\n{}", frame_text(&hall, 100, 40));
+        let playing = seated_state();
+        eprintln!("=== playing 100x40 ===\n{}", frame_text(&playing, 100, 40));
+        eprintln!(
+            "=== playing 40x30 (narrow) ===\n{}",
+            frame_text(&playing, 40, 30)
+        );
+    }
+
     #[test]
     fn hall_renders_without_panicking_narrow_and_wide() {
         let mut state = PachinkoState::new();

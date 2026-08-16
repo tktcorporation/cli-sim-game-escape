@@ -100,6 +100,16 @@ clippy の `disallowed_methods` で禁止済み（`clippy.toml` 参照）。ア�
 
 ---
 
+### Important: UI の確認は文字 dump
+
+画面は端末セルである。見た目の判断は `TestBackend` のバッファを文字列として
+取り出し、そのテキストで行う。ブラウザのスクリーンショットや画面録画に
+変換しない。画像は Braille 盤面の点を潰し、読む側のトークンも食う。
+
+手順とコマンドは `.claude/rules/project/cli-ui-inspection.md`。
+
+---
+
 ## Game Design Concepts
 
 ### Cookie Factory — コアコンセプト: 「投資戦略」
