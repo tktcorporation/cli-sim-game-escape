@@ -1259,9 +1259,10 @@ fn boards_keep_the_galton_nail_count() {
         counts.push(machine.nails.len());
     }
     let avg = counts.iter().sum::<usize>() as f64 / counts.len() as f64;
+    let expected = nails::expected_nail_count() as f64;
     assert!(
-        (avg - 68.0).abs() < 1.0,
-        "釘の本数が千鳥格子の想定から外れている (平均={avg:.1}本, 内訳={counts:?})"
+        (avg - expected).abs() < 1.0,
+        "釘の本数が千鳥格子の想定から外れている (平均={avg:.1}本 想定={expected:.0}, 内訳={counts:?})"
     );
 }
 

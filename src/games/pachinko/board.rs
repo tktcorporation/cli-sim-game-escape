@@ -15,7 +15,9 @@ pub const CONTACT_DIST: f64 = BALL_R + NAIL_R;
 const POCKET_SPREAD_GAIN: f64 = 2.0;
 
 /// 盤面上部の逆U字。楕円の上半分が天井と左右の肩になり、その下は垂直の壁。
-/// 打ち出した玉は右端に沿って上がり、肩のカーブに当たって釘帯へ落ちる。
+///
+/// 打ち出しは右足 (3時) から内壁を滑り、頂点 (12時) 付近で盤内へ落ちる。
+/// 天井をただの壁として跳ね返すと、玉は右肩で落ちて頂点まで届かない。
 /// 平面の天井は反射角が揃い、同じ列へ落ちる。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Arch {
@@ -42,6 +44,13 @@ impl Arch {
         b: 15.0,
     };
 
+    /// 左足 (9時)。`polyline` と同じ媒介変数。
+    pub const THETA_LEFT: f64 = std::f64::consts::PI;
+    /// 頂点 (12時)。
+    pub const THETA_TOP: f64 = std::f64::consts::PI * 1.5;
+    /// 右足 (3時)。打ち出しの始点。
+    pub const THETA_RIGHT: f64 = std::f64::consts::PI * 2.0;
+
     /// 天井の y (下向き正)。中央が最も浅く、左右の肩で `b` まで下がる。
     pub fn ceiling_y(self, x: f64) -> f64 {
         let u = ((x - self.cx) / self.a).clamp(-1.0, 1.0);
@@ -60,6 +69,44 @@ impl Arch {
                 )
             })
             .collect()
+    }
+
+    /// 玉半径だけ縮めた楕円上の点。レールに乗った玉の中心。
+    pub fn inner_point(self, theta: f64, radius: f64) -> (f64, f64) {
+        let rx = (self.a - radius).max(0.1);
+        let ry = (self.b - radius).max(0.1);
+        (
+            self.cx + rx * theta.cos(),
+            self.cy + ry * theta.sin(),
+        )
+    }
+
+    /// 右足から頂点へ向かう向きの単位接線。θ を減らす方向。
+    pub fn tangent_decreasing(self, theta: f64, radius: f64) -> (f64, f64) {
+        let rx = (self.a - radius).max(0.1);
+        let ry = (self.b - radius).max(0.1);
+        let dx = rx * theta.sin();
+        let dy = -ry * theta.cos();
+        let len = (dx * dx + dy * dy).sqrt().max(1e-9);
+        (dx / len, dy / len)
+    }
+
+    /// 楕円の外へ向かう単位法線。レールを離すときに盤内へ蹴る向きの逆。
+    pub fn outward_normal(self, theta: f64, radius: f64) -> (f64, f64) {
+        let (x, y) = self.inner_point(theta, radius);
+        let rx = (self.a - radius).max(0.1);
+        let ry = (self.b - radius).max(0.1);
+        let gx = (x - self.cx) / (rx * rx);
+        let gy = (y - self.cy) / (ry * ry);
+        let len = (gx * gx + gy * gy).sqrt().max(1e-9);
+        (gx / len, gy / len)
+    }
+
+    /// `dθ` を弧長に換算する係数。レール上の移動量を速さから決める。
+    pub fn arc_metric(self, theta: f64, radius: f64) -> f64 {
+        let rx = (self.a - radius).max(0.1);
+        let ry = (self.b - radius).max(0.1);
+        (rx * theta.sin()).hypot(ry * theta.cos())
     }
 
     /// 玉半径だけ縮めた楕円の上半分の外側に中心があるとき、面上へ押し戻した
@@ -181,6 +228,22 @@ mod tests {
             pts[8]
         );
         assert!((pts[16].0 - BOARD_W).abs() < 0.2 && (pts[16].1 - arch.b).abs() < 0.2);
+        let top = arch.inner_point(Arch::THETA_TOP, BALL_R);
+        assert!(
+            (top.0 - arch.cx).abs() < 0.2 && top.1 < BALL_R + 0.2,
+            "12時の内側点が頂点に無い ({:?})",
+            top
+        );
+        let right = arch.inner_point(Arch::THETA_RIGHT, BALL_R);
+        assert!(
+            right.0 > BOARD_W - BALL_R - 0.2 && (right.1 - arch.b).abs() < 0.2,
+            "3時の内側点が右足に無い ({:?})",
+            right
+        );
+        assert!(
+            (crate::games::pachinko::state::LAUNCH_Y - arch.b).abs() < 1e-9,
+            "LAUNCH_Y がアーチの右足の高さとずれている"
+        );
     }
 
     #[test]

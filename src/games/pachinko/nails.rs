@@ -29,7 +29,11 @@ use super::state::{
 /// 下側2段は千鳥にしない。隙間を拾う段ではなく、当たった玉を外側へ歩かせる
 /// ヘソ前のゲートなので、同じ x に重ねる。ずらすと、一段目で弾かれた玉が
 /// 二段目を外してヘソへ落ち、出玉率が 1 を超える。
-const RAIL_ROWS: usize = 6;
+///
+/// 12時から落ちた玉は盤面中央へ来る。偶数段と同じく中央を空けると、中段を
+/// 抜けたあと縦溝でヘソへ直行する。ここは奇数段と同じ中央ゲートを重ねて、
+/// 一度当たってからヘソ釘の開きで選別されるようにする。
+const RAIL_ROWS: usize = 8;
 pub(super) const RAIL_TOP_Y: f64 = 16.0;
 /// 同じ段の釘の中心間隔。次の段は半分ずらす。
 ///
@@ -37,9 +41,10 @@ pub(super) const RAIL_TOP_Y: f64 = 16.0;
 /// 縦の抜け道が残る。実機のゲージは玉が次の段で必ず釘に当たる間隔なので、
 /// ここも半ピッチを捕獲幅に近づける。
 const RAIL_PITCH: f64 = 6.0;
-/// 段の間隔。正三角形の千鳥 (`pitch * √3/2`) にすると、跳ねた先が次の釘の
-/// 側面へ入り、真正面の衝突より左右へ割れやすい。
-pub(super) const RAIL_ROW_DY: f64 = 5.196;
+/// 段の間隔。正三角形 (`pitch * √3/2` ≈ 5.2) より少し詰める。ヘソ前まで
+/// 段を足すと正三角形のままでは最下段がヘソ釘と重なり、詰めると跳ねた弧が
+/// 次の段へ届いて中段の空落下が消える。
+pub(super) const RAIL_ROW_DY: f64 = 4.50;
 const RAIL_BOTTOM_Y: f64 = RAIL_TOP_Y + RAIL_ROW_DY * (RAIL_ROWS as f64 - 1.0);
 const _: () = assert!(RAIL_BOTTOM_Y > RAIL_TOP_Y);
 const _: () = assert!(RAIL_PITCH / 2.0 <= CONTACT_DIST * 2.0 + BALL_R);
@@ -50,13 +55,7 @@ const RAIL_EVEN_OFFSETS: [f64; 10] = [-27.0, -21.0, -15.0, -9.0, -3.0, 3.0, 9.0,
 const RAIL_ODD_OFFSETS: [f64; 11] = [
     -30.0, -24.0, -18.0, -12.0, -6.0, 0.0, 6.0, 12.0, 18.0, 24.0, 30.0,
 ];
-/// 下側2段。中央を広く空け、ステージとヘソ釘が最終ゲートになる余地を残す。
-/// 内側の空きはピッチ2倍より 2 広い。これ以上広げると千鳥で散らした玉が
-/// 縦溝でヘソへ落ちて出玉率が 1 を超える。2段とも同じ x に打ち、当たった
-/// 玉を外側へ歩かせる。
-const RAIL_LAST_OFFSETS: [f64; 8] = [-24.0, -18.0, -12.0, -7.0, 7.0, 12.0, 18.0, 24.0];
 const _: () = assert!(RAIL_ROWS.is_multiple_of(2));
-const _: () = assert!(RAIL_LAST_OFFSETS[4] - RAIL_LAST_OFFSETS[3] <= RAIL_PITCH * 2.0 + 2.0);
 /// `rail_bias` が最大のときに外側の釘を中央へ寄せる割合。中央の釘は動かず、
 /// 端ほど大きく動くので、盤面では「上部の釘が中央へ傾いている」形に見える。
 ///
@@ -95,7 +94,7 @@ pub fn generate_nails(seed: &mut u32, nail_spread: f64, rail_bias: f64) -> Vec<N
     for row in 0..RAIL_ROWS {
         let y = RAIL_TOP_Y + row as f64 * RAIL_ROW_DY;
         let offsets: &[f64] = if row + 2 >= RAIL_ROWS {
-            &RAIL_LAST_OFFSETS
+            &RAIL_ODD_OFFSETS
         } else if row % 2 == 0 {
             &RAIL_EVEN_OFFSETS
         } else {
@@ -171,6 +170,20 @@ pub fn generate_nails(seed: &mut u32, nail_spread: f64, rail_bias: f64) -> Vec<N
     nails
 }
 
+/// 千鳥＋ヘソ＋下部の想定本数。段の配列を足した値で、生成結果と突き合わせる。
+#[cfg(test)]
+pub(super) fn expected_nail_count() -> usize {
+    let mut n = 0usize;
+    for row in 0..RAIL_ROWS {
+        n += if row + 2 >= RAIL_ROWS || row % 2 == 1 {
+            RAIL_ODD_OFFSETS.len()
+        } else {
+            RAIL_EVEN_OFFSETS.len()
+        };
+    }
+    n + 2 + 2 + LOWER_ROWS * LOWER_NAILS_PER_ROW + 2
+}
+
 /// ホールに並ぶ台のヘソ釘の開きの範囲。
 ///
 /// 下限は「全く回らない台」を並べないための足切り。上限は出玉率 (賞球総数 ÷
@@ -237,12 +250,13 @@ mod tests {
     fn generate_nails_keeps_the_galton_count() {
         // 密すぎると玉が毎コマ釘に当たり、弧を描いて跳ねる絵が残らない。
         // 本数が段×列から外れると、千鳥のどこかが欠けて抜け道になる。
+        let expected = expected_nail_count();
         for seed in [1u32, 0xABCD, 0x5EED_1234, 99] {
             let mut s = seed;
             let nails = generate_nails(&mut s, 0.55, 0.0);
             assert_eq!(
                 nails.len(),
-                68,
+                expected,
                 "釘の本数が千鳥格子の想定から外れている (seed={seed})"
             );
         }
@@ -265,24 +279,6 @@ mod tests {
                 w
             );
         }
-        for w in RAIL_LAST_OFFSETS.windows(2) {
-            assert_funnel_step(w, "ヘソ前");
-        }
-    }
-
-    fn assert_funnel_step(w: &[f64], label: &str) {
-        if w[0] < 0.0 && w[1] > 0.0 {
-            return;
-        }
-        let gap = w[1] - w[0];
-        if gap + 1e-9 < RAIL_PITCH {
-            return;
-        }
-        assert!(
-            (gap - RAIL_PITCH).abs() < 1e-9,
-            "{label}の間隔がピッチから外れている ({:?})",
-            w
-        );
     }
 
     #[test]
@@ -300,8 +296,8 @@ mod tests {
 
     #[test]
     fn rail_heso_gate_rows_stack_on_the_same_x() {
-        // ヘソ前は千鳥で隙間を拾う場所ではない。同じ x に重ねて、当たった
-        // 玉を外側へ歩かせる。ずれると一段目で弾かれた玉がヘソへ落ちる。
+        // ヘソ前は千鳥で隙間を拾う場所ではない。同じ x に中央ゲートを重ねて、
+        // 12時から落ちた玉を一度当ててからヘソ釘へ渡す。
         let mut seed = 0xA11C_E5EDu32;
         let nails = generate_nails(&mut seed, 0.55, 0.0);
         let y4 = RAIL_TOP_Y + RAIL_ROW_DY * (RAIL_ROWS as f64 - 2.0);
@@ -356,6 +352,12 @@ mod tests {
         assert!(
             odd_gap < CONTACT_DIST,
             "奇数段に中央ゲートが無い (最近={odd_gap:.2})"
+        );
+        let last_y = RAIL_TOP_Y + RAIL_ROW_DY * (RAIL_ROWS as f64 - 1.0);
+        assert!(
+            nearest(last_y) < CONTACT_DIST,
+            "ヘソ前の段に中央ゲートが無く、12時から落ちた玉が縦溝で抜ける (最近={:.2})",
+            nearest(last_y)
         );
     }
 }

@@ -18,6 +18,12 @@
 cargo test --lib games::pachinko::render::tests::dump_hall_and_playing_screens -- --ignored --nocapture
 ```
 
+打ち出しが 3時から 12時へ沿う軌跡:
+
+```bash
+cargo test --lib games::pachinko::physics::tests::dump_launch_path_to_twelve -- --ignored --nocapture
+```
+
 他ゲームでも同じ型の `#[ignore]` dump を `render.rs` のテストに置く。名前は `dump_` で始め、`--ignored --nocapture` で標準エラーへ出す。
 
 レイアウトの退行（「この文言がこの行にある」）は dump ではなく、通常の `cargo test` でバッファを assert する。dump は人間が形を判断するための出口であり、回帰の網ではない。

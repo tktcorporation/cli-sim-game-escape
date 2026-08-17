@@ -37,11 +37,11 @@ pub const BALL_R: f64 = 0.68;
 /// 釘の半径。玉より小さく描き、隙間から玉道が読めるようにする。
 pub const NAIL_R: f64 = 0.48;
 
-/// 発射位置 (右上、逆U字の右肩の内側)。ここから上へ打ち出し、肩のカーブに
-/// 当たって釘帯へ落ちる。下すぎると釘帯と重なり、上すぎると天井までの
-/// 助走が無くて当たった絵が見えない。
-pub const LAUNCH_X: f64 = BOARD_W - 3.0;
-pub const LAUNCH_Y: f64 = 12.0;
+/// 発射位置 (逆U字の右足、3時)。ここから内壁を滑って頂点 (12時) へ向かう。
+/// `Arch::inner_point(THETA_RIGHT, BALL_R)` と同じ点。座標の式は `board` が
+/// 持ち、ここは物理テストが打ち出し位置を参照するための値。
+pub const LAUNCH_X: f64 = BOARD_W - BALL_R;
+pub const LAUNCH_Y: f64 = 15.0;
 
 /// ヘソ (スタートチャッカー) の中心。
 pub const START_POCKET_X: f64 = BOARD_W / 2.0;
@@ -230,6 +230,15 @@ pub struct Ball {
     pub teeter_x: f64,
     /// 描画用の色。物理には使わない。
     pub tint: BallTint,
+    /// 逆U字の内壁に沿っているか。打ち出し直後だけ真で、離れたら二度と乗らない。
+    ///
+    /// 天井を壁として跳ね返すと右肩 (3時) で落ちる。レールとして滑らせると
+    /// 頂点 (12時) まで伸びる。
+    pub on_rail: bool,
+    /// レール上の角度。`Arch` の媒介変数。乗っていない間は意味を持たない。
+    pub rail_theta: f64,
+    /// この角度まで来たらレールを離す。ハンドル強度で決める。
+    pub rail_until: f64,
 }
 
 impl Ball {
@@ -245,7 +254,18 @@ impl Ball {
             teeter: 0,
             teeter_x: x,
             tint,
+            on_rail: false,
+            rail_theta: 0.0,
+            rail_until: 0.0,
         }
+    }
+
+    /// 打ち出し直後だけ内壁に乗せる。離れた玉を再び乗せない。
+    pub fn with_rail(mut self, theta: f64, until: f64) -> Self {
+        self.on_rail = true;
+        self.rail_theta = theta;
+        self.rail_until = until;
+        self
     }
 }
 

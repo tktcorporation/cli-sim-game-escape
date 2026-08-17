@@ -10,13 +10,13 @@
 //! 盤面の見た目と実測回転率が食い違わない。
 
 use super::nails::{generate_nails, NAIL_SPREAD_RANGE, RAIL_BIAS_RANGE};
-use super::physics::{self, jitter_launch, launch_velocity};
+use super::physics::{self, rail_start};
 use super::rng::{rand_range, rng_below};
 use super::state::{
     Ball, BallTint, Digit, HistoryEntry, JackpotState, Machine, MachineSpec, Mode, PachinkoState,
     Pending, PendingRank, Phase, ReachKind, SpinOutcome, StopStyle, ATTACKER_PAYOUT,
     BALL_LOAN_COUNT, BALL_LOAN_YEN, FIRE_INTERVAL_TICKS, HALL_SIZE, HISTORY_LEN, INITIAL_REELS,
-    LAUNCH_X, LAUNCH_Y, MACHINE_SPECS, MAX_BALLS, MAX_PENDING, PENDING_PROMOTE_FLASH_TICKS,
+    MACHINE_SPECS, MAX_BALLS, MAX_PENDING, PENDING_PROMOTE_FLASH_TICKS,
     RANK_WEIGHT_TOTAL, REACH_FLASH_TICKS, ROUND_COUNT, ROUND_LIMIT_TICKS, SIDE_PAYOUT,
     START_FLASH_TICKS, START_PAYOUT,
 };
@@ -515,17 +515,20 @@ fn try_fire(state: &mut PachinkoState) {
         return;
     }
     let seed = &mut state.rng_state;
-    let (vx, vy) = jitter_launch(launch_velocity(state.power), seed);
+    let start = rail_start(state.power, seed);
     let fired_in_normal = state.mode == Mode::Normal;
     let tint = BallTint::ALL[rng_below(seed, BallTint::ALL.len() as u32) as usize];
-    state.balls.push(Ball::falling(
-        LAUNCH_X,
-        LAUNCH_Y,
-        vx,
-        vy,
-        fired_in_normal,
-        tint,
-    ));
+    state.balls.push(
+        Ball::falling(
+            start.x,
+            start.y,
+            start.vx,
+            start.vy,
+            fired_in_normal,
+            tint,
+        )
+        .with_rail(start.theta, start.until),
+    );
     state.balls_held -= 1;
     if let Some(machine) = state.seated_machine_mut() {
         machine.balls_spent += 1;
@@ -797,9 +800,8 @@ mod tests {
 
     #[test]
     fn same_power_launches_fan_out_across_the_board() {
-        // 同じハンドル強度でも釘帯へ入る列が分かれる。速さだけを振ると角度が
-        // 固定されたまま、釘の間に一本の溝ができる。測定はアーチ折り返し直後
-        // ではなく釘帯の上端。折り返し地点は横移動が短く、ばらけが見えない。
+        // 同じハンドル強度でも釘帯へ入る列が分かれる。離す角度だけを固定すると
+        // 12時から一本の溝ができる。測定はレールを離れたあと、釘帯の上端。
         let mut xs = Vec::new();
         for i in 0..36u32 {
             let mut state = state_with_nails(Vec::new());
