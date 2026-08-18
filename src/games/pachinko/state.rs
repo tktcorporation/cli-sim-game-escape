@@ -233,12 +233,15 @@ pub struct Ball {
     /// 逆U字の内壁に沿っているか。打ち出し直後だけ真で、離れたら二度と乗らない。
     ///
     /// 天井を壁として跳ね返すと右肩 (3時) で落ちる。レールとして滑らせると
-    /// 頂点 (12時) まで伸びる。
+    /// 頂点 (12時) まで伸び、強い玉は 10時の出っ張りで跳ねて頂点へ戻る。
     pub on_rail: bool,
     /// レール上の角度。`Arch` の媒介変数。乗っていない間は意味を持たない。
     pub rail_theta: f64,
     /// この角度まで来たらレールを離す。ハンドル強度で決める。
+    /// 出っ張りに届く打ち出しでは、跳ねたあと 12時に書き換わる。
     pub rail_until: f64,
+    /// 出っ張りで跳ねたあと、θ を増やして 12時へ戻っているか。
+    pub rail_returning: bool,
 }
 
 impl Ball {
@@ -257,6 +260,7 @@ impl Ball {
             on_rail: false,
             rail_theta: 0.0,
             rail_until: 0.0,
+            rail_returning: false,
         }
     }
 
@@ -265,6 +269,7 @@ impl Ball {
         self.on_rail = true;
         self.rail_theta = theta;
         self.rail_until = until;
+        self.rail_returning = false;
         self
     }
 }

@@ -194,6 +194,7 @@ const FUNNEL_CHEVRONS: usize = 3;
 struct BoardStatics {
     guide_lines: Vec<(f64, f64, f64, f64)>,
     nails: Vec<(f64, f64)>,
+    bump: Vec<(f64, f64)>,
     side_pockets: Vec<(f64, f64)>,
     start_pocket: Vec<(f64, f64)>,
     attacker: Vec<(f64, f64)>,
@@ -219,6 +220,16 @@ fn board_statics(
     let mut guide_lines: Vec<(f64, f64, f64, f64)> = Vec::new();
     let arch = Arch::TABLE.polyline(28);
     for w in arch.windows(2) {
+        guide_lines.push((
+            w[0].0,
+            board_to_canvas_y(w[0].1),
+            w[1].0,
+            board_to_canvas_y(w[1].1),
+        ));
+    }
+    // 10時の出っ張り。強い打ち出しが壁を沿ってここに当たり、12時へ戻る。
+    let bump = Arch::TABLE.bump_polyline(12);
+    for w in bump.windows(2) {
         guide_lines.push((
             w[0].0,
             board_to_canvas_y(w[0].1),
@@ -333,9 +344,19 @@ fn board_statics(
         0.8,
     );
 
+    let (bump_x, bump_y) = Arch::TABLE.bump_center();
+    let bump = canvas_fx::filled_ellipse_points(
+        bump_x,
+        board_to_canvas_y(bump_y),
+        Arch::BUMP_R * 0.72,
+        Arch::BUMP_R * 0.72 * aspect,
+        0.28,
+    );
+
     BoardStatics {
         guide_lines,
         nails,
+        bump,
         side_pockets,
         start_pocket,
         attacker,
@@ -367,6 +388,8 @@ fn draw_board_statics(
         });
     }
     draw_points(ctx, &statics.out_mouth, Color::DarkGray);
+    // 出っ張りは壁と同じ色で塗り、釘や玉の粒と混ざらないようにする。
+    draw_points(ctx, &statics.bump, Color::DarkGray);
     // 釘は盤面に固定された構造物なので暗く沈める。玉と同じ明るさで描くと、
     // 点描の粒がどちらのものか判別できず、玉が釘の間を落ちていく動きを
     // 目で追えなくなる。

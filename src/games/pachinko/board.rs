@@ -16,8 +16,9 @@ const POCKET_SPREAD_GAIN: f64 = 2.0;
 
 /// 盤面上部の逆U字。楕円の上半分が天井と左右の肩になり、その下は垂直の壁。
 ///
-/// 打ち出しは右足 (3時) から内壁を滑り、頂点 (12時) 付近で盤内へ落ちる。
-/// 天井をただの壁として跳ね返すと、玉は右肩で落ちて頂点まで届かない。
+/// 打ち出しは右足 (3時) から内壁を滑る。弱い玉は途中で落ち、既定は頂点
+/// (12時) で離す。強い玉は 10時の出っ張りまで沿って跳ね、12時へ戻ってから
+/// 落ちる。天井をただの壁として跳ね返すと、玉は右肩で落ちて頂点まで届かない。
 /// 平面の天井は反射角が揃い、同じ列へ落ちる。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Arch {
@@ -46,15 +47,49 @@ impl Arch {
 
     /// 左足 (9時)。`polyline` と同じ媒介変数。
     pub const THETA_LEFT: f64 = std::f64::consts::PI;
+    /// 10時。頂点から左へ 60°。強い打ち出しが壁を沿って届く出っ張りの位置。
+    pub const THETA_BUMP: f64 = Self::THETA_TOP - std::f64::consts::PI / 3.0;
     /// 頂点 (12時)。
     pub const THETA_TOP: f64 = std::f64::consts::PI * 1.5;
     /// 右足 (3時)。打ち出しの始点。
     pub const THETA_RIGHT: f64 = std::f64::consts::PI * 2.0;
+    /// 出っ張りが内壁から盤内へ張り出す半径。釘より大きく、壁の一部として読める。
+    pub const BUMP_R: f64 = 1.55;
 
     /// 天井の y (下向き正)。中央が最も浅く、左右の肩で `b` まで下がる。
     pub fn ceiling_y(self, x: f64) -> f64 {
         let u = ((x - self.cx) / self.a).clamp(-1.0, 1.0);
         self.b * (1.0 - (1.0 - u * u).sqrt())
+    }
+
+    /// 10時の出っ張りの中心。内壁に接し、盤の内側へ円として張り出す。
+    /// 物理の跳ね位置と描画が同じ点を見る。
+    pub fn bump_center(self) -> (f64, f64) {
+        let theta = Self::THETA_BUMP;
+        let wall_x = self.cx + self.a * theta.cos();
+        let wall_y = self.cy + self.b * theta.sin();
+        let (nx, ny) = self.outward_normal(theta, 0.0);
+        (
+            wall_x - nx * Self::BUMP_R,
+            wall_y - ny * Self::BUMP_R,
+        )
+    }
+
+    /// 出っ張りの輪郭。壁に接する円なので、アーチの折れ線と重ねて描く。
+    pub fn bump_polyline(self, segments: usize) -> Vec<(f64, f64)> {
+        let (cx, cy) = self.bump_center();
+        let n = segments.max(8);
+        (0..=n)
+            .map(|i| {
+                let t = std::f64::consts::PI * 2.0 * i as f64 / n as f64;
+                (cx + Self::BUMP_R * t.cos(), cy + Self::BUMP_R * t.sin())
+            })
+            .collect()
+    }
+
+    /// レールの到達角が出っ張りに届くか。届いた玉はここで跳ねて 12時へ戻る。
+    pub fn rail_hits_bump(until: f64) -> bool {
+        until <= Self::THETA_BUMP + 1e-6
     }
 
     /// 逆U字の上端を左足から右足まで辿る折れ線。描画と物理が同じ楕円を共有する。
@@ -244,6 +279,34 @@ mod tests {
             (crate::games::pachinko::state::LAUNCH_Y - arch.b).abs() < 1e-9,
             "LAUNCH_Y がアーチの右足の高さとずれている"
         );
+    }
+
+    #[test]
+    fn the_ten_oclock_bump_sits_on_the_inner_wall() {
+        // 出っ張りは 10時の内壁に接する円。描画と跳ね位置が同じ中心を見る。
+        let arch = Arch::TABLE;
+        let (bx, by) = arch.bump_center();
+        assert!(
+            bx < arch.cx - arch.a * 0.35,
+            "出っ張りが10時側に無い (x={bx:.2})"
+        );
+        assert!(
+            by > 2.0 && by < arch.b * 0.75,
+            "出っ張りがアーチの左肩に無い (y={by:.2})"
+        );
+        let wall = (
+            arch.cx + arch.a * Arch::THETA_BUMP.cos(),
+            arch.cy + arch.b * Arch::THETA_BUMP.sin(),
+        );
+        let dist = (bx - wall.0).hypot(by - wall.1);
+        assert!(
+            (dist - Arch::BUMP_R).abs() < 0.05,
+            "出っ張りが壁から浮いている (dist={dist:.2})"
+        );
+        let outline = arch.bump_polyline(12);
+        assert!(outline.len() >= 9, "出っ張りの輪郭が閉じていない");
+        assert!(Arch::rail_hits_bump(Arch::THETA_BUMP));
+        assert!(!Arch::rail_hits_bump(Arch::THETA_TOP));
     }
 
     #[test]

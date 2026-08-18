@@ -80,6 +80,13 @@ const LAUNCH_SPEED_JITTER: f64 = 0.11;
 /// レールを離す角度のばらつき。同じ強度でも 12 時の左右に割れ、釘帯の入口が
 /// 一本にならない。
 const RAIL_UNTIL_JITTER: f64 = 0.18;
+/// 到達角が出っ張りからこの内側なら、壁を沿って跳ね 12時へ戻す。
+/// 届かない打ち出しと「当たって戻る」打ち出しを強度で分けられる幅。
+const BUMP_REACH: f64 = 0.22;
+/// 出っ張りで跳ね返したあとの速さの下限。12時まで登り返す勢いを残す。
+const BUMP_RETURN_SPEED: f64 = 0.82;
+/// 出っ張り衝突の反発。1 だと行きの速さをそのまま持ち帰り、0 だとその場で落ちる。
+const BUMP_RESTITUTION: f64 = 0.92;
 /// 縁揺れの最短 / 最長 (tick)。最短は `delta_ticks` の上限 (5) より長くし、
 /// 遅れをまとめて消化しても「縁に乗っている」絵が1フレームは残るようにする。
 pub(super) const TEETER_TICKS_MIN: u8 = 6;
@@ -116,17 +123,18 @@ pub(super) struct PocketHits {
 
 /// ハンドル強度 (0〜100) から、逆U字レールを離す角度を決める。
 ///
-/// 強度 0 は右足 (3時) のすぐ先、既定の 62 は頂点 (12時)、100 は 11 時過ぎ。
+/// 強度 0 は右足 (3時) のすぐ先、既定の 62 は頂点 (12時)、100 は 10時の
+/// 出っ張り。出っ張りに届いた玉はそこで跳ね、12時まで戻ってから落ちる。
 /// 天井を壁として跳ね返すと、どの強度でも右肩で落ちて頂点まで届かない。
 pub fn rail_release_theta(power: u8) -> f64 {
     let p = (power as f64 / 100.0).clamp(0.0, 1.0);
     let start = Arch::THETA_RIGHT - 0.22;
     let twelve = Arch::THETA_TOP;
-    let past = Arch::THETA_TOP - 0.42;
+    let bump = Arch::THETA_BUMP;
     if p <= 0.62 {
         start + (twelve - start) * (p / 0.62)
     } else {
-        twelve + (past - twelve) * ((p - 0.62) / 0.38)
+        twelve + (bump - twelve) * ((p - 0.62) / 0.38)
     }
 }
 
@@ -151,8 +159,12 @@ pub fn rail_start(power: u8, seed: &mut u32) -> RailStart {
     let theta = Arch::THETA_RIGHT;
     let speed_j = 1.0 + (rand01(seed) - 0.5) * 2.0 * LAUNCH_SPEED_JITTER;
     let speed = (rail_speed(power) * speed_j).clamp(0.2, MAX_SPEED);
-    let until = (rail_release_theta(power) + (rand01(seed) - 0.5) * 2.0 * RAIL_UNTIL_JITTER)
-        .clamp(Arch::THETA_TOP - 0.5, Arch::THETA_RIGHT - 0.12);
+    let aimed = rail_release_theta(power) + (rand01(seed) - 0.5) * 2.0 * RAIL_UNTIL_JITTER;
+    let until = if aimed <= Arch::THETA_BUMP + BUMP_REACH {
+        Arch::THETA_BUMP
+    } else {
+        aimed.clamp(Arch::THETA_BUMP, Arch::THETA_RIGHT - 0.12)
+    };
     let (x, y) = arch.inner_point(theta, BALL_R);
     let (tx, ty) = arch.tangent_decreasing(theta, BALL_R);
     RailStart {
@@ -165,10 +177,14 @@ pub fn rail_start(power: u8, seed: &mut u32) -> RailStart {
     }
 }
 
-/// 1サブステップ、内壁に沿って進む。`rail_until` に達するか速さが尽きると離す。
+/// 1サブステップ、内壁に沿って進む。行きは θ を減らし、出っ張りに届いたら
+/// 向きを反転して 12時まで戻す。`rail_until` に達するか速さが尽きると離す。
 fn step_rail(ball: &mut Ball) {
     let arch = Arch::TABLE;
-    let (_, ty) = arch.tangent_decreasing(ball.rail_theta, BALL_R);
+    let (_, mut ty) = arch.tangent_decreasing(ball.rail_theta, BALL_R);
+    if ball.rail_returning {
+        ty = -ty;
+    }
     let mut speed = (ball.vx * ball.vx + ball.vy * ball.vy).sqrt();
     if speed < 1e-6 {
         speed = 0.5;
@@ -176,23 +192,47 @@ fn step_rail(ball: &mut Ball) {
     speed += GRAVITY * ty * 0.4;
     speed = speed.clamp(0.06, MAX_SPEED);
     let metric = arch.arc_metric(ball.rail_theta, BALL_R).max(1e-6);
-    ball.rail_theta -= speed / metric;
-    let leave = ball.rail_theta <= ball.rail_until || speed <= 0.07;
-    let theta = if leave {
-        ball.rail_until
+    let dtheta = speed / metric;
+    if ball.rail_returning {
+        ball.rail_theta += dtheta;
     } else {
-        ball.rail_theta
-    };
+        ball.rail_theta -= dtheta;
+    }
+
+    let mut leave = false;
+    if ball.rail_returning {
+        if ball.rail_theta >= ball.rail_until {
+            ball.rail_theta = ball.rail_until;
+            leave = true;
+        }
+    } else if ball.rail_theta <= ball.rail_until {
+        if Arch::rail_hits_bump(ball.rail_until) {
+            ball.rail_returning = true;
+            ball.rail_until = Arch::THETA_TOP;
+            ball.rail_theta = Arch::THETA_BUMP;
+            speed = (speed * BUMP_RESTITUTION).max(BUMP_RETURN_SPEED);
+        } else {
+            ball.rail_theta = ball.rail_until;
+            leave = true;
+        }
+    } else if speed <= 0.07 {
+        leave = true;
+    }
+
+    let theta = ball.rail_theta;
     let (x, y) = arch.inner_point(theta, BALL_R);
     ball.x = x;
     ball.y = y;
-    let (tx, ty) = arch.tangent_decreasing(theta, BALL_R);
-    let leave_speed = speed.max(0.55);
+    let (mut tx, mut ty) = arch.tangent_decreasing(theta, BALL_R);
+    if ball.rail_returning {
+        tx = -tx;
+        ty = -ty;
+    }
+    let leave_speed = if leave { speed.max(0.55) } else { speed };
     ball.vx = tx * leave_speed;
     ball.vy = ty * leave_speed;
     if leave {
         ball.on_rail = false;
-        ball.rail_theta = theta;
         let (nx, ny) = arch.outward_normal(theta, BALL_R);
         ball.vx -= nx * 0.10;
         ball.vy -= ny * 0.10;
@@ -345,6 +385,7 @@ fn slip_off_lip(ball: &mut Ball) {
 
 fn bounce_walls(ball: &mut Ball, seed: &mut u32) {
     bounce_arch(ball, seed);
+    bounce_bump(ball, seed);
     if ball.x < BALL_R {
         ball.x = BALL_R;
         ball.vx = -ball.vx * WALL_RESTITUTION;
@@ -381,6 +422,33 @@ fn bounce_arch(ball: &mut Ball, seed: &mut u32) {
     let lost = vt * (1.0 - ARCH_TANGENTIAL_KEEP);
     ball.vx -= lost * tx;
     ball.vy -= lost * ty;
+}
+
+/// 10時の出っ張り。レール上の跳ねは `step_rail` が角度で扱い、ここは盤内を
+/// 落ちる玉が塗りつぶしをすり抜けないための円衝突。材質はアーチと同じ。
+fn bounce_bump(ball: &mut Ball, seed: &mut u32) {
+    let (cx, cy) = Arch::TABLE.bump_center();
+    let dx = cx - ball.x;
+    let dy = cy - ball.y;
+    let contact = BALL_R + Arch::BUMP_R;
+    let dist_sq = dx * dx + dy * dy;
+    if dist_sq >= contact * contact {
+        return;
+    }
+    let dist = dist_sq.sqrt();
+    let (nx, ny) = if dist < 1e-6 {
+        (0.0, -1.0)
+    } else {
+        (-dx / dist, -dy / dist)
+    };
+    ball.x = cx + nx * contact;
+    ball.y = cy + ny * contact;
+    let vn = ball.vx * nx + ball.vy * ny;
+    if vn < 0.0 {
+        ball.vx -= (1.0 + ARCH_RESTITUTION) * vn * nx;
+        ball.vy -= (1.0 + ARCH_RESTITUTION) * vn * ny;
+        ball.vx += (rand01(seed) - 0.5) * 2.0 * ARCH_SCATTER;
+    }
 }
 
 fn bounce_nails(ball: &mut Ball, nails: &[Nail], seed: &mut u32) {
@@ -557,6 +625,104 @@ mod tests {
     }
 
     #[test]
+    fn a_strong_launch_reaches_the_ten_oclock_bump_and_returns_to_twelve() {
+        // 強い打ち出しは 12時を越えて 10時の出っ張りまで壁を沿い、跳ねて
+        // 頂点へ戻ってから落ちる。行きっぱなしだと左壁沿いに落ちる。
+        let mut state = state_with_nails(Vec::new());
+        state.balls.push(launched_at(100, 5));
+        let bump = Arch::TABLE.inner_point(Arch::THETA_BUMP, BALL_R);
+        let mut min_x = LAUNCH_X;
+        let mut reached_bump = false;
+        let mut x_leave = LAUNCH_X;
+        let mut y_leave = LAUNCH_Y;
+        for _ in 0..400 {
+            step_balls(&mut state);
+            let Some(ball) = state.balls.first() else {
+                break;
+            };
+            if ball.on_rail {
+                min_x = min_x.min(ball.x);
+                if (ball.x - bump.0).abs() < 3.0 && (ball.y - bump.1).abs() < 3.0 {
+                    reached_bump = true;
+                }
+            } else {
+                x_leave = ball.x;
+                y_leave = ball.y;
+                break;
+            }
+        }
+        assert!(
+            reached_bump,
+            "強い打ち出しが出っ張りまで届いていない (min_x={min_x:.2})"
+        );
+        assert!(
+            min_x < BOARD_W * 0.28,
+            "10時側まで回っていない (min_x={min_x:.2})"
+        );
+        assert!(
+            (x_leave - BOARD_W / 2.0).abs() < BOARD_W * 0.22,
+            "跳ね返り後に12時付近で離していない (x={x_leave:.2} y={y_leave:.2})"
+        );
+        assert!(
+            y_leave < Arch::TABLE.b * 0.22,
+            "12時の高さで離していない (y={y_leave:.2})"
+        );
+    }
+
+    #[test]
+    fn a_default_launch_does_not_reach_the_ten_oclock_bump() {
+        // 既定の強度は 12時で離し、出っ張りまで行かない。届くかどうかが
+        // ハンドルの強さの差になる。
+        let mut state = state_with_nails(Vec::new());
+        state.balls.push(launched_at(62, 1));
+        let bump = Arch::TABLE.inner_point(Arch::THETA_BUMP, BALL_R);
+        let mut min_x = LAUNCH_X;
+        let mut x_leave = LAUNCH_X;
+        for _ in 0..200 {
+            step_balls(&mut state);
+            let Some(ball) = state.balls.first() else {
+                break;
+            };
+            if ball.on_rail {
+                min_x = min_x.min(ball.x);
+            } else {
+                x_leave = ball.x;
+                break;
+            }
+        }
+        assert!(
+            min_x > bump.0 + 8.0,
+            "既定の打ち出しが出っ張りまで届いている (min_x={min_x:.2} bump_x={:.2})",
+            bump.0
+        );
+        assert!(
+            (x_leave - BOARD_W / 2.0).abs() < BOARD_W * 0.22,
+            "既定が12時付近で離していない (x={x_leave:.2})"
+        );
+    }
+
+    #[test]
+    fn a_falling_ball_bounces_off_the_ten_oclock_bump() {
+        let (cx, cy) = Arch::TABLE.bump_center();
+        let mut state = state_with_nails(Vec::new());
+        let gap = Arch::BUMP_R + BALL_R - 0.04;
+        state.balls.push(test_ball(cx + gap, cy + 0.2, -0.45, 0.05));
+        let x_before = state.balls[0].x;
+        step_balls(&mut state);
+        let ball = state.balls.first().expect("玉が消えている");
+        assert!(
+            ball.x >= x_before - 0.15,
+            "出っ張りを左へすり抜けている (x={:.2} from {x_before:.2})",
+            ball.x
+        );
+        assert!(
+            ball.vx > -0.15,
+            "出っ張りで跳ねていない (vx={:.3})",
+            ball.vx
+        );
+    }
+
+    #[test]
     fn a_weak_launch_falls_near_three_oclock() {
         let mut state = state_with_nails(Vec::new());
         state.balls.push(launched_at(8, 2));
@@ -680,14 +846,20 @@ mod tests {
         }
     }
 
-    /// 既定強度の打ち出しが 3時から 12時へ沿う軌跡を文字で出す。
+    /// 既定強度の打ち出しが 3時から 12時へ沿う軌跡と、強い打ち出しが
+    /// 10時の出っ張りで跳ねて 12時へ戻る軌跡を文字で出す。
     ///
     /// `cargo test --lib games::pachinko::physics::tests::dump_launch_path_to_twelve -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn dump_launch_path_to_twelve() {
+        dump_launch_path(62, "default 62");
+        dump_launch_path(100, "strong 100");
+    }
+
+    fn dump_launch_path(power: u8, label: &str) {
         let mut state = state_with_nails(Vec::new());
-        state.balls.push(launched_at(62, 7));
+        state.balls.push(launched_at(power, 7));
         let cols = 64usize;
         let rows = 20usize;
         let mut grid = vec![vec![' '; cols]; rows];
@@ -703,18 +875,26 @@ mod tests {
             let (x, y) = Arch::TABLE.inner_point(theta, BALL_R);
             plot(&mut grid, x, y, '.');
         }
+        let (bx, by) = Arch::TABLE.bump_center();
+        plot(&mut grid, bx, by, '#');
         for _ in 0..240 {
             let Some(ball) = state.balls.first().copied() else {
                 break;
             };
-            let mark = if ball.on_rail { '@' } else { 'o' };
+            let mark = if !ball.on_rail {
+                'o'
+            } else if ball.rail_returning {
+                '*'
+            } else {
+                '@'
+            };
             plot(&mut grid, ball.x, ball.y, mark);
             if !ball.on_rail && ball.y > 18.0 {
                 break;
             }
             step_balls(&mut state);
         }
-        eprintln!("=== launch path (64x20, y=0..20) @=rail o=free .=arch ===");
+        eprintln!("=== launch path {label} (64x20, y=0..20) @=out * =return o=free .=arch #=bump ===");
         for (i, row) in grid.iter().enumerate() {
             eprintln!("{:2}|{}|", i, row.iter().collect::<String>());
         }

@@ -18,7 +18,7 @@
 cargo test --lib games::pachinko::render::tests::dump_hall_and_playing_screens -- --ignored --nocapture
 ```
 
-打ち出しが 3時から 12時へ沿う軌跡:
+打ち出しが 3時から 12時へ沿う軌跡と、強い打ち出しが 10時の出っ張りで跳ねて戻る軌跡:
 
 ```bash
 cargo test --lib games::pachinko::physics::tests::dump_launch_path_to_twelve -- --ignored --nocapture
