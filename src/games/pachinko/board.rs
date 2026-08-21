@@ -217,57 +217,129 @@ impl Playfield {
     }
 }
 
-/// 盤面下側の液晶。ヘソとアタッカーのあいだ、空いている 2/5 を埋める。
+/// 盤面下側の液晶。ヘソとアタッカーのあいだ、空いている帯を横長の楕円で埋める。
 ///
 /// 玉は液晶の手前を落ちる（当たり判定は持たない）。実機と同じく、下の
 /// 空きは数字や釘ではなく「今なにかが動いている」場所として視線を置く。
-/// 物理と描画が同じ円を共有しないと、玉の通り道と絵がずれる。
+/// 物理は当たらない。描画だけが同じ楕円を見る。円だと左右の空きが死ぬ。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Stage {
     pub cx: f64,
     pub cy: f64,
-    pub r: f64,
+    pub rx: f64,
+    pub ry: f64,
+}
+
+/// 液晶の見せ方。同じ回転だけだと数秒で目が慣れるので、席の位相から
+/// 種類を切り替える。数字は出さない。速さは描画側の `stage_rate` が決める。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageShow {
+    /// 外周が回り、スポークが追いかけて輪だと読める。
+    Roulette,
+    /// 縦の光が左右へ往復する。横長を一番使う。
+    Sweep,
+    /// 二つの明かりが逆向きに追う。
+    Twin,
+    /// 楕円の輪が内側から膨らんで消える。
+    Pulse,
+    /// 光点が Lissajous で画面を渡り歩く。
+    Comet,
+}
+
+impl StageShow {
+    pub const ALL: [Self; 5] = [
+        Self::Roulette,
+        Self::Sweep,
+        Self::Twin,
+        Self::Pulse,
+        Self::Comet,
+    ];
+    /// 1種類を見せる tick 数。10 ticks/sec なので約 8 秒で次へ移る。
+    pub const LEN: u32 = 80;
+
+    pub fn at(ticks: u32) -> Self {
+        Self::ALL[((ticks / Self::LEN) as usize) % Self::ALL.len()]
+    }
 }
 
 impl Stage {
     pub const TABLE: Self = Self {
         cx: BOARD_W / 2.0,
         cy: 65.0,
-        r: 9.0,
+        rx: 22.0,
+        ry: 8.5,
     };
-    /// 外周のランプ数。時計とルーレットの目盛りを兼ねる。
-    pub const LAMPS: usize = 12;
+    /// 外周のランプ数。横長だと 12 では目盛りがスカスカになる。
+    pub const LAMPS: usize = 16;
     /// 内周のランプ数。外周と逆向きに回し、止まって見えないのを防ぐ。
-    pub const INNER_LAMPS: usize = 6;
+    pub const INNER_LAMPS: usize = 8;
     /// スポーク数。ランプだけだと円の塗りに見え、輪が回っていると読めない。
-    pub const SPOKES: usize = 4;
+    pub const SPOKES: usize = 6;
     /// 内周の速さ倍率。外周と同じ位相だと二重の円が一体に見えてしまう。
     pub const INNER_PHASE_MULT: f64 = 1.35;
 
+    /// 楕円上の点。`frac` は半径に対する割合。
+    fn point_on_ring(self, index: usize, count: usize, frac: f64, phase: f64) -> (f64, f64) {
+        let a = phase + std::f64::consts::TAU * index as f64 / count as f64;
+        (
+            self.cx + self.rx * frac * a.cos(),
+            self.cy + self.ry * frac * a.sin(),
+        )
+    }
+
     /// 外周ランプの位置。`phase` は時計回りに進む位相 (ラジアン)。
     pub fn lamp(self, index: usize, phase: f64) -> (f64, f64) {
-        self.point_on_ring(index, Self::LAMPS, self.r * 0.82, phase)
+        self.point_on_ring(index, Self::LAMPS, 0.88, phase)
     }
 
     /// 内周ランプの位置。外周と逆位相で回す。
     pub fn inner_lamp(self, index: usize, phase: f64) -> (f64, f64) {
-        self.point_on_ring(index, Self::INNER_LAMPS, self.r * 0.42, Self::inner_phase(phase))
+        self.point_on_ring(
+            index,
+            Self::INNER_LAMPS,
+            0.42,
+            Self::inner_phase(phase),
+        )
     }
 
-    /// スポーク上の点。`frac` は半径に対する割合 (ハブ=0、リム寄り=1に近い)。
+    /// スポーク上の点。
     pub fn spoke_point(self, index: usize, phase: f64, frac: f64) -> (f64, f64) {
-        self.point_on_ring(index, Self::SPOKES, self.r * frac, phase)
+        self.point_on_ring(index, Self::SPOKES, frac, phase)
     }
 
-    /// スポーク先端。ハブからリムへ向かう半径で、外周と同じ位相で回す。
+    /// スポーク先端。
     pub fn spoke_tip(self, index: usize, phase: f64) -> (f64, f64) {
         self.spoke_point(index, phase, 0.70)
     }
 
-    /// 12時の指針。ルーレットの当たり位置で、ランプだけだと「どこを見れば
-    /// いいか」が決まらない。y は下向き正なので、頂点は中心より浅い。
+    /// 12時の指針。y は下向き正なので、頂点は中心より浅い。
     pub fn pointer(self) -> (f64, f64) {
-        (self.cx, self.cy - self.r * 0.96)
+        (self.cx, self.cy - self.ry * 0.96)
+    }
+
+    /// 掃引バーの x。`t.sin()` で左右へ往復し、横幅を使い切る。
+    pub fn sweep_x(self, t: f64) -> f64 {
+        self.cx + self.rx * 0.78 * t.sin()
+    }
+
+    /// 脈動する輪の半径割合。`offset` をずらすと二重の波になる。
+    pub fn pulse_frac(t: f64, offset: f64) -> f64 {
+        0.20 + 0.68 * (t * 0.18 + offset).rem_euclid(1.0)
+    }
+
+    /// 画面を横断する光点。周波数を 2:3 にして同じ軌跡を辿らせない。
+    pub fn comet(self, t: f64) -> (f64, f64) {
+        (
+            self.cx + self.rx * 0.78 * (t * 0.85).sin(),
+            self.cy + self.ry * 0.62 * (t * 1.3 + 0.7).sin(),
+        )
+    }
+
+    /// 点が液晶の内側かどうか。サイド入賞口と重ならないことの検査に使う。
+    pub fn contains(self, x: f64, y: f64) -> bool {
+        let nx = (x - self.cx) / self.rx;
+        let ny = (y - self.cy) / self.ry;
+        nx * nx + ny * ny <= 1.0
     }
 
     /// 内周の位相。符号をここで一箇所に閉じ、位置と点灯が打ち消し合わないようにする。
@@ -281,14 +353,19 @@ impl Stage {
         ((phase / step).rem_euclid(count as f64).floor() as usize) % count
     }
 
-    fn point_on_ring(self, index: usize, count: usize, radius: f64, phase: f64) -> (f64, f64) {
-        let a = phase + std::f64::consts::TAU * index as f64 / count as f64;
-        (self.cx + radius * a.cos(), self.cy + radius * a.sin())
+    /// ルーレットの回転方向。同じ向きだけだと目が慣れる。
+    pub fn spin_sign(ticks: u32) -> f64 {
+        if (ticks / StageShow::LEN / StageShow::ALL.len() as u32).is_multiple_of(2) {
+            1.0
+        } else {
+            -1.0
+        }
     }
 }
 
-const _: () = assert!(Stage::TABLE.cy - Stage::TABLE.r > START_POCKET_Y + 1.5);
-const _: () = assert!(Stage::TABLE.cy + Stage::TABLE.r < ATTACKER_Y - 2.0);
+const _: () = assert!(Stage::TABLE.cy - Stage::TABLE.ry > START_POCKET_Y + 1.5);
+const _: () = assert!(Stage::TABLE.cy + Stage::TABLE.ry < ATTACKER_Y - 2.0);
+const _: () = assert!(Stage::TABLE.rx > Stage::TABLE.ry * 2.0);
 
 /// ヘソの受け口半幅。決まるのは台のヘソ釘の開きと電サポの有無だけなので、
 /// 着席中の台に限らずホールに並ぶ台にも同じ式で引ける。ホールの盤面
@@ -314,6 +391,9 @@ pub fn effective_pocket_half_w(state: &PachinkoState) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::games::pachinko::state::{
+        SIDE_POCKET_LEFT_X, SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y,
+    };
 
     #[test]
     fn arch_ceiling_is_an_inverted_u() {
@@ -400,13 +480,47 @@ mod tests {
             stage.cy
         );
         assert!(
-            stage.cy + stage.r < ATTACKER_Y - 1.0,
+            stage.rx > stage.ry * 2.0,
+            "液晶が横長になっていない (rx={:.1} ry={:.1})",
+            stage.rx,
+            stage.ry
+        );
+        assert!(
+            stage.cy + stage.ry < ATTACKER_Y - 1.0,
             "液晶がアタッカーに重なっている"
         );
         assert!(
-            stage.cy - stage.r > START_POCKET_Y,
+            stage.cy - stage.ry > START_POCKET_Y,
             "液晶の上端がヘソより上にある"
         );
+        assert!(
+            !stage.contains(SIDE_POCKET_LEFT_X, SIDE_POCKET_Y),
+            "液晶が左のサイド入賞口に被っている"
+        );
+        assert!(
+            !stage.contains(SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y),
+            "液晶が右のサイド入賞口に被っている"
+        );
+        let sweep_span = (stage.sweep_x(std::f64::consts::FRAC_PI_2)
+            - stage.sweep_x(-std::f64::consts::FRAC_PI_2))
+        .abs();
+        assert!(
+            sweep_span > stage.rx,
+            "掃引が横幅を使っていない (span={sweep_span:.1})"
+        );
+        let (c0x, _) = stage.comet(0.0);
+        let (c1x, _) = stage.comet(2.0);
+        assert!(
+            (c0x - c1x).abs() > stage.rx * 0.5,
+            "コメットが横に動いていない"
+        );
+        assert_ne!(
+            StageShow::at(0),
+            StageShow::at(StageShow::LEN),
+            "tick が進んでも見せ方が変わらない"
+        );
+        assert_eq!(StageShow::at(0), StageShow::Roulette);
+        assert_eq!(StageShow::at(StageShow::LEN), StageShow::Sweep);
         let (px, py) = stage.pointer();
         assert!(
             (px - stage.cx).abs() < 0.2 && py < stage.cy,

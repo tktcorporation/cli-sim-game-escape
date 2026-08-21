@@ -33,7 +33,7 @@ use crate::theme;
 use crate::widgets::{Clickable, ClickableList, ScrollableTab, TabBar};
 
 use super::actions;
-use super::board::{self, Arch, Stage};
+use super::board::{self, Arch, Stage, StageShow};
 use super::logic;
 use super::nails;
 use super::state::{
@@ -399,19 +399,10 @@ fn draw_board_statics(
     draw_points(ctx, &statics.attacker, attacker_color);
 }
 
-/// 液晶の点群。`paint` は move クロージャなので、色ごとに所有権付きで先に組む。
-struct StageDots {
-    disc: Vec<(f64, f64)>,
-    spokes: Vec<(f64, f64)>,
-    rim: Vec<(f64, f64)>,
-    lamps_dim: Vec<(f64, f64)>,
-    lamps_hot: Vec<(f64, f64)>,
-    inner_dim: Vec<(f64, f64)>,
-    inner_hot: Vec<(f64, f64)>,
-    hub: Vec<(f64, f64)>,
-    pointer: Vec<(f64, f64)>,
-    lamp_color: Color,
-    hot_color: Color,
+/// 液晶の一層。`paint` は move クロージャなので、色ごとに所有権付きで先に組む。
+struct StageLayer {
+    points: Vec<(f64, f64)>,
+    color: Color,
 }
 
 /// 液晶の回転速度 (tick あたりラジアン)。止まっていると下側の空きが死ぬ。
@@ -461,106 +452,236 @@ fn lamp_is_hot(index: usize, hot: usize, count: usize, span: usize) -> bool {
     dist <= span || dist >= count - span
 }
 
-fn stage_dots(state: &PachinkoState, aspect: f64) -> StageDots {
-    let stage = Stage::TABLE;
-    let phase = state.stage_ticks as f64 * stage_rate(state);
-    let cy = board_to_canvas_y(stage.cy);
-    let disc = canvas_fx::filled_ellipse_points(
+fn stage_blob(x: f64, y: f64, rx: f64, ry: f64, aspect: f64, step: f64) -> Vec<(f64, f64)> {
+    canvas_fx::filled_ellipse_points(x, board_to_canvas_y(y), rx, ry * aspect, step)
+}
+
+fn stage_panel(stage: Stage, aspect: f64) -> Vec<(f64, f64)> {
+    canvas_fx::filled_ellipse_points(
         stage.cx,
-        cy,
-        stage.r * 0.48,
-        stage.r * 0.48 * aspect,
-        0.38,
-    );
-    let rim = canvas_fx::ring_points(stage.cx, cy, stage.r * 0.82, 0.10);
-    let mut spokes = Vec::new();
-    for i in 0..Stage::SPOKES {
-        let mut t = 0.22;
-        while t <= 0.68 {
-            let (x, y) = stage.spoke_point(i, phase, t);
-            spokes.extend(canvas_fx::filled_ellipse_points(
-                x,
-                board_to_canvas_y(y),
-                0.28,
-                0.28 * aspect,
-                0.24,
-            ));
-            t += 0.08;
-        }
-    }
-    let lamp_r = 0.78;
-    let hot = Stage::hot_index(phase, Stage::LAMPS);
-    let mut lamps_dim = Vec::new();
-    let mut lamps_hot = Vec::new();
+        board_to_canvas_y(stage.cy),
+        stage.rx * 0.70,
+        stage.ry * 0.62 * aspect,
+        0.58,
+    )
+}
+
+fn stage_rim(stage: Stage, aspect: f64) -> Vec<(f64, f64)> {
+    canvas_fx::ellipse_ring_points(
+        stage.cx,
+        board_to_canvas_y(stage.cy),
+        stage.rx * 0.95,
+        stage.ry * 0.95 * aspect,
+        0.08,
+    )
+}
+
+fn collect_lamps(
+    stage: Stage,
+    phase: f64,
+    hot: usize,
+    span: usize,
+    aspect: f64,
+    dim: &mut Vec<(f64, f64)>,
+    lit: &mut Vec<(f64, f64)>,
+) {
     for i in 0..Stage::LAMPS {
         let (x, y) = stage.lamp(i, phase);
-        let pts = canvas_fx::filled_ellipse_points(
-            x,
-            board_to_canvas_y(y),
-            lamp_r,
-            lamp_r * aspect,
-            0.28,
-        );
-        if lamp_is_hot(i, hot, Stage::LAMPS, 1) {
-            lamps_hot.extend(pts);
+        let pts = stage_blob(x, y, 0.72, 0.62, aspect, 0.28);
+        if lamp_is_hot(i, hot, Stage::LAMPS, span) {
+            lit.extend(pts);
         } else {
-            lamps_dim.extend(pts);
+            dim.extend(pts);
         }
-    }
-    let inner_hot_i = Stage::hot_index(Stage::inner_phase(phase), Stage::INNER_LAMPS);
-    let mut inner_dim = Vec::new();
-    let mut inner_hot = Vec::new();
-    for i in 0..Stage::INNER_LAMPS {
-        let (x, y) = stage.inner_lamp(i, phase);
-        let pts = canvas_fx::filled_ellipse_points(
-            x,
-            board_to_canvas_y(y),
-            0.48,
-            0.48 * aspect,
-            0.26,
-        );
-        if lamp_is_hot(i, inner_hot_i, Stage::INNER_LAMPS, 0) {
-            inner_hot.extend(pts);
-        } else {
-            inner_dim.extend(pts);
-        }
-    }
-    let breath = 1.05 + 0.16 * (state.stage_ticks as f64 * 0.19).sin();
-    let hub = canvas_fx::filled_ellipse_points(stage.cx, cy, breath, breath * aspect, 0.26);
-    let (px, py) = stage.pointer();
-    let pointer = canvas_fx::filled_ellipse_points(
-        px,
-        board_to_canvas_y(py),
-        0.55,
-        0.85 * aspect,
-        0.24,
-    );
-    StageDots {
-        disc,
-        spokes,
-        rim,
-        lamps_dim,
-        lamps_hot,
-        inner_dim,
-        inner_hot,
-        hub,
-        pointer,
-        lamp_color: Color::Rgb(148, 78, 28),
-        hot_color: stage_hot_color(state),
     }
 }
 
-fn draw_stage(ctx: &mut Context, dots: &StageDots) {
-    // 盤面より暗い円で「画面」を作り、空きをただの余白に見せない。
-    draw_points(ctx, &dots.disc, Color::Rgb(22, 26, 32));
-    draw_points(ctx, &dots.spokes, Color::Rgb(70, 52, 36));
-    draw_points(ctx, &dots.rim, Color::Rgb(86, 74, 52));
-    draw_points(ctx, &dots.lamps_dim, dots.lamp_color);
-    draw_points(ctx, &dots.inner_dim, Color::Rgb(120, 70, 36));
-    draw_points(ctx, &dots.hub, Color::Rgb(48, 40, 36));
-    draw_points(ctx, &dots.inner_hot, Color::Rgb(210, 150, 70));
-    draw_points(ctx, &dots.lamps_hot, dots.hot_color);
-    draw_points(ctx, &dots.pointer, Color::LightRed);
+fn stage_dots(state: &PachinkoState, aspect: f64) -> Vec<StageLayer> {
+    let stage = Stage::TABLE;
+    let rate = stage_rate(state);
+    let t = state.stage_ticks as f64 * rate;
+    let dir = Stage::spin_sign(state.stage_ticks);
+    let phase = t * dir;
+    let hot_color = stage_hot_color(state);
+    let lamp_color = Color::Rgb(148, 78, 28);
+    let mut layers = vec![
+        StageLayer {
+            points: stage_panel(stage, aspect),
+            color: Color::Rgb(22, 26, 32),
+        },
+        StageLayer {
+            points: stage_rim(stage, aspect),
+            color: Color::Rgb(86, 74, 52),
+        },
+    ];
+    match StageShow::at(state.stage_ticks) {
+        StageShow::Roulette => {
+            let mut spokes = Vec::new();
+            for i in 0..Stage::SPOKES {
+                let mut frac = 0.22;
+                while frac <= 0.68 {
+                    let (x, y) = stage.spoke_point(i, phase, frac);
+                    spokes.extend(stage_blob(x, y, 0.28, 0.28, aspect, 0.24));
+                    frac += 0.08;
+                }
+            }
+            let mut dim = Vec::new();
+            let mut lit = Vec::new();
+            collect_lamps(
+                stage,
+                phase,
+                Stage::hot_index(phase, Stage::LAMPS),
+                1,
+                aspect,
+                &mut dim,
+                &mut lit,
+            );
+            let inner_hot_i = Stage::hot_index(Stage::inner_phase(phase), Stage::INNER_LAMPS);
+            let mut inner_dim = Vec::new();
+            let mut inner_hot = Vec::new();
+            for i in 0..Stage::INNER_LAMPS {
+                let (x, y) = stage.inner_lamp(i, phase);
+                let pts = stage_blob(x, y, 0.48, 0.42, aspect, 0.26);
+                if lamp_is_hot(i, inner_hot_i, Stage::INNER_LAMPS, 0) {
+                    inner_hot.extend(pts);
+                } else {
+                    inner_dim.extend(pts);
+                }
+            }
+            let breath = 1.15 + 0.22 * (state.stage_ticks as f64 * 0.19).sin();
+            let (px, py) = stage.pointer();
+            layers.push(StageLayer {
+                points: spokes,
+                color: Color::Rgb(70, 52, 36),
+            });
+            layers.push(StageLayer {
+                points: dim,
+                color: lamp_color,
+            });
+            layers.push(StageLayer {
+                points: inner_dim,
+                color: Color::Rgb(120, 70, 36),
+            });
+            layers.push(StageLayer {
+                points: stage_blob(stage.cx, stage.cy, breath, breath, aspect, 0.26),
+                color: Color::Rgb(48, 40, 36),
+            });
+            layers.push(StageLayer {
+                points: inner_hot,
+                color: Color::Rgb(210, 150, 70),
+            });
+            layers.push(StageLayer {
+                points: lit,
+                color: hot_color,
+            });
+            layers.push(StageLayer {
+                points: stage_blob(px, py, 0.55, 0.85, aspect, 0.24),
+                color: Color::LightRed,
+            });
+        }
+        StageShow::Sweep => {
+            let x = stage.sweep_x(t * 0.85);
+            let trail_x = stage.sweep_x(t * 0.85 - 0.55);
+            layers.push(StageLayer {
+                points: stage_blob(trail_x, stage.cy, 1.4, stage.ry * 0.42, aspect, 0.22),
+                color: Color::Rgb(120, 70, 36),
+            });
+            layers.push(StageLayer {
+                points: stage_blob(x, stage.cy, 2.1, stage.ry * 0.78, aspect, 0.20),
+                color: hot_color,
+            });
+        }
+        StageShow::Twin => {
+            let hot_a = Stage::hot_index(phase, Stage::LAMPS);
+            let hot_b = (hot_a + Stage::LAMPS / 2) % Stage::LAMPS;
+            let mut dim = Vec::new();
+            let mut lit_a = Vec::new();
+            let mut lit_b = Vec::new();
+            for i in 0..Stage::LAMPS {
+                let (x, y) = stage.lamp(i, phase * 0.15);
+                let pts = stage_blob(x, y, 0.72, 0.62, aspect, 0.28);
+                if lamp_is_hot(i, hot_a, Stage::LAMPS, 1) {
+                    lit_a.extend(pts);
+                } else if lamp_is_hot(i, hot_b, Stage::LAMPS, 1) {
+                    lit_b.extend(pts);
+                } else {
+                    dim.extend(pts);
+                }
+            }
+            layers.push(StageLayer {
+                points: dim,
+                color: lamp_color,
+            });
+            layers.push(StageLayer {
+                points: lit_b,
+                color: Color::Rgb(80, 140, 170),
+            });
+            layers.push(StageLayer {
+                points: lit_a,
+                color: hot_color,
+            });
+        }
+        StageShow::Pulse => {
+            let breath = 1.2 + 0.35 * (state.stage_ticks as f64 * 0.21).sin();
+            for (offset, color) in [
+                (0.0, Color::Rgb(86, 74, 52)),
+                (0.45, hot_color),
+                (0.78, Color::Rgb(210, 150, 70)),
+            ] {
+                let frac = Stage::pulse_frac(t, offset);
+                layers.push(StageLayer {
+                    points: canvas_fx::ellipse_ring_points(
+                        stage.cx,
+                        board_to_canvas_y(stage.cy),
+                        stage.rx * frac,
+                        stage.ry * frac * aspect,
+                        0.10,
+                    ),
+                    color,
+                });
+            }
+            layers.push(StageLayer {
+                points: stage_blob(stage.cx, stage.cy, breath, breath, aspect, 0.26),
+                color: hot_color,
+            });
+        }
+        StageShow::Comet => {
+            let mut trail = Vec::new();
+            let mut head = Vec::new();
+            let mut second = Vec::new();
+            for k in (0..8).rev() {
+                let (x, y) = stage.comet(t - k as f64 * 0.22);
+                let r = 0.55 + 0.18 * (7 - k) as f64;
+                if k == 0 {
+                    head.extend(stage_blob(x, y, r + 0.35, r + 0.20, aspect, 0.20));
+                } else {
+                    trail.extend(stage_blob(x, y, r, r, aspect, 0.22));
+                }
+            }
+            let (sx, sy) = stage.comet(t * 0.7 + 2.4);
+            second.extend(stage_blob(sx, sy, 0.95, 0.75, aspect, 0.22));
+            layers.push(StageLayer {
+                points: trail,
+                color: Color::Rgb(120, 70, 36),
+            });
+            layers.push(StageLayer {
+                points: second,
+                color: Color::Rgb(80, 140, 170),
+            });
+            layers.push(StageLayer {
+                points: head,
+                color: hot_color,
+            });
+        }
+    }
+    layers
+}
+
+fn draw_stage(ctx: &mut Context, layers: &[StageLayer]) {
+    // 盤面より暗い楕円で「画面」を作り、左右の空きをただの余白に見せない。
+    for layer in layers {
+        draw_points(ctx, &layer.points, layer.color);
+    }
 }
 
 // ── ホール画面 ─────────────────────────────────────────────────
@@ -2197,10 +2318,13 @@ mod tests {
     #[ignore]
     fn dump_stage_motion() {
         let mut state = seated_state();
-        for ticks in [0u32, 6, 12] {
+        for ticks in [0u32, 20, 80, 120, 160, 240, 320] {
             state.stage_ticks = ticks;
             let grid = board_symbols_of(&state, 34, 28, false);
-            eprintln!("=== stage t={ticks} 34x28 ===");
+            eprintln!(
+                "=== stage t={ticks} {:?} 34x28 ===",
+                crate::games::pachinko::board::StageShow::at(ticks)
+            );
             for (y, row) in grid.iter().enumerate() {
                 eprintln!("{:2}|{}|", y, row.join(""));
             }
@@ -2229,22 +2353,26 @@ mod tests {
             .is_some_and(|c| ('\u{2800}'..='\u{28FF}').contains(&c))
     }
 
-    fn lower_band_braille(symbols: &[Vec<String>]) -> usize {
+    fn band_braille(symbols: &[Vec<String>], x0_frac: f64, x1_frac: f64) -> usize {
         let h = symbols.len();
         let w = symbols.first().map(Vec::len).unwrap_or(0);
         let y0 = h * 3 / 5;
         let y1 = h.saturating_sub(3);
-        let x0 = w / 4;
-        let x1 = w * 3 / 4;
+        let x0 = ((w as f64 * x0_frac) as usize).min(w);
+        let x1 = ((w as f64 * x1_frac) as usize).min(w).max(x0);
         symbols[y0..y1]
             .iter()
             .map(|row| {
-                row[x0..x1.min(row.len())]
+                row[x0..x1]
                     .iter()
                     .filter(|cell| is_braille(cell))
                     .count()
             })
             .sum()
+    }
+
+    fn lower_band_braille(symbols: &[Vec<String>]) -> usize {
+        band_braille(symbols, 0.25, 0.75)
     }
 
     #[test]
@@ -2256,6 +2384,12 @@ mod tests {
         assert!(
             count >= 40,
             "下側の空きに液晶が描かれていない (braille={count})"
+        );
+        let left = band_braille(&symbols, 0.12, 0.32);
+        let right = band_braille(&symbols, 0.68, 0.88);
+        assert!(
+            left >= 8 && right >= 8,
+            "液晶が中央の円に留まり左右の空きが死んでいる (left={left} right={right})"
         );
     }
 
@@ -2273,6 +2407,12 @@ mod tests {
         assert!(
             lower_band_braille(&b) >= 40,
             "動いたあとに液晶が消えている"
+        );
+        state.stage_ticks = StageShow::LEN;
+        let c = board_symbols_of(&state, 34, 28, false);
+        assert_ne!(
+            a, c,
+            "見せ方が変わっても盤面の記号が同じ"
         );
     }
 

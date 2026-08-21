@@ -89,14 +89,25 @@ pub fn filled_rect_points(x0: f64, y0: f64, x1: f64, y1: f64, step: f64) -> Vec<
 /// 円環 (アウトラインのみ、塗りつぶさない) の座標を、中心角 0〜2π を
 /// `step_rad` 間隔でサンプリングして返す。
 pub fn ring_points(cx: f64, cy: f64, radius: f64, step_rad: f64) -> Vec<(f64, f64)> {
+    ellipse_ring_points(cx, cy, radius, radius, step_rad)
+}
+
+/// 楕円の輪郭。横長の液晶のように、円では幅が足りない形を描く。
+pub fn ellipse_ring_points(
+    cx: f64,
+    cy: f64,
+    rx: f64,
+    ry: f64,
+    step_rad: f64,
+) -> Vec<(f64, f64)> {
     let mut points = Vec::new();
-    if radius <= 0.0 || step_rad <= 0.0 {
+    if rx <= 0.0 || ry <= 0.0 || step_rad <= 0.0 {
         return points;
     }
     let mut angle = 0.0;
     while angle < std::f64::consts::TAU {
         let (sin, cos) = angle.sin_cos();
-        points.push((cx + cos * radius, cy + sin * radius));
+        points.push((cx + cos * rx, cy + sin * ry));
         angle += step_rad;
     }
     points
@@ -176,5 +187,24 @@ mod tests {
     #[test]
     fn ring_points_empty_for_non_positive_radius() {
         assert!(ring_points(0.0, 0.0, 0.0, 0.2).is_empty());
+    }
+
+    #[test]
+    fn ellipse_ring_points_stays_on_ellipse() {
+        let pts = ellipse_ring_points(0.0, 0.0, 8.0, 3.0, 0.2);
+        assert!(!pts.is_empty());
+        for (x, y) in &pts {
+            let n = (x / 8.0).powi(2) + (y / 3.0).powi(2);
+            assert!((n - 1.0).abs() < 1e-9, "楕円上に無い ({x:.2},{y:.2}) n={n:.4}");
+        }
+        let xs: Vec<f64> = pts.iter().map(|p| p.0).collect();
+        assert!(xs.iter().copied().fold(f64::MIN, f64::max) > 7.5);
+        assert!(xs.iter().copied().fold(f64::MAX, f64::min) < -7.5);
+    }
+
+    #[test]
+    fn ellipse_ring_points_empty_for_non_positive_radii() {
+        assert!(ellipse_ring_points(0.0, 0.0, 0.0, 3.0, 0.2).is_empty());
+        assert!(ellipse_ring_points(0.0, 0.0, 4.0, -1.0, 0.2).is_empty());
     }
 }
