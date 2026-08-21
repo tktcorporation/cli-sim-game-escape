@@ -804,6 +804,9 @@ pub struct PachinkoState {
     pub info_scroll: Cell<u16>,
     /// 情報パネルの選択タブ。
     pub tab: InfoTab,
+    /// 液晶演出の位相。着席していなくても毎 tick 進める。止まっていると
+    /// 下側の空きが「何もない」ままになり、釘を読む目がそこへ落ちない。
+    pub stage_ticks: u32,
 }
 
 impl PachinkoState {
@@ -848,6 +851,7 @@ impl PachinkoState {
             hall_scroll: Cell::new(0),
             info_scroll: Cell::new(0),
             tab: InfoTab::Board,
+            stage_ticks: 0,
         }
     }
 

@@ -255,6 +255,7 @@ mod tests {
         restored.invested = 5_000;
         restored.tab = InfoTab::History;
         restored.has_seated = true;
+        restored.stage_ticks = 42;
 
         apply_save(
             &mut restored,
@@ -276,6 +277,7 @@ mod tests {
         assert_eq!(restored.tab, InfoTab::History);
         assert!(restored.has_seated);
         assert_eq!(restored.cash, 2_000);
+        assert_eq!(restored.stage_ticks, 42);
     }
 
     #[test]

@@ -4,7 +4,10 @@
 //! 描画だけが別の形を描き、当たった場所と見えている壁がずれる。規則は値の
 //! 側へ閉じ、呼び出し側は `Arch::TABLE` / `Playfield::TABLE` を渡す。
 
-use super::state::{PachinkoState, BALL_R, BOARD_H, BOARD_W, NAIL_R, START_POCKET_BASE_HALF_W};
+use super::state::{
+    PachinkoState, ATTACKER_Y, BALL_R, BOARD_H, BOARD_W, NAIL_R, START_POCKET_BASE_HALF_W,
+    START_POCKET_Y,
+};
 
 /// 玉と釘が接触する距離。衝突判定と釘格子のピッチ制約が同じ値を見る。
 pub const CONTACT_DIST: f64 = BALL_R + NAIL_R;
@@ -214,6 +217,79 @@ impl Playfield {
     }
 }
 
+/// 盤面下側の液晶。ヘソとアタッカーのあいだ、空いている 2/5 を埋める。
+///
+/// 玉は液晶の手前を落ちる（当たり判定は持たない）。実機と同じく、下の
+/// 空きは数字や釘ではなく「今なにかが動いている」場所として視線を置く。
+/// 物理と描画が同じ円を共有しないと、玉の通り道と絵がずれる。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Stage {
+    pub cx: f64,
+    pub cy: f64,
+    pub r: f64,
+}
+
+impl Stage {
+    pub const TABLE: Self = Self {
+        cx: BOARD_W / 2.0,
+        cy: 65.0,
+        r: 9.0,
+    };
+    /// 外周のランプ数。時計とルーレットの目盛りを兼ねる。
+    pub const LAMPS: usize = 12;
+    /// 内周のランプ数。外周と逆向きに回し、止まって見えないのを防ぐ。
+    pub const INNER_LAMPS: usize = 6;
+    /// スポーク数。ランプだけだと円の塗りに見え、輪が回っていると読めない。
+    pub const SPOKES: usize = 4;
+    /// 内周の速さ倍率。外周と同じ位相だと二重の円が一体に見えてしまう。
+    pub const INNER_PHASE_MULT: f64 = 1.35;
+
+    /// 外周ランプの位置。`phase` は時計回りに進む位相 (ラジアン)。
+    pub fn lamp(self, index: usize, phase: f64) -> (f64, f64) {
+        self.point_on_ring(index, Self::LAMPS, self.r * 0.82, phase)
+    }
+
+    /// 内周ランプの位置。外周と逆位相で回す。
+    pub fn inner_lamp(self, index: usize, phase: f64) -> (f64, f64) {
+        self.point_on_ring(index, Self::INNER_LAMPS, self.r * 0.42, Self::inner_phase(phase))
+    }
+
+    /// スポーク上の点。`frac` は半径に対する割合 (ハブ=0、リム寄り=1に近い)。
+    pub fn spoke_point(self, index: usize, phase: f64, frac: f64) -> (f64, f64) {
+        self.point_on_ring(index, Self::SPOKES, self.r * frac, phase)
+    }
+
+    /// スポーク先端。ハブからリムへ向かう半径で、外周と同じ位相で回す。
+    pub fn spoke_tip(self, index: usize, phase: f64) -> (f64, f64) {
+        self.spoke_point(index, phase, 0.70)
+    }
+
+    /// 12時の指針。ルーレットの当たり位置で、ランプだけだと「どこを見れば
+    /// いいか」が決まらない。y は下向き正なので、頂点は中心より浅い。
+    pub fn pointer(self) -> (f64, f64) {
+        (self.cx, self.cy - self.r * 0.96)
+    }
+
+    /// 内周の位相。符号をここで一箇所に閉じ、位置と点灯が打ち消し合わないようにする。
+    pub const fn inner_phase(phase: f64) -> f64 {
+        -phase * Self::INNER_PHASE_MULT
+    }
+
+    /// 位相に対して点灯するランプ番号。位置の計算と同じ `phase` を渡す。
+    pub fn hot_index(phase: f64, count: usize) -> usize {
+        let step = std::f64::consts::TAU / count as f64;
+        ((phase / step).rem_euclid(count as f64).floor() as usize) % count
+    }
+
+    fn point_on_ring(self, index: usize, count: usize, radius: f64, phase: f64) -> (f64, f64) {
+        let a = phase + std::f64::consts::TAU * index as f64 / count as f64;
+        (self.cx + radius * a.cos(), self.cy + radius * a.sin())
+    }
+}
+
+const _: () = assert!(Stage::TABLE.cy - Stage::TABLE.r > START_POCKET_Y + 1.5);
+const _: () = assert!(Stage::TABLE.cy + Stage::TABLE.r < ATTACKER_Y - 2.0);
+
 /// ヘソの受け口半幅。決まるのは台のヘソ釘の開きと電サポの有無だけなので、
 /// 着席中の台に限らずホールに並ぶ台にも同じ式で引ける。ホールの盤面
 /// プレビューが着席後と同じヘソを描けるのはこのため。
@@ -307,6 +383,53 @@ mod tests {
         assert!(outline.len() >= 9, "出っ張りの輪郭が閉じていない");
         assert!(Arch::rail_hits_bump(Arch::THETA_BUMP));
         assert!(!Arch::rail_hits_bump(Arch::THETA_TOP));
+    }
+
+    #[test]
+    fn the_stage_sits_in_the_empty_band_below_the_heso() {
+        // 液晶はヘソとアタッカーのあいだに置く。釘帯や漏斗に重ねると、
+        // 玉の通り道と絵が食い違って釘読みの対象が消える。
+        let stage = Stage::TABLE;
+        assert!(
+            (stage.cx - BOARD_W / 2.0).abs() < 1e-9,
+            "液晶が盤面の中央に無い"
+        );
+        assert!(
+            stage.cy > START_POCKET_Y + 2.0,
+            "液晶がヘソに重なっている (cy={:.2})",
+            stage.cy
+        );
+        assert!(
+            stage.cy + stage.r < ATTACKER_Y - 1.0,
+            "液晶がアタッカーに重なっている"
+        );
+        assert!(
+            stage.cy - stage.r > START_POCKET_Y,
+            "液晶の上端がヘソより上にある"
+        );
+        let (px, py) = stage.pointer();
+        assert!(
+            (px - stage.cx).abs() < 0.2 && py < stage.cy,
+            "指針が12時に無い ({px:.2}, {py:.2})"
+        );
+        let (x0, y0) = stage.lamp(0, 0.0);
+        let (x1, y1) = stage.lamp(0, 0.4);
+        assert!(
+            (x0 - x1).hypot(y0 - y1) > 1.0,
+            "位相を変えてもランプが動いていない"
+        );
+        let inner_a = stage.inner_lamp(Stage::hot_index(Stage::inner_phase(0.0), Stage::INNER_LAMPS), 0.0);
+        let inner_b = stage.inner_lamp(Stage::hot_index(Stage::inner_phase(0.8), Stage::INNER_LAMPS), 0.8);
+        assert!(
+            (inner_a.0 - inner_b.0).hypot(inner_a.1 - inner_b.1) > 1.0,
+            "内周の点灯が位相打ち消しで止まっている ({inner_a:?} / {inner_b:?})"
+        );
+        let spoke_a = stage.spoke_tip(0, 0.0);
+        let spoke_b = stage.spoke_tip(0, 0.5);
+        assert!(
+            (spoke_a.0 - spoke_b.0).hypot(spoke_a.1 - spoke_b.1) > 1.0,
+            "位相を変えてもスポークが動いていない"
+        );
     }
 
     #[test]

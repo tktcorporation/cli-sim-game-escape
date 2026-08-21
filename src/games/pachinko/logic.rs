@@ -464,6 +464,7 @@ pub fn tick_n(state: &mut PachinkoState, n: u32) {
 }
 
 pub fn tick(state: &mut PachinkoState) {
+    state.stage_ticks = state.stage_ticks.wrapping_add(1);
     if state.phase != Phase::Playing {
         return;
     }
