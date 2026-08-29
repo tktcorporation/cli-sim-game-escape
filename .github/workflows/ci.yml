@@ -24,6 +24,16 @@ jobs:
       # 速度面では `cargo test` と大差ないが、最遅テストを把握できる利点が大きい。
       - uses: taiki-e/install-action@nextest
       - run: cargo nextest run --profile ci
+      # わかりにくさスコアは成功時もログに残したいので、critique だけ再実行して
+      # レポートを artifact にする（本体の nextest は success-output=never）。
+      - name: Game critique report
+        run: cargo test --lib critique -- --nocapture
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: critique-report
+          path: target/critique-report.txt
+          if-no-files-found: ignore
       # JUnit を artifact にしておくと PR 上で test reporting アクションが拾える。
       - if: always()
         uses: actions/upload-artifact@v4

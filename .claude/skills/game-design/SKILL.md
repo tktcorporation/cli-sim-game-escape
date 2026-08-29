@@ -33,6 +33,11 @@ arguments:
 - `DESIGN.md` — 存在する場合、デザインドキュメント
 - `CLAUDE.md` の Game Design Concepts セクション — コアコンセプトと既知の課題
 
+可能なら先に `cargo test --lib critique -- --nocapture` を回し、
+`target/critique-report.txt` の afford / goal / feedback を見る。
+低い列は「なんかよくわからん」の定量的な手がかりになる
+（詳細は `.claude/rules/project/game-critique.md`）。
+
 ### Step 2: 「面白さの核」の診断
 
 以下のフレームワークで各ゲームの面白さを診断する:
