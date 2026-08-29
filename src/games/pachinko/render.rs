@@ -33,7 +33,7 @@ use crate::theme;
 use crate::widgets::{Clickable, ClickableList, ScrollableTab, TabBar};
 
 use super::actions;
-use super::board::{self, Arch, Stage, StageShow};
+use super::board::{self, Arch, Stage};
 use super::logic;
 use super::nails;
 use super::state::{
@@ -405,28 +405,56 @@ struct StageLayer {
     color: Color,
 }
 
-/// 液晶の回転速度 (tick あたりラジアン)。止まっていると下側の空きが死ぬ。
-/// デジタルが回っているほど速くし、格の違いは速さの差としてだけ出す。
+/// 液晶の機嫌。席の経過時間ではなく、盤面で今起きていることにだけ反応する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StageMood {
+    /// 停止。息をしているだけ。
+    Idle,
+    /// ヘソ入賞〜デジタル回転。ルーレットが起きる。
+    Spin,
+    /// リーチ。二つの明かりが追う。
+    Reach,
+    /// 大当たり。輪が膨らむ。
+    Jackpot,
+}
+
+fn stage_mood(state: &PachinkoState) -> StageMood {
+    if matches!(state.mode, Mode::Jackpot(_)) {
+        return StageMood::Jackpot;
+    }
+    let reach = match &state.digit {
+        Digit::Spinning { outcome, .. } => outcome.reach != ReachKind::None,
+        Digit::Idle => false,
+    };
+    if state.reach_flash > 0 || reach {
+        return StageMood::Reach;
+    }
+    if matches!(state.digit, Digit::Spinning { .. }) || state.start_flash > 0 {
+        return StageMood::Spin;
+    }
+    StageMood::Idle
+}
+
+/// 液晶の回転速度 (tick あたりラジアン)。機嫌に応じて速さが変わる。
 fn stage_rate(state: &PachinkoState) -> f64 {
-    match state.mode {
-        Mode::Jackpot(_) => 0.48,
-        _ => match &state.digit {
-            Digit::Spinning {
-                ticks_left,
-                outcome,
-            } => {
+    match stage_mood(state) {
+        StageMood::Jackpot => 0.48,
+        StageMood::Reach => match &state.digit {
+            Digit::Spinning { ticks_left, outcome } => {
                 let total = outcome.reach.spin_ticks().max(1) as f64;
                 let urgency = 1.0 - (*ticks_left as f64 / total).clamp(0.0, 1.0);
                 match outcome.reach {
                     ReachKind::Premium => 0.36 + urgency * 0.28,
                     ReachKind::Super => 0.28 + urgency * 0.22,
                     ReachKind::Normal => 0.20 + urgency * 0.16,
-                    ReachKind::None => 0.14 + urgency * 0.10,
+                    ReachKind::None => 0.22,
                 }
             }
-            Digit::Idle if state.mode.is_assisted() => 0.16,
-            Digit::Idle => 0.11,
+            Digit::Idle => 0.22,
         },
+        StageMood::Spin => 0.18,
+        StageMood::Idle if state.mode.is_assisted() => 0.05,
+        StageMood::Idle => 0.03,
     }
 }
 
@@ -441,6 +469,7 @@ fn stage_hot_color(state: &PachinkoState) -> Color {
         Digit::Spinning { outcome, .. } if outcome.reach != ReachKind::None => {
             outcome.reach.color()
         }
+        Digit::Idle if state.start_flash > 0 => Color::LightYellow,
         Digit::Spinning { .. } => Color::LightYellow,
         Digit::Idle if state.mode.is_assisted() => Color::LightCyan,
         Digit::Idle => Color::Rgb(255, 196, 72),
@@ -460,9 +489,9 @@ fn stage_panel(stage: Stage, aspect: f64) -> Vec<(f64, f64)> {
     canvas_fx::filled_ellipse_points(
         stage.cx,
         board_to_canvas_y(stage.cy),
-        stage.rx * 0.70,
-        stage.ry * 0.62 * aspect,
-        0.58,
+        stage.rx * 0.62,
+        stage.ry * 0.58 * aspect,
+        0.42,
     )
 }
 
@@ -470,9 +499,9 @@ fn stage_rim(stage: Stage, aspect: f64) -> Vec<(f64, f64)> {
     canvas_fx::ellipse_ring_points(
         stage.cx,
         board_to_canvas_y(stage.cy),
-        stage.rx * 0.95,
-        stage.ry * 0.95 * aspect,
-        0.08,
+        stage.rx * 0.94,
+        stage.ry * 0.94 * aspect,
+        0.10,
     )
 }
 
@@ -487,7 +516,7 @@ fn collect_lamps(
 ) {
     for i in 0..Stage::LAMPS {
         let (x, y) = stage.lamp(i, phase);
-        let pts = stage_blob(x, y, 0.72, 0.62, aspect, 0.28);
+        let pts = stage_blob(x, y, 0.55, 0.48, aspect, 0.26);
         if lamp_is_hot(i, hot, Stage::LAMPS, span) {
             lit.extend(pts);
         } else {
@@ -496,12 +525,14 @@ fn collect_lamps(
     }
 }
 
+fn pulse_frac(t: f64, offset: f64) -> f64 {
+    0.28 + 0.60 * (t * 0.22 + offset).rem_euclid(1.0)
+}
+
 fn stage_dots(state: &PachinkoState, aspect: f64) -> Vec<StageLayer> {
     let stage = Stage::TABLE;
-    let rate = stage_rate(state);
-    let t = state.stage_ticks as f64 * rate;
-    let dir = Stage::spin_sign(state.stage_ticks);
-    let phase = t * dir;
+    let mood = stage_mood(state);
+    let phase = state.stage_ticks as f64 * stage_rate(state);
     let hot_color = stage_hot_color(state);
     let lamp_color = Color::Rgb(148, 78, 28);
     let mut layers = vec![
@@ -514,14 +545,40 @@ fn stage_dots(state: &PachinkoState, aspect: f64) -> Vec<StageLayer> {
             color: Color::Rgb(86, 74, 52),
         },
     ];
-    match StageShow::at(state.stage_ticks) {
-        StageShow::Roulette => {
+    match mood {
+        StageMood::Idle => {
+            let mut dim = Vec::new();
+            let mut lit = Vec::new();
+            collect_lamps(
+                stage,
+                phase,
+                Stage::hot_index(phase, Stage::LAMPS),
+                0,
+                aspect,
+                &mut dim,
+                &mut lit,
+            );
+            let breath = 0.95 + 0.22 * (state.stage_ticks as f64 * 0.12).sin();
+            layers.push(StageLayer {
+                points: dim,
+                color: lamp_color,
+            });
+            layers.push(StageLayer {
+                points: stage_blob(stage.cx, stage.cy, breath, breath, aspect, 0.26),
+                color: Color::Rgb(48, 40, 36),
+            });
+            layers.push(StageLayer {
+                points: lit,
+                color: hot_color,
+            });
+        }
+        StageMood::Spin => {
             let mut spokes = Vec::new();
             for i in 0..Stage::SPOKES {
                 let mut frac = 0.22;
                 while frac <= 0.68 {
                     let (x, y) = stage.spoke_point(i, phase, frac);
-                    spokes.extend(stage_blob(x, y, 0.28, 0.28, aspect, 0.24));
+                    spokes.extend(stage_blob(x, y, 0.26, 0.26, aspect, 0.24));
                     frac += 0.08;
                 }
             }
@@ -541,14 +598,15 @@ fn stage_dots(state: &PachinkoState, aspect: f64) -> Vec<StageLayer> {
             let mut inner_hot = Vec::new();
             for i in 0..Stage::INNER_LAMPS {
                 let (x, y) = stage.inner_lamp(i, phase);
-                let pts = stage_blob(x, y, 0.48, 0.42, aspect, 0.26);
+                let pts = stage_blob(x, y, 0.42, 0.36, aspect, 0.26);
                 if lamp_is_hot(i, inner_hot_i, Stage::INNER_LAMPS, 0) {
                     inner_hot.extend(pts);
                 } else {
                     inner_dim.extend(pts);
                 }
             }
-            let breath = 1.15 + 0.22 * (state.stage_ticks as f64 * 0.19).sin();
+            let punch = if state.start_flash > 0 { 0.35 } else { 0.0 };
+            let breath = 1.05 + punch + 0.16 * (state.stage_ticks as f64 * 0.19).sin();
             let (px, py) = stage.pointer();
             layers.push(StageLayer {
                 points: spokes,
@@ -575,42 +633,47 @@ fn stage_dots(state: &PachinkoState, aspect: f64) -> Vec<StageLayer> {
                 color: hot_color,
             });
             layers.push(StageLayer {
-                points: stage_blob(px, py, 0.55, 0.85, aspect, 0.24),
+                points: stage_blob(px, py, 0.50, 0.72, aspect, 0.24),
                 color: Color::LightRed,
             });
         }
-        StageShow::Sweep => {
-            let x = stage.sweep_x(t * 0.85);
-            let trail_x = stage.sweep_x(t * 0.85 - 0.55);
-            layers.push(StageLayer {
-                points: stage_blob(trail_x, stage.cy, 1.4, stage.ry * 0.42, aspect, 0.22),
-                color: Color::Rgb(120, 70, 36),
-            });
-            layers.push(StageLayer {
-                points: stage_blob(x, stage.cy, 2.1, stage.ry * 0.78, aspect, 0.20),
-                color: hot_color,
-            });
-        }
-        StageShow::Twin => {
+        StageMood::Reach => {
             let hot_a = Stage::hot_index(phase, Stage::LAMPS);
             let hot_b = (hot_a + Stage::LAMPS / 2) % Stage::LAMPS;
             let mut dim = Vec::new();
             let mut lit_a = Vec::new();
             let mut lit_b = Vec::new();
+            let mut axis = Vec::new();
             for i in 0..Stage::LAMPS {
-                let (x, y) = stage.lamp(i, phase * 0.15);
-                let pts = stage_blob(x, y, 0.72, 0.62, aspect, 0.28);
-                if lamp_is_hot(i, hot_a, Stage::LAMPS, 1) {
+                let (x, y) = stage.lamp(i, 0.0);
+                let on_a = lamp_is_hot(i, hot_a, Stage::LAMPS, 1);
+                let on_b = lamp_is_hot(i, hot_b, Stage::LAMPS, 1);
+                let r = if on_a || on_b { 0.78 } else { 0.40 };
+                let pts = stage_blob(x, y, r, r * 0.88, aspect, 0.26);
+                if on_a {
                     lit_a.extend(pts);
-                } else if lamp_is_hot(i, hot_b, Stage::LAMPS, 1) {
+                } else if on_b {
                     lit_b.extend(pts);
                 } else {
                     dim.extend(pts);
                 }
             }
+            // 色だけが追い合うと、塗り潰した楕円に飲まれて対向していると読めない。
+            let mut frac = 0.18;
+            while frac <= 0.70 {
+                let (x, y) = stage.along_lamp(hot_a, frac);
+                axis.extend(stage_blob(x, y, 0.24, 0.24, aspect, 0.24));
+                let (x, y) = stage.along_lamp(hot_b, frac);
+                axis.extend(stage_blob(x, y, 0.24, 0.24, aspect, 0.24));
+                frac += 0.10;
+            }
             layers.push(StageLayer {
                 points: dim,
                 color: lamp_color,
+            });
+            layers.push(StageLayer {
+                points: axis,
+                color: Color::Rgb(90, 70, 48),
             });
             layers.push(StageLayer {
                 points: lit_b,
@@ -621,14 +684,14 @@ fn stage_dots(state: &PachinkoState, aspect: f64) -> Vec<StageLayer> {
                 color: hot_color,
             });
         }
-        StageShow::Pulse => {
-            let breath = 1.2 + 0.35 * (state.stage_ticks as f64 * 0.21).sin();
+        StageMood::Jackpot => {
+            let breath = 1.15 + 0.35 * (state.stage_ticks as f64 * 0.21).sin();
             for (offset, color) in [
                 (0.0, Color::Rgb(86, 74, 52)),
                 (0.45, hot_color),
                 (0.78, Color::Rgb(210, 150, 70)),
             ] {
-                let frac = Stage::pulse_frac(t, offset);
+                let frac = pulse_frac(phase, offset);
                 layers.push(StageLayer {
                     points: canvas_fx::ellipse_ring_points(
                         stage.cx,
@@ -645,40 +708,12 @@ fn stage_dots(state: &PachinkoState, aspect: f64) -> Vec<StageLayer> {
                 color: hot_color,
             });
         }
-        StageShow::Comet => {
-            let mut trail = Vec::new();
-            let mut head = Vec::new();
-            let mut second = Vec::new();
-            for k in (0..8).rev() {
-                let (x, y) = stage.comet(t - k as f64 * 0.22);
-                let r = 0.55 + 0.18 * (7 - k) as f64;
-                if k == 0 {
-                    head.extend(stage_blob(x, y, r + 0.35, r + 0.20, aspect, 0.20));
-                } else {
-                    trail.extend(stage_blob(x, y, r, r, aspect, 0.22));
-                }
-            }
-            let (sx, sy) = stage.comet(t * 0.7 + 2.4);
-            second.extend(stage_blob(sx, sy, 0.95, 0.75, aspect, 0.22));
-            layers.push(StageLayer {
-                points: trail,
-                color: Color::Rgb(120, 70, 36),
-            });
-            layers.push(StageLayer {
-                points: second,
-                color: Color::Rgb(80, 140, 170),
-            });
-            layers.push(StageLayer {
-                points: head,
-                color: hot_color,
-            });
-        }
     }
     layers
 }
 
 fn draw_stage(ctx: &mut Context, layers: &[StageLayer]) {
-    // 盤面より暗い楕円で「画面」を作り、左右の空きをただの余白に見せない。
+    // ヘソ直下の小さな画面。アタッカーへ寄る通路は塗らない。
     for layer in layers {
         draw_points(ctx, &layer.points, layer.color);
     }
@@ -734,7 +769,8 @@ const HALL_PREVIEW_W: u16 = 40;
 /// `board_statics` と液晶を描くので、ここで読んだヘソの開きは着席後の盤面と
 /// そのまま一致する。
 ///
-/// 釘と入賞口は静止画。液晶だけは `stage_ticks` で回し、下側の空きを死なせない。
+/// 釘と入賞口は静止画。液晶は停止中でも息をするので、ホールのプレビューでも
+/// `stage_ticks` で位相を進める。ヘソ下の通路までは塗らない。
 /// 玉やアタッカーの開放のような遊技中にしか存在しない要素は持たない。
 /// クリック判定も持たない純粋な装飾なので、別 DOM 要素は生やさず盤面と同じ
 /// `<pre>` 上に描く。
@@ -2311,24 +2347,71 @@ mod tests {
         );
     }
 
-    /// 液晶が tick ごとに回る様子を盤面だけ切り出して出す。
+    fn stage_spinning_digit(reach: ReachKind) -> Digit {
+        Digit::Spinning {
+            ticks_left: 20,
+            outcome: SpinOutcome {
+                hit: reach != ReachKind::None,
+                rounds: if reach != ReachKind::None { 16 } else { 0 },
+                kakuhen: false,
+                reach,
+                rank: PendingRank::White,
+                stop: StopStyle::Plain,
+                confirmed: false,
+                assisted: false,
+                reels: [7, 7, 7],
+            },
+        }
+    }
+
+    fn stage_jackpot_mode() -> Mode {
+        Mode::Jackpot(crate::games::pachinko::state::JackpotState {
+            round: 3,
+            total_rounds: 16,
+            count: 4,
+            ticks_left: 120,
+            kakuhen: true,
+            payout: 0,
+        })
+    }
+
+    fn dump_board_grid(label: &str, state: &PachinkoState) {
+        let grid = board_symbols_of(state, 34, 28, false);
+        eprintln!("=== stage {label} 34x28 ===");
+        for (y, row) in grid.iter().enumerate() {
+            eprintln!("{:2}|{}|", y, row.join(""));
+        }
+    }
+
+    /// 液晶が盤面の出来事に合わせて形を変える様子を盤面だけ切り出して出す。
     ///
     /// `cargo test --lib games::pachinko::render::tests::dump_stage_motion -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn dump_stage_motion() {
-        let mut state = seated_state();
-        for ticks in [0u32, 20, 80, 120, 160, 240, 320] {
-            state.stage_ticks = ticks;
-            let grid = board_symbols_of(&state, 34, 28, false);
-            eprintln!(
-                "=== stage t={ticks} {:?} 34x28 ===",
-                crate::games::pachinko::board::StageShow::at(ticks)
-            );
-            for (y, row) in grid.iter().enumerate() {
-                eprintln!("{:2}|{}|", y, row.join(""));
-            }
-        }
+        let idle = seated_state();
+        dump_board_grid("idle t=0", &idle);
+        let mut idle_later = seated_state();
+        idle_later.stage_ticks = 80;
+        dump_board_grid("idle t=80", &idle_later);
+
+        let mut spin = seated_state();
+        spin.digit = stage_spinning_digit(ReachKind::None);
+        dump_board_grid("spin t=0", &spin);
+        spin.stage_ticks = 24;
+        dump_board_grid("spin t=24", &spin);
+
+        let mut reach = seated_state();
+        reach.digit = stage_spinning_digit(ReachKind::Super);
+        dump_board_grid("reach t=0", &reach);
+        reach.stage_ticks = 24;
+        dump_board_grid("reach t=24", &reach);
+
+        let mut jack = seated_state();
+        jack.mode = stage_jackpot_mode();
+        dump_board_grid("jackpot t=0", &jack);
+        jack.stage_ticks = 24;
+        dump_board_grid("jackpot t=24", &jack);
     }
 
     #[test]
@@ -2375,45 +2458,107 @@ mod tests {
         band_braille(symbols, 0.25, 0.75)
     }
 
+    fn stage_band_text(state: &PachinkoState) -> String {
+        let grid = board_symbols_of(state, 34, 28, false);
+        let h = grid.len();
+        let w = grid.first().map(Vec::len).unwrap_or(0);
+        let y0 = (h as f64 * 0.56) as usize;
+        let y1 = ((h as f64 * 0.72) as usize).min(h);
+        let x0 = ((w as f64 * 0.38) as usize).min(w);
+        let x1 = ((w as f64 * 0.62) as usize).min(w).max(x0);
+        grid[y0..y1]
+            .iter()
+            .map(|row| row[x0..x1].join(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
-    fn the_stage_fills_the_empty_band_below_the_heso() {
-        // 下側 2/5 は釘も漏斗も無い。液晶が無いと視線の置き場が無く、
-        // 盤面の下半分が「何も起きていない」死んだ余白になる。
+    fn the_stage_mood_follows_the_board() {
+        let idle = seated_state();
+        assert_eq!(stage_mood(&idle), StageMood::Idle);
+
+        let mut flash = seated_state();
+        flash.start_flash = 1;
+        assert_eq!(stage_mood(&flash), StageMood::Spin);
+
+        let mut spin = seated_state();
+        spin.digit = stage_spinning_digit(ReachKind::None);
+        assert_eq!(stage_mood(&spin), StageMood::Spin);
+
+        let mut reach = seated_state();
+        reach.digit = stage_spinning_digit(ReachKind::Super);
+        assert_eq!(stage_mood(&reach), StageMood::Reach);
+
+        let mut reach_flash = seated_state();
+        reach_flash.reach_flash = 1;
+        assert_eq!(stage_mood(&reach_flash), StageMood::Reach);
+
+        let mut jack = seated_state();
+        jack.mode = stage_jackpot_mode();
+        jack.digit = stage_spinning_digit(ReachKind::Super);
+        assert_eq!(stage_mood(&jack), StageMood::Jackpot);
+    }
+
+    #[test]
+    fn the_stage_sits_under_the_heso_without_filling_the_wings() {
+        // 液晶はヘソ直下の中央だけ。左右の通路まで塗ると、外れた玉を追う
+        // 目が絵に奪われる。
         let symbols = board_symbols(34, 28, false);
-        let count = lower_band_braille(&symbols);
+        let center = band_braille(&symbols, 0.38, 0.62);
         assert!(
-            count >= 40,
-            "下側の空きに液晶が描かれていない (braille={count})"
+            center >= 8,
+            "ヘソ直下の中央に液晶が描かれていない (braille={center})"
         );
         let left = band_braille(&symbols, 0.12, 0.32);
         let right = band_braille(&symbols, 0.68, 0.88);
         assert!(
-            left >= 8 && right >= 8,
-            "液晶が中央の円に留まり左右の空きが死んでいる (left={left} right={right})"
+            left < center && right < center,
+            "液晶が通路まで広がっている (center={center} left={left} right={right})"
         );
     }
 
     #[test]
     fn the_stage_moves_as_ticks_pass() {
-        let mut state = seated_state();
-        state.stage_ticks = 0;
-        let a = board_symbols_of(&state, 34, 28, false);
-        state.stage_ticks = 24;
-        let b = board_symbols_of(&state, 34, 28, false);
-        assert_ne!(
-            a, b,
-            "tick が進んでも液晶が動いていない"
-        );
+        // 停止中の息は遅いので、回転とリーチで位相が進むことを見る。
+        let mut spin = seated_state();
+        spin.digit = stage_spinning_digit(ReachKind::None);
+        spin.stage_ticks = 0;
+        let spin_a = board_symbols_of(&spin, 34, 28, false);
+        spin.stage_ticks = 24;
+        let spin_b = board_symbols_of(&spin, 34, 28, false);
+        assert_ne!(spin_a, spin_b, "tick が進んでも液晶が動いていない");
         assert!(
-            lower_band_braille(&b) >= 40,
+            lower_band_braille(&spin_b) >= 8,
             "動いたあとに液晶が消えている"
         );
-        state.stage_ticks = StageShow::LEN;
-        let c = board_symbols_of(&state, 34, 28, false);
-        assert_ne!(
-            a, c,
-            "見せ方が変わっても盤面の記号が同じ"
-        );
+
+        let mut reach = seated_state();
+        reach.digit = stage_spinning_digit(ReachKind::Super);
+        reach.stage_ticks = 0;
+        let reach_a = board_symbols_of(&reach, 34, 28, false);
+        reach.stage_ticks = 24;
+        let reach_b = board_symbols_of(&reach, 34, 28, false);
+        assert_ne!(reach_a, reach_b, "リーチ中に対向する明かりが動いていない");
+    }
+
+    #[test]
+    fn the_stage_changes_shape_with_the_board() {
+        let idle = seated_state();
+        let mut spin = seated_state();
+        spin.digit = stage_spinning_digit(ReachKind::None);
+        let mut reach = seated_state();
+        reach.digit = stage_spinning_digit(ReachKind::Super);
+        let mut jack = seated_state();
+        jack.mode = stage_jackpot_mode();
+        let idle_text = stage_band_text(&idle);
+        let spin_text = stage_band_text(&spin);
+        let reach_text = stage_band_text(&reach);
+        let jack_text = stage_band_text(&jack);
+        assert_ne!(idle_text, spin_text, "ヘソ入賞でも液晶の形が止まっている");
+        assert_ne!(spin_text, reach_text, "リーチでも液晶の形が回転のまま");
+        assert_ne!(reach_text, jack_text, "大当たりでも液晶の形がリーチのまま");
+        assert_ne!(idle_text, jack_text, "大当たりでも液晶の形が停止のまま");
     }
 
     #[test]

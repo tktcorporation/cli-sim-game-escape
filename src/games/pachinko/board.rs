@@ -5,8 +5,8 @@
 //! 側へ閉じ、呼び出し側は `Arch::TABLE` / `Playfield::TABLE` を渡す。
 
 use super::state::{
-    PachinkoState, ATTACKER_Y, BALL_R, BOARD_H, BOARD_W, NAIL_R, START_POCKET_BASE_HALF_W,
-    START_POCKET_Y,
+    PachinkoState, ATTACKER_Y, BALL_R, BOARD_H, BOARD_W, NAIL_R, SIDE_POCKET_Y,
+    START_POCKET_BASE_HALF_W, START_POCKET_Y,
 };
 
 /// 玉と釘が接触する距離。衝突判定と釘格子のピッチ制約が同じ値を見る。
@@ -217,11 +217,11 @@ impl Playfield {
     }
 }
 
-/// 盤面下側の液晶。ヘソとアタッカーのあいだ、空いている帯を横長の楕円で埋める。
+/// ヘソ直下の液晶。玉は手前を落ちる（当たり判定は持たない）。
 ///
-/// 玉は液晶の手前を落ちる（当たり判定は持たない）。実機と同じく、下の
-/// 空きは数字や釘ではなく「今なにかが動いている」場所として視線を置く。
-/// 物理は当たらない。描画だけが同じ楕円を見る。円だと左右の空きが死ぬ。
+/// ヘソに入ったあとの視線の置き場としてだけ置く。アタッカーへ寄る通路や
+/// サイド入賞口まで広げると、外れた玉を追う目が絵に奪われる。物理は当たらない。
+/// 描画だけが同じ楕円を見る。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Stage {
     pub cx: f64,
@@ -230,51 +230,19 @@ pub struct Stage {
     pub ry: f64,
 }
 
-/// 液晶の見せ方。同じ回転だけだと数秒で目が慣れるので、席の位相から
-/// 種類を切り替える。数字は出さない。速さは描画側の `stage_rate` が決める。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StageShow {
-    /// 外周が回り、スポークが追いかけて輪だと読める。
-    Roulette,
-    /// 縦の光が左右へ往復する。横長を一番使う。
-    Sweep,
-    /// 二つの明かりが逆向きに追う。
-    Twin,
-    /// 楕円の輪が内側から膨らんで消える。
-    Pulse,
-    /// 光点が Lissajous で画面を渡り歩く。
-    Comet,
-}
-
-impl StageShow {
-    pub const ALL: [Self; 5] = [
-        Self::Roulette,
-        Self::Sweep,
-        Self::Twin,
-        Self::Pulse,
-        Self::Comet,
-    ];
-    /// 1種類を見せる tick 数。10 ticks/sec なので約 8 秒で次へ移る。
-    pub const LEN: u32 = 80;
-
-    pub fn at(ticks: u32) -> Self {
-        Self::ALL[((ticks / Self::LEN) as usize) % Self::ALL.len()]
-    }
-}
-
 impl Stage {
     pub const TABLE: Self = Self {
         cx: BOARD_W / 2.0,
-        cy: 65.0,
-        rx: 22.0,
-        ry: 8.5,
+        cy: 61.0,
+        rx: 8.0,
+        ry: 5.0,
     };
-    /// 外周のランプ数。横長だと 12 では目盛りがスカスカになる。
-    pub const LAMPS: usize = 16;
+    /// 外周のランプ数。時計の目盛りを兼ねる。
+    pub const LAMPS: usize = 12;
     /// 内周のランプ数。外周と逆向きに回し、止まって見えないのを防ぐ。
-    pub const INNER_LAMPS: usize = 8;
+    pub const INNER_LAMPS: usize = 6;
     /// スポーク数。ランプだけだと円の塗りに見え、輪が回っていると読めない。
-    pub const SPOKES: usize = 6;
+    pub const SPOKES: usize = 4;
     /// 内周の速さ倍率。外周と同じ位相だと二重の円が一体に見えてしまう。
     pub const INNER_PHASE_MULT: f64 = 1.35;
 
@@ -317,25 +285,16 @@ impl Stage {
         (self.cx, self.cy - self.ry * 0.96)
     }
 
-    /// 掃引バーの x。`t.sin()` で左右へ往復し、横幅を使い切る。
-    pub fn sweep_x(self, t: f64) -> f64 {
-        self.cx + self.rx * 0.78 * t.sin()
-    }
-
-    /// 脈動する輪の半径割合。`offset` をずらすと二重の波になる。
-    pub fn pulse_frac(t: f64, offset: f64) -> f64 {
-        0.20 + 0.68 * (t * 0.18 + offset).rem_euclid(1.0)
-    }
-
-    /// 画面を横断する光点。周波数を 2:3 にして同じ軌跡を辿らせない。
-    pub fn comet(self, t: f64) -> (f64, f64) {
+    /// ランプへ向かう半径上の点。リーチの対向する明かりを線で結ぶ。
+    pub fn along_lamp(self, index: usize, frac: f64) -> (f64, f64) {
+        let (x, y) = self.lamp(index, 0.0);
         (
-            self.cx + self.rx * 0.78 * (t * 0.85).sin(),
-            self.cy + self.ry * 0.62 * (t * 1.3 + 0.7).sin(),
+            self.cx + (x - self.cx) * frac,
+            self.cy + (y - self.cy) * frac,
         )
     }
 
-    /// 点が液晶の内側かどうか。サイド入賞口と重ならないことの検査に使う。
+    /// 点が液晶の内側かどうか。通路や入賞口と重ならないことの検査に使う。
     pub fn contains(self, x: f64, y: f64) -> bool {
         let nx = (x - self.cx) / self.rx;
         let ny = (y - self.cy) / self.ry;
@@ -352,20 +311,12 @@ impl Stage {
         let step = std::f64::consts::TAU / count as f64;
         ((phase / step).rem_euclid(count as f64).floor() as usize) % count
     }
-
-    /// ルーレットの回転方向。同じ向きだけだと目が慣れる。
-    pub fn spin_sign(ticks: u32) -> f64 {
-        if (ticks / StageShow::LEN / StageShow::ALL.len() as u32).is_multiple_of(2) {
-            1.0
-        } else {
-            -1.0
-        }
-    }
 }
 
 const _: () = assert!(Stage::TABLE.cy - Stage::TABLE.ry > START_POCKET_Y + 1.5);
+const _: () = assert!(Stage::TABLE.cy + Stage::TABLE.ry < SIDE_POCKET_Y);
 const _: () = assert!(Stage::TABLE.cy + Stage::TABLE.ry < ATTACKER_Y - 2.0);
-const _: () = assert!(Stage::TABLE.rx > Stage::TABLE.ry * 2.0);
+const _: () = assert!(Stage::TABLE.rx < BOARD_W * 0.2);
 
 /// ヘソの受け口半幅。決まるのは台のヘソ釘の開きと電サポの有無だけなので、
 /// 着席中の台に限らずホールに並ぶ台にも同じ式で引ける。ホールの盤面
@@ -466,9 +417,9 @@ mod tests {
     }
 
     #[test]
-    fn the_stage_sits_in_the_empty_band_below_the_heso() {
-        // 液晶はヘソとアタッカーのあいだに置く。釘帯や漏斗に重ねると、
-        // 玉の通り道と絵が食い違って釘読みの対象が消える。
+    fn the_stage_sits_just_below_the_heso() {
+        // 液晶はヘソに入ったあとの視線の置き場。アタッカーへ寄る通路まで
+        // 広げると、外れた玉を追う目が絵に奪われる。
         let stage = Stage::TABLE;
         assert!(
             (stage.cx - BOARD_W / 2.0).abs() < 1e-9,
@@ -480,10 +431,18 @@ mod tests {
             stage.cy
         );
         assert!(
-            stage.rx > stage.ry * 2.0,
-            "液晶が横長になっていない (rx={:.1} ry={:.1})",
-            stage.rx,
-            stage.ry
+            stage.cy - START_POCKET_Y < 10.0,
+            "液晶がヘソから離れすぎている (cy={:.2})",
+            stage.cy
+        );
+        assert!(
+            stage.rx < BOARD_W * 0.2,
+            "液晶が通路を塞ぐ幅になっている (rx={:.1})",
+            stage.rx
+        );
+        assert!(
+            stage.cy + stage.ry < SIDE_POCKET_Y,
+            "液晶がサイド入賞口の高さまで下がっている"
         );
         assert!(
             stage.cy + stage.ry < ATTACKER_Y - 1.0,
@@ -501,26 +460,6 @@ mod tests {
             !stage.contains(SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y),
             "液晶が右のサイド入賞口に被っている"
         );
-        let sweep_span = (stage.sweep_x(std::f64::consts::FRAC_PI_2)
-            - stage.sweep_x(-std::f64::consts::FRAC_PI_2))
-        .abs();
-        assert!(
-            sweep_span > stage.rx,
-            "掃引が横幅を使っていない (span={sweep_span:.1})"
-        );
-        let (c0x, _) = stage.comet(0.0);
-        let (c1x, _) = stage.comet(2.0);
-        assert!(
-            (c0x - c1x).abs() > stage.rx * 0.5,
-            "コメットが横に動いていない"
-        );
-        assert_ne!(
-            StageShow::at(0),
-            StageShow::at(StageShow::LEN),
-            "tick が進んでも見せ方が変わらない"
-        );
-        assert_eq!(StageShow::at(0), StageShow::Roulette);
-        assert_eq!(StageShow::at(StageShow::LEN), StageShow::Sweep);
         let (px, py) = stage.pointer();
         assert!(
             (px - stage.cx).abs() < 0.2 && py < stage.cy,
@@ -543,6 +482,17 @@ mod tests {
         assert!(
             (spoke_a.0 - spoke_b.0).hypot(spoke_a.1 - spoke_b.1) > 1.0,
             "位相を変えてもスポークが動いていない"
+        );
+        let (lx, ly) = stage.lamp(3, 0.0);
+        let (ax, ay) = stage.along_lamp(3, 1.0);
+        assert!(
+            (lx - ax).hypot(ly - ay) < 1e-9,
+            "半径1の点がランプに乗っていない"
+        );
+        let (ox, oy) = stage.along_lamp(3, 0.0);
+        assert!(
+            (ox - stage.cx).hypot(oy - stage.cy) < 1e-9,
+            "半径0の点が中心に無い"
         );
     }
 
