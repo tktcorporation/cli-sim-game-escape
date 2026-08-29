@@ -1,17 +1,18 @@
 //! 玉響 (Tamayura) — ゲーム状態。
 //!
-//! 純粋なデータ定義とパラメータ関数のみ。物理・抽選・状態遷移は logic.rs、
-//! 描画は render.rs に置く (Pure Logic Pattern)。
+//! 純粋なデータ定義とパラメータ関数のみ。空間は board、釘は nails、運動は
+//! physics、当落と席は logic、描画は render に置く (Pure Logic Pattern)。
 //!
 //! ## 盤面座標系
-//! 盤面は連続座標 (`f64`) の縦長の矩形で、`x` は [0, BOARD_W]、`y` は
-//! [0, BOARD_H]。**`y` は下向きが正** で、`y=0` が天井、`y=BOARD_H` が
-//! アウト口にあたる。重力の符号をそのまま `vy` に足せる向きを優先した
-//! 結果で、上下が反転して見える Canvas へは render 側で反転して描く。
+//! 盤面は連続座標 (`f64`) の縦長で、上部は楕円アーチの逆U字、その下は矩形。
+//! `x` は [0, BOARD_W]、`y` は [0, BOARD_H]。**`y` は下向きが正** で、
+//! `y=0` がアーチの頂点、`y=BOARD_H` がアウト口にあたる。重力の符号をそのまま
+//! `vy` に足せる向きを優先した結果で、上下が反転して見える Canvas へは
+//! render 側で反転して描く。
 //!
 //! ## 台の個性の見せ方
 //! 台ごとの回りやすさは `Machine::nail_spread` / `rail_bias` が持つが、
-//! これらは数値として UI に出さない。`logic::generate_nails` が釘の座標へ
+//! これらは数値として UI に出さない。`nails::generate_nails` が釘の座標へ
 //! 反映し、プレイヤーは盤面の見た目から読む。実際の回転率は打って計測して
 //! 初めて分かる (`logic::spin_rate`)。
 
@@ -27,25 +28,32 @@ pub const BOARD_W: f64 = 64.0;
 pub const BOARD_H: f64 = 96.0;
 
 /// 玉の半径。釘との衝突判定 `BALL_R + NAIL_R` に使う。
-pub const BALL_R: f64 = 0.9;
-/// 釘の半径。
-pub const NAIL_R: f64 = 0.7;
+///
+/// 盤面幅 (`BOARD_W`) に対して大きいと、釘の隙間を玉が塞いでしまい、
+/// 1本1本に弾かれる弧が見えなくなる。実機の 11mm 玉は釘間隔より一回り
+/// 小さく、隙間を抜けたり縁に乗ったりする余地がある。ここも同じ比率に
+/// 寄せて、穴へ「入りかける」動きが物理として起きるようにする。
+pub const BALL_R: f64 = 0.68;
+/// 釘の半径。玉より小さく描き、隙間から玉道が読めるようにする。
+pub const NAIL_R: f64 = 0.48;
 
-/// 発射レールの出口 (右上)。ここから初速を与えて打ち出す。
-pub const LAUNCH_X: f64 = BOARD_W - 3.0;
-pub const LAUNCH_Y: f64 = 10.0;
+/// 発射位置 (逆U字の右足、3時)。ここから内壁を滑って頂点 (12時) へ向かう。
+/// `Arch::inner_point(THETA_RIGHT, BALL_R)` と同じ点。座標の式は `board` が
+/// 持ち、ここは物理テストが打ち出し位置を参照するための値。
+pub const LAUNCH_X: f64 = BOARD_W - BALL_R;
+pub const LAUNCH_Y: f64 = 15.0;
 
 /// ヘソ (スタートチャッカー) の中心。
 pub const START_POCKET_X: f64 = BOARD_W / 2.0;
 pub const START_POCKET_Y: f64 = 54.0;
 /// ヘソの基本の受け口半幅。台ごとの `nail_spread` と電サポの有無を加えた値が
-/// 実効幅になる (`logic::effective_pocket_half_w`)。
+/// 実効幅になる (`board::effective_pocket_half_w`)。
 ///
 /// 回転率はこの幅とヘソ手前の釘の当たり方の積で決まる。ヘソ釘に当たった玉は
 /// 弾かれて受け口を外れるので、玉が速くて釘の判定をすり抜けるほど回転率は
-/// 上がる — 玉の速さ (`logic` の `GRAVITY` / `MAX_SPEED`) を変えたら、この幅も
+/// 上がる。玉の速さ (`physics` の `GRAVITY` / `MAX_SPEED`) を変えたら、この幅も
 /// 測り直して合わせる。`simulator::spin_rate_report` の対照が実測値を出す。
-pub const START_POCKET_BASE_HALF_W: f64 = 1.2;
+pub const START_POCKET_BASE_HALF_W: f64 = 1.20;
 
 /// アタッカー (大当たり中のみ開放)。
 pub const ATTACKER_X: f64 = BOARD_W / 2.0;
@@ -151,6 +159,22 @@ pub struct Nail {
     pub y: f64,
 }
 
+/// 盤面の玉を互いに見分ける色。打ち出しのたびに振り、同じ軌道に乗った
+/// 複数の玉が1つの塊に見えないようにする。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BallTint {
+    /// 金色。釘 (暗い茶灰) との差が最も大きい。
+    Gold,
+    /// 銀色。実機の鋼玉に近い。
+    Silver,
+    /// 青白い真珠色。金・銀の中間で3個並んでも連続しない。
+    Pearl,
+}
+
+impl BallTint {
+    pub const ALL: [BallTint; 3] = [BallTint::Gold, BallTint::Silver, BallTint::Pearl];
+}
+
 /// 1台の遊技機。釘配置とスペックを持つ。
 #[derive(Clone, Debug)]
 pub struct Machine {
@@ -162,7 +186,7 @@ pub struct Machine {
     /// 寄り釘の傾き。-1.0 (外へ逃がす) 〜 1.0 (中央へ寄せる)。
     /// 描画上は上部釘の x オフセットの傾きとして現れる。
     pub rail_bias: f64,
-    /// 釘の配置。`logic::generate_nails` が seed から生成する。
+    /// 釘の配置。`nails::generate_nails` が seed から生成する。
     pub nails: Vec<Nail>,
     /// この台で打った累計と、その間に回った累計。台を離れても持ち越す。
     pub balls_spent: u32,
@@ -170,7 +194,7 @@ pub struct Machine {
     /// 通常時に限った打ち込みと回転数。回転率 (`logic::spin_rate`) はこちらを
     /// 使う。
     ///
-    /// 電サポ中はヘソの受け口が広がる (`logic::pocket_half_w`) ため、全区間を
+    /// 電サポ中はヘソの受け口が広がる (`board::pocket_half_w`) ため、全区間を
     /// 混ぜた比は「釘がどれだけ開いているか」ではなく「どれだけ当たったか」を
     /// 映してしまう。当たった台ほど回るように見えると、ホールへ戻ったときの
     /// 台選びが釘読みではなく直前の引きの強さに引きずられる。
@@ -196,6 +220,58 @@ pub struct Ball {
     /// 始まることもある。打ち出し時と入賞時のモードを別々に見ると、分母を
     /// 増やさなかった玉が分子だけ増やす — 標本が小さいうちほど比率が歪む。
     pub fired_in_normal: bool,
+    /// ヘソの縁で揺れている残り tick。0 なら通常の落下。
+    ///
+    /// 実機では盤面とガラスの隙間で玉が三次元に揺れ、入賞口の縁に乗ってから
+    /// 落ちる。2D ではその「入りそう」を、口へ到達した瞬間の即時判定ではなく
+    /// 縁での横揺れとして残す。
+    pub teeter: u8,
+    /// 揺れの中心 x。`teeter > 0` のあいだだけ意味を持つ。
+    pub teeter_x: f64,
+    /// 描画用の色。物理には使わない。
+    pub tint: BallTint,
+    /// 逆U字の内壁に沿っているか。打ち出し直後だけ真で、離れたら二度と乗らない。
+    ///
+    /// 天井を壁として跳ね返すと右肩 (3時) で落ちる。レールとして滑らせると
+    /// 頂点 (12時) まで伸び、強い玉は 10時の出っ張りで跳ねて頂点へ戻る。
+    pub on_rail: bool,
+    /// レール上の角度。`Arch` の媒介変数。乗っていない間は意味を持たない。
+    pub rail_theta: f64,
+    /// この角度まで来たらレールを離す。ハンドル強度で決める。
+    /// 出っ張りに届く打ち出しでは、跳ねたあと 12時に書き換わる。
+    pub rail_until: f64,
+    /// 出っ張りで跳ねたあと、θ を増やして 12時へ戻っているか。
+    pub rail_returning: bool,
+}
+
+impl Ball {
+    /// 盤面を落ちていく玉を1つ作る。揺れと発光は落ち始めてから付く。
+    pub fn falling(x: f64, y: f64, vx: f64, vy: f64, fired_in_normal: bool, tint: BallTint) -> Self {
+        Self {
+            x,
+            y,
+            vx,
+            vy,
+            hit_glow: 0,
+            fired_in_normal,
+            teeter: 0,
+            teeter_x: x,
+            tint,
+            on_rail: false,
+            rail_theta: 0.0,
+            rail_until: 0.0,
+            rail_returning: false,
+        }
+    }
+
+    /// 打ち出し直後だけ内壁に乗せる。離れた玉を再び乗せない。
+    pub fn with_rail(mut self, theta: f64, until: f64) -> Self {
+        self.on_rail = true;
+        self.rail_theta = theta;
+        self.rail_until = until;
+        self.rail_returning = false;
+        self
+    }
 }
 
 // ── デジタル抽選 ───────────────────────────────────────────────
@@ -728,6 +804,9 @@ pub struct PachinkoState {
     pub info_scroll: Cell<u16>,
     /// 情報パネルの選択タブ。
     pub tab: InfoTab,
+    /// 液晶演出の位相。着席していなくても毎 tick 進める。止まっていると
+    /// 停止中の息が消え、ヘソ直下の画面が死んだ絵になる。
+    pub stage_ticks: u32,
 }
 
 impl PachinkoState {
@@ -772,6 +851,7 @@ impl PachinkoState {
             hall_scroll: Cell::new(0),
             info_scroll: Cell::new(0),
             tab: InfoTab::Board,
+            stage_ticks: 0,
         }
     }
 

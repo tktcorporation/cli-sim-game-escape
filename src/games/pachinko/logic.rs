@@ -1,205 +1,34 @@
-//! 玉響 — ゲームロジック (純粋関数)。
+//! 玉響 — 遊技ルール (純粋関数)。
 //!
 //! `tick()` が1tick分の全処理 (演出タイマー減衰→打ち出し→物理と入賞判定→
 //! ラウンド進行→デジタル→保留消化→玉の補充) を順に進める。render.rs は
 //! ここで更新された `PachinkoState` を読むだけで、書き込まない。
 //!
-//! 台の個性 (`Machine::nail_spread` / `rail_bias`) は `generate_nails` が
-//! 釘の座標へ落とし込み、そこから先は物理だけが結果を決める。数値を直接
-//! 当落へ掛けないことで、盤面の見た目と実測回転率が食い違わない。
+//! 空間は `board`、釘は `nails`、運動は `physics` が担う。ここは当落・保留・
+//! 席・軍資金だけを進め、座標の式を持たない。台の個性は `nails::generate_nails`
+//! が座標へ落とし、物理だけが結果を決める。数値を当落へ直接掛けないことで、
+//! 盤面の見た目と実測回転率が食い違わない。
 
+use super::nails::{generate_nails, NAIL_SPREAD_RANGE, RAIL_BIAS_RANGE};
+use super::physics::{self, rail_start};
+use super::rng::{rand_range, rng_below};
 use super::state::{
-    Ball, Digit, HistoryEntry, JackpotState, Machine, MachineSpec, Mode, Nail, PachinkoState,
-    Pending, PendingRank, Phase, ReachKind, SpinOutcome, StopStyle, ATTACKER_HALF_W,
-    ATTACKER_PAYOUT, ATTACKER_X, ATTACKER_Y, BALL_LOAN_COUNT, BALL_LOAN_YEN, BALL_R, BOARD_H,
-    BOARD_W, FIRE_INTERVAL_TICKS, HALL_SIZE, HISTORY_LEN, HIT_GLOW_TICKS, INITIAL_REELS, LAUNCH_X,
-    LAUNCH_Y, MACHINE_SPECS, MAX_BALLS, MAX_PENDING, NAIL_R, PENDING_PROMOTE_FLASH_TICKS,
+    Ball, BallTint, Digit, HistoryEntry, JackpotState, Machine, MachineSpec, Mode, PachinkoState,
+    Pending, PendingRank, Phase, ReachKind, SpinOutcome, StopStyle, ATTACKER_PAYOUT,
+    BALL_LOAN_COUNT, BALL_LOAN_YEN, FIRE_INTERVAL_TICKS, HALL_SIZE, HISTORY_LEN, INITIAL_REELS,
+    MACHINE_SPECS, MAX_BALLS, MAX_PENDING, PENDING_PROMOTE_FLASH_TICKS,
     RANK_WEIGHT_TOTAL, REACH_FLASH_TICKS, ROUND_COUNT, ROUND_LIMIT_TICKS, SIDE_PAYOUT,
-    SIDE_POCKET_HALF_W, SIDE_POCKET_LEFT_X, SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y, START_FLASH_TICKS,
-    START_PAYOUT, START_POCKET_BASE_HALF_W, START_POCKET_X, START_POCKET_Y,
+    START_FLASH_TICKS, START_PAYOUT,
 };
 
-// ── 乱数 (xorshift32。seed を state に持たせてセーブ・シミュレーターで再現可能にする) ──
-
-fn rng_next(seed: &mut u32) -> u32 {
-    let mut x = *seed;
-    if x == 0 {
-        // xorshift32 は 0 が不動点で、一度落ちると乱数列が止まる。
-        x = 0xDEAD_BEEF;
-    }
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *seed = x;
-    x
-}
-
-fn rng_below(seed: &mut u32, bound: u32) -> u32 {
-    if bound == 0 {
-        return 0;
-    }
-    rng_next(seed) % bound
-}
-
-fn rand01(seed: &mut u32) -> f64 {
-    (rng_next(seed) as f64) / (u32::MAX as f64)
-}
-
-fn rand_range(seed: &mut u32, lo: f64, hi: f64) -> f64 {
-    lo + (hi - lo) * rand01(seed)
-}
-
-// ── 物理 ───────────────────────────────────────────────────────
-
-/// 1 tick あたりの物理サブステップ数。10 ticks/sec のまま1回で進めると、
-/// 1ステップの移動量が釘の直径を超えて釘をすり抜ける。
-pub const PHYSICS_SUBSTEPS: u32 = 4;
-/// 1サブステップあたりの重力加速度。玉が落ちる速さはここが決める。
-///
-/// 盤面は 10 ticks/sec でしか描き直されないので、1 tick の移動距離が玉の直径
-/// (`BALL_R * 2`) を大きく超えると、玉は毎コマ離れた位置に現れ、釘に弾かれる
-/// 瞬間が絵として残らない。`simulator::ball_motion_report` がこの移動距離を
-/// 実測する。
-///
-/// 速さを決める定数は `GRAVITY` 単体ではない。`launch_velocity` /
-/// `HORIZONTAL_DRAG` / `NAIL_SCATTER` と組で「玉道の形」を決めており、
-/// どれか1つだけを触ると形が変わって回転率が動く。玉道を保ったまま T 倍の
-/// 時間をかけさせたい場合は、位置が速度の積分・速度が加速度の積分である
-/// ことから、速度を 1/T・加速度を 1/T²・1サブステップあたりの減衰を T 乗根
-/// にした組で動かす。
-const GRAVITY: f64 = 0.030;
-/// 釘との衝突の反発係数。弾かれた玉が次の釘まで飛ぶ軌跡が絵として残る程度に
-/// 跳ね返す。上げすぎると玉が釘の上で跳ね続けて落ちてこない。
-const NAIL_RESTITUTION: f64 = 0.75;
-/// 壁・天井との衝突の反発係数。
-const WALL_RESTITUTION: f64 = 0.45;
-/// 速度の上限。`CONTACT_DIST` 以下に収めてあるので、釘へ真っ直ぐ向かう玉は
-/// 必ず1回はサブステップの標本が接触範囲へ入る。ここが接触距離を超えると
-/// 速い玉だけが釘をすり抜け、釘に当たるかどうかが速度で変わってしまう。
-const MAX_SPEED: f64 = 1.6;
-/// 釘に当たった時に横方向へ乗るばらつきの最大幅。同じ軌道で入っても結果が
-/// 割れる「パチンコらしさ」の源で、0 にすると釘配置だけで結果が決まる
-/// 決定論的な機械になってしまう。速度と同じ次元なので、落下の速さを変える
-/// ときは `GRAVITY` の説明にある組で一緒に動かす。
-const NAIL_SCATTER: f64 = 0.163;
-/// `nail_spread` がヘソの受け口へ効く強さ。ヘソ釘の位置 (`generate_nails`)
-/// と当たり判定の幅 (`effective_pocket_half_w`) は同じ係数を共有しないと、
-/// 見た目の開きと実際の入りやすさが食い違って釘読みが嘘になる。
-const POCKET_SPREAD_GAIN: f64 = 1.3;
-/// 玉と釘が接触する距離。
-const CONTACT_DIST: f64 = BALL_R + NAIL_R;
-/// 1サブステップごとに横方向の速度へ掛かる減衰。打ち出した勢いは盤面を
-/// 横切る間に抜け、玉は釘の間をほぼ真下へ落ちていく。減衰が無いと初速の
-/// まま左端まで飛んで壁沿いに落ちるだけになり、ハンドル強度が「どこへ
-/// 落とすか」を決める操作にならない。
-const HORIZONTAL_DRAG: f64 = 0.955;
-/// 打ち出し1発ごとの初速のばらつき (割合)。同じ強度でも玉道が完全に一致
-/// すると、釘の間に一本の溝ができて全弾が同じ場所へ落ちる。実機のハンドル
-/// と同じく、わずかな揺らぎが玉道を散らす。
-const LAUNCH_JITTER: f64 = 0.03;
-
-/// ハンドル強度 (0〜100) から打ち出し初速 (1サブステップあたり) を決める。
-/// 玉は天井で折り返し、`HORIZONTAL_DRAG` で横の勢いが抜けたところから釘の
-/// 間へ落ちるので、強度は「盤面のどこへ落とすか」を決める操作になる。
-/// 適正値は台ごとの釘配置で変わるため、ここでは素直な線形写像だけを行い、
-/// 良し悪しの判断は盤面に委ねる。
-pub fn launch_velocity(power: u8) -> (f64, f64) {
-    let p = (power as f64 / 100.0).clamp(0.0, 1.0);
-    (-(0.407 + p * 0.963), -0.556 - p * 0.407)
-}
-
-/// ヘソの受け口半幅。決まるのは台のヘソ釘の開きと電サポの有無だけなので、
-/// 着席中の台に限らずホールに並ぶ台にも同じ式で引ける — ホールの盤面
-/// プレビューが着席後と同じヘソを描けるのはこのため。
-pub fn pocket_half_w(nail_spread: f64, assisted: bool) -> f64 {
-    let base = START_POCKET_BASE_HALF_W + nail_spread * POCKET_SPREAD_GAIN;
-    if assisted {
-        // 電サポ中は羽根が開いてヘソが広がる。確変・時短の価値をヘソの
-        // 見た目そのもので伝えるため、確率ではなく受け口を触る。
-        base + 1.0
-    } else {
-        base
-    }
-}
-
-/// 着席中の台のヘソの実効受け口半幅。台に着いていない間は中庸な開きの台と
-/// して扱い、受け口が 0 幅に潰れた盤面を描かせない。
-pub fn effective_pocket_half_w(state: &PachinkoState) -> f64 {
-    let spread = state.seated_machine().map(|m| m.nail_spread).unwrap_or(0.5);
-    pocket_half_w(spread, state.mode.is_assisted())
-}
-
-/// サブステップの前後で入賞口の高さを跨いだか。矩形の内包判定にすると、
-/// 1サブステップの移動量 (最大 `MAX_SPEED`) が入賞口の高さを超えたときに
-/// 素通りする。
-fn crossed_downward(prev_y: f64, y: f64, line: f64) -> bool {
-    prev_y <= line && y > line
-}
-
-/// 1 tick 分の玉の運動と入賞判定。
+/// 1 tick の運動結果を賞球と抽選へ渡す。口を跨いだ事実は physics が返し、
+/// 払い出しの規則はここに閉じる。
 fn step_balls(state: &mut PachinkoState) {
-    if state.seat >= state.machines.len() {
-        return;
+    let hits = physics::step_balls(state);
+    if hits.side > 0 {
+        add_balls(state, hits.side * SIDE_PAYOUT);
     }
-    // 釘と玉は所有権ごと借り出す。`state` の他のフィールド (乱数 seed) を
-    // 玉のループ中に触るため、借用を分離する必要がある。
-    let nails = std::mem::take(&mut state.machines[state.seat].nails);
-    let mut balls = std::mem::take(&mut state.balls);
-    let pocket_half_w = effective_pocket_half_w(state);
-    let attacker_open = matches!(state.mode, Mode::Jackpot(_));
-    let seed = &mut state.rng_state;
-
-    // ヘソ入賞は玉ごとに「通常時に打たれた玉か」を持ち回る。回転率の分母は
-    // 打ち出しの時点で数えるので、分子もその玉が打たれた区間へ揃える。
-    let mut start_hits: Vec<bool> = Vec::new();
-    let mut attacker_hits = 0u32;
-    let mut side_hits = 0u32;
-
-    balls.retain_mut(|ball| {
-        for _ in 0..PHYSICS_SUBSTEPS {
-            let prev_y = ball.y;
-            ball.vy += GRAVITY;
-            ball.x += ball.vx;
-            ball.y += ball.vy;
-            ball.vx *= HORIZONTAL_DRAG;
-            bounce_walls(ball);
-            bounce_nails(ball, &nails, seed);
-            clamp_speed(ball);
-
-            if crossed_downward(prev_y, ball.y, START_POCKET_Y)
-                && (ball.x - START_POCKET_X).abs() < pocket_half_w
-            {
-                start_hits.push(ball.fired_in_normal);
-                return false;
-            }
-            if crossed_downward(prev_y, ball.y, SIDE_POCKET_Y)
-                && ((ball.x - SIDE_POCKET_LEFT_X).abs() < SIDE_POCKET_HALF_W
-                    || (ball.x - SIDE_POCKET_RIGHT_X).abs() < SIDE_POCKET_HALF_W)
-            {
-                side_hits += 1;
-                return false;
-            }
-            if attacker_open
-                && crossed_downward(prev_y, ball.y, ATTACKER_Y)
-                && (ball.x - ATTACKER_X).abs() < ATTACKER_HALF_W
-            {
-                attacker_hits += 1;
-                return false;
-            }
-            if ball.y > BOARD_H {
-                return false;
-            }
-        }
-        true
-    });
-
-    state.balls = balls;
-    state.machines[state.seat].nails = nails;
-
-    if side_hits > 0 {
-        add_balls(state, side_hits * SIDE_PAYOUT);
-    }
-    for _ in 0..attacker_hits {
+    for _ in 0..hits.attacker {
         add_balls(state, ATTACKER_PAYOUT);
         if let Mode::Jackpot(mut j) = state.mode {
             j.count += 1;
@@ -207,64 +36,8 @@ fn step_balls(state: &mut PachinkoState) {
             state.mode = Mode::Jackpot(j);
         }
     }
-    for fired_in_normal in start_hits {
+    for fired_in_normal in hits.start {
         resolve_start_pocket(state, fired_in_normal);
-    }
-}
-
-fn bounce_walls(ball: &mut Ball) {
-    if ball.x < BALL_R {
-        ball.x = BALL_R;
-        ball.vx = -ball.vx * WALL_RESTITUTION;
-    } else if ball.x > BOARD_W - BALL_R {
-        ball.x = BOARD_W - BALL_R;
-        ball.vx = -ball.vx * WALL_RESTITUTION;
-    }
-    if ball.y < BALL_R {
-        // 天井。打ち出した玉はレールを駆け上がってここで折り返す。
-        ball.y = BALL_R;
-        ball.vy = -ball.vy * WALL_RESTITUTION;
-    }
-}
-
-fn bounce_nails(ball: &mut Ball, nails: &[Nail], seed: &mut u32) {
-    for nail in nails {
-        // 玉数×釘数×サブステップ分の距離計算になるため、y 差だけで先に弾く。
-        let dy = nail.y - ball.y;
-        if dy.abs() > CONTACT_DIST {
-            continue;
-        }
-        let dx = nail.x - ball.x;
-        let dist_sq = dx * dx + dy * dy;
-        if dist_sq >= CONTACT_DIST * CONTACT_DIST {
-            continue;
-        }
-        // 釘中心から玉へ向かう法線。真上から落ちて距離 0 になった場合だけは
-        // 法線が定まらないので、真上へ逃がす。
-        let dist = dist_sq.sqrt();
-        let (nx, ny) = if dist < 1e-6 {
-            (0.0, -1.0)
-        } else {
-            (-dx / dist, -dy / dist)
-        };
-        ball.x = nail.x + nx * CONTACT_DIST;
-        ball.y = nail.y + ny * CONTACT_DIST;
-        let vn = ball.vx * nx + ball.vy * ny;
-        if vn < 0.0 {
-            ball.vx -= (1.0 + NAIL_RESTITUTION) * vn * nx;
-            ball.vy -= (1.0 + NAIL_RESTITUTION) * vn * ny;
-        }
-        ball.vx += (rand01(seed) - 0.5) * NAIL_SCATTER;
-        ball.hit_glow = HIT_GLOW_TICKS;
-    }
-}
-
-fn clamp_speed(ball: &mut Ball) {
-    let speed = (ball.vx * ball.vx + ball.vy * ball.vy).sqrt();
-    if speed > MAX_SPEED {
-        let scale = MAX_SPEED / speed;
-        ball.vx *= scale;
-        ball.vy *= scale;
     }
 }
 
@@ -405,12 +178,7 @@ fn near_miss_ready(reach: ReachKind, rank: PendingRank) -> bool {
 
 /// デジタルの止まり方を引く。当落は既に決まっているので、ここは「決まった
 /// 結果をどう見せるか」だけを選ぶ。
-fn pick_stop_style(
-    hit: bool,
-    reach: ReachKind,
-    rank: PendingRank,
-    seed: &mut u32,
-) -> StopStyle {
+fn pick_stop_style(hit: bool, reach: ReachKind, rank: PendingRank, seed: &mut u32) -> StopStyle {
     if hit {
         if rng_below(seed, 100) < REVIVAL_PERCENT {
             return StopStyle::Revival;
@@ -526,7 +294,10 @@ fn promote_pending(state: &mut PachinkoState) {
 
 fn advance_digit(state: &mut PachinkoState) {
     let finished = match &mut state.digit {
-        Digit::Spinning { ticks_left, outcome } => {
+        Digit::Spinning {
+            ticks_left,
+            outcome,
+        } => {
             *ticks_left = ticks_left.saturating_sub(1);
             if *ticks_left == 0 {
                 Some(*outcome)
@@ -693,6 +464,7 @@ pub fn tick_n(state: &mut PachinkoState, n: u32) {
 }
 
 pub fn tick(state: &mut PachinkoState) {
+    state.stage_ticks = state.stage_ticks.wrapping_add(1);
     if state.phase != Phase::Playing {
         return;
     }
@@ -743,19 +515,21 @@ fn try_fire(state: &mut PachinkoState) {
     if !state.firing || state.balls_held == 0 || state.balls.len() >= MAX_BALLS {
         return;
     }
-    let (vx, vy) = launch_velocity(state.power);
     let seed = &mut state.rng_state;
-    let jitter = |seed: &mut u32| 1.0 + (rand01(seed) - 0.5) * 2.0 * LAUNCH_JITTER;
-    let (vx, vy) = (vx * jitter(seed), vy * jitter(seed));
+    let start = rail_start(state.power, seed);
     let fired_in_normal = state.mode == Mode::Normal;
-    state.balls.push(Ball {
-        x: LAUNCH_X,
-        y: LAUNCH_Y,
-        vx,
-        vy,
-        hit_glow: 0,
-        fired_in_normal,
-    });
+    let tint = BallTint::ALL[rng_below(seed, BallTint::ALL.len() as u32) as usize];
+    state.balls.push(
+        Ball::falling(
+            start.x,
+            start.y,
+            start.vx,
+            start.vy,
+            fired_in_normal,
+            tint,
+        )
+        .with_rail(start.theta, start.until),
+    );
     state.balls_held -= 1;
     if let Some(machine) = state.seated_machine_mut() {
         machine.balls_spent += 1;
@@ -878,119 +652,6 @@ pub fn cash_out(state: &mut PachinkoState) -> bool {
     true
 }
 
-// ── 釘 ─────────────────────────────────────────────────────────
-
-/// 寄り釘の段数と、最上段・最下段の y。
-///
-/// 寄り釘はヘソより上にあり、ここの密度がそのまま回転率を決める。段数・本数・
-/// 間隔のどれを動かしても最下段の千鳥の位相がずれ、ヘソの真上に釘が来るか
-/// 隙間が来るかが入れ替わって回転率が倍近く動く
-/// (`simulator::spin_rate_report` の対照で実測できる)。盤面から釘を減らし
-/// たいときは、回転率に効かない下部釘 (`LOWER_ROWS`) の方から間引く。
-const RAIL_ROWS: usize = 5;
-const RAIL_TOP_Y: f64 = 20.0;
-const RAIL_BOTTOM_Y: f64 = 46.0;
-/// 寄り釘1段あたりの本数と x の間隔。
-const RAIL_NAILS_PER_ROW: usize = 7;
-const RAIL_STEP_X: f64 = 8.0;
-const RAIL_BASE_X: f64 = 8.0;
-/// `rail_bias` が最大のときに外側の釘を中央へ寄せる割合。中央の釘は動かず、
-/// 端ほど大きく動くので、盤面では「上部の釘が中央へ傾いている」形に見える。
-///
-/// 寄り釘は等間隔の格子なので、ここを大きくして格子ごと縮めると、段の隙間が
-/// ヘソの真上へ揃う `rail_bias` の値でだけ玉道が一本に繋がり、回転率が跳ね
-/// 上がる。跳ね方は `rail_bias` に対して単調ではなく、盤面の見た目からは
-/// 読めない。読める手がかり (ヘソ釘の開き) より強い当たり外れを隠し持たせ
-/// ないよう、傾きは玉道を大きく変えない範囲に留める。
-const RAIL_BIAS_PULL: f64 = 0.02;
-/// 釘1本ごとの位置の揺らぎ。同じ `nail_spread` / `rail_bias` の台でも
-/// 盤面が同一にならないようにして、台ごとの見た目の個体差を作る。
-///
-/// ここを大きくすると、玉道を決めるのが「見えるヘソ釘の開き」ではなく
-/// 「見えない寄り釘のズレ」になり、盤面から回りやすさを読むという判断軸が
-/// 成立しなくなる。`simulator::nail_spread_correlates_with_spin_rate` が
-/// その退行を検知する。
-const NAIL_JITTER: f64 = 0.15;
-
-/// 下部釘の段数と本数。密度を絞る狙いは `RAIL_ROWS` と同じ。こちらはヘソ
-/// より下にあり回転率に効かないので、段数からも間引ける。
-const LOWER_ROWS: usize = 3;
-const LOWER_TOP_Y: f64 = 58.0;
-const LOWER_BOTTOM_Y: f64 = 74.0;
-const LOWER_NAILS_PER_ROW: usize = 7;
-const LOWER_BASE_X: f64 = 6.2;
-const LOWER_STEP_X: f64 = 8.6;
-
-/// 台の釘配置を seed から生成する。`nail_spread` / `rail_bias` を釘の座標
-/// そのものへ反映させることで、プレイヤーは盤面を見て回りやすさを推し量れる
-/// (数値としては UI に出さない)。
-pub fn generate_nails(seed: &mut u32, nail_spread: f64, rail_bias: f64) -> Vec<Nail> {
-    let mut nails = Vec::new();
-    let center = BOARD_W / 2.0;
-
-    // 寄り釘。段ごとに半ピッチずらして千鳥に組む。ヘソの真上にあたる最下段は
-    // 中央を空ける並びにして、玉がヘソへ落ちる道を残す。
-    for row in 0..RAIL_ROWS {
-        let t = row as f64 / (RAIL_ROWS - 1) as f64;
-        let y = RAIL_TOP_Y + (RAIL_BOTTOM_Y - RAIL_TOP_Y) * t;
-        let stagger = if row % 2 == 0 { RAIL_STEP_X / 2.0 } else { 0.0 };
-        for i in 0..RAIL_NAILS_PER_ROW {
-            let base_x = RAIL_BASE_X + stagger + RAIL_STEP_X * i as f64;
-            let pulled = center + (base_x - center) * (1.0 - rail_bias * RAIL_BIAS_PULL);
-            nails.push(Nail {
-                x: pulled + rand_range(seed, -NAIL_JITTER, NAIL_JITTER),
-                y: y + rand_range(seed, -NAIL_JITTER * 0.5, NAIL_JITTER * 0.5),
-            });
-        }
-    }
-
-    // ヘソ釘。この2本の間隔が「開いて見える」ことが釘読みの手がかりになるので、
-    // 通常時の受け口 (`pocket_half_w`) の外側へ釘半径分だけ逃がした位置に
-    // 置き、見た目と当たり判定を一致させる。
-    let mouth = pocket_half_w(nail_spread, false) + NAIL_R;
-    for side in [-1.0, 1.0] {
-        nails.push(Nail {
-            x: START_POCKET_X + side * mouth,
-            y: START_POCKET_Y - 2.0,
-        });
-    }
-
-    // 下部釘。ヘソを外した玉を一般入賞口とアタッカーへ振り分ける。
-    for row in 0..LOWER_ROWS {
-        let t = row as f64 / (LOWER_ROWS - 1) as f64;
-        let y = LOWER_TOP_Y + (LOWER_BOTTOM_Y - LOWER_TOP_Y) * t;
-        let stagger = if row % 2 == 0 { 0.0 } else { LOWER_STEP_X / 2.0 };
-        for i in 0..LOWER_NAILS_PER_ROW {
-            let x = LOWER_BASE_X + stagger + LOWER_STEP_X * i as f64;
-            nails.push(Nail {
-                x: x + rand_range(seed, -NAIL_JITTER, NAIL_JITTER),
-                y,
-            });
-        }
-    }
-
-    // アタッカー脇。開放中の受け口へ玉を導く。
-    for side in [-1.0, 1.0] {
-        nails.push(Nail {
-            x: ATTACKER_X + side * (ATTACKER_HALF_W + 1.5),
-            y: ATTACKER_Y - 3.0,
-        });
-    }
-
-    nails
-}
-
-/// ホールに並ぶ台のヘソ釘の開きの範囲。
-///
-/// 下限は「全く回らない台」を並べないための足切り。上限は出玉率 (賞球総数 ÷
-/// 打ち込み玉数) の天井を決める — 開くほど回り、回るほど当たるので、ここを
-/// 上げすぎると打つほど玉が増える台がホールに並び、有限の軍資金という前提が
-/// 崩れる。`simulator::payout_ratio_stays_below_break_even` がこの上限の台を
-/// 実際に打って確かめる。
-pub const NAIL_SPREAD_RANGE: (f64, f64) = (0.25, 0.80);
-/// ホールに並ぶ台の寄り釘の傾きの範囲。効き方は `RAIL_BIAS_PULL` を参照。
-pub const RAIL_BIAS_RANGE: (f64, f64) = (-0.6, 0.9);
-
 /// 来店ごとのホールを作る。同じスペックの台が釘だけ違う形で並ぶことがあり、
 /// それが釘読みという判断軸を成立させる。
 pub fn generate_hall(state: &mut PachinkoState) {
@@ -998,8 +659,11 @@ pub fn generate_hall(state: &mut PachinkoState) {
     for _ in 0..HALL_SIZE {
         let pick = rng_below(&mut state.rng_state, MACHINE_SPECS.len() as u32) as usize;
         let (name, spec) = MACHINE_SPECS[pick];
-        let nail_spread =
-            rand_range(&mut state.rng_state, NAIL_SPREAD_RANGE.0, NAIL_SPREAD_RANGE.1);
+        let nail_spread = rand_range(
+            &mut state.rng_state,
+            NAIL_SPREAD_RANGE.0,
+            NAIL_SPREAD_RANGE.1,
+        );
         let rail_bias = rand_range(&mut state.rng_state, RAIL_BIAS_RANGE.0, RAIL_BIAS_RANGE.1);
         let nails = generate_nails(&mut state.rng_state, nail_spread, rail_bias);
         machines.push(Machine {
@@ -1037,6 +701,14 @@ pub fn spin_rate(machine: &Machine) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::games::pachinko::board::Playfield;
+    use crate::games::pachinko::nails::RAIL_TOP_Y;
+    use crate::games::pachinko::physics::{
+        MAX_SPEED, POCKET_MOUTH_BELOW, TEETER_TICKS_MAX, TEETER_TICKS_MIN,
+    };
+    use crate::games::pachinko::state::{
+        Nail, ATTACKER_X, ATTACKER_Y, HIT_GLOW_TICKS, START_POCKET_X, START_POCKET_Y,
+    };
 
     fn seated_state() -> PachinkoState {
         let mut state = PachinkoState::new();
@@ -1052,72 +724,8 @@ mod tests {
         state
     }
 
-    fn start_pocket_gap(nail_spread: f64) -> f64 {
-        let mut seed = 0x1234_5678;
-        let nails = generate_nails(&mut seed, nail_spread, 0.0);
-        let mouth: Vec<f64> = nails
-            .iter()
-            .filter(|n| (n.y - (START_POCKET_Y - 2.0)).abs() < 1e-9)
-            .map(|n| n.x)
-            .collect();
-        assert_eq!(mouth.len(), 2, "ヘソ釘が2本ではない: {mouth:?}");
-        (mouth[0] - mouth[1]).abs()
-    }
-
-    #[test]
-    fn nail_spread_widens_the_start_pocket_gap() {
-        // 釘読みは「ヘソ釘の開きが見た目で分かる」ことが前提。開きが
-        // `nail_spread` に連動しないと、盤面から回りやすさを読む軸が消える。
-        let narrow = start_pocket_gap(0.15);
-        let wide = start_pocket_gap(0.95);
-        assert!(
-            wide > narrow + 1.0,
-            "nail_spread を上げてもヘソ釘が開いていない (狭={narrow:.2} 広={wide:.2})"
-        );
-    }
-
-    #[test]
-    fn rail_bias_pulls_upper_nails_toward_center() {
-        // 寄り釘の傾きも釘読みの手がかり。bias を上げたら上部の釘が中央へ
-        // 寄る、という対応が崩れると盤面の見た目が何も語らなくなる。
-        let center = BOARD_W / 2.0;
-        let spread_of = |bias: f64| {
-            let mut seed = 0xABCD_1234;
-            let nails = generate_nails(&mut seed, 0.5, bias);
-            let upper: Vec<&Nail> = nails.iter().filter(|n| n.y < START_POCKET_Y - 4.0).collect();
-            let sum: f64 = upper.iter().map(|n| (n.x - center).abs()).sum();
-            sum / upper.len() as f64
-        };
-        assert!(
-            spread_of(0.9) < spread_of(-0.6),
-            "rail_bias を上げても上部釘が中央へ寄っていない (寄={:.2} 逃={:.2})",
-            spread_of(0.9),
-            spread_of(-0.6)
-        );
-    }
-
-    #[test]
-    fn a_ball_bounces_off_a_nail_instead_of_passing_through() {
-        let mut state = state_with_nails(vec![Nail { x: 32.0, y: 30.0 }]);
-        state.balls.push(Ball {
-            x: 32.0,
-            y: 28.0,
-            vx: 0.0,
-            vy: 0.5,
-            hit_glow: 0,
-            fired_in_normal: true,
-        });
-        step_balls(&mut state);
-        let ball = state.balls.first().expect("玉が消えている");
-        assert_eq!(
-            ball.hit_glow, HIT_GLOW_TICKS,
-            "釘に接触したのに衝突が記録されていない"
-        );
-        assert!(
-            ball.y < 30.0,
-            "玉が釘をすり抜けて下へ抜けている (y={:.2})",
-            ball.y
-        );
+    fn test_ball(x: f64, y: f64, vx: f64, vy: f64) -> Ball {
+        Ball::falling(x, y, vx, vy, true, BallTint::Gold)
     }
 
     #[test]
@@ -1129,8 +737,8 @@ mod tests {
             tick(&mut state);
             for ball in &state.balls {
                 assert!(
-                    ball.x >= 0.0 && ball.x <= BOARD_W && ball.y >= 0.0 && ball.y <= BOARD_H,
-                    "玉が盤面の外へ出た ({:.2}, {:.2})",
+                    Playfield::TABLE.contains(ball.x, ball.y, 0.0),
+                    "玉が逆U字の盤面の外へ出た ({:.2}, {:.2})",
                     ball.x,
                     ball.y
                 );
@@ -1164,19 +772,147 @@ mod tests {
         // 1サブステップの移動量が入賞口の高さを超える速度でも拾えること。
         // 矩形の内包判定へ退行すると、速い玉だけが素通りするようになる。
         let mut state = state_with_nails(Vec::new());
-        state.balls.push(Ball {
-            x: START_POCKET_X,
-            y: START_POCKET_Y - 0.5,
-            vx: 0.0,
-            vy: MAX_SPEED,
-            hit_glow: 0,
-            fired_in_normal: true,
-        });
+        state.balls.push(test_ball(
+            START_POCKET_X,
+            START_POCKET_Y - 0.5,
+            0.0,
+            MAX_SPEED,
+        ));
         let before = state.balls_held;
         step_balls(&mut state);
+        // 速い玉も縁に乗ってから入る。即消えさせると、サブステップを跨いだ
+        // 素通りと区別が付かなくなる。
+        if !state.balls.is_empty() {
+            assert!(
+                state.balls[0].teeter > 0,
+                "速い玉がヘソを素通りして盤面に残っている"
+            );
+            for _ in 0..(u32::from(TEETER_TICKS_MAX) + 2) {
+                step_balls(&mut state);
+                if state.balls.is_empty() {
+                    break;
+                }
+            }
+        }
         assert!(state.balls.is_empty(), "入賞した玉が盤面に残っている");
         assert_eq!(state.balls_held, before + START_PAYOUT);
         assert_eq!(state.pending.len(), 1, "ヘソ入賞なのに保留が積まれていない");
+    }
+
+    #[test]
+    fn same_power_launches_fan_out_across_the_board() {
+        // 同じハンドル強度でも釘帯へ入る列が分かれる。離す角度だけを固定すると
+        // 12時から一本の溝ができる。測定はレールを離れたあと、釘帯の上端。
+        let mut xs = Vec::new();
+        for i in 0..36u32 {
+            let mut state = state_with_nails(Vec::new());
+            state.rng_state = 0xA11C_E5ED ^ i.wrapping_mul(0x9E37);
+            state.power = 62;
+            state.balls_held = 8;
+            state.firing = true;
+            state.fire_cooldown = 0;
+            try_fire(&mut state);
+            assert_eq!(state.balls.len(), 1, "打ち出されていない");
+            for _ in 0..800 {
+                step_balls(&mut state);
+                let Some(ball) = state.balls.first() else {
+                    break;
+                };
+                if ball.vy > 0.0 && ball.y >= RAIL_TOP_Y {
+                    xs.push(ball.x);
+                    break;
+                }
+            }
+        }
+        assert!(
+            xs.len() >= 30,
+            "釘帯まで届いた玉が少なすぎる ({})",
+            xs.len()
+        );
+        let mean = xs.iter().sum::<f64>() / xs.len() as f64;
+        let var = xs.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / (xs.len() - 1) as f64;
+        let std = var.sqrt();
+        assert!(
+            std > 1.2,
+            "同じ強度の打ち出しが同じ列へ落ちている (std={std:.2}, n={})",
+            xs.len()
+        );
+    }
+
+    #[test]
+    fn a_slow_ball_teeters_on_the_start_pocket_before_entering() {
+        // ヘソへ届いた玉が即消えすると「入りそう」が無い。遅い玉は縁に乗って
+        // から揺れ、そのあいだ盤面に残る。
+        let mut state = state_with_nails(Vec::new());
+        state.machines[0].nail_spread = 0.8;
+        state
+            .balls
+            .push(test_ball(START_POCKET_X, START_POCKET_Y - 0.4, 0.0, 0.25));
+        step_balls(&mut state);
+        let ball = state.balls.first().expect("縁に乗った玉が消えている");
+        assert!(
+            ball.teeter >= TEETER_TICKS_MIN,
+            "遅い玉がヘソの縁で揺れていない (teeter={})",
+            ball.teeter
+        );
+        assert_eq!(state.pending.len(), 0, "揺れている最中に入賞している");
+
+        for _ in 0..(u32::from(TEETER_TICKS_MAX) + 2) {
+            step_balls(&mut state);
+            if state.balls.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            state.balls.is_empty(),
+            "縁揺れが尽きた後も玉が盤面に残っている"
+        );
+        assert_eq!(state.pending.len(), 1, "揺れの末にヘソ入賞していない");
+    }
+
+    #[test]
+    fn a_ball_that_walks_off_the_lip_falls_instead_of_entering() {
+        // 揺れの末に口の外へ出た玉は入らずに落下する。「入りそう…アウト」が
+        // 入賞の確定になってしまうと、縁に乗る意味が無くなる。
+        let mut state = state_with_nails(Vec::new());
+        let mut ball = test_ball(START_POCKET_X + 8.0, START_POCKET_Y - 0.35, 0.0, 0.0);
+        ball.teeter = 3;
+        ball.teeter_x = START_POCKET_X + 8.0;
+        state.balls.push(ball);
+        let before = state.pending.len();
+        step_balls(&mut state);
+        let ball = state.balls.first().expect("口の外へ出た玉が消えている");
+        assert_eq!(ball.teeter, 0, "口の外なのに縁揺れが続いている");
+        assert!(
+            ball.y > START_POCKET_Y + POCKET_MOUTH_BELOW,
+            "口の外へ出た玉が判定矩形の中に残っている (y={:.2})",
+            ball.y
+        );
+        assert_eq!(state.pending.len(), before, "口の外の玉が入賞している");
+        step_balls(&mut state);
+        let ball = state.balls.first().expect("落下中の玉が消えている");
+        assert_eq!(ball.teeter, 0, "滑り落ちた玉が再び縁に乗っている");
+    }
+
+    #[test]
+    fn teetering_survives_a_batched_tick() {
+        // `delta_ticks` は最大5までまとめて来るので、それ未満の長さの揺れは
+        // 一度も描画されないまま入賞してしまう。
+        const { assert!(TEETER_TICKS_MIN as u32 > 5) };
+        let mut state = state_with_nails(Vec::new());
+        state
+            .balls
+            .push(test_ball(START_POCKET_X, START_POCKET_Y - 0.4, 0.0, 0.2));
+        step_balls(&mut state);
+        assert!(
+            state.balls.first().is_some_and(|b| b.teeter > 0),
+            "縁揺れが始まっていない"
+        );
+        tick_n(&mut state, 5);
+        assert!(
+            state.balls.first().is_some_and(|b| b.teeter > 0),
+            "まとめて進めた tick のあいだに縁揺れが消えている"
+        );
     }
 
     #[test]
@@ -1185,9 +921,7 @@ mod tests {
         let count_hits = |mode: Mode| {
             let mut state = seated_state();
             state.mode = mode;
-            (0..trials)
-                .filter(|_| roll_outcome(&mut state).hit)
-                .count()
+            (0..trials).filter(|_| roll_outcome(&mut state).hit).count()
         };
         let normal = count_hits(Mode::Normal);
         let kakuhen = count_hits(Mode::Kakuhen { spins_left: 0 });
@@ -1211,9 +945,17 @@ mod tests {
             }
             let [l, m, r] = outcome.reels;
             if outcome.hit {
-                assert!(l == m && m == r, "当たりなのにゾロ目でない: {:?}", outcome.reels);
+                assert!(
+                    l == m && m == r,
+                    "当たりなのにゾロ目でない: {:?}",
+                    outcome.reels
+                );
             } else if outcome.reach == ReachKind::None {
-                assert_ne!(l, r, "リーチ無しなのに左右が揃っている: {:?}", outcome.reels);
+                assert_ne!(
+                    l, r,
+                    "リーチ無しなのに左右が揃っている: {:?}",
+                    outcome.reels
+                );
             } else {
                 assert!(
                     l == r && m != l,
@@ -1374,7 +1116,10 @@ mod tests {
             state.chain, 0,
             "電サポが切れても連チャン数が残り、通常時の画面が終わった連チャンを続いているものとして出し続ける"
         );
-        assert_eq!(state.record.best_chain, 2, "自己記録まで巻き戻してはいけない");
+        assert_eq!(
+            state.record.best_chain, 2,
+            "自己記録まで巻き戻してはいけない"
+        );
     }
 
     #[test]
@@ -1412,7 +1157,10 @@ mod tests {
         state.mode = Mode::Normal;
         resolve_spin(&mut state, jackpot(10));
 
-        assert!(after_first > before, "1回目の大当たりで演出トリガが進んでいない");
+        assert!(
+            after_first > before,
+            "1回目の大当たりで演出トリガが進んでいない"
+        );
         assert!(
             state.jackpot_seq > after_first,
             "ヘソ入賞を挟まない連続大当たりで演出トリガが進んでいない"
@@ -1473,15 +1221,18 @@ mod tests {
     #[test]
     fn a_start_pocket_entry_lights_the_pocket() {
         let mut state = state_with_nails(Vec::new());
-        state.balls.push(Ball {
-            x: START_POCKET_X,
-            y: START_POCKET_Y - 0.5,
-            vx: 0.0,
-            vy: MAX_SPEED,
-            hit_glow: 0,
-            fired_in_normal: true,
-        });
-        step_balls(&mut state);
+        state.balls.push(test_ball(
+            START_POCKET_X,
+            START_POCKET_Y - 0.5,
+            0.0,
+            MAX_SPEED,
+        ));
+        for _ in 0..(u32::from(TEETER_TICKS_MAX) + 2) {
+            step_balls(&mut state);
+            if state.balls.is_empty() {
+                break;
+            }
+        }
         assert_eq!(
             state.start_flash, START_FLASH_TICKS,
             "ヘソ入賞の演出トリガが立っていない"
@@ -1516,7 +1267,10 @@ mod tests {
         state.reach_flash = REACH_FLASH_TICKS;
         tick_n(&mut state, HIT_GLOW_TICKS as u32);
         assert!(state.start_flash > 0, "ヘソの光が描画される前に消えている");
-        assert!(state.reach_flash > 0, "リーチの光が描画される前に消えている");
+        assert!(
+            state.reach_flash > 0,
+            "リーチの光が描画される前に消えている"
+        );
         tick_n(&mut state, REACH_FLASH_TICKS as u32);
         assert_eq!(state.start_flash, 0, "ヘソの光が消えない");
         assert_eq!(state.reach_flash, 0, "リーチの光が消えない");
@@ -1560,8 +1314,12 @@ mod tests {
         let mut state = seated_state();
         // 先頭は次の変動で消化されるため最終ランクまで押し上げられる。1段ずつ
         // 上る様子は、その後ろで待つ保留で見る。
-        state.pending.push(Pending::new(ranked_miss(PendingRank::White)));
-        state.pending.push(Pending::new(ranked_miss(PendingRank::Rainbow)));
+        state
+            .pending
+            .push(Pending::new(ranked_miss(PendingRank::White)));
+        state
+            .pending
+            .push(Pending::new(ranked_miss(PendingRank::Rainbow)));
         let mut rank = PendingRank::White;
         let mut steps = 0;
         for _ in 0..500 {
@@ -1624,8 +1382,8 @@ mod tests {
             try_fire(&mut state);
             state.balls.clear();
         }
-        let normal_only = spin_rate(state.seated_machine().expect("着席していない"))
-            .expect("標本が足りない");
+        let normal_only =
+            spin_rate(state.seated_machine().expect("着席していない")).expect("標本が足りない");
 
         // 同じ台で電サポ中に打ち込んでも、表示される回転率は動かない。
         state.mode = Mode::Kakuhen { spins_left: 0 };
@@ -1637,8 +1395,8 @@ mod tests {
             resolve_start_pocket(&mut state, false);
             state.pending.clear();
         }
-        let after_assist = spin_rate(state.seated_machine().expect("着席していない"))
-            .expect("標本が足りない");
+        let after_assist =
+            spin_rate(state.seated_machine().expect("着席していない")).expect("標本が足りない");
 
         assert!(
             (after_assist - normal_only).abs() < 1e-9,
@@ -1730,7 +1488,10 @@ mod tests {
             panic!("大当たり中ではない");
         };
         end_jackpot(&mut state, jackpot_state);
-        assert_eq!(state.last_jackpot_chain, 2, "終了時点の連チャン数が残っていない");
+        assert_eq!(
+            state.last_jackpot_chain, 2,
+            "終了時点の連チャン数が残っていない"
+        );
 
         // 電サポを切らして連チャンを数え直しても、決算の値は動かない。
         state.mode = Mode::Normal;
@@ -1799,7 +1560,10 @@ mod tests {
                 outcome.reach.label()
             );
         }
-        assert!(near_misses > 0, "惜しいハズレが一度も出ず、検証になっていない");
+        assert!(
+            near_misses > 0,
+            "惜しいハズレが一度も出ず、検証になっていない"
+        );
     }
 
     #[test]
@@ -1836,7 +1600,10 @@ mod tests {
                 );
             }
         }
-        assert!(confirmed > 0, "確定シグナルが一度も立たず、検証になっていない");
+        assert!(
+            confirmed > 0,
+            "確定シグナルが一度も立たず、検証になっていない"
+        );
         assert!(rainbows > 0, "虹保留が一度も出ず、検証になっていない");
     }
 
@@ -1860,7 +1627,10 @@ mod tests {
         let slip = spin_ticks(StopStyle::Slip);
         let revival = spin_ticks(StopStyle::Revival);
         assert_eq!(plain, ReachKind::None.spin_ticks());
-        assert!(slip > plain, "滑りで回転が伸びていない (滑り={slip} 素={plain})");
+        assert!(
+            slip > plain,
+            "滑りで回転が伸びていない (滑り={slip} 素={plain})"
+        );
         assert!(
             revival > slip,
             "復活が滑りより短い (復活={revival} 滑り={slip})"
@@ -1943,7 +1713,9 @@ mod tests {
         resolve_spin(&mut state, jackpot(5));
         state.mode = Mode::Jitan { spins_left: 1 };
         // 消化待ちの保留を1つ残したまま、電サポ中に引いたハズレを消化する。
-        state.pending.push(Pending::new(assisted_miss(ReachKind::None)));
+        state
+            .pending
+            .push(Pending::new(assisted_miss(ReachKind::None)));
         resolve_spin(&mut state, assisted_miss(ReachKind::None));
         assert_eq!(state.mode, Mode::Normal, "時短が切れていない");
         assert_eq!(
@@ -1980,7 +1752,10 @@ mod tests {
             ease_jackpot_payout(&mut state);
             let diff = target - state.jackpot_payout_shown;
             assert!(diff >= 0.0, "表示値が実際の値を追い越した ({diff})");
-            assert!(diff < prev, "表示値が実際の値へ近づいていない ({prev} → {diff})");
+            assert!(
+                diff < prev,
+                "表示値が実際の値へ近づいていない ({prev} → {diff})"
+            );
             prev = diff;
             ticks += 1;
             if diff == 0.0 {
@@ -2026,14 +1801,9 @@ mod tests {
             kakuhen: false,
             payout: 0,
         });
-        state.balls.push(Ball {
-            x: ATTACKER_X,
-            y: ATTACKER_Y - 0.5,
-            vx: 0.0,
-            vy: MAX_SPEED,
-            hit_glow: 0,
-            fired_in_normal: true,
-        });
+        state
+            .balls
+            .push(test_ball(ATTACKER_X, ATTACKER_Y - 0.5, 0.0, MAX_SPEED));
         step_balls(&mut state);
         assert_eq!(state.jackpot_payout(), ATTACKER_PAYOUT);
     }
@@ -2062,7 +1832,10 @@ mod tests {
         // 何が揃ったのか見えないまま次の回転へ移る。
         let mut state = seated_state();
         let outcome = jackpot(8);
-        state.digit = Digit::Spinning { ticks_left: 1, outcome };
+        state.digit = Digit::Spinning {
+            ticks_left: 1,
+            outcome,
+        };
         advance_digit(&mut state);
         assert_eq!(state.digit, Digit::Idle);
         assert_eq!(state.last_reels, outcome.reels);

@@ -1,7 +1,7 @@
 //! 玉響 — 描画 (読み取り専用)。
 //!
 //! 盤面は `ratatui::widgets::canvas::Canvas` + `Marker::Braille` の疑似
-//! ピクセルで、logic.rs が持つ連続座標のまま描く。盤面全面は `Clickable` で
+//! ピクセルで、board が持つ連続座標のまま描く。盤面全面は `Clickable` で
 //! 1つのタップ対象にし、別 DOM 要素を生やさずに「盤面を触ると打ち出しが
 //! 切り替わる」操作を成立させる。
 //!
@@ -33,12 +33,15 @@ use crate::theme;
 use crate::widgets::{Clickable, ClickableList, ScrollableTab, TabBar};
 
 use super::actions;
+use super::board::{self, Arch, Stage};
 use super::logic;
+use super::nails;
 use super::state::{
-    Digit, InfoTab, JackpotState, Machine, MachineSpec, Mode, PachinkoState, PendingRank, Phase,
-    SpinOutcome, StopStyle, ATTACKER_HALF_W, ATTACKER_X, ATTACKER_Y, BALL_R, BOARD_H, BOARD_W, LAUNCH_X, LAUNCH_Y, MAX_PENDING, NAIL_R,
-    PENDING_PROMOTE_FLASH_TICKS, ROUND_COUNT, SIDE_POCKET_HALF_W, SIDE_POCKET_LEFT_X,
-    SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y, START_POCKET_X, START_POCKET_Y,
+    BallTint, Digit, InfoTab, JackpotState, Machine, MachineSpec, Mode, PachinkoState, PendingRank,
+    Phase, ReachKind, SpinOutcome, StopStyle, ATTACKER_HALF_W, ATTACKER_X, ATTACKER_Y, BALL_R,
+    BOARD_H, BOARD_W, MAX_PENDING, NAIL_R, PENDING_PROMOTE_FLASH_TICKS, ROUND_COUNT,
+    SIDE_POCKET_HALF_W, SIDE_POCKET_LEFT_X, SIDE_POCKET_RIGHT_X, SIDE_POCKET_Y, START_POCKET_X,
+    START_POCKET_Y,
 };
 
 /// 玉響のアクセント色 (銀玉の色)。盤面の枠・選択中タブ・見出しで共有する。
@@ -51,7 +54,15 @@ const ACCENT: Color = theme::accent(&GameChoice::Pachinko);
 /// 玉が数点まとまった塊になり、隣り合った玉どうしが1つに融合して数を見失う。
 /// 判定より小さく描く分には、釘のどちら側を抜けたかという読み取りは変わらない
 /// — 玉の中心が動く軌跡は同じで、見えるのがその周りの塗りだけになる。
-const BALL_DRAW_SCALE: f64 = 0.7;
+const BALL_DRAW_SCALE: f64 = 0.78;
+/// 縁で揺れている玉は少し大きく描き、「今まさに入りかけている」1個へ視線を集める。
+const TEETER_DRAW_SCALE: f64 = 0.95;
+/// 釘の色。暗い茶灰にして、金・銀・真珠の玉と点描の粒が混ざらないようにする。
+const NAIL_COLOR: Color = Color::Rgb(92, 84, 70);
+const BALL_GOLD: Color = Color::Rgb(255, 214, 70);
+const BALL_SILVER: Color = Color::Rgb(236, 240, 248);
+const BALL_PEARL: Color = Color::Rgb(150, 214, 255);
+const BALL_TEETER: Color = Color::Rgb(255, 130, 210);
 
 pub fn render(
     state: &PachinkoState,
@@ -65,7 +76,7 @@ pub fn render(
     }
 }
 
-/// 盤面のワールド y (下向きが正、0=天井) を Canvas の y (上向きが正) へ
+/// 盤面のワールド y (下向きが正、0=アーチの頂点) を Canvas の y (上向きが正) へ
 /// 反転する。x は左右そのままなので変換しない。
 fn board_to_canvas_y(world_y: f64) -> f64 {
     BOARD_H - world_y
@@ -183,6 +194,7 @@ const FUNNEL_CHEVRONS: usize = 3;
 struct BoardStatics {
     guide_lines: Vec<(f64, f64, f64, f64)>,
     nails: Vec<(f64, f64)>,
+    bump: Vec<(f64, f64)>,
     side_pockets: Vec<(f64, f64)>,
     start_pocket: Vec<(f64, f64)>,
     attacker: Vec<(f64, f64)>,
@@ -193,7 +205,7 @@ struct BoardStatics {
 /// なので、描くものは全て所有権付きの Vec で先に組む。
 ///
 /// `aspect` は釘を真円に見せるための y 半径の倍率 (`round_aspect`)、
-/// `pocket_half_w` はヘソの受け口半幅 (`logic::pocket_half_w`)。
+/// `pocket_half_w` はヘソの受け口半幅 (`board::pocket_half_w`)。
 fn board_statics(
     machine: Option<&Machine>,
     pocket_half_w: f64,
@@ -202,34 +214,57 @@ fn board_statics(
 ) -> BoardStatics {
     let center = BOARD_W / 2.0;
 
-    // 打ち出し口から天井へ回り込むレールと、アタッカーの下からアウト口へ
-    // 絞り込む漏斗。玉が飛んでいない時にも玉道の入口と出口が読める。
-    let mut guide_lines: Vec<(f64, f64, f64, f64)> = vec![
+    // 逆U字のアーチと、アタッカーの下からアウト口へ絞り込む漏斗。
+    // 打ち出した玉は右肩のカーブに当たって釘帯へ落ちるので、入口の形を
+    // 平面の天井ではなくアーチとして見せる。
+    let mut guide_lines: Vec<(f64, f64, f64, f64)> = Vec::new();
+    let arch = Arch::TABLE.polyline(28);
+    for w in arch.windows(2) {
+        guide_lines.push((
+            w[0].0,
+            board_to_canvas_y(w[0].1),
+            w[1].0,
+            board_to_canvas_y(w[1].1),
+        ));
+    }
+    // 10時の出っ張り。強い打ち出しが壁を沿ってここに当たり、12時へ戻る。
+    let bump = Arch::TABLE.bump_polyline(12);
+    for w in bump.windows(2) {
+        guide_lines.push((
+            w[0].0,
+            board_to_canvas_y(w[0].1),
+            w[1].0,
+            board_to_canvas_y(w[1].1),
+        ));
+    }
+    // アーチの足から漏斗まで、左右の壁。
+    guide_lines.push((
+        0.4,
+        board_to_canvas_y(Arch::TABLE.b),
+        0.4,
+        board_to_canvas_y(FUNNEL_TOP_Y),
+    ));
+    guide_lines.push((
+        BOARD_W - 0.4,
+        board_to_canvas_y(Arch::TABLE.b),
+        BOARD_W - 0.4,
+        board_to_canvas_y(FUNNEL_TOP_Y),
+    ));
+    let mut funnel: Vec<(f64, f64, f64, f64)> = vec![
         (
-            LAUNCH_X,
-            board_to_canvas_y(LAUNCH_Y),
-            LAUNCH_X,
-            board_to_canvas_y(1.5),
-        ),
-        (
-            LAUNCH_X,
-            board_to_canvas_y(1.5),
-            3.0,
-            board_to_canvas_y(1.5),
-        ),
-        (
-            2.0,
+            0.4,
             board_to_canvas_y(FUNNEL_TOP_Y),
             center - OUT_HALF_W,
             board_to_canvas_y(OUT_MOUTH_Y),
         ),
         (
-            BOARD_W - 2.0,
+            BOARD_W - 0.4,
             board_to_canvas_y(FUNNEL_TOP_Y),
             center + OUT_HALF_W,
             board_to_canvas_y(OUT_MOUTH_Y),
         ),
     ];
+    guide_lines.append(&mut funnel);
     for i in 0..FUNNEL_CHEVRONS {
         let t = (i + 1) as f64 / (FUNNEL_CHEVRONS + 1) as f64;
         let y = FUNNEL_TOP_Y + (OUT_MOUTH_Y - FUNNEL_TOP_Y) * t;
@@ -257,9 +292,9 @@ fn board_statics(
                     canvas_fx::filled_ellipse_points(
                         n.x,
                         board_to_canvas_y(n.y),
-                        NAIL_R * 0.6,
-                        NAIL_R * 0.6 * aspect,
-                        0.2,
+                        NAIL_R * 0.5,
+                        NAIL_R * 0.5 * aspect,
+                        0.22,
                     )
                 })
                 .collect()
@@ -309,9 +344,19 @@ fn board_statics(
         0.8,
     );
 
+    let (bump_x, bump_y) = Arch::TABLE.bump_center();
+    let bump = canvas_fx::filled_ellipse_points(
+        bump_x,
+        board_to_canvas_y(bump_y),
+        Arch::BUMP_R * 0.72,
+        Arch::BUMP_R * 0.72 * aspect,
+        0.28,
+    );
+
     BoardStatics {
         guide_lines,
         nails,
+        bump,
         side_pockets,
         start_pocket,
         attacker,
@@ -343,13 +388,335 @@ fn draw_board_statics(
         });
     }
     draw_points(ctx, &statics.out_mouth, Color::DarkGray);
+    // 出っ張りは壁と同じ色で塗り、釘や玉の粒と混ざらないようにする。
+    draw_points(ctx, &statics.bump, Color::DarkGray);
     // 釘は盤面に固定された構造物なので暗く沈める。玉と同じ明るさで描くと、
     // 点描の粒がどちらのものか判別できず、玉が釘の間を落ちていく動きを
     // 目で追えなくなる。
-    draw_points(ctx, &statics.nails, Color::DarkGray);
+    draw_points(ctx, &statics.nails, NAIL_COLOR);
     draw_points(ctx, &statics.side_pockets, Color::Blue);
     draw_points(ctx, &statics.start_pocket, start_pocket_color);
     draw_points(ctx, &statics.attacker, attacker_color);
+}
+
+/// 液晶の一層。`paint` は move クロージャなので、色ごとに所有権付きで先に組む。
+struct StageLayer {
+    points: Vec<(f64, f64)>,
+    color: Color,
+}
+
+/// 液晶の機嫌。席の経過時間ではなく、盤面で今起きていることにだけ反応する。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StageMood {
+    /// 停止。息をしているだけ。
+    Idle,
+    /// ヘソ入賞〜デジタル回転。ルーレットが起きる。
+    Spin,
+    /// リーチ。二つの明かりが追う。
+    Reach,
+    /// 大当たり。輪が膨らむ。
+    Jackpot,
+}
+
+fn stage_mood(state: &PachinkoState) -> StageMood {
+    if matches!(state.mode, Mode::Jackpot(_)) {
+        return StageMood::Jackpot;
+    }
+    let reach = match &state.digit {
+        Digit::Spinning { outcome, .. } => outcome.reach != ReachKind::None,
+        Digit::Idle => false,
+    };
+    if state.reach_flash > 0 || reach {
+        return StageMood::Reach;
+    }
+    if matches!(state.digit, Digit::Spinning { .. }) || state.start_flash > 0 {
+        return StageMood::Spin;
+    }
+    StageMood::Idle
+}
+
+/// 液晶の回転速度 (tick あたりラジアン)。機嫌に応じて速さが変わる。
+fn stage_rate(state: &PachinkoState) -> f64 {
+    match stage_mood(state) {
+        StageMood::Jackpot => 0.48,
+        StageMood::Reach => match &state.digit {
+            Digit::Spinning { ticks_left, outcome } => {
+                let total = outcome.reach.spin_ticks().max(1) as f64;
+                let urgency = 1.0 - (*ticks_left as f64 / total).clamp(0.0, 1.0);
+                match outcome.reach {
+                    ReachKind::Premium => 0.36 + urgency * 0.28,
+                    ReachKind::Super => 0.28 + urgency * 0.22,
+                    ReachKind::Normal => 0.20 + urgency * 0.16,
+                    ReachKind::None => 0.22,
+                }
+            }
+            Digit::Idle => 0.22,
+        },
+        StageMood::Spin => 0.18,
+        StageMood::Idle if state.mode.is_assisted() => 0.05,
+        StageMood::Idle => 0.03,
+    }
+}
+
+fn stage_hot_color(state: &PachinkoState) -> Color {
+    if matches!(state.mode, Mode::Jackpot(_)) {
+        return Color::LightRed;
+    }
+    if state.reach_flash > 0 {
+        return state.reach_flash_kind.color();
+    }
+    match &state.digit {
+        Digit::Spinning { outcome, .. } if outcome.reach != ReachKind::None => {
+            outcome.reach.color()
+        }
+        Digit::Idle if state.start_flash > 0 => Color::LightYellow,
+        Digit::Spinning { .. } => Color::LightYellow,
+        Digit::Idle if state.mode.is_assisted() => Color::LightCyan,
+        Digit::Idle => Color::Rgb(255, 196, 72),
+    }
+}
+
+fn lamp_is_hot(index: usize, hot: usize, count: usize, span: usize) -> bool {
+    let dist = (index + count - hot) % count;
+    dist <= span || dist >= count - span
+}
+
+fn stage_blob(x: f64, y: f64, rx: f64, ry: f64, aspect: f64, step: f64) -> Vec<(f64, f64)> {
+    canvas_fx::filled_ellipse_points(x, board_to_canvas_y(y), rx, ry * aspect, step)
+}
+
+fn stage_panel(stage: Stage, aspect: f64) -> Vec<(f64, f64)> {
+    canvas_fx::filled_ellipse_points(
+        stage.cx,
+        board_to_canvas_y(stage.cy),
+        stage.rx * 0.62,
+        stage.ry * 0.58 * aspect,
+        0.42,
+    )
+}
+
+fn stage_rim(stage: Stage, aspect: f64) -> Vec<(f64, f64)> {
+    canvas_fx::ellipse_ring_points(
+        stage.cx,
+        board_to_canvas_y(stage.cy),
+        stage.rx * 0.94,
+        stage.ry * 0.94 * aspect,
+        0.10,
+    )
+}
+
+fn collect_lamps(
+    stage: Stage,
+    phase: f64,
+    hot: usize,
+    span: usize,
+    aspect: f64,
+    dim: &mut Vec<(f64, f64)>,
+    lit: &mut Vec<(f64, f64)>,
+) {
+    for i in 0..Stage::LAMPS {
+        let (x, y) = stage.lamp(i, phase);
+        let pts = stage_blob(x, y, 0.55, 0.48, aspect, 0.26);
+        if lamp_is_hot(i, hot, Stage::LAMPS, span) {
+            lit.extend(pts);
+        } else {
+            dim.extend(pts);
+        }
+    }
+}
+
+fn pulse_frac(t: f64, offset: f64) -> f64 {
+    0.28 + 0.60 * (t * 0.22 + offset).rem_euclid(1.0)
+}
+
+fn stage_dots(state: &PachinkoState, aspect: f64) -> Vec<StageLayer> {
+    let stage = Stage::TABLE;
+    let mood = stage_mood(state);
+    let phase = state.stage_ticks as f64 * stage_rate(state);
+    let hot_color = stage_hot_color(state);
+    let lamp_color = Color::Rgb(148, 78, 28);
+    let mut layers = vec![
+        StageLayer {
+            points: stage_panel(stage, aspect),
+            color: Color::Rgb(22, 26, 32),
+        },
+        StageLayer {
+            points: stage_rim(stage, aspect),
+            color: Color::Rgb(86, 74, 52),
+        },
+    ];
+    match mood {
+        StageMood::Idle => {
+            let mut dim = Vec::new();
+            let mut lit = Vec::new();
+            collect_lamps(
+                stage,
+                phase,
+                Stage::hot_index(phase, Stage::LAMPS),
+                0,
+                aspect,
+                &mut dim,
+                &mut lit,
+            );
+            let breath = 0.95 + 0.22 * (state.stage_ticks as f64 * 0.12).sin();
+            layers.push(StageLayer {
+                points: dim,
+                color: lamp_color,
+            });
+            layers.push(StageLayer {
+                points: stage_blob(stage.cx, stage.cy, breath, breath, aspect, 0.26),
+                color: Color::Rgb(48, 40, 36),
+            });
+            layers.push(StageLayer {
+                points: lit,
+                color: hot_color,
+            });
+        }
+        StageMood::Spin => {
+            let mut spokes = Vec::new();
+            for i in 0..Stage::SPOKES {
+                let mut frac = 0.22;
+                while frac <= 0.68 {
+                    let (x, y) = stage.spoke_point(i, phase, frac);
+                    spokes.extend(stage_blob(x, y, 0.26, 0.26, aspect, 0.24));
+                    frac += 0.08;
+                }
+            }
+            let mut dim = Vec::new();
+            let mut lit = Vec::new();
+            collect_lamps(
+                stage,
+                phase,
+                Stage::hot_index(phase, Stage::LAMPS),
+                1,
+                aspect,
+                &mut dim,
+                &mut lit,
+            );
+            let inner_hot_i = Stage::hot_index(Stage::inner_phase(phase), Stage::INNER_LAMPS);
+            let mut inner_dim = Vec::new();
+            let mut inner_hot = Vec::new();
+            for i in 0..Stage::INNER_LAMPS {
+                let (x, y) = stage.inner_lamp(i, phase);
+                let pts = stage_blob(x, y, 0.42, 0.36, aspect, 0.26);
+                if lamp_is_hot(i, inner_hot_i, Stage::INNER_LAMPS, 0) {
+                    inner_hot.extend(pts);
+                } else {
+                    inner_dim.extend(pts);
+                }
+            }
+            let punch = if state.start_flash > 0 { 0.35 } else { 0.0 };
+            let breath = 1.05 + punch + 0.16 * (state.stage_ticks as f64 * 0.19).sin();
+            let (px, py) = stage.pointer();
+            layers.push(StageLayer {
+                points: spokes,
+                color: Color::Rgb(70, 52, 36),
+            });
+            layers.push(StageLayer {
+                points: dim,
+                color: lamp_color,
+            });
+            layers.push(StageLayer {
+                points: inner_dim,
+                color: Color::Rgb(120, 70, 36),
+            });
+            layers.push(StageLayer {
+                points: stage_blob(stage.cx, stage.cy, breath, breath, aspect, 0.26),
+                color: Color::Rgb(48, 40, 36),
+            });
+            layers.push(StageLayer {
+                points: inner_hot,
+                color: Color::Rgb(210, 150, 70),
+            });
+            layers.push(StageLayer {
+                points: lit,
+                color: hot_color,
+            });
+            layers.push(StageLayer {
+                points: stage_blob(px, py, 0.50, 0.72, aspect, 0.24),
+                color: Color::LightRed,
+            });
+        }
+        StageMood::Reach => {
+            let hot_a = Stage::hot_index(phase, Stage::LAMPS);
+            let hot_b = (hot_a + Stage::LAMPS / 2) % Stage::LAMPS;
+            let mut dim = Vec::new();
+            let mut lit_a = Vec::new();
+            let mut lit_b = Vec::new();
+            let mut axis = Vec::new();
+            for i in 0..Stage::LAMPS {
+                let (x, y) = stage.lamp(i, 0.0);
+                let on_a = lamp_is_hot(i, hot_a, Stage::LAMPS, 1);
+                let on_b = lamp_is_hot(i, hot_b, Stage::LAMPS, 1);
+                let r = if on_a || on_b { 0.78 } else { 0.40 };
+                let pts = stage_blob(x, y, r, r * 0.88, aspect, 0.26);
+                if on_a {
+                    lit_a.extend(pts);
+                } else if on_b {
+                    lit_b.extend(pts);
+                } else {
+                    dim.extend(pts);
+                }
+            }
+            // 色だけが追い合うと、塗り潰した楕円に飲まれて対向していると読めない。
+            let mut frac = 0.18;
+            while frac <= 0.70 {
+                let (x, y) = stage.along_lamp(hot_a, frac);
+                axis.extend(stage_blob(x, y, 0.24, 0.24, aspect, 0.24));
+                let (x, y) = stage.along_lamp(hot_b, frac);
+                axis.extend(stage_blob(x, y, 0.24, 0.24, aspect, 0.24));
+                frac += 0.10;
+            }
+            layers.push(StageLayer {
+                points: dim,
+                color: lamp_color,
+            });
+            layers.push(StageLayer {
+                points: axis,
+                color: Color::Rgb(90, 70, 48),
+            });
+            layers.push(StageLayer {
+                points: lit_b,
+                color: Color::Rgb(80, 140, 170),
+            });
+            layers.push(StageLayer {
+                points: lit_a,
+                color: hot_color,
+            });
+        }
+        StageMood::Jackpot => {
+            let breath = 1.15 + 0.35 * (state.stage_ticks as f64 * 0.21).sin();
+            for (offset, color) in [
+                (0.0, Color::Rgb(86, 74, 52)),
+                (0.45, hot_color),
+                (0.78, Color::Rgb(210, 150, 70)),
+            ] {
+                let frac = pulse_frac(phase, offset);
+                layers.push(StageLayer {
+                    points: canvas_fx::ellipse_ring_points(
+                        stage.cx,
+                        board_to_canvas_y(stage.cy),
+                        stage.rx * frac,
+                        stage.ry * frac * aspect,
+                        0.10,
+                    ),
+                    color,
+                });
+            }
+            layers.push(StageLayer {
+                points: stage_blob(stage.cx, stage.cy, breath, breath, aspect, 0.26),
+                color: hot_color,
+            });
+        }
+    }
+    layers
+}
+
+fn draw_stage(ctx: &mut Context, layers: &[StageLayer]) {
+    // ヘソ直下の小さな画面。アタッカーへ寄る通路は塗らない。
+    for layer in layers {
+        draw_points(ctx, &layer.points, layer.color);
+    }
 }
 
 // ── ホール画面 ─────────────────────────────────────────────────
@@ -399,12 +766,14 @@ fn render_hall(
 const HALL_PREVIEW_W: u16 = 40;
 
 /// 選択中の台の盤面プレビュー。遊技中の盤面 (`render_board`) と同じ
-/// `board_statics` を描くので、ここで読んだヘソの開きは着席後の盤面と
+/// `board_statics` と液晶を描くので、ここで読んだヘソの開きは着席後の盤面と
 /// そのまま一致する。
 ///
-/// 描くのは釘と入賞口だけの静止画で、玉やアタッカーの開放状態のような
-/// 遊技中にしか存在しない要素は持たない。クリック判定も持たない純粋な
-/// 装飾なので、別 DOM 要素は生やさず盤面と同じ `<pre>` 上に描く。
+/// 釘と入賞口は静止画。液晶は停止中でも息をするので、ホールのプレビューでも
+/// `stage_ticks` で位相を進める。ヘソ下の通路までは塗らない。
+/// 玉やアタッカーの開放のような遊技中にしか存在しない要素は持たない。
+/// クリック判定も持たない純粋な装飾なので、別 DOM 要素は生やさず盤面と同じ
+/// `<pre>` 上に描く。
 fn render_hall_preview(state: &PachinkoState, f: &mut Frame, area: Rect) {
     let machine = state.hall_cursor_machine();
     let title = match machine {
@@ -425,16 +794,18 @@ fn render_hall_preview(state: &PachinkoState, f: &mut Frame, area: Rect) {
     // 座る前に読んだ開きより実際が狭く、釘読みが当てにならなくなる。
     let statics = board_statics(
         Some(machine),
-        logic::pocket_half_w(machine.nail_spread, false),
+        board::pocket_half_w(machine.nail_spread, false),
         round_aspect(inner),
         false,
     );
+    let stage = stage_dots(state, round_aspect(inner));
     let canvas = Canvas::default()
         .x_bounds([0.0, BOARD_W])
         .y_bounds([0.0, BOARD_H])
         .marker(Marker::Braille)
         .paint(move |ctx| {
             draw_board_statics(ctx, &statics, Color::Cyan, Color::DarkGray);
+            draw_stage(ctx, &stage);
         })
         .block(block);
     f.render_widget(canvas, area);
@@ -517,7 +888,7 @@ fn nail_spread_gauge(nail_spread: f64) -> String {
     const MIN_GAP: usize = 1;
     const MAX_GAP: usize = 7;
 
-    let (lo, hi) = logic::NAIL_SPREAD_RANGE;
+    let (lo, hi) = nails::NAIL_SPREAD_RANGE;
     let t = if hi > lo {
         ((nail_spread - lo) / (hi - lo)).clamp(0.0, 1.0)
     } else {
@@ -850,10 +1221,13 @@ fn shaken_area(state: &PachinkoState, area: Rect) -> Rect {
 
 /// ヘソの色。玉が入った直後だけ白く光らせる。釘に弾かれた玉
 /// (`Ball::hit_glow`) と同じ見せ方にすることで、盤面の白さが一貫して
-/// 「今この瞬間に何かが当たった」印になる。
+/// 「今この瞬間に何かが当たった」印になる。縁で揺れている玉があるときは
+/// 口そのものを色を変えて、「入りそう」の対象を釘の隙間から拾えるようにする。
 fn start_pocket_color(state: &PachinkoState) -> Color {
     if state.start_flash > 0 {
         Color::White
+    } else if state.balls.iter().any(|b| b.teeter > 0) {
+        BALL_TEETER
     } else if state.mode.is_assisted() {
         Color::LightCyan
     } else {
@@ -885,7 +1259,7 @@ fn render_board(
     let attacker_open = jackpot.is_some();
     let statics = board_statics(
         state.seated_machine(),
-        logic::effective_pocket_half_w(state),
+        board::effective_pocket_half_w(state),
         aspect,
         attacker_open,
     );
@@ -897,20 +1271,35 @@ fn render_board(
     };
 
     // 釘に弾かれた直後の玉だけ白く光らせ、どこで跳ねたかを目で追えるようにする。
-    let mut ball_pts: Vec<(f64, f64)> = Vec::new();
+    // 色を3種に分けるのは、同じ軌道に乗った複数の玉が1つの塊に融合しないため。
+    let mut gold_pts: Vec<(f64, f64)> = Vec::new();
+    let mut silver_pts: Vec<(f64, f64)> = Vec::new();
+    let mut pearl_pts: Vec<(f64, f64)> = Vec::new();
     let mut glow_pts: Vec<(f64, f64)> = Vec::new();
+    let mut teeter_pts: Vec<(f64, f64)> = Vec::new();
     for ball in &state.balls {
+        let scale = if ball.teeter > 0 {
+            TEETER_DRAW_SCALE
+        } else {
+            BALL_DRAW_SCALE
+        };
         let pts = canvas_fx::filled_ellipse_points(
             ball.x,
             board_to_canvas_y(ball.y),
-            BALL_R * BALL_DRAW_SCALE,
-            BALL_R * BALL_DRAW_SCALE * aspect,
-            0.25,
+            BALL_R * scale,
+            BALL_R * scale * aspect,
+            0.22,
         );
-        if ball.hit_glow > 0 {
+        if ball.teeter > 0 {
+            teeter_pts.extend(pts);
+        } else if ball.hit_glow > 0 {
             glow_pts.extend(pts);
         } else {
-            ball_pts.extend(pts);
+            match ball.tint {
+                BallTint::Gold => gold_pts.extend(pts),
+                BallTint::Silver => silver_pts.extend(pts),
+                BallTint::Pearl => pearl_pts.extend(pts),
+            }
         }
     }
 
@@ -927,6 +1316,7 @@ fn render_board(
             )
         })
         .unwrap_or_default();
+    let stage = stage_dots(state, aspect);
 
     let canvas = Canvas::default()
         .x_bounds([0.0, BOARD_W])
@@ -934,11 +1324,16 @@ fn render_board(
         .marker(Marker::Braille)
         .paint(move |ctx| {
             draw_board_statics(ctx, &statics, start_pocket_color, attacker_color);
-            // 玉は盤面で唯一動くものなので、固定物 (釘・入賞口) より明るく
+            // 液晶は釘より手前、玉より奥。玉が画面の上を落ちる実機の前後関係。
+            draw_stage(ctx, &stage);
+            // 玉は盤面で唯一物理として動くものなので、固定物 (釘・入賞口) より明るく
             // 描いて視線を集める。弾かれた瞬間だけさらに白く飛ばすことで、
             // 「今この瞬間に当たった」印はヘソの入賞と同じ白で統一される。
-            draw_points(ctx, &ball_pts, Color::LightYellow);
+            draw_points(ctx, &gold_pts, BALL_GOLD);
+            draw_points(ctx, &silver_pts, BALL_SILVER);
+            draw_points(ctx, &pearl_pts, BALL_PEARL);
             draw_points(ctx, &glow_pts, Color::White);
+            draw_points(ctx, &teeter_pts, BALL_TEETER);
             draw_points(ctx, &jackpot_ring, Color::LightRed);
         })
         .block(block);
@@ -1875,8 +2270,8 @@ mod tests {
     use ratzilla::ratatui::Terminal;
 
     use crate::games::pachinko::state::{
-        Ball, Digit, Pending, PendingRank, ReachKind, SpinOutcome, StopStyle, INITIAL_REELS,
-        REACH_FLASH_TICKS, START_FLASH_TICKS,
+        Ball, BallTint, Digit, Pending, PendingRank, ReachKind, SpinOutcome, StopStyle,
+        INITIAL_REELS, REACH_FLASH_TICKS, START_FLASH_TICKS,
     };
 
     /// `Game::render` ではなく `render` を直接叩く。前者は `crate::time::now_ms()`
@@ -1917,6 +2312,108 @@ mod tests {
         state
     }
 
+    fn frame_text(state: &PachinkoState, width: u16, height: u16) -> String {
+        let cs = Rc::new(RefCell::new(ClickState::new()));
+        cs.borrow_mut().terminal_cols = width;
+        cs.borrow_mut().terminal_rows = height;
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| {
+                render(state, f, f.area(), &cs);
+            })
+            .unwrap();
+        crate::tui_inspect::buffer_text(terminal.backend().buffer())
+    }
+
+    /// 着席画面とホールを文字として出す。見た目の判断はこの出力で行う。
+    ///
+    /// `cargo test --lib games::pachinko::render::tests::dump_hall_and_playing_screens -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_hall_and_playing_screens() {
+        let mut hall = PachinkoState::new();
+        logic::generate_hall(&mut hall);
+        eprintln!("=== hall 100x40 ===\n{}", frame_text(&hall, 100, 40));
+        let mut playing = seated_state();
+        eprintln!("=== playing 100x40 ===\n{}", frame_text(&playing, 100, 40));
+        eprintln!(
+            "=== playing 40x30 (narrow) ===\n{}",
+            frame_text(&playing, 40, 30)
+        );
+        logic::tick_n(&mut playing, 12);
+        eprintln!(
+            "=== playing 100x40 after 12 ticks ===\n{}",
+            frame_text(&playing, 100, 40)
+        );
+    }
+
+    fn stage_spinning_digit(reach: ReachKind) -> Digit {
+        Digit::Spinning {
+            ticks_left: 20,
+            outcome: SpinOutcome {
+                hit: reach != ReachKind::None,
+                rounds: if reach != ReachKind::None { 16 } else { 0 },
+                kakuhen: false,
+                reach,
+                rank: PendingRank::White,
+                stop: StopStyle::Plain,
+                confirmed: false,
+                assisted: false,
+                reels: [7, 7, 7],
+            },
+        }
+    }
+
+    fn stage_jackpot_mode() -> Mode {
+        Mode::Jackpot(crate::games::pachinko::state::JackpotState {
+            round: 3,
+            total_rounds: 16,
+            count: 4,
+            ticks_left: 120,
+            kakuhen: true,
+            payout: 0,
+        })
+    }
+
+    fn dump_board_grid(label: &str, state: &PachinkoState) {
+        let grid = board_symbols_of(state, 34, 28, false);
+        eprintln!("=== stage {label} 34x28 ===");
+        for (y, row) in grid.iter().enumerate() {
+            eprintln!("{:2}|{}|", y, row.join(""));
+        }
+    }
+
+    /// 液晶が盤面の出来事に合わせて形を変える様子を盤面だけ切り出して出す。
+    ///
+    /// `cargo test --lib games::pachinko::render::tests::dump_stage_motion -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn dump_stage_motion() {
+        let idle = seated_state();
+        dump_board_grid("idle t=0", &idle);
+        let mut idle_later = seated_state();
+        idle_later.stage_ticks = 80;
+        dump_board_grid("idle t=80", &idle_later);
+
+        let mut spin = seated_state();
+        spin.digit = stage_spinning_digit(ReachKind::None);
+        dump_board_grid("spin t=0", &spin);
+        spin.stage_ticks = 24;
+        dump_board_grid("spin t=24", &spin);
+
+        let mut reach = seated_state();
+        reach.digit = stage_spinning_digit(ReachKind::Super);
+        dump_board_grid("reach t=0", &reach);
+        reach.stage_ticks = 24;
+        dump_board_grid("reach t=24", &reach);
+
+        let mut jack = seated_state();
+        jack.mode = stage_jackpot_mode();
+        dump_board_grid("jackpot t=0", &jack);
+        jack.stage_ticks = 24;
+        dump_board_grid("jackpot t=24", &jack);
+    }
+
     #[test]
     fn hall_renders_without_panicking_narrow_and_wide() {
         let mut state = PachinkoState::new();
@@ -1932,11 +2429,161 @@ mod tests {
         render_to_test_backend_with_click_state(&state, 40, 30);
     }
 
+    fn is_braille(symbol: &str) -> bool {
+        symbol
+            .chars()
+            .next()
+            .is_some_and(|c| ('\u{2800}'..='\u{28FF}').contains(&c))
+    }
+
+    fn band_braille(symbols: &[Vec<String>], x0_frac: f64, x1_frac: f64) -> usize {
+        let h = symbols.len();
+        let w = symbols.first().map(Vec::len).unwrap_or(0);
+        let y0 = h * 3 / 5;
+        let y1 = h.saturating_sub(3);
+        let x0 = ((w as f64 * x0_frac) as usize).min(w);
+        let x1 = ((w as f64 * x1_frac) as usize).min(w).max(x0);
+        symbols[y0..y1]
+            .iter()
+            .map(|row| {
+                row[x0..x1]
+                    .iter()
+                    .filter(|cell| is_braille(cell))
+                    .count()
+            })
+            .sum()
+    }
+
+    fn lower_band_braille(symbols: &[Vec<String>]) -> usize {
+        band_braille(symbols, 0.25, 0.75)
+    }
+
+    fn stage_band_text(state: &PachinkoState) -> String {
+        let grid = board_symbols_of(state, 34, 28, false);
+        let h = grid.len();
+        let w = grid.first().map(Vec::len).unwrap_or(0);
+        let y0 = (h as f64 * 0.56) as usize;
+        let y1 = ((h as f64 * 0.72) as usize).min(h);
+        let x0 = ((w as f64 * 0.38) as usize).min(w);
+        let x1 = ((w as f64 * 0.62) as usize).min(w).max(x0);
+        grid[y0..y1]
+            .iter()
+            .map(|row| row[x0..x1].join(""))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn the_stage_mood_follows_the_board() {
+        let idle = seated_state();
+        assert_eq!(stage_mood(&idle), StageMood::Idle);
+
+        let mut flash = seated_state();
+        flash.start_flash = 1;
+        assert_eq!(stage_mood(&flash), StageMood::Spin);
+
+        let mut spin = seated_state();
+        spin.digit = stage_spinning_digit(ReachKind::None);
+        assert_eq!(stage_mood(&spin), StageMood::Spin);
+
+        let mut reach = seated_state();
+        reach.digit = stage_spinning_digit(ReachKind::Super);
+        assert_eq!(stage_mood(&reach), StageMood::Reach);
+
+        let mut reach_flash = seated_state();
+        reach_flash.reach_flash = 1;
+        assert_eq!(stage_mood(&reach_flash), StageMood::Reach);
+
+        let mut jack = seated_state();
+        jack.mode = stage_jackpot_mode();
+        jack.digit = stage_spinning_digit(ReachKind::Super);
+        assert_eq!(stage_mood(&jack), StageMood::Jackpot);
+    }
+
+    #[test]
+    fn the_stage_sits_under_the_heso_without_filling_the_wings() {
+        // 液晶はヘソ直下の中央だけ。左右の通路まで塗ると、外れた玉を追う
+        // 目が絵に奪われる。
+        let symbols = board_symbols(34, 28, false);
+        let center = band_braille(&symbols, 0.38, 0.62);
+        assert!(
+            center >= 8,
+            "ヘソ直下の中央に液晶が描かれていない (braille={center})"
+        );
+        let left = band_braille(&symbols, 0.12, 0.32);
+        let right = band_braille(&symbols, 0.68, 0.88);
+        assert!(
+            left < center && right < center,
+            "液晶が通路まで広がっている (center={center} left={left} right={right})"
+        );
+    }
+
+    #[test]
+    fn the_stage_moves_as_ticks_pass() {
+        // 停止中の息は遅いので、回転とリーチで位相が進むことを見る。
+        let mut spin = seated_state();
+        spin.digit = stage_spinning_digit(ReachKind::None);
+        spin.stage_ticks = 0;
+        let spin_a = board_symbols_of(&spin, 34, 28, false);
+        spin.stage_ticks = 24;
+        let spin_b = board_symbols_of(&spin, 34, 28, false);
+        assert_ne!(spin_a, spin_b, "tick が進んでも液晶が動いていない");
+        assert!(
+            lower_band_braille(&spin_b) >= 8,
+            "動いたあとに液晶が消えている"
+        );
+
+        let mut reach = seated_state();
+        reach.digit = stage_spinning_digit(ReachKind::Super);
+        reach.stage_ticks = 0;
+        let reach_a = board_symbols_of(&reach, 34, 28, false);
+        reach.stage_ticks = 24;
+        let reach_b = board_symbols_of(&reach, 34, 28, false);
+        assert_ne!(reach_a, reach_b, "リーチ中に対向する明かりが動いていない");
+    }
+
+    #[test]
+    fn the_stage_changes_shape_with_the_board() {
+        let idle = seated_state();
+        let mut spin = seated_state();
+        spin.digit = stage_spinning_digit(ReachKind::None);
+        let mut reach = seated_state();
+        reach.digit = stage_spinning_digit(ReachKind::Super);
+        let mut jack = seated_state();
+        jack.mode = stage_jackpot_mode();
+        let idle_text = stage_band_text(&idle);
+        let spin_text = stage_band_text(&spin);
+        let reach_text = stage_band_text(&reach);
+        let jack_text = stage_band_text(&jack);
+        assert_ne!(idle_text, spin_text, "ヘソ入賞でも液晶の形が止まっている");
+        assert_ne!(spin_text, reach_text, "リーチでも液晶の形が回転のまま");
+        assert_ne!(reach_text, jack_text, "大当たりでも液晶の形がリーチのまま");
+        assert_ne!(idle_text, jack_text, "大当たりでも液晶の形が停止のまま");
+    }
+
+    #[test]
+    fn hall_stage_ticks_advance_without_sitting() {
+        let mut state = PachinkoState::new();
+        logic::generate_hall(&mut state);
+        assert_eq!(state.phase, Phase::Hall);
+        logic::tick_n(&mut state, 5);
+        assert_eq!(state.stage_ticks, 5, "ホールでも液晶の位相が進まない");
+        assert!(state.balls.is_empty(), "ホールで玉が進んでいる");
+    }
+
     /// 同じ `Rect` へ盤面 (遊技中) とホールのプレビューをそれぞれ描き、
     /// 記号だけを取り出す。色と枠の見出しは画面ごとに違ってよいので、
     /// 比較するのは「どこに何が描かれたか」だけにする。
     fn board_symbols(area_w: u16, area_h: u16, hall_preview: bool) -> Vec<Vec<String>> {
-        let state = seated_state();
+        board_symbols_of(&seated_state(), area_w, area_h, hall_preview)
+    }
+
+    fn board_symbols_of(
+        state: &PachinkoState,
+        area_w: u16,
+        area_h: u16,
+        hall_preview: bool,
+    ) -> Vec<Vec<String>> {
         let cs = Rc::new(RefCell::new(ClickState::new()));
         cs.borrow_mut().terminal_cols = area_w;
         cs.borrow_mut().terminal_rows = area_h;
@@ -1945,9 +2592,9 @@ mod tests {
             .draw(|f| {
                 let area = f.area();
                 if hall_preview {
-                    render_hall_preview(&state, f, area);
+                    render_hall_preview(state, f, area);
                 } else {
-                    render_board(&state, f, area, &cs);
+                    render_board(state, f, area, &cs);
                 }
             })
             .unwrap();
@@ -1985,12 +2632,12 @@ mod tests {
         let mut state = PachinkoState::new();
         logic::generate_hall(&mut state);
         // 開きの上限と下限の台を並べ、最も差が付く2台で見比べる。
-        let (lo, hi) = logic::NAIL_SPREAD_RANGE;
+        let (lo, hi) = nails::NAIL_SPREAD_RANGE;
         for (index, spread) in [(0usize, lo), (1usize, hi)] {
             let mut seed = 12_345 + index as u32;
             state.machines[index].nail_spread = spread;
             state.machines[index].nails =
-                logic::generate_nails(&mut seed, spread, state.machines[index].rail_bias);
+                nails::generate_nails(&mut seed, spread, state.machines[index].rail_bias);
         }
 
         let render_preview = |state: &PachinkoState| -> Vec<String> {
@@ -2033,7 +2680,7 @@ mod tests {
     fn the_hall_list_shows_the_nail_spread_as_a_gap() {
         // ナロー幅ではプレビューを出せないので、ヘソの開きはこの行だけが
         // 伝える。消えると台を釘で見分ける手がかりが無くなる。
-        let (lo, hi) = logic::NAIL_SPREAD_RANGE;
+        let (lo, hi) = nails::NAIL_SPREAD_RANGE;
         let tight = nail_spread_gauge(lo);
         let loose = nail_spread_gauge(hi);
         assert!(
@@ -2143,22 +2790,9 @@ mod tests {
                 reels: [7, 7, 7],
             },
         };
-        state.balls.push(Ball {
-            x: 30.0,
-            y: 40.0,
-            vx: -0.4,
-            vy: 0.6,
-            hit_glow: 3,
-            fired_in_normal: true,
-        });
-        state.balls.push(Ball {
-            x: 12.0,
-            y: 70.0,
-            vx: 0.2,
-            vy: 0.9,
-            hit_glow: 0,
-            fired_in_normal: true,
-        });
+        state.balls.push(Ball::falling(30.0, 40.0, -0.4, 0.6, true, BallTint::Gold));
+        state.balls.last_mut().expect("玉を積んだ").hit_glow = 3;
+        state.balls.push(Ball::falling(12.0, 70.0, 0.2, 0.9, true, BallTint::Pearl));
         state.pending.push(Pending::new(SpinOutcome {
             hit: false,
             rounds: 0,
@@ -2345,6 +2979,14 @@ mod tests {
         state.start_flash = 0;
         state.mode = Mode::Jitan { spins_left: 10 };
         assert_eq!(start_pocket_color(&state), Color::LightCyan);
+        state.mode = Mode::Normal;
+        state.balls.push(Ball::falling(START_POCKET_X, START_POCKET_Y, 0.0, 0.0, true, BallTint::Silver));
+        state.balls[0].teeter = 8;
+        assert_eq!(
+            start_pocket_color(&state),
+            BALL_TEETER,
+            "縁で揺れている玉があるのにヘソの色が変わっていない"
+        );
     }
 
     #[test]

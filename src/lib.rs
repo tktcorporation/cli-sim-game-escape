@@ -15,6 +15,8 @@ pub mod input;
 pub mod sound;
 pub mod theme;
 pub mod time;
+#[cfg(test)]
+pub mod tui_inspect;
 pub mod widgets;
 
 /// 「メニューに戻る」共通アクション ID。
