@@ -4,11 +4,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use ratzilla::ratatui::backend::TestBackend;
-use ratzilla::ratatui::layout::Rect;
 use ratzilla::ratatui::Terminal;
 
 use crate::input::ClickState;
-use crate::tui_inspect::buffer_text;
+use crate::tui_inspect::{buffer_occupancy, buffer_text};
 
 /// 1フレーム分の「プレイヤーが見ているもの」。
 #[derive(Clone, Debug)]
@@ -19,8 +18,8 @@ pub struct ScreenSnapshot {
     pub text: String,
     /// 登録されたクリック対象の action_id（重複除去・ソート済み）。
     pub action_ids: Vec<u16>,
-    /// クリック対象の矩形。画面上のどの帯が押せるかの密度判定に使う。
-    pub target_rects: Vec<Rect>,
+    /// 空白以外のセル比率（全角は表示幅でカウント）。
+    pub occupancy: f64,
 }
 
 impl ScreenSnapshot {
@@ -28,18 +27,17 @@ impl ScreenSnapshot {
         !needle.is_empty() && self.text.contains(needle)
     }
 
-    /// 空白以外のセル比率。読みやすさの粗い代理指標。
     pub fn occupancy(&self) -> f64 {
-        let total = (self.width as usize).saturating_mul(self.height as usize);
-        if total == 0 {
-            return 0.0;
-        }
-        let filled = self.text.chars().filter(|c| *c != ' ' && *c != '\n').count();
-        filled as f64 / total as f64
+        self.occupancy
     }
 
     pub fn has_action(&self, action_id: u16) -> bool {
         self.action_ids.binary_search(&action_id).is_ok()
+    }
+
+    /// 画面に登録されたクリック対象のユニーク数。ChoiceLoad の入力。
+    pub fn distinct_action_count(&self) -> usize {
+        self.action_ids.len()
     }
 }
 
@@ -57,17 +55,18 @@ where
             draw(f, &cs);
         })
         .expect("draw");
-    let text = buffer_text(terminal.backend().buffer());
+    let buf = terminal.backend().buffer();
+    let text = buffer_text(buf);
+    let occupancy = buffer_occupancy(buf);
     let borrowed = cs.borrow();
     let mut action_ids: Vec<u16> = borrowed.targets.iter().map(|t| t.action_id).collect();
     action_ids.sort_unstable();
     action_ids.dedup();
-    let target_rects = borrowed.targets.iter().map(|t| t.rect).collect();
     ScreenSnapshot {
         width,
         height,
         text,
         action_ids,
-        target_rects,
+        occupancy,
     }
 }

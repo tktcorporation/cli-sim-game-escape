@@ -31,8 +31,15 @@ impl Subject for PachinkoSubject {
                 next_goal: Some("台を選ぶ".into()),
                 actions: vec![ActionFact {
                     id: MACHINE_SELECT_BASE,
-                    label: "台を選ぶ".into(),
-                    hint: None,
+                    // 実クリック行は台名。タイトル「台を選ぶ」だけだと対応が弱いので、
+                    // 先頭台の名前をラベルにする。
+                    label: self
+                        .state
+                        .machines
+                        .first()
+                        .map(|m| m.name.to_string())
+                        .unwrap_or_else(|| "台".into()),
+                    hint: Some('1'),
                     primary: true,
                 }],
                 progress: vec![

@@ -60,7 +60,7 @@ pub fn evaluate_opening(facts: &ProbeFacts, screen: &ScreenSnapshot) -> Vec<Metr
         score_affordance(facts, screen),
         score_goal_visibility(facts, screen),
         score_readable_density(screen),
-        score_choice_load(facts),
+        score_choice_load(screen),
     ]
 }
 
@@ -122,13 +122,9 @@ fn score_goal_visibility(facts: &ProbeFacts, screen: &ScreenSnapshot) -> MetricS
             note: "probe に next_goal が無い（未設計扱い）".into(),
         };
     };
-    // 長い目標文はキーワード断片でも認める。全文一致はレイアウト折り返しで
-    // 壊れやすい。
-    let visible = screen.contains_needle(goal)
-        || goal_keywords(goal)
-            .into_iter()
-            .filter(|k| k.chars().count() >= 2)
-            .any(|k| screen.contains_needle(k));
+    // 全文一致を優先。折り返しで壊れる場合だけ、キーワードの過半数一致を
+    // 認める（1語ヒットでは HUD の別行に騙されない）。
+    let visible = screen.contains_needle(goal) || majority_keywords_visible(goal, screen);
     MetricScore {
         kind: MetricKind::GoalVisibility,
         value: if visible { 1.0 } else { 0.0 },
@@ -140,9 +136,20 @@ fn score_goal_visibility(facts: &ProbeFacts, screen: &ScreenSnapshot) -> MetricS
     }
 }
 
+fn majority_keywords_visible(goal: &str, screen: &ScreenSnapshot) -> bool {
+    let keys: Vec<&str> = goal_keywords(goal)
+        .into_iter()
+        .filter(|k| k.chars().count() >= 2)
+        .collect();
+    if keys.is_empty() {
+        return false;
+    }
+    let hits = keys.iter().filter(|k| screen.contains_needle(k)).count();
+    hits * 2 >= keys.len()
+}
+
 fn goal_keywords(goal: &str) -> Vec<&str> {
-    // 日本語の助詞で雑に切る。精密な形態素解析はしない — 「目標の核が
-    // 画面にあるか」の代理で足りる。
+    // 日本語の助詞で雑に切る。精密な形態素解析はしない。
     goal.split([' ', '　', 'を', 'に', 'へ', 'が', 'は', 'と', 'の', '『', '』', '「', '」'])
         .filter(|s| !s.is_empty())
         .collect()
@@ -165,35 +172,36 @@ fn score_readable_density(screen: &ScreenSnapshot) -> MetricScore {
     }
 }
 
-fn score_choice_load(facts: &ProbeFacts) -> MetricScore {
-    let n = facts.actions.len();
-    // 5以下は満点。15で0。スクロールやタブ切替そのものは「迷い」ではないので
-    // primary 以外を多く列挙しすぎないよう subject 側で抑える。
-    let value = if n <= 5 {
+fn score_choice_load(screen: &ScreenSnapshot) -> MetricScore {
+    // probe の列挙数ではなく、画面に登録されたクリック対象数を見る。
+    // subject 作者が actions を絞っても、実画面の迷い度は変わらない。
+    let n = screen.distinct_action_count();
+    let value = if n <= 8 {
         1.0
-    } else if n >= 15 {
+    } else if n >= 24 {
         0.0
     } else {
-        1.0 - (n - 5) as f64 / 10.0
+        1.0 - (n - 8) as f64 / 16.0
     };
     MetricScore {
         kind: MetricKind::ChoiceLoad,
         value,
-        note: format!("{n} actions in probe"),
+        note: format!("{n} click targets on screen"),
     }
 }
 
-/// 操作前後の progress / 画面差分からフィードバックを採点する。
+/// 操作前後の progress / 画面 / ログ差分からフィードバックを採点する。
 pub fn score_feedback(
     before_progress: &[(String, f64)],
     after_progress: &[(String, f64)],
     before_text: &str,
     after_text: &str,
-    recent_feedback: &[String],
+    before_feedback: &[String],
+    after_feedback: &[String],
 ) -> MetricScore {
     let progress_moved = progress_changed(before_progress, after_progress);
     let screen_moved = before_text != after_text;
-    let log_moved = !recent_feedback.is_empty();
+    let log_moved = before_feedback != after_feedback;
     let value = if progress_moved {
         1.0
     } else if screen_moved && log_moved {
@@ -207,8 +215,7 @@ pub fn score_feedback(
         kind: MetricKind::FeedbackResponsiveness,
         value,
         note: format!(
-            "progress={progress_moved} screen={screen_moved} log={}",
-            log_moved
+            "progress={progress_moved} screen={screen_moved} log={log_moved}"
         ),
     }
 }
@@ -229,7 +236,7 @@ pub fn score_momentum(stagnant_samples: usize, total_samples: usize) -> MetricSc
     }
 }
 
-fn progress_changed(before: &[(String, f64)], after: &[(String, f64)]) -> bool {
+pub fn progress_changed(before: &[(String, f64)], after: &[(String, f64)]) -> bool {
     for (name, value) in after {
         match before.iter().find(|(n, _)| n == name) {
             Some((_, old)) if (old - value).abs() > f64::EPSILON => return true,
@@ -251,7 +258,7 @@ mod unit_tests {
             height: 2,
             text: "          \n          ".into(),
             action_ids: vec![],
-            target_rects: vec![],
+            occupancy: 0.0,
         }
     }
 
@@ -266,6 +273,21 @@ mod unit_tests {
         };
         let score = score_goal_visibility(&facts, &empty_screen());
         assert_eq!(score.value, 1.0);
+    }
+
+    #[test]
+    fn goal_visibility_rejects_a_single_stray_keyword() {
+        let facts = ProbeFacts {
+            phase: "x".into(),
+            next_goal: Some("第15波『満月の魔王』を討伐する".into()),
+            actions: vec![],
+            progress: vec![],
+            recent_feedback: vec![],
+        };
+        let mut screen = empty_screen();
+        screen.text = "魔王だけがどこかにある画面".into();
+        let score = score_goal_visibility(&facts, &screen);
+        assert_eq!(score.value, 0.0, "1語ヒットだけで満点になってはいけない");
     }
 
     #[test]
@@ -287,5 +309,30 @@ mod unit_tests {
         screen.action_ids = vec![1];
         let score = score_affordance(&facts, &screen);
         assert_eq!(score.value, 1.0);
+    }
+
+    #[test]
+    fn feedback_ignores_stale_welcome_logs() {
+        let before_log = vec!["ようこそ".into()];
+        let after_log = vec!["ようこそ".into()];
+        let score = score_feedback(&[], &[], "a", "a", &before_log, &after_log);
+        assert_eq!(score.value, 0.0);
+    }
+
+    #[test]
+    fn feedback_counts_new_log_lines() {
+        let before_log = vec!["ようこそ".into()];
+        let after_log = vec!["買った".into(), "ようこそ".into()];
+        let score = score_feedback(&[], &[], "a", "a", &before_log, &after_log);
+        assert_eq!(score.value, 0.6);
+    }
+
+    #[test]
+    fn choice_load_uses_on_screen_targets() {
+        let mut screen = empty_screen();
+        screen.action_ids = (1..=20).collect();
+        let score = score_choice_load(&screen);
+        assert!(score.value < 1.0, "画面上の対象が多いのに choice=1.0");
+        assert!(score.note.contains("20 click targets"));
     }
 }

@@ -50,9 +50,13 @@ impl Subject for CookieSubject {
         }
         ProbeFacts {
             phase: "main".into(),
-            // Cookie は明示目標 UI を持たない。未設計として GoalVisibility は
-            // 減点しない（note で分かる）。
-            next_goal: None,
+            next_goal: self.state.best_next_purchase().map(|g| {
+                if g.affordable {
+                    format!("{} を買おう", g.name)
+                } else {
+                    format!("次: {}", g.name)
+                }
+            }),
             actions,
             progress: vec![
                 ("cookies".into(), self.state.cookies),

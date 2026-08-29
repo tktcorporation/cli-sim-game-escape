@@ -34,7 +34,9 @@ cargo test --lib critique::tests::dump_critique_frames -- --ignored --nocapture
 | choice | 選択肢が多すぎて迷う |
 | momentum | 進んでる実感が無い |
 
-`goal` で probe に `next_goal` が無いゲームは 1.0（未設計）扱い。Cookie のように明示目標 UI が無い設計は減点しない。目標を画面に出す設計なのに見えないのは退行として fail する（常夜灯・玉響のテスト）。
+`goal` で probe に `next_goal` が無いゲームは 1.0（未設計）扱い。目標行を
+画面に出す設計なら subject が `next_goal` を埋め、退行で fail させる
+（常夜灯・玉響・Cookie の「次:」行・周回討伐の出発 CTA）。
 
 ## 新しいゲームを足す
 

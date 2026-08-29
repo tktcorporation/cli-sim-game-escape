@@ -1,7 +1,7 @@
 //! 短時間セッションを回して開口スコア + 動的スコアを集める。
 
 use crate::critique::metrics::{
-    evaluate_opening, score_feedback, score_momentum, MetricScore,
+    evaluate_opening, progress_changed, score_feedback, score_momentum, MetricScore,
 };
 use crate::critique::probe::Subject;
 
@@ -65,6 +65,7 @@ pub fn run_session(subject: &mut dyn Subject, config: &SessionConfig) -> Session
         };
         let before_text = screen.text.clone();
         let before_progress = facts.progress.clone();
+        let before_feedback = facts.recent_feedback.clone();
         if !subject.apply_action(action_id) {
             break;
         }
@@ -78,14 +79,16 @@ pub fn run_session(subject: &mut dyn Subject, config: &SessionConfig) -> Session
             &after_facts.progress,
             &before_text,
             &after_screen.text,
+            &before_feedback,
             &after_facts.recent_feedback,
         );
         feedback_scores.push(fb.value);
 
         if config.sample_every_actions > 0 && (step + 1) % config.sample_every_actions == 0 {
             samples += 1;
-            if !progress_moved(&last_progress, &after_facts.progress)
+            if !progress_changed(&last_progress, &after_facts.progress)
                 && before_text == after_screen.text
+                && before_feedback == after_facts.recent_feedback
             {
                 stagnant += 1;
             }
@@ -110,15 +113,4 @@ pub fn run_session(subject: &mut dyn Subject, config: &SessionConfig) -> Session
         opening,
         session,
     }
-}
-
-fn progress_moved(before: &[(String, f64)], after: &[(String, f64)]) -> bool {
-    for (name, value) in after {
-        match before.iter().find(|(n, _)| n == name) {
-            Some((_, old)) if (old - value).abs() > f64::EPSILON => return true,
-            None => return true,
-            _ => {}
-        }
-    }
-    false
 }

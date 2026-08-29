@@ -81,6 +81,23 @@ mod tests {
     }
 
     #[test]
+    fn cookie_opening_exposes_next_purchase_goal() {
+        let mut subject = subjects::cookie();
+        let report = run_session(subject.as_mut(), &SessionConfig::opening_only());
+        let goal = report
+            .opening
+            .iter()
+            .find(|s| s.kind == MetricKind::GoalVisibility)
+            .expect("GoalVisibility が無い");
+        assert!(
+            goal.value >= 0.99,
+            "Cookie の次購入目標が見えていない: {} ({})",
+            goal.value,
+            goal.note
+        );
+    }
+
+    #[test]
     fn cookie_opening_exposes_a_primary_click_target() {
         let mut subject = subjects::cookie();
         let report = run_session(subject.as_mut(), &SessionConfig::opening_only());

@@ -72,7 +72,7 @@ impl Subject for LoopMarchSubject {
                 }
                 ProbeFacts {
                     phase: "expedition".into(),
-                    next_goal: Some("地形を置いて周回する".into()),
+                    next_goal: Some("カードを選んで→道をタップで配置".into()),
                     actions,
                     progress: vec![
                         ("lap".into(), self.state.lap as f64),
