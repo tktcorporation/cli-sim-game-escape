@@ -31,3 +31,9 @@ slow-timeout = { period = "90s", terminate-after = 3 }
 [[profile.ci.overrides]]
 filter = 'test(/automation_drives_outposts_and_demolitions/) | test(/tier1_never_stalls_across_seeds/) | test(/tier_ordering_holds_at_30min/) | test(/tier4_strategies_specialize/) | test(/eco_strategy_does_not_stall/) | test(/higher_tier_cleans_up_low_tier_mess/) | test(/more_workers_build_more/)'
 retries = 0
+
+# critique レポートは成功時でも CI ログで比較したい。
+[[profile.ci.overrides]]
+filter = 'test(/critique/)'
+success-output = "immediate"
+retries = 0

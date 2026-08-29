@@ -10,7 +10,9 @@
 2. `crate::tui_inspect::buffer_text` で記号列にする。
 3. 標準エラーへ出して目で読む。CI の通常テストには乗せない（`#[ignore]`）。
 
-全角文字はセル幅 2 のため、dump 上では文字の間に空白が挟まる。TestBackend の仕様であり、盤面の Braille は幅 1 のまま並ぶ。
+全角文字はセル幅 2 のため、続きセルの symbol は空になる。`buffer_text` は
+表示幅だけ進めて続きセルを飛ばすので、`contains("台を選ぶ")` のような照合が
+そのまま使える。
 
 玉響の着席／ホール画面:
 
@@ -32,3 +34,9 @@ cargo test --lib games::pachinko::physics::tests::dump_launch_path_to_twelve -- 
 ## 成果物
 
 確認結果を残すときは `.txt` / `.log` にする。`.png` / `.webp` / `.mp4` に画面を焼かない。
+
+## 関連: わかりにくさの定量評価
+
+dump は人間が形を見る出口。ゲーム間で「目標が見えるか / 操作が辿れるか /
+押すと反応するか」を数値で比較する基盤は `src/critique/` と
+`.claude/rules/project/game-critique.md`。

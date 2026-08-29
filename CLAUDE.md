@@ -108,6 +108,9 @@ clippy の `disallowed_methods` で禁止済み（`clippy.toml` 参照）。ア�
 
 手順とコマンドは `.claude/rules/project/cli-ui-inspection.md`。
 
+「なんかよくわからん」をゲーム間で比較する定量評価は `src/critique/`（画面
+テキスト + 概念状態のスコア）。使い方は `.claude/rules/project/game-critique.md`。
+
 ---
 
 ## Game Design Concepts

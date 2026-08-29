@@ -9,6 +9,8 @@
 //! テストから再利用できる余地を残すため。
 
 pub mod canvas_fx;
+#[cfg(test)]
+pub mod critique;
 pub mod effects;
 pub mod games;
 pub mod input;
