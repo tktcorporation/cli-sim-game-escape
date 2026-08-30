@@ -919,10 +919,24 @@ impl CookieState {
             cookies_per_click: 1.0,
             producers,
             upgrades,
-            log: vec![CookieLogEntry {
-                text: "Cookie Factory へようこそ！".into(),
-                is_important: true,
-            }],
+            log: vec![
+                CookieLogEntry {
+                    text: "Cookie Factory へようこそ！".into(),
+                    is_important: true,
+                },
+                CookieLogEntry {
+                    text: "CLICK! で貯めて、生産者を買おう".into(),
+                    is_important: false,
+                },
+                CookieLogEntry {
+                    text: "◆は回収がいちばん早い投資先".into(),
+                    is_important: false,
+                },
+                CookieLogEntry {
+                    text: "相場が Crash/Bear のときが買い時".into(),
+                    is_important: false,
+                },
+            ],
             show_upgrades: false,
             show_research: false,
             anim_frame: 0,
