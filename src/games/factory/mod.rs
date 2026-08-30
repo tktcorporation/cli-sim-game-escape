@@ -34,31 +34,31 @@ impl FactoryGame {
     fn handle_click(&mut self, action_id: u16) -> bool {
         match action_id {
             SELECT_MINER => {
-                self.state.tool = PlacementTool::Miner;
+                logic::select_tool(&mut self.state, PlacementTool::Miner);
                 true
             }
             SELECT_SMELTER => {
-                self.state.tool = PlacementTool::Smelter;
+                logic::select_tool(&mut self.state, PlacementTool::Smelter);
                 true
             }
             SELECT_ASSEMBLER => {
-                self.state.tool = PlacementTool::Assembler;
+                logic::select_tool(&mut self.state, PlacementTool::Assembler);
                 true
             }
             SELECT_EXPORTER => {
-                self.state.tool = PlacementTool::Exporter;
+                logic::select_tool(&mut self.state, PlacementTool::Exporter);
                 true
             }
             SELECT_FABRICATOR => {
-                self.state.tool = PlacementTool::Fabricator;
+                logic::select_tool(&mut self.state, PlacementTool::Fabricator);
                 true
             }
             SELECT_BELT => {
-                self.state.tool = PlacementTool::Belt;
+                logic::select_tool(&mut self.state, PlacementTool::Belt);
                 true
             }
             SELECT_DELETE => {
-                self.state.tool = PlacementTool::Delete;
+                logic::select_tool(&mut self.state, PlacementTool::Delete);
                 true
             }
             TOGGLE_MINER_MODE => {
@@ -83,31 +83,31 @@ impl FactoryGame {
         match key {
             // Tool selection
             '1' => {
-                self.state.tool = PlacementTool::Miner;
+                logic::select_tool(&mut self.state, PlacementTool::Miner);
                 true
             }
             '2' => {
-                self.state.tool = PlacementTool::Smelter;
+                logic::select_tool(&mut self.state, PlacementTool::Smelter);
                 true
             }
             '3' => {
-                self.state.tool = PlacementTool::Assembler;
+                logic::select_tool(&mut self.state, PlacementTool::Assembler);
                 true
             }
             '4' => {
-                self.state.tool = PlacementTool::Exporter;
+                logic::select_tool(&mut self.state, PlacementTool::Exporter);
                 true
             }
             '5' => {
-                self.state.tool = PlacementTool::Fabricator;
+                logic::select_tool(&mut self.state, PlacementTool::Fabricator);
                 true
             }
             'b' => {
-                self.state.tool = PlacementTool::Belt;
+                logic::select_tool(&mut self.state, PlacementTool::Belt);
                 true
             }
             'd' => {
-                self.state.tool = PlacementTool::Delete;
+                logic::select_tool(&mut self.state, PlacementTool::Delete);
                 true
             }
             't' => {
