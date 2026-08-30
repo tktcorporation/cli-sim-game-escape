@@ -482,14 +482,18 @@ pub fn move_cursor(state: &mut LoopMarchState, delta: i32) {
 
 /// 手札のカードを選択/選択解除する。
 pub fn select_hand(state: &mut LoopMarchState, index: usize) {
-    if index >= state.hand.len() || state.hand[index].is_none() {
+    let Some(terrain) = state.hand.get(index).copied().flatten() else {
+        return;
+    };
+    if state.selected_hand == Some(index) {
+        state.selected_hand = None;
+        state.add_log("構えを解いた");
         return;
     }
-    state.selected_hand = if state.selected_hand == Some(index) {
-        None
-    } else {
-        Some(index)
-    };
+    state.selected_hand = Some(index);
+    // 選択→配置の二段操作のうち「選択」側にも手応えを返す。
+    // ハイライトだけではログ差分が動かず、押した感が薄い。
+    state.add_log(format!("{}を構えた — 道をタップで配置", terrain.name()));
 }
 
 /// 選択中の手札カードを道の `path_index` に配置する。空きマスなら新規配置、
@@ -1549,8 +1553,18 @@ mod tests {
         s.hand[0] = Some(Terrain::Forest);
         select_hand(&mut s, 0);
         assert_eq!(s.selected_hand, Some(0));
+        assert!(
+            s.log.iter().any(|l| l.contains("森を構えた")),
+            "選択時にログで手応えを返す: {:?}",
+            s.log
+        );
         select_hand(&mut s, 0);
         assert_eq!(s.selected_hand, None, "同じカードを再選択すると解除される");
+        assert!(
+            s.log.iter().any(|l| l.contains("構えを解いた")),
+            "解除時にもログを残す: {:?}",
+            s.log
+        );
     }
 
     #[test]

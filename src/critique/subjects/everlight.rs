@@ -5,7 +5,7 @@ use crate::critique::probe::{ActionFact, ProbeFacts, Subject};
 use crate::games::everlight::actions::{CAMP_START_VIGIL, CAMP_TAB_PREPARE, LANE_CLICK_BASE};
 use crate::games::everlight::logic;
 use crate::games::everlight::render;
-use crate::games::everlight::state::{CampTab, EverlightState, Phase};
+use crate::games::everlight::state::{CampTab, EverlightState, Phase, COLUMNS, WORLD_W};
 
 pub struct EverlightSubject {
     state: EverlightState,
@@ -67,6 +67,12 @@ impl Subject for EverlightSubject {
                     ("wave".into(), self.state.wave as f64),
                     ("light".into(), self.state.lantern.light as f64),
                     ("kills".into(), self.state.kill_count as f64),
+                    // 主操作（レーン移動）そのものを進捗として見る。
+                    // kills だけだと無意味な再タップが feedback を下げる。
+                    (
+                        "target_lane".into(),
+                        self.state.lantern.target_lane as f64,
+                    ),
                 ],
                 recent_feedback: self.state.log.iter().rev().take(3).cloned().collect(),
             },
@@ -95,7 +101,7 @@ impl Subject for EverlightSubject {
             self.state.camp_tab = CampTab::Prepare;
             return true;
         }
-        if (LANE_CLICK_BASE..LANE_CLICK_BASE + 8).contains(&action_id) {
+        if (LANE_CLICK_BASE..LANE_CLICK_BASE + COLUMNS as u16).contains(&action_id) {
             let lane = (action_id - LANE_CLICK_BASE) as usize;
             logic::set_lantern_target_lane(&mut self.state, lane);
             return true;
@@ -106,7 +112,28 @@ impl Subject for EverlightSubject {
     fn suggest_action(&self, _facts: &ProbeFacts, _screen: &ScreenSnapshot) -> Option<u16> {
         match self.state.phase {
             Phase::Camp => Some(CAMP_START_VIGIL),
-            Phase::Vigil => Some(LANE_CLICK_BASE + 3),
+            Phase::Vigil => {
+                // シミュレーターと同じく、敵が多いレーンへ灯を向ける。
+                // 固定レーン再タップは no-op で feedback を落とすだけなので避ける。
+                let mut counts = vec![0u32; COLUMNS];
+                let lane_w = WORLD_W / COLUMNS as f64;
+                for e in &self.state.enemies {
+                    let lane = ((e.x / lane_w) as usize).min(COLUMNS - 1);
+                    counts[lane] += 1;
+                }
+                let best = counts
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|&(_, c)| *c)
+                    .map(|(lane, _)| lane)
+                    .unwrap_or(self.state.lantern.target_lane);
+                let lane = if best == self.state.lantern.target_lane {
+                    (self.state.lantern.target_lane + 2) % COLUMNS
+                } else {
+                    best
+                };
+                Some(LANE_CLICK_BASE + lane as u16)
+            }
         }
     }
 }

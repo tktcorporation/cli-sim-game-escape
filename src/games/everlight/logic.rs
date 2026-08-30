@@ -246,13 +246,20 @@ fn update_wave(state: &mut EverlightState) {
 // ── 灯の移動 ────────────────────────────────────────────────────
 
 pub fn set_lantern_target_lane(state: &mut EverlightState, lane: usize) {
-    state.lantern.target_lane = lane.min(COLUMNS - 1);
+    let lane = lane.min(COLUMNS - 1);
+    if state.lantern.target_lane == lane {
+        return;
+    }
+    state.lantern.target_lane = lane;
+    // 迎撃の主操作。画面の灯移動だけでは「押した感」が薄いので、
+    // レーン変更の瞬間だけログで手応えを返す（同じレーンの再タップは黙る）。
+    state.add_log(format!("灯を路{}へ向けた", lane + 1));
 }
 
 pub fn nudge_lantern(state: &mut EverlightState, delta: i32) {
     let cur = state.lantern.target_lane as i32;
-    let next = (cur + delta).clamp(0, COLUMNS as i32 - 1);
-    state.lantern.target_lane = next as usize;
+    let next = (cur + delta).clamp(0, COLUMNS as i32 - 1) as usize;
+    set_lantern_target_lane(state, next);
 }
 
 fn move_lantern(state: &mut EverlightState) {
@@ -2013,6 +2020,24 @@ mod tests {
         tick_n(&mut state, 50);
         assert_eq!(state.elapsed_ticks, 0);
         assert!(state.enemies.is_empty());
+    }
+
+    #[test]
+    fn set_lantern_target_lane_logs_only_on_change() {
+        let mut state = EverlightState::new();
+        start_vigil(&mut state);
+        let start = state.lantern.target_lane;
+        let before = state.log.len();
+        set_lantern_target_lane(&mut state, start);
+        assert_eq!(state.log.len(), before, "同じレーン再指定はログしない");
+        let next = (start + 1) % COLUMNS;
+        set_lantern_target_lane(&mut state, next);
+        assert_eq!(state.lantern.target_lane, next);
+        assert!(
+            state.log.iter().any(|l| l.contains(&format!("路{}", next + 1))),
+            "レーン変更時にログで手応えを返す: {:?}",
+            state.log
+        );
     }
 
     #[test]
