@@ -202,7 +202,7 @@ pub fn launch_sortie(state: &mut ExpeditionState, use_scout: bool) -> bool {
         scout_hint: hint,
         aid_ready: true,
         combat_tick: 0,
-        bond_gained: 0,
+        levels_gained: 0,
     });
     state.screen = Screen::Running;
     state.push_log(format!("第{depth}層へ出撃。"));
@@ -280,7 +280,7 @@ fn tick_combat(state: &mut ExpeditionState) {
         state.push_log(format!("{name}を倒した。"));
         if let Some(s) = state.sortie.as_mut() {
             s.enemy = None;
-            s.bond_gained += 1 + depth / 3;
+            s.levels_gained += 1 + depth / 3;
         }
         advance_after_battle(state);
         return;
@@ -395,7 +395,7 @@ pub fn use_aid(state: &mut ExpeditionState) -> bool {
         state.push_log(format!("{name}を倒した。"));
         if let Some(s) = state.sortie.as_mut() {
             s.enemy = None;
-            s.bond_gained += 1 + depth / 3;
+            s.levels_gained += 1 + depth / 3;
         }
         advance_after_battle(state);
     }
@@ -403,13 +403,13 @@ pub fn use_aid(state: &mut ExpeditionState) -> bool {
 }
 
 fn clear_sortie(state: &mut ExpeditionState) {
-    let (depth, bond, party) = match state.sortie.as_ref() {
-        Some(s) => (s.depth, s.bond_gained, s.party),
+    let (depth, levels, party) = match state.sortie.as_ref() {
+        Some(s) => (s.depth, s.levels_gained, s.party),
         None => return,
     };
     for id in party {
         if let Some(h) = state.hero_mut(id) {
-            h.bond += bond;
+            h.level += levels;
             h.refresh_max_hp();
             h.hp = h.max_hp;
         }
@@ -418,7 +418,7 @@ fn clear_sortie(state: &mut ExpeditionState) {
         state.best_depth = depth + 1;
     }
     state.result_summary = format!(
-        "第{depth}層クリア！ 参加者の絆+{bond}\n（絆が上がると力と体力が伸び、糧の回復も少し速くなる）"
+        "第{depth}層クリア！ 参加者 Lv+{levels}"
     );
     state.sortie = None;
     state.screen = Screen::Result;
@@ -430,14 +430,14 @@ fn fail_sortie(state: &mut ExpeditionState) {
     if let Some(s) = state.sortie.clone() {
         for id in s.party {
             if let Some(h) = state.hero_mut(id) {
-                h.bond += 1;
+                h.level += 1;
                 h.refresh_max_hp();
                 h.hp = h.max_hp;
             }
         }
     }
     state.result_summary =
-        format!("第{depth}層で敗退。持ち帰れた絆はわずかに+1。\n次は編成を変えるか、下調べして再挑戦。");
+        format!("第{depth}層で敗退。参加者 Lv+1");
     state.sortie = None;
     state.screen = Screen::Result;
     state.push_log(state.result_summary.clone());
@@ -481,31 +481,31 @@ mod tests {
     use crate::games::expedition::state::BASE_RATION_CAP;
 
     #[test]
-    fn idle_regen_fills_rations_without_raising_bond() {
+    fn idle_regen_fills_rations_without_raising_level() {
         let mut state = ExpeditionState::new();
         state.rations = 0;
-        let bond_before = state.total_bond();
+        let level_before = state.total_level();
         let ticks = state.ration_regen_ticks() as u64;
         apply_offline_regen(&mut state, ticks);
         assert!(state.rations >= 1);
-        assert_eq!(state.total_bond(), bond_before);
+        assert_eq!(state.total_level(), level_before);
     }
 
     #[test]
-    fn sortie_consumes_ration_and_grows_bond_only_on_clear() {
+    fn sortie_consumes_ration_and_grows_level_only_on_clear() {
         let mut state = ExpeditionState::new();
         state.rations = 2;
         assert!(begin_forming(&mut state));
         assert!(launch_sortie(&mut state, false));
         assert_eq!(state.rations, 1);
-        let bond_before = state.total_bond();
+        let level_before = state.total_level();
         if let Some(s) = state.sortie.as_mut() {
             s.enemy = None;
             s.node_index = s.nodes_total;
-            s.bond_gained = 3;
+            s.levels_gained = 3;
         }
         clear_sortie(&mut state);
-        assert!(state.total_bond() > bond_before);
+        assert!(state.total_level() > level_before);
         assert_eq!(state.screen, Screen::Result);
     }
 
@@ -536,7 +536,7 @@ mod tests {
             tick(&mut state, 1);
         }
         assert!(matches!(state.screen, Screen::Result));
-        assert!(state.total_bond() > 0);
+        assert!(state.total_level() > 0);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! 遠征団のセーブ / ロード。
 //!
-//! 永続対象: 行軍糧・下調べメモ・絆・到達層。
+//! 永続対象: 行軍糧・下調べメモ・レベル・到達層。
 //! 遠征中の進行は保存しない（拠点から再開）。
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -36,7 +36,8 @@ struct GameSave {
     scout_memos: u32,
     scout_progress: u32,
     best_depth: u32,
-    bonds: Vec<u32>,
+    #[serde(alias = "bonds")]
+    levels: Vec<u32>,
     elapsed_ticks: u64,
     last_wall_ms: u64,
 }
@@ -51,7 +52,7 @@ fn extract_save(state: &ExpeditionState) -> SaveData {
             scout_memos: state.scout_memos,
             scout_progress: state.scout_progress,
             best_depth: state.best_depth,
-            bonds: state.roster.iter().map(|h| h.bond).collect(),
+            levels: state.roster.iter().map(|h| h.level).collect(),
             elapsed_ticks: state.elapsed_ticks,
             last_wall_ms: state.last_wall_ms,
         },
@@ -67,8 +68,8 @@ fn apply_save(state: &mut ExpeditionState, save: &GameSave) {
     state.best_depth = save.best_depth.max(1);
     state.elapsed_ticks = save.elapsed_ticks;
     state.last_wall_ms = save.last_wall_ms;
-    for (hero, bond) in state.roster.iter_mut().zip(save.bonds.iter()) {
-        hero.bond = *bond;
+    for (hero, level) in state.roster.iter_mut().zip(save.levels.iter()) {
+        hero.level = *level;
         hero.refresh_max_hp();
         hero.hp = hero.max_hp;
     }
@@ -143,16 +144,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_preserves_bonds_and_rations() {
+    fn roundtrip_preserves_levels_and_rations() {
         let mut state = ExpeditionState::new();
         state.rations = 2;
-        state.roster[0].bond = 4;
+        state.roster[0].level = 4;
         state.best_depth = 3;
         let save = extract_save(&state);
         let mut loaded = ExpeditionState::new();
         apply_save(&mut loaded, &save.game);
         assert_eq!(loaded.rations, 2);
-        assert_eq!(loaded.roster[0].bond, 4);
+        assert_eq!(loaded.roster[0].level, 4);
         assert_eq!(loaded.best_depth, 3);
         assert_eq!(loaded.screen, Screen::Camp);
     }

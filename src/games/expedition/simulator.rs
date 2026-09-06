@@ -37,9 +37,9 @@ fn bot_run(ticks: u32, use_optional_aid: bool) -> ExpeditionState {
 fn long_run_never_panics_and_keeps_ration_bounds() {
     let state = bot_run(30_000, false);
     eprintln!(
-        "expedition report: depth={} bond={} rations={}/{} ticks={}",
+        "expedition report: depth={} level={} rations={}/{} ticks={}",
         state.best_depth,
-        state.total_bond(),
+        state.total_level(),
         state.rations,
         state.ration_cap(),
         state.elapsed_ticks
@@ -49,24 +49,24 @@ fn long_run_never_panics_and_keeps_ration_bounds() {
 }
 
 #[test]
-fn idle_only_does_not_increase_bond() {
+fn idle_only_does_not_increase_level() {
     let mut state = ExpeditionState::new();
-    let before = state.total_bond();
+    let before = state.total_level();
     tick(&mut state, 20_000);
-    assert_eq!(state.total_bond(), before);
+    assert_eq!(state.total_level(), before);
     assert!(state.rations > 0);
 }
 
 #[test]
-fn active_play_grows_bond_with_or_without_aid() {
+fn active_play_grows_level_with_or_without_aid() {
     let plain = bot_run(12_000, false);
     let aided = bot_run(12_000, true);
     eprintln!(
-        "plain bond={} depth={} / aided bond={} depth={}",
-        plain.total_bond(),
+        "plain level={} depth={} / aided level={} depth={}",
+        plain.total_level(),
         plain.best_depth,
-        aided.total_bond(),
+        aided.total_level(),
         aided.best_depth
     );
-    assert!(plain.total_bond() > 0 || aided.total_bond() > 0);
+    assert!(plain.total_level() > 0 || aided.total_level() > 0);
 }

@@ -63,7 +63,7 @@ pub struct Hero {
     pub id: u8,
     pub name: &'static str,
     pub role: Role,
-    pub bond: u32,
+    pub level: u32,
     pub hp: i32,
     pub max_hp: i32,
 }
@@ -75,20 +75,20 @@ impl Hero {
             Role::Striker => 7,
             Role::Support => 3,
         };
-        base + self.bond as i32
+        base + self.level as i32
     }
 
-    pub fn bond_max_hp(&self) -> i32 {
+    pub fn level_max_hp(&self) -> i32 {
         let base = match self.role {
             Role::Vanguard => 28,
             Role::Striker => 18,
             Role::Support => 20,
         };
-        base + self.bond as i32 * 2
+        base + self.level as i32 * 2
     }
 
     pub fn refresh_max_hp(&mut self) {
-        let new_max = self.bond_max_hp();
+        let new_max = self.level_max_hp();
         let missing = self.max_hp.saturating_sub(self.hp);
         self.max_hp = new_max;
         self.hp = (new_max - missing).clamp(1, new_max);
@@ -115,7 +115,7 @@ pub struct Sortie {
     /// 遠征中に一度だけ使える任意援護。使わなくても自動で完走する。
     pub aid_ready: bool,
     pub combat_tick: u32,
-    pub bond_gained: u32,
+    pub levels_gained: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -146,10 +146,10 @@ impl Default for ExpeditionState {
 impl ExpeditionState {
     pub fn new() -> Self {
         let mut roster = vec![
-            Hero { id: 0, name: "灰", role: Role::Vanguard, bond: 0, hp: 28, max_hp: 28 },
-            Hero { id: 1, name: "焔", role: Role::Striker, bond: 0, hp: 18, max_hp: 18 },
-            Hero { id: 2, name: "雫", role: Role::Support, bond: 0, hp: 20, max_hp: 20 },
-            Hero { id: 3, name: "嵐", role: Role::Striker, bond: 0, hp: 18, max_hp: 18 },
+            Hero { id: 0, name: "灰", role: Role::Vanguard, level: 1, hp: 28, max_hp: 28 },
+            Hero { id: 1, name: "焔", role: Role::Striker, level: 1, hp: 18, max_hp: 18 },
+            Hero { id: 2, name: "雫", role: Role::Support, level: 1, hp: 20, max_hp: 20 },
+            Hero { id: 3, name: "嵐", role: Role::Striker, level: 1, hp: 18, max_hp: 18 },
         ];
         for h in &mut roster {
             h.refresh_max_hp();
@@ -174,16 +174,16 @@ impl ExpeditionState {
         }
     }
 
-    pub fn total_bond(&self) -> u32 {
-        self.roster.iter().map(|h| h.bond).sum()
+    pub fn total_level(&self) -> u32 {
+        self.roster.iter().map(|h| h.level).sum()
     }
 
     pub fn ration_cap(&self) -> u32 {
-        BASE_RATION_CAP + (self.total_bond() / 8).min(MAX_BONUS_RATION_CAP)
+        BASE_RATION_CAP + (self.total_level() / 8).min(MAX_BONUS_RATION_CAP)
     }
 
     pub fn ration_regen_ticks(&self) -> u32 {
-        let bonus = self.total_bond().min(25);
+        let bonus = self.total_level().min(25);
         (BASE_RATION_REGEN_TICKS * 100 / (100 + bonus * 2)).max(200)
     }
 

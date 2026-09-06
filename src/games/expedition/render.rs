@@ -110,9 +110,9 @@ fn render_status_bar(state: &ExpeditionState, f: &mut Frame, area: Rect) {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled("絆", label_style()),
+        Span::styled("Lv", label_style()),
         Span::styled(
-            format!("{}", state.total_bond()),
+            format!("{}", state.total_level()),
             Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
@@ -223,7 +223,7 @@ fn render_roster(state: &ExpeditionState, f: &mut Frame, area: Rect) {
                 Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("  絆 {}", h.bond),
+                format!("  Lv{}", h.level),
                 Style::default().fg(Color::LightYellow),
             ),
         ]));
@@ -309,7 +309,7 @@ fn render_camp(
                             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
-                            format!("絆{} ", h.bond),
+                            format!("Lv{} ", h.level),
                             Style::default().fg(Color::LightYellow),
                         ),
                         Span::styled(
@@ -444,10 +444,10 @@ fn render_forming(
         };
         let line = Paragraph::new(Span::styled(
             format!(
-                " {mark} [{}]{}  絆{}  力{}  キー{}",
+                " {mark} [{}]{}  Lv{}  力{}  キー{}",
                 h.role.label(),
                 h.name,
-                h.bond,
+                h.level,
                 h.atk(),
                 h.id + 1
             ),
@@ -656,14 +656,14 @@ fn render_result(
             Style::default().fg(Color::White),
         )),
         Line::from(""),
-        section_title("団員のいまの絆"),
+        section_title("団員のレベル"),
     ];
     for h in &state.roster {
         lines.push(Line::from(format!(
-            " [{}]{}  絆{}  力{}",
+            " [{}]{}  Lv{}  力{}",
             h.role.label(),
             h.name,
-            h.bond,
+            h.level,
             h.atk()
         )));
     }
