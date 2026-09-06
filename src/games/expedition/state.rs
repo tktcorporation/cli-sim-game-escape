@@ -11,6 +11,11 @@ pub const SCOUT_MEMO_CAP: u32 = 3;
 pub const SCOUT_MEMO_REGEN_TICKS: u32 = 1_800;
 pub const COMBAT_ROUND_TICKS: u32 = 4;
 pub const LOG_CAP: usize = 8;
+pub const STAGES_PER_CHAPTER: u32 = 4;
+/// 節クリアで得られる補給の基礎値。
+pub const SUPPLY_CLEAR_BASE: u32 = 3;
+/// 敗退時の持ち帰り補給。
+pub const SUPPLY_FAIL: u32 = 1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -32,14 +37,14 @@ impl Role {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HubTab {
     Camp,
-    Roster,
+    Train,
 }
 
 impl HubTab {
     pub fn label(self) -> &'static str {
         match self {
             HubTab::Camp => "拠点",
-            HubTab::Roster => "団員",
+            HubTab::Train => "育成",
         }
     }
 }
@@ -105,7 +110,10 @@ pub struct Enemy {
 
 #[derive(Clone, Debug)]
 pub struct Sortie {
-    pub depth: u32,
+    pub chapter: u32,
+    pub stage: u32,
+    /// 敵スケール用。`(chapter-1)*STAGES + stage`
+    pub difficulty: u32,
     pub node_index: u32,
     pub nodes_total: u32,
     pub party: [u8; PARTY_SIZE],
@@ -115,7 +123,8 @@ pub struct Sortie {
     /// 遠征中に一度だけ使える任意援護。使わなくても自動で完走する。
     pub aid_ready: bool,
     pub combat_tick: u32,
-    pub levels_gained: u32,
+    pub supplies_gained: u32,
+    pub last_hit_log: String,
 }
 
 #[derive(Clone, Debug)]
@@ -128,7 +137,14 @@ pub struct ExpeditionState {
     pub ration_progress: u32,
     pub scout_memos: u32,
     pub scout_progress: u32,
-    pub best_depth: u32,
+    /// 次に攻略する章（1始まり）。
+    pub chapter: u32,
+    /// 次に攻略する節（1..=STAGES_PER_CHAPTER）。
+    pub stage: u32,
+    /// 拠点育成用の通貨。探索クリアで増え、レベル上げで減る。
+    pub supplies: u32,
+    /// 直近の探索が敗退なら true（育成誘導用）。
+    pub last_failed: bool,
     pub sortie: Option<Sortie>,
     pub log: Vec<String>,
     pub result_summary: String,
@@ -164,7 +180,10 @@ impl ExpeditionState {
             ration_progress: 0,
             scout_memos: 1,
             scout_progress: 0,
-            best_depth: 1,
+            chapter: 1,
+            stage: 1,
+            supplies: 0,
+            last_failed: false,
             sortie: None,
             log: Vec::new(),
             result_summary: String::new(),
@@ -205,5 +224,30 @@ impl ExpeditionState {
 
     pub fn forming_count(&self) -> usize {
         self.forming.iter().flatten().count()
+    }
+
+    pub fn stage_label(chapter: u32, stage: u32) -> String {
+        format!("{chapter}-{stage}")
+    }
+
+    pub fn current_stage_label(&self) -> String {
+        Self::stage_label(self.chapter, self.stage)
+    }
+
+    pub fn difficulty(chapter: u32, stage: u32) -> u32 {
+        chapter.saturating_sub(1) * STAGES_PER_CHAPTER + stage
+    }
+
+    pub fn current_difficulty(&self) -> u32 {
+        Self::difficulty(self.chapter, self.stage)
+    }
+
+    pub fn is_boss_stage(stage: u32) -> bool {
+        stage >= STAGES_PER_CHAPTER
+    }
+
+    /// 団員1人を1レベル上げる補給コスト。
+    pub fn upgrade_cost(level: u32) -> u32 {
+        level + 1
     }
 }

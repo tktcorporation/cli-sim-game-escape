@@ -8,7 +8,20 @@ pub const USE_AID: u16 = 5;
 pub const ACK_RESULT: u16 = 7;
 pub const OPEN_FORMING: u16 = 8;
 pub const TAB_CAMP: u16 = 10;
-pub const TAB_ROSTER: u16 = 11;
+pub const TAB_TRAIN: u16 = 11;
+pub const UPGRADE_HERO_BASE: u16 = 40;
+
+pub fn upgrade_hero_id(hero_id: u8) -> u16 {
+    UPGRADE_HERO_BASE + u16::from(hero_id)
+}
+
+pub fn hero_id_from_upgrade(action_id: u16) -> Option<u8> {
+    if (UPGRADE_HERO_BASE..UPGRADE_HERO_BASE + 8).contains(&action_id) {
+        Some((action_id - UPGRADE_HERO_BASE) as u8)
+    } else {
+        None
+    }
+}
 pub const TOGGLE_HERO_BASE: u16 = 20;
 
 pub fn toggle_hero_id(hero_id: u8) -> u16 {

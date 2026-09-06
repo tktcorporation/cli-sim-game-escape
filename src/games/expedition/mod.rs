@@ -1,9 +1,9 @@
-//! 遠征団 — 行軍糧を貯めて短い遠征へ出し、結果でのみレベルが育つ。
+//! 遠征団 — マップを進め、詰まったら拠点で育てる。
 //!
 //! コアループ:
-//! 1. 拠点で行軍糧（と下調べメモ）が自然回復する
-//! 2. 3人を編成して出撃し、オート戦闘の遠征ランを進める
-//! 3. 遠征は基本オート完走。任意で「援護」すると有利になる。クリア報酬のレベルだけが永続成長
+//! 1. 拠点で行軍糧が自然回復する（放置は燃料だけ）
+//! 2. 章マップ（1-1, 1-2, …）をオート探索で切り拓き、補給を得る
+//! 3. 詰まったら育成タブで補給を使いレベルを上げ、またマップへ戻る
 
 pub mod actions;
 pub mod logic;
@@ -24,8 +24,8 @@ use crate::games::{Game, GameChoice};
 use crate::input::{ClickScope, ClickState, InputEvent};
 
 use actions::{
-    hero_id_from_toggle, ACK_RESULT, CANCEL_FORMING, LAUNCH, LAUNCH_WITH_SCOUT, OPEN_FORMING,
-    START_FORMING, TAB_CAMP, TAB_ROSTER, USE_AID,
+    hero_id_from_toggle, hero_id_from_upgrade, ACK_RESULT, CANCEL_FORMING, LAUNCH, LAUNCH_WITH_SCOUT,
+    OPEN_FORMING, START_FORMING, TAB_CAMP, TAB_TRAIN, USE_AID,
 };
 use state::{ExpeditionState, HubTab, Screen};
 
@@ -61,6 +61,9 @@ impl ExpeditionGame {
         if let Some(hero_id) = hero_id_from_toggle(id) {
             return logic::toggle_forming_hero(&mut self.state, hero_id);
         }
+        if let Some(hero_id) = hero_id_from_upgrade(id) {
+            return logic::upgrade_hero(&mut self.state, hero_id);
+        }
         match id {
             START_FORMING => logic::primary_depart(&mut self.state),
             OPEN_FORMING => logic::begin_forming(&mut self.state),
@@ -70,7 +73,12 @@ impl ExpeditionGame {
             USE_AID => logic::use_aid(&mut self.state),
             ACK_RESULT => logic::acknowledge_result(&mut self.state),
             TAB_CAMP => logic::set_hub_tab(&mut self.state, HubTab::Camp),
-            TAB_ROSTER => logic::set_hub_tab(&mut self.state, HubTab::Roster),
+            TAB_TRAIN => {
+                if self.state.screen == Screen::Result {
+                    let _ = logic::acknowledge_result(&mut self.state);
+                }
+                logic::set_hub_tab(&mut self.state, HubTab::Train)
+            }
             _ => false,
         }
     }
@@ -79,6 +87,10 @@ impl ExpeditionGame {
         match (self.state.screen, key) {
             (Screen::Camp, ' ' | 'e' | 'E') => logic::primary_depart(&mut self.state),
             (Screen::Camp, 'f' | 'F') => logic::begin_forming(&mut self.state),
+            (Screen::Camp, '1'..='4') if self.state.hub_tab == HubTab::Train => {
+                let id = key as u8 - b'1';
+                logic::upgrade_hero(&mut self.state, id)
+            }
             (Screen::Forming, ' ') => logic::launch_sortie(&mut self.state, false),
             (Screen::Forming, 's' | 'S') => logic::launch_sortie(&mut self.state, true),
             (Screen::Forming, 'q' | 'Q' | 'b' | 'B') => logic::cancel_forming(&mut self.state),
@@ -89,7 +101,7 @@ impl ExpeditionGame {
             (Screen::Running, 'a' | 'A' | ' ') => logic::use_aid(&mut self.state),
             (Screen::Result, ' ' | '\n') => logic::acknowledge_result(&mut self.state),
             (_, '{') => logic::set_hub_tab(&mut self.state, HubTab::Camp),
-            (_, '|') => logic::set_hub_tab(&mut self.state, HubTab::Roster),
+            (_, '|' | 't' | 'T') => logic::set_hub_tab(&mut self.state, HubTab::Train),
             _ => false,
         }
     }
@@ -162,7 +174,7 @@ mod tests {
     fn hub_tab_switches_via_key() {
         let mut game = ExpeditionGame::new();
         assert!(game.handle_input(&InputEvent::Key('|')));
-        assert_eq!(game.state.hub_tab, HubTab::Roster);
+        assert_eq!(game.state.hub_tab, HubTab::Train);
         assert!(game.handle_input(&InputEvent::Key('{')));
         assert_eq!(game.state.hub_tab, HubTab::Camp);
     }

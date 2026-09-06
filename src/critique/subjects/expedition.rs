@@ -100,7 +100,8 @@ impl Subject for ExpeditionSubject {
             progress: vec![
                 ("rations".into(), self.state.rations as f64),
                 ("level".into(), self.state.total_level() as f64),
-                ("best_depth".into(), self.state.best_depth as f64),
+                ("chapter".into(), self.state.chapter as f64),
+                ("supplies".into(), self.state.supplies as f64),
             ],
             recent_feedback: self.state.log.iter().rev().take(3).cloned().collect(),
         }

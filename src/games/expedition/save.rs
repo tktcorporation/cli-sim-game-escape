@@ -1,6 +1,6 @@
 //! 遠征団のセーブ / ロード。
 //!
-//! 永続対象: 行軍糧・下調べメモ・レベル・到達層。
+//! 永続対象: 行軍糧・下調べメモ・レベル・章節・補給。
 //! 遠征中の進行は保存しない（拠点から再開）。
 
 #[cfg(any(target_arch = "wasm32", test))]
@@ -13,7 +13,7 @@ use super::state::{ExpeditionState, Screen};
 pub const AUTOSAVE_INTERVAL: u32 = 300;
 
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 1;
+const SAVE_VERSION: u32 = 2;
 #[cfg(target_arch = "wasm32")]
 const MIN_COMPATIBLE_VERSION: u32 = 1;
 
@@ -35,12 +35,23 @@ struct GameSave {
     ration_progress: u32,
     scout_memos: u32,
     scout_progress: u32,
+    #[serde(default = "default_chapter")]
+    chapter: u32,
+    #[serde(default = "default_stage")]
+    stage: u32,
+    #[serde(default)]
+    supplies: u32,
+    /// 旧セーブ互換。chapter/stage が無いときだけ使う。
+    #[serde(default)]
     best_depth: u32,
     #[serde(alias = "bonds")]
     levels: Vec<u32>,
     elapsed_ticks: u64,
     last_wall_ms: u64,
 }
+
+fn default_chapter() -> u32 { 1 }
+fn default_stage() -> u32 { 1 }
 
 #[cfg(any(target_arch = "wasm32", test))]
 fn extract_save(state: &ExpeditionState) -> SaveData {
@@ -51,7 +62,10 @@ fn extract_save(state: &ExpeditionState) -> SaveData {
             ration_progress: state.ration_progress,
             scout_memos: state.scout_memos,
             scout_progress: state.scout_progress,
-            best_depth: state.best_depth,
+            chapter: state.chapter,
+            stage: state.stage,
+            supplies: state.supplies,
+            best_depth: 0,
             levels: state.roster.iter().map(|h| h.level).collect(),
             elapsed_ticks: state.elapsed_ticks,
             last_wall_ms: state.last_wall_ms,
@@ -65,11 +79,22 @@ fn apply_save(state: &mut ExpeditionState, save: &GameSave) {
     state.ration_progress = save.ration_progress;
     state.scout_memos = save.scout_memos;
     state.scout_progress = save.scout_progress;
-    state.best_depth = save.best_depth.max(1);
+    if save.chapter > 0 {
+        state.chapter = save.chapter.max(1);
+        state.stage = save.stage.clamp(1, 4);
+    } else if save.best_depth > 0 {
+        let d = save.best_depth.max(1) - 1;
+        state.chapter = d / 4 + 1;
+        state.stage = d % 4 + 1;
+    } else {
+        state.chapter = 1;
+        state.stage = 1;
+    }
+    state.supplies = save.supplies;
     state.elapsed_ticks = save.elapsed_ticks;
     state.last_wall_ms = save.last_wall_ms;
     for (hero, level) in state.roster.iter_mut().zip(save.levels.iter()) {
-        hero.level = *level;
+        hero.level = (*level).max(1);
         hero.refresh_max_hp();
         hero.hp = hero.max_hp;
     }
@@ -144,17 +169,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn roundtrip_preserves_levels_and_rations() {
+    fn roundtrip_preserves_levels_map_and_supplies() {
         let mut state = ExpeditionState::new();
         state.rations = 2;
         state.roster[0].level = 4;
-        state.best_depth = 3;
+        state.chapter = 1;
+        state.stage = 3;
+        state.supplies = 5;
         let save = extract_save(&state);
         let mut loaded = ExpeditionState::new();
         apply_save(&mut loaded, &save.game);
         assert_eq!(loaded.rations, 2);
         assert_eq!(loaded.roster[0].level, 4);
-        assert_eq!(loaded.best_depth, 3);
+        assert_eq!(loaded.chapter, 1);
+        assert_eq!(loaded.stage, 3);
+        assert_eq!(loaded.supplies, 5);
         assert_eq!(loaded.screen, Screen::Camp);
     }
 }

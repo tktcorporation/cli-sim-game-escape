@@ -18,10 +18,10 @@ use crate::theme;
 use crate::widgets::{Clickable, TabBar};
 
 use super::actions::{
-    toggle_hero_id, ACK_RESULT, CANCEL_FORMING, LAUNCH,
-    LAUNCH_WITH_SCOUT, OPEN_FORMING, START_FORMING, TAB_CAMP, TAB_ROSTER, USE_AID,
+    upgrade_hero_id, toggle_hero_id, ACK_RESULT, CANCEL_FORMING, LAUNCH, LAUNCH_WITH_SCOUT,
+    OPEN_FORMING, START_FORMING, TAB_CAMP, TAB_TRAIN, USE_AID,
 };
-use super::state::{ExpeditionState, HubTab, Screen, BASE_NODES, PARTY_SIZE};
+use super::state::{ExpeditionState, HubTab, Screen, PARTY_SIZE};
 
 fn accent() -> Color {
     theme::accent(&GameChoice::Expedition)
@@ -44,13 +44,13 @@ fn goal_style() -> Style {
 /// 画面に出す「いまの目標」一文。critique の goal 照合にも使う。
 pub fn next_goal_line(state: &ExpeditionState) -> String {
     match state.screen {
-        Screen::Camp if state.rations == 0 => {
-            "次: 行軍糧（出撃燃料）が貯まるのを待つ".into()
-        }
-        Screen::Camp => "次: 遠征に出る".into(),
+        Screen::Camp if state.rations == 0 => "次: 行軍糧が貯まるのを待つ".into(),
+        Screen::Camp if state.last_failed => format!("次: 育成で強化してから {} 再挑戦", state.current_stage_label()),
+        Screen::Camp => format!("次: {} を攻略する", state.current_stage_label()),
         Screen::Forming => "次: 3人を選んで出発する".into(),
-        Screen::Running => "自動遠征中… 援護すると有利".into(),
-        Screen::Result => "次: 拠点に戻る".into(),
+        Screen::Running => format!("探索中 {} …", state.sortie.as_ref().map(|s| ExpeditionState::stage_label(s.chapter, s.stage)).unwrap_or_default()),
+        Screen::Result if state.last_failed => "次: 育成でレベルを上げる".into(),
+        Screen::Result => format!("次: {} へ進む", state.current_stage_label()),
     }
 }
 
@@ -78,7 +78,7 @@ pub fn render(
     match state.screen {
         Screen::Camp => match state.hub_tab {
             HubTab::Camp => render_camp(state, f, chunks[1], click_state),
-            HubTab::Roster => render_roster(state, f, chunks[1]),
+            HubTab::Train => render_train(state, f, chunks[1], click_state),
         },
         Screen::Forming => render_forming(state, f, chunks[1], click_state),
         Screen::Running => render_running(state, f, chunks[1], click_state),
@@ -116,7 +116,8 @@ fn render_status_bar(state: &ExpeditionState, f: &mut Frame, area: Rect) {
             Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
         ),
         Span::raw("  "),
-        Span::styled(format!("第{}層", state.best_depth), Style::default().fg(Color::Gray)),
+        Span::styled(format!("補給{} ", state.supplies), Style::default().fg(Color::LightYellow)),
+        Span::styled(state.current_stage_label(), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         phase,
     ]);
 
@@ -163,10 +164,10 @@ fn render_bottom_nav(
     } else {
         "拠点"
     };
-    let roster_label = if state.hub_tab == HubTab::Roster {
-        "● 団員"
+    let roster_label = if state.hub_tab == HubTab::Train {
+        "● 育成"
     } else {
-        "団員"
+        "育成"
     };
 
     let mut cs = click_state.borrow_mut();
@@ -178,8 +179,8 @@ fn render_bottom_nav(
         )
         .tab(
             roster_label,
-            tab_style(state.hub_tab == HubTab::Roster),
-            TAB_ROSTER,
+            tab_style(state.hub_tab == HubTab::Train),
+            TAB_TRAIN,
         )
         .render(f, inner, &mut cs);
 }
@@ -201,53 +202,83 @@ fn hp_bar(hp: i32, max_hp: i32) -> String {
     bar
 }
 
-fn render_roster(state: &ExpeditionState, f: &mut Frame, area: Rect) {
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        "団員一覧",
-        goal_style(),
-    )));
-    lines.push(Line::from(Span::styled(
-        " 盾 耐久 · 刃 火力 · 癒 回復",
-        muted(),
-    )));
-    lines.push(Line::from(""));
-    for h in &state.roster {
-        lines.push(Line::from(vec![
-            Span::styled(
-                format!(" [{}] ", h.role.label()),
-                Style::default().fg(accent()).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                h.name,
-                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  Lv{}", h.level),
-                Style::default().fg(Color::LightYellow),
-            ),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("     "),
-            Span::styled(format!("力{}  ", h.atk()), label_style()),
-            Span::styled(
-                format!("体力 {}/{} {}", h.hp, h.max_hp, hp_bar(h.hp, h.max_hp)),
-                Style::default().fg(Color::LightGreen),
-            ),
-        ]));
-        lines.push(Line::from(Span::styled(
-            "     ────────────────────────",
-            muted(),
-        )));
-    }
-    let body = Paragraph::new(lines).block(
+fn render_train(
+    state: &ExpeditionState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(6),
+        ])
+        .split(area);
+
+    let hint = if state.last_failed {
+        "敗退した。補給で鍛えて再挑戦"
+    } else {
+        "探索で補給を稼ぎ、ここで強くする"
+    };
+    let head = Paragraph::new(vec![
+        Line::from(Span::styled(
+            format!("補給 {}  —  {hint}", state.supplies),
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+        )),
+    ])
+    .block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
-            .title("団員"),
+            .title("育成"),
     );
-    f.render_widget(body, area);
+    f.render_widget(head, chunks[0]);
+
+    let row_h = 3u16;
+    let n = state.roster.len().max(1) as u16;
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(vec![Constraint::Length(row_h); state.roster.len()])
+        .split(chunks[1]);
+    for (idx, h) in state.roster.iter().enumerate() {
+        let cost = ExpeditionState::upgrade_cost(h.level);
+        let can = state.supplies >= cost;
+        let info = Paragraph::new(Line::from(vec![
+            Span::styled(
+                format!(" [{}]{} ", h.role.label(), h.name),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("Lv{}  ", h.level), Style::default().fg(Color::LightYellow)),
+            Span::styled(format!("力{}  ", h.atk()), muted()),
+            Span::styled(hp_bar(h.hp, h.max_hp), Style::default().fg(Color::LightGreen)),
+        ]));
+        let btn_style = if can {
+            Style::default().fg(Color::Black).bg(accent()).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let btn = Paragraph::new(Line::from(Span::styled(
+            format!(" Lv↑ 補給-{cost} (キー{}) ", idx + 1),
+            btn_style,
+        )))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL));
+
+        let pair = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(rows[idx]);
+        f.render_widget(info.block(Block::default().borders(Borders::ALL)), pair[0]);
+        Clickable::new(btn, upgrade_hero_id(h.id)).render(
+            f,
+            pair[1],
+            &mut click_state.borrow_mut(),
+        );
+    }
+    let _ = n;
 }
+
 
 fn render_camp(
     state: &ExpeditionState,
@@ -265,22 +296,38 @@ fn render_camp(
         ])
         .split(area);
 
-    let mid = if BASE_NODES > 2 {
-        "─○".repeat((BASE_NODES - 2) as usize)
-    } else {
-        String::new()
+    let map_line = {
+        let mut parts = Vec::new();
+        for s in 1..=4u32 {
+            let label = format!("{}-{}", state.chapter, s);
+            if s < state.stage {
+                parts.push(format!("[{label}✓]"));
+            } else if s == state.stage {
+                parts.push(format!("▶{label}"));
+            } else {
+                parts.push(format!(" {label} "));
+            }
+        }
+        parts.join("─")
     };
-    let road = format!("●{mid}─◎");
+    let boss_note = if state.stage >= 4 { " Boss" } else { "" };
     let dest = Paragraph::new(vec![
         Line::from(Span::styled(
-            format!(" 第{}層", state.best_depth),
+            format!(" 第{}章{}", state.chapter, boss_note),
             Style::default().fg(accent()).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            format!(" {road}"),
+            format!(" {map_line}"),
             Style::default().fg(Color::White),
         )),
-        Line::from(Span::styled(" 突破すると団が強くなる", muted())),
+        Line::from(Span::styled(
+            if state.last_failed {
+                " 敗退 — 育成で強くして再挑戦"
+            } else {
+                " 節をクリアすると次が開く"
+            },
+            muted(),
+        )),
     ])
     .block(
         Block::default()
@@ -355,7 +402,7 @@ fn render_camp(
         )
     } else {
         (
-            "▶ 遠征に出る".into(),
+            format!("▶ {} に出る", state.current_stage_label()),
             Style::default()
                 .fg(Color::Black)
                 .bg(accent())
@@ -535,18 +582,18 @@ fn render_running(
         .constraints([Constraint::Min(8), Constraint::Length(3)])
         .split(area);
 
-    let progress = road_progress(sortie.node_index, sortie.nodes_total);
+    let _progress = road_progress(sortie.node_index, sortie.nodes_total);
     let mut lines = vec![
         Line::from(Span::styled(next_goal_line(state), goal_style())),
         Line::from(vec![
             Span::styled(
-                format!(" 第{}層 ", sortie.depth),
+                format!(" {} ", ExpeditionState::stage_label(sortie.chapter, sortie.stage)),
                 Style::default().fg(accent()).add_modifier(Modifier::BOLD),
             ),
             Span::raw(format!(
-                " {progress}  ({}/{})",
-                sortie.node_index + 1,
-                sortie.nodes_total
+                "難度{}  {}",
+                sortie.difficulty,
+                if ExpeditionState::is_boss_stage(sortie.stage) { "BOSS戦" } else { "戦闘" },
             )),
         ]),
     ];
@@ -576,6 +623,12 @@ fn render_running(
         )));
     }
     lines.push(Line::from(""));
+    if !sortie.last_hit_log.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!(" » {}", sortie.last_hit_log),
+            Style::default().fg(Color::LightCyan),
+        )));
+    }
     lines.push(section_title("仲間"));
     for &id in &sortie.party {
         if let Some(h) = state.hero(id) {
@@ -602,7 +655,7 @@ fn render_running(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(accent()))
-            .title(" 遠征中（自動） "),
+            .title(" 探索中 "),
     );
     f.render_widget(para, chunks[0]);
 
@@ -656,7 +709,7 @@ fn render_result(
             Style::default().fg(Color::White),
         )),
         Line::from(""),
-        section_title("団員のレベル"),
+        section_title("育成のレベル"),
     ];
     for h in &state.roster {
         lines.push(Line::from(format!(
@@ -674,19 +727,37 @@ fn render_result(
             .title(" 遠征の結果 "),
     );
     f.render_widget(para, chunks[0]);
-    Clickable::new(
-        Paragraph::new(" 拠点に戻る ")
-            .alignment(Alignment::Center)
-            .style(
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(accent())
-                    .add_modifier(Modifier::BOLD),
-            )
-            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(accent()))),
-        ACK_RESULT,
-    )
-    .render(f, chunks[1], &mut click_state.borrow_mut());
+    if state.last_failed {
+        let row = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(chunks[1]);
+        Clickable::new(
+            Paragraph::new(" 育成へ ")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::Black).bg(Color::LightYellow).add_modifier(Modifier::BOLD))
+                .block(Block::default().borders(Borders::ALL)),
+            TAB_TRAIN,
+        )
+        .render(f, row[0], &mut click_state.borrow_mut());
+        Clickable::new(
+            Paragraph::new(" 拠点へ ")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::Black).bg(accent()).add_modifier(Modifier::BOLD))
+                .block(Block::default().borders(Borders::ALL)),
+            ACK_RESULT,
+        )
+        .render(f, row[1], &mut click_state.borrow_mut());
+    } else {
+        Clickable::new(
+            Paragraph::new(" 拠点に戻る ")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::Black).bg(accent()).add_modifier(Modifier::BOLD))
+                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(accent()))),
+            ACK_RESULT,
+        )
+        .render(f, chunks[1], &mut click_state.borrow_mut());
+    }
 }
 
 #[cfg(test)]
@@ -714,30 +785,31 @@ mod tests {
         assert!(text.contains("行軍糧"), "{text}");
         assert!(text.contains("下調べメモ"), "{text}");
         assert!(text.contains("拠点"), "{text}");
-        assert!(text.contains("団員"), "{text}");
+        assert!(text.contains("育成"), "{text}");
         assert!(text.contains("● 拠点"), "{text}");
     }
 
     #[test]
-    fn roster_tab_lists_members_without_leaving_shell() {
+    fn train_tab_lists_members_with_upgrade_buttons() {
         let mut state = ExpeditionState::new();
-        state.hub_tab = HubTab::Roster;
+        state.hub_tab = HubTab::Train;
         let text = draw_text(&state);
-        assert!(text.contains("団員一覧"), "{text}");
+        assert!(text.contains("育成"), "{text}");
+        assert!(text.contains("Lv↑"), "{text}");
         assert!(text.contains("灰"), "{text}");
         assert!(text.contains("ステータス"), "{text}");
         assert!(text.contains("拠点"), "{text}");
-        assert!(text.contains("● 団員"), "{text}");
+        assert!(text.contains("● 育成"), "{text}");
     }
 
     #[test]
     fn camp_shows_destination_party_and_primary_cta() {
         let state = ExpeditionState::new();
         let text = draw_text(&state);
-        assert!(text.contains("行き先"), "{text}");
-        assert!(text.contains("第1層"), "{text}");
+        assert!(text.contains("行き先") || text.contains("第1章"), "{text}");
+        assert!(text.contains("1-1"), "{text}");
         assert!(text.contains("出撃メンバー"), "{text}");
-        assert!(text.contains("遠征に出る"), "{text}");
+        assert!(text.contains("1-1 に出る") || text.contains("に出る"), "{text}");
         assert!(text.contains("行軍糧"), "{text}");
         assert!(!text.contains("やること"), "{text}");
         assert!(!text.contains("放置では戦力は上がらない"), "{text}");
@@ -765,7 +837,7 @@ mod tests {
         assert!(text.contains("出発する"), "{text}");
         assert!(text.contains("下調べ"), "{text}");
         assert!(text.contains("ステータス"), "{text}");
-        assert!(text.contains("団員"), "{text}");
+        assert!(text.contains("育成"), "{text}");
         assert!(text.contains("編成シート"), "{text}");
         assert!(text.contains("編成中"), "{text}");
     }
@@ -775,7 +847,7 @@ mod tests {
     fn dump_shell_screens() {
         let mut state = ExpeditionState::new();
         eprintln!("=== CAMP ===\n{}", draw_text(&state));
-        state.hub_tab = HubTab::Roster;
+        state.hub_tab = HubTab::Train;
         eprintln!("=== ROSTER ===\n{}", draw_text(&state));
         state.hub_tab = HubTab::Camp;
         assert!(super::super::logic::begin_forming(&mut state));

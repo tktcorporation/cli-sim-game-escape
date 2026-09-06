@@ -1,11 +1,21 @@
 //! 遠征団の自動プレイシミュレーター。
 
-use super::logic::{acknowledge_result, begin_forming, launch_sortie, tick, use_aid};
-use super::state::{ExpeditionState, Screen};
+use super::logic::{
+    acknowledge_result, begin_forming, launch_sortie, set_hub_tab, tick, upgrade_hero, use_aid,
+};
+use super::state::{ExpeditionState, HubTab, Screen};
 
 fn finish_or_progress(state: &mut ExpeditionState, use_optional_aid: bool) {
     match state.screen {
         Screen::Camp if state.rations > 0 => {
+            // 補給があれば先に育成してから出る（詰まったときの強化ループ）
+            if state.supplies > 0 {
+                let _ = set_hub_tab(state, HubTab::Train);
+                for id in 0..4u8 {
+                    let _ = upgrade_hero(state, id);
+                }
+                let _ = set_hub_tab(state, HubTab::Camp);
+            }
             let _ = begin_forming(state);
             let _ = launch_sortie(state, state.scout_memos > 0);
         }
@@ -19,7 +29,16 @@ fn finish_or_progress(state: &mut ExpeditionState, use_optional_aid: bool) {
             tick(state, 1);
         }
         Screen::Result => {
-            let _ = acknowledge_result(state);
+            if state.last_failed {
+                let _ = acknowledge_result(state);
+                let _ = set_hub_tab(state, HubTab::Train);
+                for id in 0..4u8 {
+                    let _ = upgrade_hero(state, id);
+                }
+                let _ = set_hub_tab(state, HubTab::Camp);
+            } else {
+                let _ = acknowledge_result(state);
+            }
         }
         Screen::Camp => tick(state, 1),
     }
@@ -37,14 +56,15 @@ fn bot_run(ticks: u32, use_optional_aid: bool) -> ExpeditionState {
 fn long_run_never_panics_and_keeps_ration_bounds() {
     let state = bot_run(30_000, false);
     eprintln!(
-        "expedition report: depth={} level={} rations={}/{} ticks={}",
-        state.best_depth,
+        "expedition report: chapter={} stage={} level={} supplies={} rations={}/{}",
+        state.chapter,
+        state.stage,
         state.total_level(),
+        state.supplies,
         state.rations,
         state.ration_cap(),
-        state.elapsed_ticks
     );
-    assert!(state.best_depth >= 1);
+    assert!(state.chapter >= 1);
     assert!(state.rations <= state.ration_cap());
 }
 
@@ -58,15 +78,20 @@ fn idle_only_does_not_increase_level() {
 }
 
 #[test]
-fn active_play_grows_level_with_or_without_aid() {
+fn active_play_advances_map_or_levels_via_train() {
     let plain = bot_run(12_000, false);
     let aided = bot_run(12_000, true);
     eprintln!(
-        "plain level={} depth={} / aided level={} depth={}",
+        "plain chapter={} stage={} level={} / aided chapter={} stage={} level={}",
+        plain.chapter,
+        plain.stage,
         plain.total_level(),
-        plain.best_depth,
+        aided.chapter,
+        aided.stage,
         aided.total_level(),
-        aided.best_depth
     );
-    assert!(plain.total_level() > 0 || aided.total_level() > 0);
+    let progressed = |s: &ExpeditionState| {
+        s.chapter > 1 || s.stage > 1 || s.total_level() > 4 || s.supplies > 0
+    };
+    assert!(progressed(&plain) || progressed(&aided));
 }

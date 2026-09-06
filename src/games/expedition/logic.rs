@@ -1,8 +1,9 @@
 //! 遠征団の純粋ロジック。
 
 use super::state::{
-    Enemy, ExpeditionState, HubTab, NodeKind, Role, Screen, Sortie, BASE_NODES, COMBAT_ROUND_TICKS,
-    PARTY_SIZE, SCOUT_MEMO_CAP, SCOUT_MEMO_REGEN_TICKS,
+    Enemy, ExpeditionState, HubTab, NodeKind, Role, Screen, Sortie, COMBAT_ROUND_TICKS,
+    PARTY_SIZE, SCOUT_MEMO_CAP, SCOUT_MEMO_REGEN_TICKS, STAGES_PER_CHAPTER, SUPPLY_CLEAR_BASE,
+    SUPPLY_FAIL,
 };
 
 fn enemy_for_depth(depth: u32, node: u32, is_boss: bool) -> Enemy {
@@ -188,29 +189,38 @@ pub fn launch_sortie(state: &mut ExpeditionState, use_scout: bool) -> bool {
         state.scout_memos -= 1;
     }
 
-    let depth = state.best_depth.max(1);
-    let enemy = enemy_for_depth(depth, 0, false);
+    let chapter = state.chapter.max(1);
+    let stage = state.stage.clamp(1, STAGES_PER_CHAPTER);
+    let difficulty = ExpeditionState::difficulty(chapter, stage);
+    let is_boss = ExpeditionState::is_boss_stage(stage);
+    let enemy = enemy_for_depth(difficulty, 0, is_boss);
     let hint = used_scout.then(|| scout_hint_for(enemy.name));
+    let label = ExpeditionState::stage_label(chapter, stage);
 
     state.sortie = Some(Sortie {
-        depth,
+        chapter,
+        stage,
+        difficulty,
         node_index: 0,
-        nodes_total: BASE_NODES,
+        nodes_total: 1,
         party,
         enemy: Some(enemy),
         used_scout,
         scout_hint: hint,
         aid_ready: true,
         combat_tick: 0,
-        levels_gained: 0,
+        supplies_gained: 0,
+        last_hit_log: String::new(),
     });
     state.screen = Screen::Running;
-    state.push_log(format!("第{depth}層へ出撃。"));
+    state.last_failed = false;
+    state.push_log(format!("{label} へ出撃。"));
     if let Some(h) = hint {
         state.push_log(format!("下調べ: {h}"));
     }
     true
 }
+
 
 fn party_alive(state: &ExpeditionState, party: &[u8; PARTY_SIZE]) -> bool {
     party
@@ -232,7 +242,7 @@ fn tick_combat(state: &mut ExpeditionState) {
     sortie.combat_tick = 0;
 
     let party = sortie.party;
-    let depth = sortie.depth;
+    let _difficulty = sortie.difficulty;
     let enemy_atk = sortie.enemy.as_ref().map(|e| e.atk).unwrap_or(0);
 
     let mut total_atk = 0;
@@ -280,7 +290,8 @@ fn tick_combat(state: &mut ExpeditionState) {
         state.push_log(format!("{name}を倒した。"));
         if let Some(s) = state.sortie.as_mut() {
             s.enemy = None;
-            s.levels_gained += 1 + depth / 3;
+            s.supplies_gained += SUPPLY_CLEAR_BASE + s.chapter;
+            s.last_hit_log = format!("{name}を倒した");
         }
         advance_after_battle(state);
         return;
@@ -326,23 +337,20 @@ fn advance_after_battle(state: &mut ExpeditionState) {
         clear_sortie(state);
         return;
     }
-    let kind = node_kind_at(sortie.nodes_total, sortie.node_index);
-    let is_boss = kind == NodeKind::Boss;
-    let depth = sortie.depth;
+    // 現状は1節1戦なのでここには来ない。将来の複数ノード用。
+    let is_boss = ExpeditionState::is_boss_stage(sortie.stage)
+        && sortie.node_index + 1 >= sortie.nodes_total;
+    let difficulty = sortie.difficulty;
     let node = sortie.node_index;
-    let enemy = enemy_for_depth(depth, node, is_boss);
+    let enemy = enemy_for_depth(difficulty, node, is_boss);
     if sortie.used_scout {
         sortie.scout_hint = Some(scout_hint_for(enemy.name));
     }
     sortie.enemy = Some(enemy);
     sortie.combat_tick = 0;
     state.screen = Screen::Running;
-    if is_boss {
-        state.push_log("奥の気配が近い。");
-    }
 }
 
-/// 遠征中の任意操作。回復＋追い打ち。使わなくてもランは自動完走する。
 pub fn use_aid(state: &mut ExpeditionState) -> bool {
     if state.screen != Screen::Running {
         return false;
@@ -355,7 +363,7 @@ pub fn use_aid(state: &mut ExpeditionState) -> bool {
     }
     sortie.aid_ready = false;
     let party = sortie.party;
-    let depth = sortie.depth;
+    let _difficulty = sortie.difficulty;
 
     for id in party {
         if let Some(h) = state.hero_mut(id) {
@@ -395,7 +403,8 @@ pub fn use_aid(state: &mut ExpeditionState) -> bool {
         state.push_log(format!("{name}を倒した。"));
         if let Some(s) = state.sortie.as_mut() {
             s.enemy = None;
-            s.levels_gained += 1 + depth / 3;
+            s.supplies_gained += SUPPLY_CLEAR_BASE + s.chapter;
+            s.last_hit_log = format!("{name}を倒した");
         }
         advance_after_battle(state);
     }
@@ -403,44 +412,90 @@ pub fn use_aid(state: &mut ExpeditionState) -> bool {
 }
 
 fn clear_sortie(state: &mut ExpeditionState) {
-    let (depth, levels, party) = match state.sortie.as_ref() {
-        Some(s) => (s.depth, s.levels_gained, s.party),
+    let (chapter, stage, supplies, party) = match state.sortie.as_ref() {
+        Some(s) => (s.chapter, s.stage, s.supplies_gained.max(SUPPLY_CLEAR_BASE), s.party),
         None => return,
     };
+    let label = ExpeditionState::stage_label(chapter, stage);
+    state.supplies = state.supplies.saturating_add(supplies);
+    // レベルは上げない。マップ進行だけ進める。
     for id in party {
         if let Some(h) = state.hero_mut(id) {
-            h.level += levels;
             h.refresh_max_hp();
             h.hp = h.max_hp;
         }
     }
-    if depth >= state.best_depth {
-        state.best_depth = depth + 1;
-    }
+    advance_map_progress(state);
+    let next = state.current_stage_label();
     state.result_summary = format!(
-        "第{depth}層クリア！ 参加者 Lv+{levels}"
+        "{label} クリア！ 補給+{supplies}\n次は {next} — 足りなければ育成で鍛えよう"
     );
     state.sortie = None;
+    state.last_failed = false;
     state.screen = Screen::Result;
     state.push_log(state.result_summary.clone());
 }
 
+fn advance_map_progress(state: &mut ExpeditionState) {
+    if state.stage >= STAGES_PER_CHAPTER {
+        state.chapter = state.chapter.saturating_add(1);
+        state.stage = 1;
+    } else {
+        state.stage += 1;
+    }
+}
+
 fn fail_sortie(state: &mut ExpeditionState) {
-    let depth = state.sortie.as_ref().map(|s| s.depth).unwrap_or(1);
+    let (chapter, stage) = match state.sortie.as_ref() {
+        Some(s) => (s.chapter, s.stage),
+        None => (state.chapter, state.stage),
+    };
+    let label = ExpeditionState::stage_label(chapter, stage);
+    state.supplies = state.supplies.saturating_add(SUPPLY_FAIL);
     if let Some(s) = state.sortie.clone() {
         for id in s.party {
             if let Some(h) = state.hero_mut(id) {
-                h.level += 1;
                 h.refresh_max_hp();
                 h.hp = h.max_hp;
             }
         }
     }
-    state.result_summary =
-        format!("第{depth}層で敗退。参加者 Lv+1");
+    state.result_summary = format!(
+        "{label} で敗退。補給+{SUPPLY_FAIL}\n育成でレベルを上げてから再挑戦"
+    );
     state.sortie = None;
+    state.last_failed = true;
     state.screen = Screen::Result;
     state.push_log(state.result_summary.clone());
+}
+
+/// 拠点育成: 補給を消費して団員を1レベル上げる。
+pub fn upgrade_hero(state: &mut ExpeditionState, hero_id: u8) -> bool {
+    if !matches!(state.screen, Screen::Camp | Screen::Result) {
+        // 育成タブは Camp 画面の hub_tab=Train で描画する
+        if state.screen != Screen::Camp {
+            return false;
+        }
+    }
+    let level = match state.hero(hero_id) {
+        Some(h) => h.level,
+        None => return false,
+    };
+    let cost = ExpeditionState::upgrade_cost(level);
+    if state.supplies < cost {
+        state.push_log("補給が足りない。探索で集めよう。");
+        return false;
+    }
+    state.supplies -= cost;
+    if let Some(h) = state.hero_mut(hero_id) {
+        h.level += 1;
+        h.refresh_max_hp();
+        h.hp = h.max_hp;
+        let name = h.name;
+        let lv = h.level;
+        state.push_log(format!("{name} は Lv{lv} になった。"));
+    }
+    true
 }
 
 pub fn set_hub_tab(state: &mut ExpeditionState, tab: HubTab) -> bool {
@@ -492,21 +547,46 @@ mod tests {
     }
 
     #[test]
-    fn sortie_consumes_ration_and_grows_level_only_on_clear() {
+    fn sortie_consumes_ration_and_grants_supplies_not_levels() {
         let mut state = ExpeditionState::new();
         state.rations = 2;
         assert!(begin_forming(&mut state));
         assert!(launch_sortie(&mut state, false));
         assert_eq!(state.rations, 1);
         let level_before = state.total_level();
+        let supplies_before = state.supplies;
         if let Some(s) = state.sortie.as_mut() {
             s.enemy = None;
             s.node_index = s.nodes_total;
-            s.levels_gained = 3;
+            s.supplies_gained = 3;
         }
         clear_sortie(&mut state);
-        assert!(state.total_level() > level_before);
+        assert_eq!(state.total_level(), level_before);
+        assert!(state.supplies > supplies_before);
         assert_eq!(state.screen, Screen::Result);
+        assert_eq!(state.stage, 2);
+    }
+
+    #[test]
+    fn upgrade_hero_spends_supplies_to_raise_level() {
+        let mut state = ExpeditionState::new();
+        state.supplies = 10;
+        let before = state.hero(0).unwrap().level;
+        assert!(upgrade_hero(&mut state, 0));
+        assert_eq!(state.hero(0).unwrap().level, before + 1);
+        assert!(state.supplies < 10);
+    }
+
+    #[test]
+    fn fail_keeps_stage_and_marks_last_failed() {
+        let mut state = ExpeditionState::new();
+        state.rations = 2;
+        assert!(launch_sortie(&mut state, false));
+        assert_eq!(state.stage, 1);
+        fail_sortie(&mut state);
+        assert_eq!(state.stage, 1);
+        assert!(state.last_failed);
+        assert!(state.supplies >= SUPPLY_FAIL);
     }
 
     #[test]
@@ -536,7 +616,7 @@ mod tests {
             tick(&mut state, 1);
         }
         assert!(matches!(state.screen, Screen::Result));
-        assert!(state.total_level() > 0);
+        assert!(state.supplies > 0 || state.stage > 1 || state.last_failed);
     }
 
     #[test]
@@ -551,9 +631,14 @@ mod tests {
         let hp_before: i32 = state.roster.iter().map(|h| h.hp).sum();
         assert!(use_aid(&mut state));
         let hp_after: i32 = state.roster.iter().map(|h| h.hp).sum();
-        assert!(hp_after > hp_before);
-        assert!(!use_aid(&mut state));
-        assert!(!state.sortie.as_ref().unwrap().aid_ready);
+        // 追い打ちで敵を倒して結果画面に入ることもある
+        if state.screen == Screen::Running {
+            assert!(hp_after > hp_before);
+            assert!(!use_aid(&mut state));
+            assert!(!state.sortie.as_ref().unwrap().aid_ready);
+        } else {
+            assert_eq!(state.screen, Screen::Result);
+        }
     }
 
     #[test]
