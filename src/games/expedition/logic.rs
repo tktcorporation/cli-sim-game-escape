@@ -1,7 +1,7 @@
 //! 遠征団の純粋ロジック。
 
 use super::state::{
-    Enemy, ExpeditionState, NodeKind, Role, Screen, Sortie, BASE_NODES, COMBAT_ROUND_TICKS,
+    Enemy, ExpeditionState, HubTab, NodeKind, Role, Screen, Sortie, BASE_NODES, COMBAT_ROUND_TICKS,
     PARTY_SIZE, SCOUT_MEMO_CAP, SCOUT_MEMO_REGEN_TICKS,
 };
 
@@ -438,6 +438,11 @@ fn fail_sortie(state: &mut ExpeditionState) {
     state.sortie = None;
     state.screen = Screen::Result;
     state.push_log(state.result_summary.clone());
+}
+
+pub fn set_hub_tab(state: &mut ExpeditionState, tab: HubTab) -> bool {
+    state.hub_tab = tab;
+    true
 }
 
 pub fn acknowledge_result(state: &mut ExpeditionState) -> bool {

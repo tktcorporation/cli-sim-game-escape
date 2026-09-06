@@ -1,7 +1,7 @@
 //! 遠征団の描画。
 //!
+//! 常設シェル（上部ステータス + 下部ナビ）の上に拠点本文や遠征オーバーレイを載せる。
 //! 開口で「ループ」と「次に押すボタン」が見えることを最優先する。
-//! 用語は画面上で一度は平易語に言い換える。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -15,13 +15,13 @@ use ratzilla::ratatui::Frame;
 use crate::games::GameChoice;
 use crate::input::ClickState;
 use crate::theme;
-use crate::widgets::Clickable;
+use crate::widgets::{Clickable, TabBar};
 
 use super::actions::{
     toggle_hero_id, ACK_RESULT, CANCEL_FORMING, CHOICE_PUSH, CHOICE_REST, LAUNCH,
-    LAUNCH_WITH_SCOUT, START_FORMING,
+    LAUNCH_WITH_SCOUT, START_FORMING, TAB_CAMP, TAB_ROSTER,
 };
-use super::state::{ExpeditionState, Screen, PARTY_SIZE};
+use super::state::{ExpeditionState, HubTab, Screen, PARTY_SIZE};
 
 fn accent() -> Color {
     theme::accent(&GameChoice::Expedition)
@@ -47,13 +47,113 @@ pub fn render(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(6),
+            Constraint::Length(1),
+        ])
+        .split(area);
+
+    render_status_bar(state, f, chunks[0]);
     match state.screen {
-        Screen::Camp => render_camp(state, f, area, click_state),
-        Screen::Forming => render_forming(state, f, area, click_state),
-        Screen::Running => render_running(state, f, area),
-        Screen::Choice => render_choice(f, area, click_state),
-        Screen::Result => render_result(state, f, area, click_state),
+        Screen::Camp => match state.hub_tab {
+            HubTab::Camp => render_camp(state, f, chunks[1], click_state),
+            HubTab::Roster => render_roster(state, f, chunks[1]),
+        },
+        Screen::Forming => render_forming(state, f, chunks[1], click_state),
+        Screen::Running => render_running(state, f, chunks[1]),
+        Screen::Choice => render_choice(f, chunks[1], click_state),
+        Screen::Result => render_result(state, f, chunks[1], click_state),
     }
+    render_bottom_nav(state, f, chunks[2], click_state);
+}
+
+fn render_status_bar(state: &ExpeditionState, f: &mut Frame, area: Rect) {
+    let fill = ration_fill_bar(state);
+    let para = Paragraph::new(Line::from(vec![
+        Span::styled(
+            " 行軍糧 ",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!(
+            "{}/{} {}  下調べメモ {}  絆{}  第{}層",
+            state.rations,
+            state.ration_cap(),
+            fill,
+            state.scout_memos,
+            state.total_bond(),
+            state.best_depth
+        )),
+    ]))
+    .block(Block::default().borders(Borders::ALL).title("ステータス"));
+    f.render_widget(para, area);
+}
+
+fn tab_style(active: bool) -> Style {
+    if active {
+        Style::default()
+            .fg(Color::Black)
+            .bg(accent())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    }
+}
+
+fn render_bottom_nav(
+    state: &ExpeditionState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
+    let mut cs = click_state.borrow_mut();
+    TabBar::new("│")
+        .tab(
+            HubTab::Camp.label(),
+            tab_style(state.hub_tab == HubTab::Camp),
+            TAB_CAMP,
+        )
+        .tab(
+            HubTab::Roster.label(),
+            tab_style(state.hub_tab == HubTab::Roster),
+            TAB_ROSTER,
+        )
+        .render(f, area, &mut cs);
+}
+
+fn render_roster(state: &ExpeditionState, f: &mut Frame, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        "団員一覧 — 絆は遠征の結果でのみ育つ",
+        Style::default()
+            .fg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        " 役割: 盾=耐久 / 刃=火力 / 癒=回復",
+        Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+    for h in &state.roster {
+        lines.push(Line::from(format!(
+            " [{}]{}  絆{}  力{}  体力{}/{}",
+            h.role.label(),
+            h.name,
+            h.bond,
+            h.atk(),
+            h.hp,
+            h.max_hp
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "遠征に出すときは「拠点」タブへ。",
+        Style::default().fg(Color::Gray),
+    )));
+    let body = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("団員"));
+    f.render_widget(body, area);
 }
 
 fn render_camp(
@@ -65,36 +165,22 @@ fn render_camp(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
             Constraint::Min(8),
             Constraint::Length(3),
         ])
         .split(area);
 
-    let fill = ration_fill_bar(state);
-    let header = Paragraph::new(vec![
-        Line::from(vec![
-            Span::styled(
-                " 遠征団 ",
-                Style::default().fg(accent()).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "糧がたまる → 遠征する → 絆が育つ",
-                Style::default().fg(Color::Gray),
-            ),
-        ]),
-        Line::from(format!(
-            " 行軍糧(燃料) {}/{} {}  下調べメモ {}",
-            state.rations,
-            state.ration_cap(),
-            fill,
-            state.scout_memos
-        )),
-    ])
-    .block(Block::default().borders(Borders::ALL).title("拠点"));
-    f.render_widget(header, chunks[0]);
-
     let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(
+            " 遠征団 ",
+            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "糧がたまる → 遠征する → 絆が育つ",
+            Style::default().fg(Color::Gray),
+        ),
+    ]));
     lines.push(Line::from(Span::styled(
         next_goal_line(state),
         Style::default()
@@ -145,8 +231,8 @@ fn render_camp(
             )));
         }
     }
-    let body = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("いま"));
-    f.render_widget(body, chunks[1]);
+    let body = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("拠点"));
+    f.render_widget(body, chunks[0]);
 
     let (label, style) = if state.rations == 0 {
         (
@@ -164,7 +250,7 @@ fn render_camp(
     };
     // 糧0でもタップ可能にして、logic 側のログで理由を返す（押した反応を残す）。
     Clickable::new(Paragraph::new(Line::from(Span::styled(label, style))), START_FORMING)
-        .render(f, chunks[2], &mut click_state.borrow_mut());
+        .render(f, chunks[1], &mut click_state.borrow_mut());
 }
 
 fn ration_fill_bar(state: &ExpeditionState) -> String {
@@ -440,6 +526,28 @@ mod tests {
     }
 
     #[test]
+    fn shell_shows_status_bar_and_bottom_nav() {
+        let state = ExpeditionState::new();
+        let text = draw_text(&state);
+        assert!(text.contains("ステータス"), "{text}");
+        assert!(text.contains("行軍糧"), "{text}");
+        assert!(text.contains("下調べメモ"), "{text}");
+        assert!(text.contains("拠点"), "{text}");
+        assert!(text.contains("団員"), "{text}");
+    }
+
+    #[test]
+    fn roster_tab_lists_members_without_leaving_shell() {
+        let mut state = ExpeditionState::new();
+        state.hub_tab = HubTab::Roster;
+        let text = draw_text(&state);
+        assert!(text.contains("団員一覧"), "{text}");
+        assert!(text.contains("灰"), "{text}");
+        assert!(text.contains("ステータス"), "{text}");
+        assert!(text.contains("拠点"), "{text}");
+    }
+
+    #[test]
     fn camp_shows_loop_goal_and_primary_cta() {
         let state = ExpeditionState::new();
         let text = draw_text(&state);
@@ -473,13 +581,18 @@ mod tests {
         assert!(text.contains("行軍糧-1"), "{text}");
         assert!(text.contains("出発する"), "{text}");
         assert!(text.contains("下調べ"), "{text}");
+        assert!(text.contains("ステータス"), "{text}");
+        assert!(text.contains("団員"), "{text}");
     }
 
     #[test]
     #[ignore = "手動で画面形を見るための dump"]
-    fn dump_camp_and_forming_screens() {
+    fn dump_shell_screens() {
         let mut state = ExpeditionState::new();
         eprintln!("=== CAMP ===\n{}", draw_text(&state));
+        state.hub_tab = HubTab::Roster;
+        eprintln!("=== ROSTER ===\n{}", draw_text(&state));
+        state.hub_tab = HubTab::Camp;
         assert!(super::super::logic::begin_forming(&mut state));
         eprintln!("=== FORMING ===\n{}", draw_text(&state));
     }

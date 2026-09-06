@@ -25,9 +25,9 @@ use crate::input::{ClickScope, ClickState, InputEvent};
 
 use actions::{
     hero_id_from_toggle, ACK_RESULT, CANCEL_FORMING, CHOICE_PUSH, CHOICE_REST, LAUNCH,
-    LAUNCH_WITH_SCOUT, START_FORMING,
+    LAUNCH_WITH_SCOUT, START_FORMING, TAB_CAMP, TAB_ROSTER,
 };
-use state::{ExpeditionState, Screen};
+use state::{ExpeditionState, HubTab, Screen};
 
 pub struct ExpeditionGame {
     pub state: ExpeditionState,
@@ -69,6 +69,8 @@ impl ExpeditionGame {
             CHOICE_REST => logic::choose_rest(&mut self.state),
             CHOICE_PUSH => logic::choose_push(&mut self.state),
             ACK_RESULT => logic::acknowledge_result(&mut self.state),
+            TAB_CAMP => logic::set_hub_tab(&mut self.state, HubTab::Camp),
+            TAB_ROSTER => logic::set_hub_tab(&mut self.state, HubTab::Roster),
             _ => false,
         }
     }
@@ -86,6 +88,8 @@ impl ExpeditionGame {
             (Screen::Choice, 'r' | 'R' | '1') => logic::choose_rest(&mut self.state),
             (Screen::Choice, 'p' | 'P' | '2') => logic::choose_push(&mut self.state),
             (Screen::Result, ' ' | '\n') => logic::acknowledge_result(&mut self.state),
+            (_, '{') => logic::set_hub_tab(&mut self.state, HubTab::Camp),
+            (_, '|') => logic::set_hub_tab(&mut self.state, HubTab::Roster),
             _ => false,
         }
     }
@@ -145,6 +149,15 @@ mod tests {
         let mut game = ExpeditionGame::new();
         assert!(game.handle_input(&InputEvent::Key('e')));
         assert_eq!(game.state.screen, Screen::Forming);
+    }
+
+    #[test]
+    fn hub_tab_switches_via_key() {
+        let mut game = ExpeditionGame::new();
+        assert!(game.handle_input(&InputEvent::Key('|')));
+        assert_eq!(game.state.hub_tab, HubTab::Roster);
+        assert!(game.handle_input(&InputEvent::Key('{')));
+        assert_eq!(game.state.hub_tab, HubTab::Camp);
     }
 
     #[test]

@@ -30,6 +30,21 @@ impl Role {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HubTab {
+    Camp,
+    Roster,
+}
+
+impl HubTab {
+    pub fn label(self) -> &'static str {
+        match self {
+            HubTab::Camp => "拠点",
+            HubTab::Roster => "団員",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Screen {
     Camp,
     Forming,
@@ -107,6 +122,7 @@ pub struct Sortie {
 #[derive(Clone, Debug)]
 pub struct ExpeditionState {
     pub screen: Screen,
+    pub hub_tab: HubTab,
     pub roster: Vec<Hero>,
     pub forming: [Option<u8>; PARTY_SIZE],
     pub rations: u32,
@@ -142,6 +158,7 @@ impl ExpeditionState {
         }
         Self {
             screen: Screen::Camp,
+            hub_tab: HubTab::Camp,
             roster,
             forming: [Some(0), Some(1), Some(2)],
             rations: BASE_RATION_CAP,
