@@ -50,7 +50,7 @@ fn render_wide(
     let left_chunks = Layout::default()
         .direction(LayoutDir::Vertical)
         .constraints([
-            Constraint::Length(3),                       // Header
+            Constraint::Length(4),                       // Header (money + next goal)
             Constraint::Length(VIEW_H as u16 + 2),       // Grid (viewport height + border)
             Constraint::Min(12),                         // Tool panel (7 tools + description)
         ])
@@ -77,7 +77,7 @@ fn render_narrow(
     let chunks = Layout::default()
         .direction(LayoutDir::Vertical)
         .constraints([
-            Constraint::Length(3),                       // Header
+            Constraint::Length(4),                       // Header (money + next goal)
             Constraint::Length(VIEW_H as u16 + 2),       // Grid (viewport)
             Constraint::Length(12),                       // Tool panel
         ])
@@ -179,7 +179,16 @@ fn render_header(state: &FactoryState, f: &mut Frame, area: Rect, is_narrow: boo
         ]
     };
 
-    let widget = Paragraph::new(Line::from(spans))
+    let goal = super::logic::next_build_goal(state);
+    let goal_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let lines = vec![
+        Line::from(spans),
+        Line::from(Span::styled(format!(" {goal}"), goal_style)),
+    ];
+
+    let widget = Paragraph::new(lines)
         .block(
             Block::default()
                 .borders(borders)

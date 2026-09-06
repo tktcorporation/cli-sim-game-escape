@@ -58,7 +58,6 @@ fn estimate_wrapped_lines(lines: &[Line], inner_width: u16) -> u16 {
 
 pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
     let width = area.width;
-    let is_narrow = width < 60;
 
     // Horizontal split: show log panel on the right when wide enough (>= 80 cols)
     let (main_area, log_area) = if width >= 80 {
@@ -71,6 +70,11 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
         (area, None)
     };
 
+    // Narrow判定は「実際に描くパネル幅」基準。フル幅で wide と判定して
+    // cookie_height=13 を確保しても、55% 分割後は sparkline / PRODUCTION が
+    // 出ず空洞になる（critique occupancy が落ちる原因だった）。
+    let is_narrow = main_area.width < 60;
+
     // Calculate dynamic heights for buffs/golden/discount section (unified for all widths)
     let buff_height = {
         let mut n = 0u16;
@@ -80,7 +84,7 @@ pub fn render(state: &CookieState, f: &mut Frame, area: Rect, click_state: &Rc<R
         if n > 0 { n.min(4) } else { 0 }
     };
 
-    // Cookie display height — adaptive: compact on narrow screens.
+    // Cookie display height — adaptive: compact when the cookie panel itself is narrow.
     // Includes one row for the dedicated market banner.
     let cookie_height: u16 = if is_narrow { 9 } else { 13 };
 
@@ -798,6 +802,34 @@ fn render_producers(
     click_state: &Rc<RefCell<ClickState>>,
 ) {
     let is_narrow = area.width < 60;
+    let owned_units: u32 = state.producers.iter().map(|p| p.count).sum();
+    // 序盤は生産者リストが短く Min 領域が空洞になる。投資の読み方を同じ枠に
+    // 置いて「情報は隠さず見せる」原則を開口から満たす。
+    let show_invest_guide = owned_units == 0 && area.height >= 10;
+    let visible_count = state.visible_producer_count();
+    let list_rows = {
+        let teaser = if visible_count < state.producers.len() {
+            1u16
+        } else {
+            0
+        };
+        // 行 + 上下ボーダー。ガイド用に最低 4 行は残す。
+        let content = (visible_count as u16).saturating_add(teaser).saturating_add(2);
+        if show_invest_guide {
+            content.min(area.height.saturating_sub(4)).max(4)
+        } else {
+            area.height
+        }
+    };
+    let (list_area, guide_area) = if show_invest_guide {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(list_rows), Constraint::Min(4)])
+            .split(area);
+        (chunks[0], Some(chunks[1]))
+    } else {
+        (area, None)
+    };
 
     // Find the best ROI (lowest payback time) among affordable producers, using synergy
     let best_payback = state
@@ -816,8 +848,6 @@ fn render_producers(
     let has_discount = state.active_discount > 0.0;
 
     let mut cl = ClickableList::new();
-
-    let visible_count = state.visible_producer_count();
 
     for (idx, p) in state.producers.iter().enumerate() {
         // Progressive disclosure: only show producers up to visible_count
@@ -993,7 +1023,7 @@ fn render_producers(
 
     // Register click targets (Borders::ALL → top=1, bottom=1)
     let mut cs = click_state.borrow_mut();
-    cl.register_targets(area, &mut cs, 1, 1, 0, 0);
+    cl.register_targets(list_area, &mut cs, 1, 1, 0, 0);
     drop(cs);
 
     let items: Vec<ListItem> = cl.into_lines().into_iter().map(ListItem::new).collect();
@@ -1003,6 +1033,89 @@ fn render_producers(
             .border_style(Style::default().fg(producer_border_color))
             .title(title),
     );
+    f.render_widget(widget, list_area);
+
+    if let Some(guide_area) = guide_area {
+        render_invest_guide(state, f, guide_area, is_narrow);
+    }
+}
+
+/// 開口の空洞を、投資判断の読み方で埋める。生産者を1台でも買うと消える。
+fn render_invest_guide(state: &CookieState, f: &mut Frame, area: Rect, is_narrow: bool) {
+    let next_name = state
+        .best_next_purchase()
+        .map(|g| g.name)
+        .unwrap_or_else(|| "生産者".into());
+    let lines: Vec<Line> = if is_narrow {
+        vec![
+            Line::from(Span::styled(
+                "◆=最高効率  ★=回収の早さ",
+                Style::default().fg(Color::Cyan),
+            )),
+            Line::from(Span::styled(
+                "1. CLICK! で貯める",
+                Style::default().fg(Color::White),
+            )),
+            Line::from(Span::styled(
+                format!("2. まず {next_name} を狙う"),
+                Style::default().fg(Color::Yellow),
+            )),
+            Line::from(Span::styled(
+                "3. 回収が早い方を優先",
+                Style::default().fg(Color::White),
+            )),
+            Line::from(Span::styled(
+                "Crash/Bear の相場は買い時",
+                Style::default().fg(Color::Green),
+            )),
+            Line::from(Span::styled(
+                "「今買うか貯めるか」が核",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]
+    } else {
+        vec![
+            Line::from(Span::styled(
+                "◆ = いま回収がいちばん早い投資先",
+                Style::default().fg(Color::Cyan),
+            )),
+            Line::from(Span::styled(
+                "★の数 = 回収速度の目安（多いほど早い）",
+                Style::default().fg(Color::Cyan),
+            )),
+            Line::from(Span::raw("")),
+            Line::from(Span::styled(
+                "1. CLICK! でクッキーを貯める",
+                Style::default().fg(Color::White),
+            )),
+            Line::from(Span::styled(
+                format!("2. 最初の目標は {next_name}"),
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "3. 同じ予算なら回収が早い方を優先",
+                Style::default().fg(Color::White),
+            )),
+            Line::from(Span::styled(
+                "4. 相場が Crash / Bear のときは買い時",
+                Style::default().fg(Color::Green),
+            )),
+            Line::from(Span::raw("")),
+            Line::from(Span::styled(
+                "「今この選択が正しいか？」がコアループ",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]
+    };
+
+    let widget = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(" 投資の手がかり "),
+        )
+        .wrap(Wrap { trim: false });
     f.render_widget(widget, area);
 }
 

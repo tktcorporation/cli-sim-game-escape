@@ -2,13 +2,14 @@
 
 mod cookie;
 mod everlight;
+mod factory;
 mod loopmarch;
 mod pachinko;
 
 use crate::critique::probe::Subject;
 
 pub fn all() -> Vec<Box<dyn Subject>> {
-    vec![cookie(), everlight(), pachinko(), loopmarch()]
+    vec![cookie(), everlight(), pachinko(), loopmarch(), factory()]
 }
 
 pub fn cookie() -> Box<dyn Subject> {
@@ -25,4 +26,8 @@ pub fn pachinko() -> Box<dyn Subject> {
 
 pub fn loopmarch() -> Box<dyn Subject> {
     Box::new(loopmarch::LoopMarchSubject::new())
+}
+
+pub fn factory() -> Box<dyn Subject> {
+    Box::new(factory::FactorySubject::new())
 }

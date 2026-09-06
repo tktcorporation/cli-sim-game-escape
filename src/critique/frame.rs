@@ -35,10 +35,37 @@ impl ScreenSnapshot {
         self.action_ids.binary_search(&action_id).is_ok()
     }
 
-    /// 画面に登録されたクリック対象のユニーク数。ChoiceLoad の入力。
-    pub fn distinct_action_count(&self) -> usize {
-        self.action_ids.len()
+    /// 画面に登録されたクリック対象のうち、「迷い度」として数える個数。
+    ///
+    /// 連続した ID 帯が長いもの（グリッド配置のマス群）は、マスごとに
+    /// 別のメニュー項目ではなく「盤面を1つ選ぶ」操作として 1 と数える。
+    /// レーン数程度（≤12）の短い連続は個別に数える。
+    pub fn semantic_choice_count(&self) -> usize {
+        semantic_choice_count(&self.action_ids)
     }
+}
+
+/// 連続 ID の長いランを 1 操作に畳む。
+pub(crate) fn semantic_choice_count(action_ids: &[u16]) -> usize {
+    if action_ids.is_empty() {
+        return 0;
+    }
+    let mut count = 0usize;
+    let mut i = 0usize;
+    while i < action_ids.len() {
+        let mut j = i + 1;
+        while j < action_ids.len() && action_ids[j] == action_ids[j - 1].saturating_add(1) {
+            j += 1;
+        }
+        let run = j - i;
+        if run > 12 {
+            count += 1;
+        } else {
+            count += run;
+        }
+        i = j;
+    }
+    count
 }
 
 /// `draw` に渡した描画を `TestBackend` へ落とし、文字とクリック対象を返す。

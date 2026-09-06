@@ -174,8 +174,9 @@ fn score_readable_density(screen: &ScreenSnapshot) -> MetricScore {
 
 fn score_choice_load(screen: &ScreenSnapshot) -> MetricScore {
     // probe の列挙数ではなく、画面に登録されたクリック対象数を見る。
-    // subject 作者が actions を絞っても、実画面の迷い度は変わらない。
-    let n = screen.distinct_action_count();
+    // ただしグリッド配置のような長い連続 ID 帯は「盤面を1つ選ぶ」に畳む。
+    let n = screen.semantic_choice_count();
+    let raw = screen.action_ids.len();
     let value = if n <= 8 {
         1.0
     } else if n >= 24 {
@@ -186,7 +187,11 @@ fn score_choice_load(screen: &ScreenSnapshot) -> MetricScore {
     MetricScore {
         kind: MetricKind::ChoiceLoad,
         value,
-        note: format!("{n} click targets on screen"),
+        note: if raw == n {
+            format!("{n} click targets on screen")
+        } else {
+            format!("{n} semantic choices ({raw} raw click targets)")
+        },
     }
 }
 
@@ -330,9 +335,30 @@ mod unit_tests {
     #[test]
     fn choice_load_uses_on_screen_targets() {
         let mut screen = empty_screen();
-        screen.action_ids = (1..=20).collect();
+        // メニュー的に散らばった ID（連続しない）が 20 個あるとき減点される。
+        screen.action_ids = (1..=20).map(|i| i * 3).collect();
         let score = score_choice_load(&screen);
         assert!(score.value < 1.0, "画面上の対象が多いのに choice=1.0");
         assert!(score.note.contains("20 click targets"));
+    }
+
+    #[test]
+    fn choice_load_collapses_long_grid_id_runs() {
+        let mut screen = empty_screen();
+        // ツール数個 + グリッド 280 マス相当 → semantic はツール+1
+        let mut ids: Vec<u16> = (1..=7).collect();
+        ids.extend(100..380);
+        screen.action_ids = ids;
+        let score = score_choice_load(&screen);
+        assert_eq!(
+            score.value, 1.0,
+            "グリッド帯を個別に数えて choice を潰してはいけない: {}",
+            score.note
+        );
+        assert!(
+            score.note.contains("semantic choices"),
+            "raw と semantic の差が note に出るべき: {}",
+            score.note
+        );
     }
 }

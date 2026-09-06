@@ -38,6 +38,64 @@ pub fn tick_n(state: &mut FactoryState, n: u32) {
     }
 }
 
+/// 盤面から「次に繋ぐべき一手」を返す。ヘッダーと critique の SSOT。
+pub fn next_build_goal(state: &FactoryState) -> String {
+    let mut miners = 0u32;
+    let mut belts = 0u32;
+    let mut smelters = 0u32;
+    let mut exporters = 0u32;
+    for row in &state.grid {
+        for cell in row {
+            match cell {
+                Cell::Machine(m) => match m.kind {
+                    MachineKind::Miner => miners += 1,
+                    MachineKind::Smelter => smelters += 1,
+                    MachineKind::Exporter => exporters += 1,
+                    _ => {}
+                },
+                Cell::Belt(_) => belts += 1,
+                _ => {}
+            }
+        }
+    }
+    if miners == 0 {
+        "次: Minerを設置".into()
+    } else if belts == 0 {
+        "次: 隣にベルトを設置".into()
+    } else if smelters == 0 {
+        "次: Smelterで精錬".into()
+    } else if exporters == 0 {
+        "次: Exporterで出荷".into()
+    } else if state.total_exported == 0 {
+        "次: ラインを繋いで出荷".into()
+    } else {
+        "流れを伸ばそう".into()
+    }
+}
+
+/// 配置ツールを選び、選択の手応えをログに残す。
+pub fn select_tool(state: &mut FactoryState, tool: PlacementTool) {
+    if state.tool == tool {
+        return;
+    }
+    state.tool = tool.clone();
+    let name = match tool {
+        PlacementTool::None => return,
+        PlacementTool::Miner => "Miner",
+        PlacementTool::Smelter => "Smelter",
+        PlacementTool::Assembler => "Assembler",
+        PlacementTool::Exporter => "Exporter",
+        PlacementTool::Fabricator => "Fabricator",
+        PlacementTool::Belt => "Belt",
+        PlacementTool::Delete => "Delete",
+    };
+    let hint = match tool {
+        PlacementTool::Delete => "撤去したいマスをタップ",
+        _ => "グリッドをタップで設置",
+    };
+    state.add_log(&format!("{name} を選択 — {hint}"));
+}
+
 /// 残像を 1 tick 分減衰させる。
 fn decay_trails(state: &mut FactoryState) {
     for row in &mut state.grid {
@@ -1027,6 +1085,24 @@ mod tests {
         assert!(place(&mut state));
         assert!(matches!(state.grid[2][3], Cell::Machine(_)));
         assert_eq!(state.money, 100 - 10); // Miner costs 10
+    }
+
+    #[test]
+    fn next_build_goal_starts_with_miner() {
+        let state = FactoryState::new();
+        assert_eq!(next_build_goal(&state), "次: Minerを設置");
+    }
+
+    #[test]
+    fn select_tool_logs_once_per_change() {
+        let mut state = FactoryState::new();
+        let before = state.log.len();
+        select_tool(&mut state, PlacementTool::Miner);
+        assert_eq!(state.tool, PlacementTool::Miner);
+        assert_eq!(state.log.len(), before + 1);
+        assert!(state.log.last().unwrap().contains("Miner を選択"));
+        select_tool(&mut state, PlacementTool::Miner);
+        assert_eq!(state.log.len(), before + 1, "同じツール再選択はログしない");
     }
 
     #[test]

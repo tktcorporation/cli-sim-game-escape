@@ -2,10 +2,14 @@
 
 use crate::critique::frame::{capture_frame, ScreenSnapshot};
 use crate::critique::probe::{ActionFact, ProbeFacts, Subject};
-use crate::games::loopmarch::actions::{CAMP_START_OR_RESUME, HAND_CLICK_BASE, PATH_CLICK_BASE};
+use crate::games::loopmarch::actions::{
+    CAMP_START_OR_RESUME, HAND_CLICK_BASE, PATH_CLICK_BASE, REFILL_HAND,
+};
 use crate::games::loopmarch::logic;
 use crate::games::loopmarch::render;
-use crate::games::loopmarch::state::{LoopMarchState, Phase};
+use crate::games::loopmarch::state::{
+    LoopMarchState, Phase, REFILL_STONE_COST, REFILL_WOOD_COST,
+};
 
 pub struct LoopMarchSubject {
     state: LoopMarchState,
@@ -42,6 +46,13 @@ impl Subject for LoopMarchSubject {
                 recent_feedback: self.state.log.iter().rev().take(3).cloned().collect(),
             },
             Phase::Expedition => {
+                let hand_cards = self.state.hand.iter().filter(|c| c.is_some()).count();
+                let tiles = self
+                    .state
+                    .path
+                    .iter()
+                    .filter(|s| s.terrain.is_some())
+                    .count();
                 let mut actions = Vec::new();
                 if let Some(idx) = self.state.selected_hand {
                     actions.push(ActionFact {
@@ -80,6 +91,15 @@ impl Subject for LoopMarchSubject {
                         ("wood".into(), self.state.wood as f64),
                         ("stone".into(), self.state.stone as f64),
                         ("soul".into(), self.state.soul as f64),
+                        ("hand_cards".into(), hand_cards as f64),
+                        ("tiles".into(), tiles as f64),
+                        (
+                            "selected".into(),
+                            self.state
+                                .selected_hand
+                                .map(|i| i as f64 + 1.0)
+                                .unwrap_or(0.0),
+                        ),
                     ],
                     recent_feedback: self.state.log.iter().rev().take(3).cloned().collect(),
                 }
@@ -102,6 +122,9 @@ impl Subject for LoopMarchSubject {
             logic::start_or_resume_expedition(&mut self.state);
             return true;
         }
+        if action_id == REFILL_HAND {
+            return logic::refill_hand(&mut self.state);
+        }
         if (HAND_CLICK_BASE..HAND_CLICK_BASE + 4).contains(&action_id) {
             let idx = (action_id - HAND_CLICK_BASE) as usize;
             if self.state.hand.get(idx).is_some_and(|c| c.is_some()) {
@@ -122,22 +145,29 @@ impl Subject for LoopMarchSubject {
             Phase::Camp => Some(CAMP_START_OR_RESUME),
             Phase::Expedition => {
                 if self.state.selected_hand.is_none() {
-                    self.state
+                    if let Some((i, _)) = self
+                        .state
                         .hand
                         .iter()
                         .enumerate()
                         .find(|(_, c)| c.is_some())
-                        .map(|(i, _)| HAND_CLICK_BASE + i as u16)
-                } else {
-                    // 空きマスへ置く。無ければ先頭。
-                    let slot = self
-                        .state
-                        .path
-                        .iter()
-                        .position(|s| s.terrain.is_none())
-                        .unwrap_or(0);
-                    Some(PATH_CLICK_BASE + slot as u16)
+                    {
+                        return Some(HAND_CLICK_BASE + i as u16);
+                    }
+                    // 手札が空なら補充を試す（資源が足りなければセッション終了）
+                    if self.state.wood >= REFILL_WOOD_COST && self.state.stone >= REFILL_STONE_COST {
+                        return Some(REFILL_HAND);
+                    }
+                    return None;
                 }
+                // 空きマスへ置く。無ければ先頭。
+                let slot = self
+                    .state
+                    .path
+                    .iter()
+                    .position(|s| s.terrain.is_none())
+                    .unwrap_or(0);
+                Some(PATH_CLICK_BASE + slot as u16)
             }
         }
     }

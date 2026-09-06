@@ -159,6 +159,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cookie_opening_density_is_not_a_sparse_cavern() {
+        // 投資ヒントとレイアウト契約で開口の空洞を埋めた設計なので、
+        // density が帯の下限 (0.25 occupancy → 1.0) 付近まで落ちるのは退行。
+        let mut subject = subjects::cookie();
+        let report = run_session(subject.as_mut(), &SessionConfig::opening_only());
+        let density = report
+            .opening
+            .iter()
+            .find(|s| s.kind == MetricKind::ReadableDensity)
+            .expect("ReadableDensity が無い");
+        assert!(
+            density.value >= 0.85,
+            "Cookie 開口がスカスカ: {} ({})",
+            density.value,
+            density.note
+        );
+    }
+
+    #[test]
+    fn factory_opening_shows_miner_build_goal() {
+        let mut subject = subjects::factory();
+        let report = run_session(subject.as_mut(), &SessionConfig::opening_only());
+        let goal = report
+            .opening
+            .iter()
+            .find(|s| s.kind == MetricKind::GoalVisibility)
+            .expect("GoalVisibility が無い");
+        assert!(
+            goal.value >= 0.99,
+            "Factory 開口で次の設置目標が見えていない: {} ({})",
+            goal.value,
+            goal.note
+        );
+        let afford = report
+            .opening
+            .iter()
+            .find(|s| s.kind == MetricKind::AffordanceCoverage)
+            .expect("AffordanceCoverage が無い");
+        assert!(
+            afford.value >= 0.99,
+            "Factory 開口で Miner 選択が辿れない: {} ({})",
+            afford.value,
+            afford.note
+        );
+    }
+
+    #[test]
+    fn everlight_and_loopmarch_session_feedback_stays_responsive() {
+        // レーン移動・手札選択にログ/進捗を足した設計の退行検知。
+        for mut subject in [subjects::everlight(), subjects::loopmarch()] {
+            let name = subject.name();
+            let report = run_session(subject.as_mut(), &SessionConfig::ci_default());
+            let feedback = report
+                .session
+                .iter()
+                .find(|s| s.kind == MetricKind::FeedbackResponsiveness)
+                .expect("FeedbackResponsiveness が無い");
+            assert!(
+                feedback.value >= 0.9,
+                "{name} の操作フィードバックが薄い: {} ({})",
+                feedback.value,
+                feedback.note
+            );
+        }
+    }
+
     /// 画面全文 + スコア内訳。人間が「なんで低い？」を追う出口。
     ///
     /// `cargo test --lib critique::tests::dump_critique_frames -- --ignored --nocapture`
