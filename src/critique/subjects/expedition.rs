@@ -119,7 +119,7 @@ impl Subject for ExpeditionSubject {
 
     fn apply_action(&mut self, action_id: u16) -> bool {
         match action_id {
-            START_FORMING => logic::begin_forming(&mut self.state),
+            START_FORMING => logic::primary_depart(&mut self.state),
             CANCEL_FORMING => logic::cancel_forming(&mut self.state),
             LAUNCH => logic::launch_sortie(&mut self.state, false),
             LAUNCH_WITH_SCOUT => logic::launch_sortie(&mut self.state, true),

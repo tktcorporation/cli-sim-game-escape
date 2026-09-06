@@ -141,8 +141,23 @@ pub fn cancel_forming(state: &mut ExpeditionState) -> bool {
     true
 }
 
+pub fn primary_depart(state: &mut ExpeditionState) -> bool {
+    if state.screen != Screen::Camp {
+        return false;
+    }
+    if state.rations == 0 {
+        state.push_log("行軍糧が足りない。");
+        return false;
+    }
+    if state.forming_count() != PARTY_SIZE {
+        return begin_forming(state);
+    }
+    // 拠点の主ボタンはワンタップ出撃。編成は副次操作。
+    launch_sortie(state, false)
+}
+
 pub fn launch_sortie(state: &mut ExpeditionState, use_scout: bool) -> bool {
-    if state.screen != Screen::Forming {
+    if !matches!(state.screen, Screen::Forming | Screen::Camp) {
         return false;
     }
     if state.forming_count() != PARTY_SIZE {
@@ -457,6 +472,24 @@ pub fn acknowledge_result(state: &mut ExpeditionState) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_depart_launches_from_camp_when_party_ready() {
+        let mut state = ExpeditionState::new();
+        assert!(state.rations > 0);
+        assert_eq!(state.forming_count(), PARTY_SIZE);
+        assert!(primary_depart(&mut state));
+        assert_eq!(state.screen, Screen::Running);
+        assert!(state.sortie.is_some());
+    }
+
+    #[test]
+    fn primary_depart_without_rations_stays_in_camp() {
+        let mut state = ExpeditionState::new();
+        state.rations = 0;
+        assert!(!primary_depart(&mut state));
+        assert_eq!(state.screen, Screen::Camp);
+    }
     use crate::games::expedition::state::BASE_RATION_CAP;
 
     #[test]

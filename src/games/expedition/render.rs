@@ -1,7 +1,7 @@
 //! 遠征団の描画。
 //!
 //! 常設シェル（上部 HUD + 下部タブバー）の上に拠点本文や遠征シートを載せる。
-//! 端末セルでもネイティブ放置ゲーに近い階層・タップ面積・状態の見え方を狙う。
+//! ループは説明文ではなく、行き先・メンバー・主ボタンのビジュアルで伝える。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -19,9 +19,9 @@ use crate::widgets::{Clickable, TabBar};
 
 use super::actions::{
     toggle_hero_id, ACK_RESULT, CANCEL_FORMING, CHOICE_PUSH, CHOICE_REST, LAUNCH,
-    LAUNCH_WITH_SCOUT, START_FORMING, TAB_CAMP, TAB_ROSTER,
+    LAUNCH_WITH_SCOUT, OPEN_FORMING, START_FORMING, TAB_CAMP, TAB_ROSTER,
 };
-use super::state::{ExpeditionState, HubTab, Screen, PARTY_SIZE};
+use super::state::{ExpeditionState, HubTab, Screen, BASE_NODES, PARTY_SIZE};
 
 fn accent() -> Color {
     theme::accent(&GameChoice::Expedition)
@@ -207,11 +207,11 @@ fn hp_bar(hp: i32, max_hp: i32) -> String {
 fn render_roster(state: &ExpeditionState, f: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
-        "団員一覧 — 絆は遠征の結果でのみ育つ",
+        "団員一覧",
         goal_style(),
     )));
     lines.push(Line::from(Span::styled(
-        " 役割: 盾=耐久 / 刃=火力 / 癒=回復",
+        " 盾 耐久 · 刃 火力 · 癒 回復",
         muted(),
     )));
     lines.push(Line::from(""));
@@ -243,10 +243,6 @@ fn render_roster(state: &ExpeditionState, f: &mut Frame, area: Rect) {
             muted(),
         )));
     }
-    lines.push(Line::from(Span::styled(
-        "遠征に出すときは「拠点」タブへ。",
-        label_style(),
-    )));
     let body = Paragraph::new(lines).block(
         Block::default()
             .borders(Borders::ALL)
@@ -262,105 +258,125 @@ fn render_camp(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
-    // 本文 + フル幅プライマリ CTA（ネイティブの bottom sheet button）
+    // 説明でループを説かない。行き先・メンバー・主ボタンだけで状況が読めること。
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(8), Constraint::Length(3)])
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Min(5),
+            Constraint::Length(3),
+        ])
         .split(area);
 
-    // 24行端末でも「目標・CTA・団員全員」が同時に見える密度にする。
-    // ネイティブ放置ゲーのホームは説明文より状態と主ボタンが先に来る。
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(vec![
-        Span::styled(
-            " 遠征団 ",
+    let mid = if BASE_NODES > 2 {
+        "─○".repeat((BASE_NODES - 2) as usize)
+    } else {
+        String::new()
+    };
+    let road = format!("●{mid}─◎");
+    let dest = Paragraph::new(vec![
+        Line::from(Span::styled(
+            format!(" 第{}層", state.best_depth),
             Style::default().fg(accent()).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "糧がたまる → 遠征する → 絆が育つ",
-            Style::default().fg(Color::Gray),
-        ),
-    ]));
-    lines.push(Line::from(Span::styled(
-        next_goal_line(state),
-        goal_style(),
-    )));
-    lines.push(Line::from(vec![
-        Span::styled(" 突破目標 ", Style::default().fg(Color::Yellow)),
-        Span::styled(
-            format!("第{}層", state.best_depth),
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" （クリアすると団が強くなる）", muted()),
-    ]));
-    lines.push(Line::from(Span::styled(
-        " ※放置では戦力は上がらない。貯まるのは出撃用の糧だけ。",
-        muted(),
-    )));
-    lines.push(Line::from(vec![
-        Span::styled(" やること ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw("貯める → 3人で出発 → 分かれ道 → 絆"),
-    ]));
-    lines.push(section_title("控えの団員"));
-    for h in &state.roster {
-        lines.push(Line::from(format!(
-            " [{}]{} 絆{}  力{}  {}",
-            h.role.label(),
-            h.name,
-            h.bond,
-            h.atk(),
-            hp_bar(h.hp, h.max_hp)
-        )));
-    }
-    if !state.log.is_empty() {
-        lines.push(Line::from(Span::styled(
-            format!(
-                " 最近 · {}",
-                state.log.iter().rev().take(2).cloned().rev().collect::<Vec<_>>().join(" / ")
-            ),
-            muted(),
-        )));
-    }
-    let body = Paragraph::new(lines).block(
+        )),
+        Line::from(Span::styled(
+            format!(" {road}"),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(" 突破すると団が強くなる", muted())),
+    ])
+    .block(
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray))
-            .title("拠点"),
+            .title("行き先"),
     );
-    f.render_widget(body, chunks[0]);
+    f.render_widget(dest, chunks[0]);
 
-    let (label, style) = if state.rations == 0 {
+    let mut party_lines: Vec<Line> = Vec::new();
+    party_lines.push(Line::from(Span::styled(
+        " 出撃メンバー",
+        Style::default().fg(Color::Gray),
+    )));
+    for slot in &state.forming {
+        match slot {
+            Some(id) => {
+                if let Some(h) = state.hero(*id) {
+                    party_lines.push(Line::from(vec![
+                        Span::styled(
+                            format!(" [{}]", h.role.label()),
+                            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("{} ", h.name),
+                            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            format!("絆{} ", h.bond),
+                            Style::default().fg(Color::LightYellow),
+                        ),
+                        Span::styled(
+                            hp_bar(h.hp, h.max_hp),
+                            Style::default().fg(Color::LightGreen),
+                        ),
+                    ]));
+                }
+            }
+            None => {
+                party_lines.push(Line::from(Span::styled(
+                    " [?] 未選択",
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+    }
+    let party = Paragraph::new(party_lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title(" 編成 "),
+    );
+    Clickable::new(party, OPEN_FORMING).render(f, chunks[1], &mut click_state.borrow_mut());
+
+    let party_ready = state.forming_count() == PARTY_SIZE;
+    let (label, style, border, action) = if state.rations == 0 {
         (
-            "糧が貯まるまで待つ",
+            format!("行軍糧 回復中 {}", ration_fill_bar(state)),
             Style::default().fg(Color::DarkGray),
+            Color::DarkGray,
+            START_FORMING,
+        )
+    } else if !party_ready {
+        (
+            "メンバーを選ぶ".into(),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+            Color::Yellow,
+            OPEN_FORMING,
         )
     } else {
         (
-            "▶ 遠征に出る",
+            "▶ 遠征に出る".into(),
             Style::default()
                 .fg(Color::Black)
                 .bg(accent())
                 .add_modifier(Modifier::BOLD),
+            accent(),
+            START_FORMING,
         )
     };
-    // フル幅の主ボタン。左右に余白を置かず、ネイティブの primary CTA と同じ存在感にする。
-    let cta = Paragraph::new(Line::from(Span::styled(
-        format!(" {label} "),
-        style,
-    )))
-    .alignment(Alignment::Center)
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(if state.rations == 0 {
-                Color::DarkGray
-            } else {
-                accent()
-            })),
-    );
-    // 糧0でもタップ可能にして、logic 側のログで理由を返す（押した反応を残す）。
-    Clickable::new(cta, START_FORMING).render(f, chunks[1], &mut click_state.borrow_mut());
+    let cta = Paragraph::new(Line::from(Span::styled(format!(" {label} "), style)))
+        .alignment(Alignment::Center)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(border)),
+        );
+    Clickable::new(cta, action).render(f, chunks[2], &mut click_state.borrow_mut());
 }
+
 
 fn ration_fill_bar(state: &ExpeditionState) -> String {
     if state.rations >= state.ration_cap() {
@@ -728,34 +744,29 @@ mod tests {
     }
 
     #[test]
-    fn camp_shows_loop_goal_and_primary_cta() {
+    fn camp_shows_destination_party_and_primary_cta() {
         let state = ExpeditionState::new();
         let text = draw_text(&state);
-        assert!(text.contains("遠征団"), "{text}");
-        assert!(text.contains("糧がたまる"), "{text}");
-        assert!(text.contains("行軍糧"), "{text}");
-        assert!(text.contains("次: 遠征に出る"), "{text}");
+        assert!(text.contains("行き先"), "{text}");
+        assert!(text.contains("第1層"), "{text}");
+        assert!(text.contains("出撃メンバー"), "{text}");
         assert!(text.contains("遠征に出る"), "{text}");
-        assert!(text.contains("やること"), "{text}");
-        assert!(text.contains("突破目標"), "{text}");
-        assert!(
-            text.contains("放置では戦力は上がらない"),
-            "{text}"
-        );
-            // 24行でも控え団員が欠けないこと（ネイティブホーム相当の情報密度）
+        assert!(text.contains("行軍糧"), "{text}");
+        assert!(!text.contains("やること"), "{text}");
+        assert!(!text.contains("放置では戦力は上がらない"), "{text}");
         assert!(text.contains("灰"), "{text}");
         assert!(text.contains("焔"), "{text}");
         assert!(text.contains("雫"), "{text}");
-        assert!(text.contains("嵐"), "{text}");
     }
 
     #[test]
-    fn camp_without_rations_tells_player_to_wait() {
+    fn camp_without_rations_shows_recovery_on_primary() {
         let mut state = ExpeditionState::new();
         state.rations = 0;
         let text = draw_text(&state);
-        assert!(text.contains("行軍糧（出撃燃料）が貯まるのを待つ"), "{text}");
-        assert!(text.contains("糧が貯まるまで待つ"), "{text}");
+        assert!(text.contains("行軍糧"), "{text}");
+        assert!(text.contains("回復中"), "{text}");
+        assert!(!text.contains("▶ 遠征に出る"), "{text}");
     }
 
     #[test]

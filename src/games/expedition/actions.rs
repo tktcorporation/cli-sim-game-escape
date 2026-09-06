@@ -7,6 +7,7 @@ pub const LAUNCH_WITH_SCOUT: u16 = 4;
 pub const CHOICE_REST: u16 = 5;
 pub const CHOICE_PUSH: u16 = 6;
 pub const ACK_RESULT: u16 = 7;
+pub const OPEN_FORMING: u16 = 8;
 pub const TAB_CAMP: u16 = 10;
 pub const TAB_ROSTER: u16 = 11;
 pub const TOGGLE_HERO_BASE: u16 = 20;

@@ -25,7 +25,7 @@ use crate::input::{ClickScope, ClickState, InputEvent};
 
 use actions::{
     hero_id_from_toggle, ACK_RESULT, CANCEL_FORMING, CHOICE_PUSH, CHOICE_REST, LAUNCH,
-    LAUNCH_WITH_SCOUT, START_FORMING, TAB_CAMP, TAB_ROSTER,
+    LAUNCH_WITH_SCOUT, OPEN_FORMING, START_FORMING, TAB_CAMP, TAB_ROSTER,
 };
 use state::{ExpeditionState, HubTab, Screen};
 
@@ -62,7 +62,8 @@ impl ExpeditionGame {
             return logic::toggle_forming_hero(&mut self.state, hero_id);
         }
         match id {
-            START_FORMING => logic::begin_forming(&mut self.state),
+            START_FORMING => logic::primary_depart(&mut self.state),
+            OPEN_FORMING => logic::begin_forming(&mut self.state),
             CANCEL_FORMING => logic::cancel_forming(&mut self.state),
             LAUNCH => logic::launch_sortie(&mut self.state, false),
             LAUNCH_WITH_SCOUT => logic::launch_sortie(&mut self.state, true),
@@ -77,7 +78,8 @@ impl ExpeditionGame {
 
     fn handle_key(&mut self, key: char) -> bool {
         match (self.state.screen, key) {
-            (Screen::Camp, ' ' | 'e' | 'E') => logic::begin_forming(&mut self.state),
+            (Screen::Camp, ' ' | 'e' | 'E') => logic::primary_depart(&mut self.state),
+            (Screen::Camp, 'f' | 'F') => logic::begin_forming(&mut self.state),
             (Screen::Forming, ' ') => logic::launch_sortie(&mut self.state, false),
             (Screen::Forming, 's' | 'S') => logic::launch_sortie(&mut self.state, true),
             (Screen::Forming, 'q' | 'Q' | 'b' | 'B') => logic::cancel_forming(&mut self.state),
@@ -148,6 +150,13 @@ mod tests {
     fn camp_start_via_key() {
         let mut game = ExpeditionGame::new();
         assert!(game.handle_input(&InputEvent::Key('e')));
+        assert_eq!(game.state.screen, Screen::Running);
+    }
+
+    #[test]
+    fn camp_open_forming_via_key() {
+        let mut game = ExpeditionGame::new();
+        assert!(game.handle_input(&InputEvent::Key('f')));
         assert_eq!(game.state.screen, Screen::Forming);
     }
 
