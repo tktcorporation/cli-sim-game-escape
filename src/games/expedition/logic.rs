@@ -523,7 +523,7 @@ mod tests {
         assert_eq!(state.ration_cap(), BASE_RATION_CAP);
     }
 
-        #[test]
+    #[test]
     fn auto_run_reaches_result_without_manual_choice() {
         let mut state = ExpeditionState::new();
         state.rations = 3;
