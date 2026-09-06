@@ -34,7 +34,7 @@ cargo test --lib critique::tests::dump_critique_frames -- --ignored --nocapture
 | choice | 選択肢が多すぎて迷う |
 | momentum | 進んでる実感が無い |
 
-接続済み: cookie / everlight / pachinko / loopmarch / factory
+接続済み: cookie / everlight / pachinko / loopmarch / factory / expedition
 
 `goal` で probe に `next_goal` が無いゲームは 1.0（未設計）扱い。目標行を
 画面に出す設計なら subject が `next_goal` を埋め、退行で fail させる

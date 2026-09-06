@@ -414,7 +414,9 @@ fn clear_sortie(state: &mut ExpeditionState) {
     if depth >= state.best_depth {
         state.best_depth = depth + 1;
     }
-    state.result_summary = format!("第{depth}層クリア。絆+{bond}（参加者全員）");
+    state.result_summary = format!(
+        "第{depth}層クリア！ 参加者の絆+{bond}\n（絆が上がると力と体力が伸び、糧の回復も少し速くなる）"
+    );
     state.sortie = None;
     state.screen = Screen::Result;
     state.push_log(state.result_summary.clone());
@@ -431,7 +433,8 @@ fn fail_sortie(state: &mut ExpeditionState) {
             }
         }
     }
-    state.result_summary = format!("第{depth}層で敗退。僅かな絆だけ持ち帰った。");
+    state.result_summary =
+        format!("第{depth}層で敗退。持ち帰れた絆はわずかに+1。\n次は編成を変えるか、下調べして再挑戦。");
     state.sortie = None;
     state.screen = Screen::Result;
     state.push_log(state.result_summary.clone());

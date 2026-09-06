@@ -654,7 +654,7 @@ fn render_menu(
         ('8', "常夜灯", "降り注ぐ魔物から灯を守る縦画面バレットヘヴン", MENU_SELECT_EVERLIGHT, '▶', theme::accent(&GameChoice::Everlight)),
         ('9', "星環", "上空から降る鉱石を公転武装で刈り取る放置採掘", MENU_SELECT_STARRINGE, '▶', theme::accent(&GameChoice::StarRing)),
         ('0', "玉響", "釘を読んで台を選び玉の行方に祈るパチンコホール", MENU_SELECT_PACHINKO, '▶', theme::accent(&GameChoice::Pachinko)),
-        ('=', "遠征団", "行軍糧を貯めて短い遠征へ出し、結果でのみ絆が育つ", MENU_SELECT_EXPEDITION, '▶', theme::accent(&GameChoice::Expedition)),
+        ('=', "遠征団", "糧がたまる→短い遠征→絆だけ育つ。放置では強くならない", MENU_SELECT_EXPEDITION, '▶', theme::accent(&GameChoice::Expedition)),
         ('-', "設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 
