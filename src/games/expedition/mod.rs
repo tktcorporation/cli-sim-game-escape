@@ -1,0 +1,158 @@
+//! 遠征団 — 行軍糧を貯めて短い遠征へ出し、結果でのみ絆が育つ。
+//!
+//! コアループ:
+//! 1. 拠点で行軍糧（と下調べメモ）が自然回復する
+//! 2. 3人を編成して出撃し、オート戦闘の遠征ランを進める
+//! 3. 道中で「休む / 突っ込む」を選び、クリア報酬の絆だけが永続成長になる
+
+pub mod actions;
+pub mod logic;
+pub mod render;
+pub mod save;
+pub mod state;
+
+#[cfg(test)]
+mod simulator;
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use ratzilla::ratatui::layout::Rect;
+use ratzilla::ratatui::Frame;
+
+use crate::games::{Game, GameChoice};
+use crate::input::{ClickScope, ClickState, InputEvent};
+
+use actions::{
+    hero_id_from_toggle, ACK_RESULT, CANCEL_FORMING, CHOICE_PUSH, CHOICE_REST, LAUNCH,
+    LAUNCH_WITH_SCOUT, START_FORMING,
+};
+use state::{ExpeditionState, Screen};
+
+pub struct ExpeditionGame {
+    pub state: ExpeditionState,
+    save_countdown: u32,
+}
+
+impl Default for ExpeditionGame {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ExpeditionGame {
+    pub fn new() -> Self {
+        #[allow(unused_mut)]
+        let mut state = ExpeditionState::new();
+        #[cfg(target_arch = "wasm32")]
+        {
+            save::load_game(&mut state);
+            if let Some(now) = crate::time::now_ms() {
+                state.last_wall_ms = now as u64;
+            }
+        }
+        Self {
+            state,
+            save_countdown: save::AUTOSAVE_INTERVAL,
+        }
+    }
+
+    fn handle_action(&mut self, id: u16) -> bool {
+        if let Some(hero_id) = hero_id_from_toggle(id) {
+            return logic::toggle_forming_hero(&mut self.state, hero_id);
+        }
+        match id {
+            START_FORMING => logic::begin_forming(&mut self.state),
+            CANCEL_FORMING => logic::cancel_forming(&mut self.state),
+            LAUNCH => logic::launch_sortie(&mut self.state, false),
+            LAUNCH_WITH_SCOUT => logic::launch_sortie(&mut self.state, true),
+            CHOICE_REST => logic::choose_rest(&mut self.state),
+            CHOICE_PUSH => logic::choose_push(&mut self.state),
+            ACK_RESULT => logic::acknowledge_result(&mut self.state),
+            _ => false,
+        }
+    }
+
+    fn handle_key(&mut self, key: char) -> bool {
+        match (self.state.screen, key) {
+            (Screen::Camp, ' ' | 'e' | 'E') => logic::begin_forming(&mut self.state),
+            (Screen::Forming, ' ') => logic::launch_sortie(&mut self.state, false),
+            (Screen::Forming, 's' | 'S') => logic::launch_sortie(&mut self.state, true),
+            (Screen::Forming, 'q' | 'Q' | 'b' | 'B') => logic::cancel_forming(&mut self.state),
+            (Screen::Forming, '1'..='4') => {
+                let id = key as u8 - b'1';
+                logic::toggle_forming_hero(&mut self.state, id)
+            }
+            (Screen::Choice, 'r' | 'R' | '1') => logic::choose_rest(&mut self.state),
+            (Screen::Choice, 'p' | 'P' | '2') => logic::choose_push(&mut self.state),
+            (Screen::Result, ' ' | '\n') => logic::acknowledge_result(&mut self.state),
+            _ => false,
+        }
+    }
+}
+
+impl Game for ExpeditionGame {
+    fn choice(&self) -> GameChoice {
+        GameChoice::Expedition
+    }
+
+    fn handle_input(&mut self, event: &InputEvent) -> bool {
+        match event {
+            InputEvent::Key(k) => self.handle_key(*k),
+            InputEvent::Click(ClickScope::Game(GameChoice::Expedition), id) => {
+                self.handle_action(*id)
+            }
+            _ => false,
+        }
+    }
+
+    fn tick(&mut self, delta_ticks: u32) {
+        logic::tick(&mut self.state, delta_ticks);
+        self.save_countdown = self.save_countdown.saturating_sub(delta_ticks);
+        if self.save_countdown == 0 {
+            #[cfg(target_arch = "wasm32")]
+            {
+                if let Some(now) = crate::time::now_ms() {
+                    self.state.last_wall_ms = now as u64;
+                }
+                save::save_game(&self.state);
+            }
+            self.save_countdown = save::AUTOSAVE_INTERVAL;
+        }
+    }
+
+    fn on_leave(&mut self) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            if let Some(now) = crate::time::now_ms() {
+                self.state.last_wall_ms = now as u64;
+            }
+            save::save_game(&self.state);
+        }
+    }
+
+    fn render(&self, f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
+        render::render(&self.state, f, area, click_state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn camp_start_via_key() {
+        let mut game = ExpeditionGame::new();
+        assert!(game.handle_input(&InputEvent::Key('e')));
+        assert_eq!(game.state.screen, Screen::Forming);
+    }
+
+    #[test]
+    fn tick_regenerates_rations() {
+        let mut game = ExpeditionGame::new();
+        game.state.rations = 0;
+        let need = game.state.ration_regen_ticks();
+        game.tick(need);
+        assert!(game.state.rations >= 1);
+    }
+}
