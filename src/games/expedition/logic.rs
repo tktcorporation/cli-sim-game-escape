@@ -48,8 +48,6 @@ fn scout_hint_for(enemy_name: &str) -> &'static str {
 fn node_kind_at(nodes_total: u32, node_index: u32) -> NodeKind {
     if node_index + 1 >= nodes_total {
         NodeKind::Boss
-    } else if node_index == nodes_total / 2 {
-        NodeKind::Choice
     } else {
         NodeKind::Battle
     }
@@ -202,7 +200,7 @@ pub fn launch_sortie(state: &mut ExpeditionState, use_scout: bool) -> bool {
         enemy: Some(enemy),
         used_scout,
         scout_hint: hint,
-        pending_choice: false,
+        aid_ready: true,
         combat_tick: 0,
         bond_gained: 0,
     });
@@ -224,7 +222,7 @@ fn tick_combat(state: &mut ExpeditionState) {
     let Some(sortie) = state.sortie.as_mut() else {
         return;
     };
-    if sortie.pending_choice || sortie.enemy.is_none() {
+    if sortie.enemy.is_none() {
         return;
     }
     sortie.combat_tick += 1;
@@ -328,89 +326,79 @@ fn advance_after_battle(state: &mut ExpeditionState) {
         clear_sortie(state);
         return;
     }
-    match node_kind_at(sortie.nodes_total, sortie.node_index) {
-        NodeKind::Choice => {
-            sortie.pending_choice = true;
-            state.screen = Screen::Choice;
-            state.push_log("分かれ道。休むか、突っ込むか。");
-        }
-        kind @ (NodeKind::Battle | NodeKind::Boss) => {
-            let is_boss = kind == NodeKind::Boss;
-            let depth = sortie.depth;
-            let node = sortie.node_index;
-            let enemy = enemy_for_depth(depth, node, is_boss);
-            if sortie.used_scout {
-                sortie.scout_hint = Some(scout_hint_for(enemy.name));
-            }
-            sortie.enemy = Some(enemy);
-            sortie.combat_tick = 0;
-            state.screen = Screen::Running;
-            if is_boss {
-                state.push_log("奥の気配が近い。");
-            }
-        }
-    }
-}
-
-pub fn choose_rest(state: &mut ExpeditionState) -> bool {
-    if state.screen != Screen::Choice {
-        return false;
-    }
-    let Some(sortie) = state.sortie.as_mut() else {
-        return false;
-    };
-    if !sortie.pending_choice {
-        return false;
-    }
-    let party = sortie.party;
-    sortie.pending_choice = false;
-    for id in party {
-        if let Some(h) = state.hero_mut(id) {
-            h.hp = (h.hp + h.max_hp / 2).min(h.max_hp);
-        }
-    }
-    state.push_log("焚き火で傷を癒した。");
-
-    let Some(sortie) = state.sortie.as_mut() else {
-        return true;
-    };
-    let depth = sortie.depth;
-    sortie.node_index += 1;
-    if sortie.node_index >= sortie.nodes_total {
-        clear_sortie(state);
-        return true;
-    }
-    let is_boss = node_kind_at(sortie.nodes_total, sortie.node_index) == NodeKind::Boss;
-    let enemy = enemy_for_depth(depth, sortie.node_index, is_boss);
-    sortie.enemy = Some(enemy);
-    sortie.combat_tick = 0;
-    state.screen = Screen::Running;
-    true
-}
-
-pub fn choose_push(state: &mut ExpeditionState) -> bool {
-    if state.screen != Screen::Choice {
-        return false;
-    }
-    let Some(sortie) = state.sortie.as_mut() else {
-        return false;
-    };
-    if !sortie.pending_choice {
-        return false;
-    }
-    sortie.pending_choice = false;
+    let kind = node_kind_at(sortie.nodes_total, sortie.node_index);
+    let is_boss = kind == NodeKind::Boss;
     let depth = sortie.depth;
     let node = sortie.node_index;
-    let mut enemy = enemy_for_depth(depth, node, false);
-    enemy.hp = enemy.hp * 3 / 2;
-    enemy.max_hp = enemy.hp;
-    enemy.atk += 2;
-    enemy.name = "欲深き番人";
+    let enemy = enemy_for_depth(depth, node, is_boss);
+    if sortie.used_scout {
+        sortie.scout_hint = Some(scout_hint_for(enemy.name));
+    }
     sortie.enemy = Some(enemy);
-    sortie.bond_gained += 2;
     sortie.combat_tick = 0;
     state.screen = Screen::Running;
-    state.push_log("欲を出して踏み込んだ。");
+    if is_boss {
+        state.push_log("奥の気配が近い。");
+    }
+}
+
+/// 遠征中の任意操作。回復＋追い打ち。使わなくてもランは自動完走する。
+pub fn use_aid(state: &mut ExpeditionState) -> bool {
+    if state.screen != Screen::Running {
+        return false;
+    }
+    let Some(sortie) = state.sortie.as_mut() else {
+        return false;
+    };
+    if !sortie.aid_ready || sortie.enemy.is_none() {
+        return false;
+    }
+    sortie.aid_ready = false;
+    let party = sortie.party;
+    let depth = sortie.depth;
+
+    for id in party {
+        if let Some(h) = state.hero_mut(id) {
+            if h.hp > 0 {
+                h.hp = (h.hp + h.max_hp / 2).min(h.max_hp);
+            }
+        }
+    }
+
+    let mut burst = 0;
+    for id in party {
+        if let Some(h) = state.hero(id) {
+            if h.hp > 0 {
+                burst += h.atk().max(1);
+            }
+        }
+    }
+    burst *= 2;
+    if let Some(enemy) = state.sortie.as_mut().and_then(|s| s.enemy.as_mut()) {
+        enemy.hp -= burst;
+    }
+    state.push_log("援護！ 傷を癒し、追い打ちした。");
+
+    let enemy_dead = state
+        .sortie
+        .as_ref()
+        .and_then(|s| s.enemy.as_ref())
+        .map(|e| e.hp <= 0)
+        .unwrap_or(false);
+    if enemy_dead {
+        let name = state
+            .sortie
+            .as_ref()
+            .and_then(|s| s.enemy.as_ref())
+            .map(|e| e.name)
+            .unwrap_or("敵");
+        state.push_log(format!("{name}を倒した。"));
+        if let Some(s) = state.sortie.as_mut() {
+            s.enemy = None;
+            s.bond_gained += 1 + depth / 3;
+        }
+        advance_after_battle(state);
+    }
     true
 }
 
@@ -535,8 +523,24 @@ mod tests {
         assert_eq!(state.ration_cap(), BASE_RATION_CAP);
     }
 
+        #[test]
+    fn auto_run_reaches_result_without_manual_choice() {
+        let mut state = ExpeditionState::new();
+        state.rations = 3;
+        assert!(begin_forming(&mut state));
+        assert!(launch_sortie(&mut state, false));
+        for _ in 0..20_000 {
+            if matches!(state.screen, Screen::Result) {
+                break;
+            }
+            tick(&mut state, 1);
+        }
+        assert!(matches!(state.screen, Screen::Result));
+        assert!(state.total_bond() > 0);
+    }
+
     #[test]
-    fn rest_heals_party() {
+    fn use_aid_heals_and_is_optional_once() {
         let mut state = ExpeditionState::new();
         state.rations = 3;
         begin_forming(&mut state);
@@ -544,38 +548,19 @@ mod tests {
         for h in &mut state.roster {
             h.hp = 1;
         }
-        if let Some(s) = state.sortie.as_mut() {
-            s.enemy = None;
-            s.node_index = s.nodes_total / 2;
-            s.pending_choice = true;
-        }
-        state.screen = Screen::Choice;
         let hp_before: i32 = state.roster.iter().map(|h| h.hp).sum();
-        assert!(choose_rest(&mut state));
+        assert!(use_aid(&mut state));
         let hp_after: i32 = state.roster.iter().map(|h| h.hp).sum();
         assert!(hp_after > hp_before);
+        assert!(!use_aid(&mut state));
+        assert!(!state.sortie.as_ref().unwrap().aid_ready);
     }
 
     #[test]
-    fn push_spawns_elite() {
-        let mut state = ExpeditionState::new();
-        state.rations = 3;
-        begin_forming(&mut state);
-        launch_sortie(&mut state, false);
-        if let Some(s) = state.sortie.as_mut() {
-            s.enemy = None;
-            s.node_index = s.nodes_total / 2;
-            s.pending_choice = true;
-        }
-        state.screen = Screen::Choice;
-        assert!(choose_push(&mut state));
-        assert_eq!(
-            state
-                .sortie
-                .as_ref()
-                .and_then(|s| s.enemy.as_ref())
-                .map(|e| e.name),
-            Some("欲深き番人")
-        );
+    fn mid_nodes_are_battles_not_choices() {
+        assert_eq!(node_kind_at(4, 0), NodeKind::Battle);
+        assert_eq!(node_kind_at(4, 1), NodeKind::Battle);
+        assert_eq!(node_kind_at(4, 2), NodeKind::Battle);
+        assert_eq!(node_kind_at(4, 3), NodeKind::Boss);
     }
 }

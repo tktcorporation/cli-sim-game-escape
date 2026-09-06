@@ -3,7 +3,7 @@
 use crate::critique::frame::{capture_frame, ScreenSnapshot};
 use crate::critique::probe::{ActionFact, ProbeFacts, Subject};
 use crate::games::expedition::actions::{
-    ACK_RESULT, CANCEL_FORMING, CHOICE_PUSH, CHOICE_REST, LAUNCH, LAUNCH_WITH_SCOUT, START_FORMING,
+    ACK_RESULT, CANCEL_FORMING, LAUNCH, LAUNCH_WITH_SCOUT, START_FORMING, USE_AID,
 };
 use crate::games::expedition::logic;
 use crate::games::expedition::render::{self, next_goal_line};
@@ -65,24 +65,23 @@ impl Subject for ExpeditionSubject {
                 ],
                 "forming",
             ),
-            Screen::Running => (vec![], "running"),
-            Screen::Choice => (
-                vec![
-                    ActionFact {
-                        id: CHOICE_REST,
-                        label: "休む".into(),
-                        hint: Some('R'),
+            Screen::Running => {
+                let mut actions = vec![];
+                if self.state
+                    .sortie
+                    .as_ref()
+                    .map(|s| s.aid_ready && s.enemy.is_some())
+                    .unwrap_or(false)
+                {
+                    actions.push(ActionFact {
+                        id: USE_AID,
+                        label: "援護する".into(),
+                        hint: Some('A'),
                         primary: true,
-                    },
-                    ActionFact {
-                        id: CHOICE_PUSH,
-                        label: "突っ込む".into(),
-                        hint: Some('P'),
-                        primary: false,
-                    },
-                ],
-                "choice",
-            ),
+                    });
+                }
+                (actions, "running")
+            }
             Screen::Result => (
                 vec![ActionFact {
                     id: ACK_RESULT,
@@ -123,8 +122,7 @@ impl Subject for ExpeditionSubject {
             CANCEL_FORMING => logic::cancel_forming(&mut self.state),
             LAUNCH => logic::launch_sortie(&mut self.state, false),
             LAUNCH_WITH_SCOUT => logic::launch_sortie(&mut self.state, true),
-            CHOICE_REST => logic::choose_rest(&mut self.state),
-            CHOICE_PUSH => logic::choose_push(&mut self.state),
+            USE_AID => logic::use_aid(&mut self.state),
             ACK_RESULT => logic::acknowledge_result(&mut self.state),
             _ => false,
         }
@@ -135,8 +133,7 @@ impl Subject for ExpeditionSubject {
             Screen::Camp if self.state.rations > 0 => Some(START_FORMING),
             Screen::Camp => None,
             Screen::Forming => Some(LAUNCH),
-            Screen::Running => None,
-            Screen::Choice => Some(CHOICE_REST),
+            Screen::Running => None, // オート完走が基本。援護は任意
             Screen::Result => Some(ACK_RESULT),
         }
     }

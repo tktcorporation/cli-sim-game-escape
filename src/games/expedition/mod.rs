@@ -3,7 +3,7 @@
 //! コアループ:
 //! 1. 拠点で行軍糧（と下調べメモ）が自然回復する
 //! 2. 3人を編成して出撃し、オート戦闘の遠征ランを進める
-//! 3. 道中で「休む / 突っ込む」を選び、クリア報酬の絆だけが永続成長になる
+//! 3. 遠征は基本オート完走。任意で「援護」すると有利になる。クリア報酬の絆だけが永続成長
 
 pub mod actions;
 pub mod logic;
@@ -24,8 +24,8 @@ use crate::games::{Game, GameChoice};
 use crate::input::{ClickScope, ClickState, InputEvent};
 
 use actions::{
-    hero_id_from_toggle, ACK_RESULT, CANCEL_FORMING, CHOICE_PUSH, CHOICE_REST, LAUNCH,
-    LAUNCH_WITH_SCOUT, OPEN_FORMING, START_FORMING, TAB_CAMP, TAB_ROSTER,
+    hero_id_from_toggle, ACK_RESULT, CANCEL_FORMING, LAUNCH, LAUNCH_WITH_SCOUT, OPEN_FORMING,
+    START_FORMING, TAB_CAMP, TAB_ROSTER, USE_AID,
 };
 use state::{ExpeditionState, HubTab, Screen};
 
@@ -67,8 +67,7 @@ impl ExpeditionGame {
             CANCEL_FORMING => logic::cancel_forming(&mut self.state),
             LAUNCH => logic::launch_sortie(&mut self.state, false),
             LAUNCH_WITH_SCOUT => logic::launch_sortie(&mut self.state, true),
-            CHOICE_REST => logic::choose_rest(&mut self.state),
-            CHOICE_PUSH => logic::choose_push(&mut self.state),
+            USE_AID => logic::use_aid(&mut self.state),
             ACK_RESULT => logic::acknowledge_result(&mut self.state),
             TAB_CAMP => logic::set_hub_tab(&mut self.state, HubTab::Camp),
             TAB_ROSTER => logic::set_hub_tab(&mut self.state, HubTab::Roster),
@@ -87,8 +86,7 @@ impl ExpeditionGame {
                 let id = key as u8 - b'1';
                 logic::toggle_forming_hero(&mut self.state, id)
             }
-            (Screen::Choice, 'r' | 'R' | '1') => logic::choose_rest(&mut self.state),
-            (Screen::Choice, 'p' | 'P' | '2') => logic::choose_push(&mut self.state),
+            (Screen::Running, 'a' | 'A' | ' ') => logic::use_aid(&mut self.state),
             (Screen::Result, ' ' | '\n') => logic::acknowledge_result(&mut self.state),
             (_, '{') => logic::set_hub_tab(&mut self.state, HubTab::Camp),
             (_, '|') => logic::set_hub_tab(&mut self.state, HubTab::Roster),

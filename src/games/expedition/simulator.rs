@@ -1,11 +1,9 @@
 //! 遠征団の自動プレイシミュレーター。
 
-use super::logic::{
-    acknowledge_result, begin_forming, choose_push, choose_rest, launch_sortie, tick,
-};
+use super::logic::{acknowledge_result, begin_forming, launch_sortie, tick, use_aid};
 use super::state::{ExpeditionState, Screen};
 
-fn finish_or_progress(state: &mut ExpeditionState, prefer_push: bool) {
+fn finish_or_progress(state: &mut ExpeditionState, use_optional_aid: bool) {
     match state.screen {
         Screen::Camp if state.rations > 0 => {
             let _ = begin_forming(state);
@@ -14,13 +12,11 @@ fn finish_or_progress(state: &mut ExpeditionState, prefer_push: bool) {
         Screen::Forming => {
             let _ = launch_sortie(state, state.scout_memos > 0);
         }
-        Screen::Running => tick(state, 1),
-        Screen::Choice => {
-            if prefer_push {
-                let _ = choose_push(state);
-            } else {
-                let _ = choose_rest(state);
+        Screen::Running => {
+            if use_optional_aid {
+                let _ = use_aid(state);
             }
+            tick(state, 1);
         }
         Screen::Result => {
             let _ = acknowledge_result(state);
@@ -29,10 +25,10 @@ fn finish_or_progress(state: &mut ExpeditionState, prefer_push: bool) {
     }
 }
 
-fn bot_run(ticks: u32, prefer_push: bool) -> ExpeditionState {
+fn bot_run(ticks: u32, use_optional_aid: bool) -> ExpeditionState {
     let mut state = ExpeditionState::new();
     for _ in 0..ticks {
-        finish_or_progress(&mut state, prefer_push);
+        finish_or_progress(&mut state, use_optional_aid);
     }
     state
 }
@@ -62,15 +58,15 @@ fn idle_only_does_not_increase_bond() {
 }
 
 #[test]
-fn active_play_grows_bond() {
-    let rest = bot_run(12_000, false);
-    let push = bot_run(12_000, true);
+fn active_play_grows_bond_with_or_without_aid() {
+    let plain = bot_run(12_000, false);
+    let aided = bot_run(12_000, true);
     eprintln!(
-        "rest bond={} depth={} / push bond={} depth={}",
-        rest.total_bond(),
-        rest.best_depth,
-        push.total_bond(),
-        push.best_depth
+        "plain bond={} depth={} / aided bond={} depth={}",
+        plain.total_bond(),
+        plain.best_depth,
+        aided.total_bond(),
+        aided.best_depth
     );
-    assert!(rest.total_bond() > 0 || push.total_bond() > 0);
+    assert!(plain.total_bond() > 0 || aided.total_bond() > 0);
 }

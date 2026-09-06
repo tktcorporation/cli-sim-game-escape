@@ -49,14 +49,12 @@ pub enum Screen {
     Camp,
     Forming,
     Running,
-    Choice,
     Result,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeKind {
     Battle,
-    Choice,
     Boss,
 }
 
@@ -114,7 +112,8 @@ pub struct Sortie {
     pub enemy: Option<Enemy>,
     pub used_scout: bool,
     pub scout_hint: Option<&'static str>,
-    pub pending_choice: bool,
+    /// 遠征中に一度だけ使える任意援護。使わなくても自動で完走する。
+    pub aid_ready: bool,
     pub combat_tick: u32,
     pub bond_gained: u32,
 }

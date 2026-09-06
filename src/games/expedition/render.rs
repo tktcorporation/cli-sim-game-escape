@@ -18,8 +18,8 @@ use crate::theme;
 use crate::widgets::{Clickable, TabBar};
 
 use super::actions::{
-    toggle_hero_id, ACK_RESULT, CANCEL_FORMING, CHOICE_PUSH, CHOICE_REST, LAUNCH,
-    LAUNCH_WITH_SCOUT, OPEN_FORMING, START_FORMING, TAB_CAMP, TAB_ROSTER,
+    toggle_hero_id, ACK_RESULT, CANCEL_FORMING, LAUNCH,
+    LAUNCH_WITH_SCOUT, OPEN_FORMING, START_FORMING, TAB_CAMP, TAB_ROSTER, USE_AID,
 };
 use super::state::{ExpeditionState, HubTab, Screen, BASE_NODES, PARTY_SIZE};
 
@@ -49,8 +49,7 @@ pub fn next_goal_line(state: &ExpeditionState) -> String {
         }
         Screen::Camp => "次: 遠征に出る".into(),
         Screen::Forming => "次: 3人を選んで出発する".into(),
-        Screen::Running => "自動戦闘中… 道中の分かれ道まで待つ".into(),
-        Screen::Choice => "次: 休むか、突っ込むか選ぶ".into(),
+        Screen::Running => "自動遠征中… 援護すると有利".into(),
         Screen::Result => "次: 拠点に戻る".into(),
     }
 }
@@ -82,8 +81,7 @@ pub fn render(
             HubTab::Roster => render_roster(state, f, chunks[1]),
         },
         Screen::Forming => render_forming(state, f, chunks[1], click_state),
-        Screen::Running => render_running(state, f, chunks[1]),
-        Screen::Choice => render_choice(f, chunks[1], click_state),
+        Screen::Running => render_running(state, f, chunks[1], click_state),
         Screen::Result => render_result(state, f, chunks[1], click_state),
     }
     render_bottom_nav(state, f, chunks[2], click_state);
@@ -95,7 +93,6 @@ fn render_status_bar(state: &ExpeditionState, f: &mut Frame, area: Rect) {
         Screen::Camp => Span::styled(" 待機", label_style()),
         Screen::Forming => Span::styled(" 編成中", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Screen::Running => Span::styled(" 遠征中", Style::default().fg(accent()).add_modifier(Modifier::BOLD)),
-        Screen::Choice => Span::styled(" 分岐", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Screen::Result => Span::styled(" 帰還", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
     };
 
@@ -201,7 +198,7 @@ fn hp_bar(hp: i32, max_hp: i32) -> String {
     let bar: String = (0..cells)
         .map(|i| if i < filled { '█' } else { '░' })
         .collect();
-    format!("{bar}")
+    bar
 }
 
 fn render_roster(state: &ExpeditionState, f: &mut Frame, area: Rect) {
@@ -222,7 +219,7 @@ fn render_roster(state: &ExpeditionState, f: &mut Frame, area: Rect) {
                 Style::default().fg(accent()).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!("{}", h.name),
+                h.name,
                 Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
@@ -515,10 +512,29 @@ fn render_forming(
     f.render_widget(help, chunks[3]);
 }
 
-fn render_running(state: &ExpeditionState, f: &mut Frame, area: Rect) {
+
+fn road_progress(node_index: u32, nodes_total: u32) -> String {
+    let total = nodes_total.max(1) as usize;
+    let done = (node_index as usize + 1).min(total);
+    (0..total)
+        .map(|i| if i < done { '●' } else { '○' })
+        .collect()
+}
+
+fn render_running(
+    state: &ExpeditionState,
+    f: &mut Frame,
+    area: Rect,
+    click_state: &Rc<RefCell<ClickState>>,
+) {
     let Some(sortie) = state.sortie.as_ref() else {
         return;
     };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(8), Constraint::Length(3)])
+        .split(area);
+
     let progress = road_progress(sortie.node_index, sortie.nodes_total);
     let mut lines = vec![
         Line::from(Span::styled(next_goal_line(state), goal_style())),
@@ -555,7 +571,7 @@ fn render_running(state: &ExpeditionState, f: &mut Frame, area: Rect) {
         )));
     } else {
         lines.push(Line::from(Span::styled(
-            " 次の地点へ進んでいます…",
+            " 次の地点へ…",
             label_style(),
         )));
     }
@@ -586,69 +602,40 @@ fn render_running(state: &ExpeditionState, f: &mut Frame, area: Rect) {
         Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(accent()))
-            .title(" 遠征中（自動戦闘） "),
-    );
-    f.render_widget(para, area);
-}
-
-fn road_progress(node_index: u32, nodes_total: u32) -> String {
-    let total = nodes_total.max(1) as usize;
-    let done = (node_index as usize + 1).min(total);
-    (0..total)
-        .map(|i| if i < done { '●' } else { '○' })
-        .collect()
-}
-
-fn render_choice(f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>>) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(6), Constraint::Length(3)])
-        .split(area);
-    let para = Paragraph::new(vec![
-        Line::from(Span::styled(
-            "次: 休むか、突っ込むか選ぶ",
-            goal_style(),
-        )),
-        Line::from(""),
-        Line::from("分かれ道に来た。"),
-        Line::from(Span::styled(
-            " 休む … 体力を回復して次へ進む（安全）",
-            Style::default().fg(Color::Green),
-        )),
-        Line::from(Span::styled(
-            " 突っ込む … 強い敵と戦い、絆ボーナス（危険）",
-            Style::default().fg(Color::Red),
-        )),
-    ])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow))
-            .title(" 選択 "),
+            .title(" 遠征中（自動） "),
     );
     f.render_widget(para, chunks[0]);
 
-    let row = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[1]);
-    Clickable::new(
-        Paragraph::new(" 休む (R) ")
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD))
-            .block(Block::default().borders(Borders::ALL)),
-        CHOICE_REST,
-    )
-    .render(f, row[0], &mut click_state.borrow_mut());
-    Clickable::new(
-        Paragraph::new(" 突っ込む (P) ")
-            .alignment(Alignment::Center)
-            .style(Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD))
-            .block(Block::default().borders(Borders::ALL)),
-        CHOICE_PUSH,
-    )
-    .render(f, row[1], &mut click_state.borrow_mut());
+    if sortie.aid_ready && sortie.enemy.is_some() {
+        Clickable::new(
+            Paragraph::new(" ▶ 援護する ")
+                .alignment(Alignment::Center)
+                .style(
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(accent())
+                        .add_modifier(Modifier::BOLD),
+                )
+                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(accent()))),
+            USE_AID,
+        )
+        .render(f, chunks[1], &mut click_state.borrow_mut());
+    } else {
+        let msg = if sortie.aid_ready {
+            " 自動進行中 "
+        } else {
+            " 援護済み · 自動進行中 "
+        };
+        f.render_widget(
+            Paragraph::new(msg)
+                .alignment(Alignment::Center)
+                .style(muted())
+                .block(Block::default().borders(Borders::ALL)),
+            chunks[1],
+        );
+    }
 }
+
 
 fn render_result(
     state: &ExpeditionState,
@@ -793,5 +780,7 @@ mod tests {
         state.hub_tab = HubTab::Camp;
         assert!(super::super::logic::begin_forming(&mut state));
         eprintln!("=== FORMING ===\n{}", draw_text(&state));
+        assert!(super::super::logic::launch_sortie(&mut state, false));
+        eprintln!("=== RUNNING ===\n{}", draw_text(&state));
     }
 }
