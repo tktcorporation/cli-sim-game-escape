@@ -1,12 +1,12 @@
 //! 遠征団の描画。
 //!
-//! 常設シェル（上部ステータス + 下部ナビ）の上に拠点本文や遠征オーバーレイを載せる。
-//! 開口で「ループ」と「次に押すボタン」が見えることを最優先する。
+//! 常設シェル（上部 HUD + 下部タブバー）の上に拠点本文や遠征シートを載せる。
+//! 端末セルでもネイティブ放置ゲーに近い階層・タップ面積・状態の見え方を狙う。
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use ratzilla::ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratzilla::ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratzilla::ratatui::style::{Color, Modifier, Style};
 use ratzilla::ratatui::text::{Line, Span};
 use ratzilla::ratatui::widgets::{Block, Borders, Paragraph};
@@ -27,6 +27,20 @@ fn accent() -> Color {
     theme::accent(&GameChoice::Expedition)
 }
 
+fn muted() -> Style {
+    Style::default().fg(Color::DarkGray)
+}
+
+fn label_style() -> Style {
+    Style::default().fg(Color::Gray)
+}
+
+fn goal_style() -> Style {
+    Style::default()
+        .fg(Color::LightGreen)
+        .add_modifier(Modifier::BOLD)
+}
+
 /// 画面に出す「いまの目標」一文。critique の goal 照合にも使う。
 pub fn next_goal_line(state: &ExpeditionState) -> String {
     match state.screen {
@@ -41,18 +55,23 @@ pub fn next_goal_line(state: &ExpeditionState) -> String {
     }
 }
 
+fn on_sortie(state: &ExpeditionState) -> bool {
+    !matches!(state.screen, Screen::Camp)
+}
+
 pub fn render(
     state: &ExpeditionState,
     f: &mut Frame,
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    // ネイティブアプリの safe-area: 上 HUD / 下タブは常に確保し、中央だけがコンテンツ。
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Min(6),
-            Constraint::Length(1),
+            Constraint::Length(3),
         ])
         .split(area);
 
@@ -72,22 +91,44 @@ pub fn render(
 
 fn render_status_bar(state: &ExpeditionState, f: &mut Frame, area: Rect) {
     let fill = ration_fill_bar(state);
-    let para = Paragraph::new(Line::from(vec![
+    let phase = match state.screen {
+        Screen::Camp => Span::styled(" 待機", label_style()),
+        Screen::Forming => Span::styled(" 編成中", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Screen::Running => Span::styled(" 遠征中", Style::default().fg(accent()).add_modifier(Modifier::BOLD)),
+        Screen::Choice => Span::styled(" 分岐", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Screen::Result => Span::styled(" 帰還", Style::default().fg(Color::LightGreen).add_modifier(Modifier::BOLD)),
+    };
+
+    // リソースを「チップ」として並べ、タイトルは HUD 名だけにする（ネイティブの top bar）。
+    let line1 = Line::from(vec![
+        Span::styled(" 行軍糧 ", Style::default().fg(accent()).add_modifier(Modifier::BOLD)),
         Span::styled(
-            " 行軍糧 ",
-            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+            format!("{}/{}", state.rations, state.ration_cap()),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!(
-            "{}/{} {}  下調べメモ {}  絆{}  第{}層",
-            state.rations,
-            state.ration_cap(),
-            fill,
-            state.scout_memos,
-            state.total_bond(),
-            state.best_depth
-        )),
-    ]))
-    .block(Block::default().borders(Borders::ALL).title("ステータス"));
+        Span::raw(format!(" {fill}  ")),
+        Span::styled("下調べメモ ", label_style()),
+        Span::styled(
+            format!("{}", state.scout_memos),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled("絆", label_style()),
+        Span::styled(
+            format!("{}", state.total_bond()),
+            Style::default().fg(Color::LightYellow).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("  "),
+        Span::styled(format!("第{}層", state.best_depth), Style::default().fg(Color::Gray)),
+        phase,
+    ]);
+
+    let para = Paragraph::new(line1).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title("ステータス"),
+    );
     f.render_widget(para, area);
 }
 
@@ -108,51 +149,110 @@ fn render_bottom_nav(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    let block = Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(if on_sortie(state) {
+            " ナビ（遠征中も切替可・反映は帰還後） "
+        } else {
+            " ナビ "
+        });
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // 選択中は「●」でテキスト dump でも分かるようにする（色だけだとネイティブ感が出ない）。
+    let camp_label = if state.hub_tab == HubTab::Camp {
+        "● 拠点"
+    } else {
+        "拠点"
+    };
+    let roster_label = if state.hub_tab == HubTab::Roster {
+        "● 団員"
+    } else {
+        "団員"
+    };
+
     let mut cs = click_state.borrow_mut();
-    TabBar::new("│")
+    TabBar::new("  ")
         .tab(
-            HubTab::Camp.label(),
+            camp_label,
             tab_style(state.hub_tab == HubTab::Camp),
             TAB_CAMP,
         )
         .tab(
-            HubTab::Roster.label(),
+            roster_label,
             tab_style(state.hub_tab == HubTab::Roster),
             TAB_ROSTER,
         )
-        .render(f, area, &mut cs);
+        .render(f, inner, &mut cs);
+}
+
+fn section_title(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("── {text} ──"),
+        Style::default().fg(Color::DarkGray),
+    ))
+}
+
+fn hp_bar(hp: i32, max_hp: i32) -> String {
+    let max_hp = max_hp.max(1);
+    let cells = 8usize;
+    let filled = ((hp.max(0) as usize * cells) / max_hp as usize).min(cells);
+    let bar: String = (0..cells)
+        .map(|i| if i < filled { '█' } else { '░' })
+        .collect();
+    format!("{bar}")
 }
 
 fn render_roster(state: &ExpeditionState, f: &mut Frame, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(Span::styled(
         "団員一覧 — 絆は遠征の結果でのみ育つ",
-        Style::default()
-            .fg(Color::LightGreen)
-            .add_modifier(Modifier::BOLD),
+        goal_style(),
     )));
     lines.push(Line::from(Span::styled(
         " 役割: 盾=耐久 / 刃=火力 / 癒=回復",
-        Style::default().fg(Color::DarkGray),
+        muted(),
     )));
     lines.push(Line::from(""));
     for h in &state.roster {
-        lines.push(Line::from(format!(
-            " [{}]{}  絆{}  力{}  体力{}/{}",
-            h.role.label(),
-            h.name,
-            h.bond,
-            h.atk(),
-            h.hp,
-            h.max_hp
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" [{}] ", h.role.label()),
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{}", h.name),
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  絆 {}", h.bond),
+                Style::default().fg(Color::LightYellow),
+            ),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("     "),
+            Span::styled(format!("力{}  ", h.atk()), label_style()),
+            Span::styled(
+                format!("体力 {}/{} {}", h.hp, h.max_hp, hp_bar(h.hp, h.max_hp)),
+                Style::default().fg(Color::LightGreen),
+            ),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "     ────────────────────────",
+            muted(),
         )));
     }
-    lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "遠征に出すときは「拠点」タブへ。",
-        Style::default().fg(Color::Gray),
+        label_style(),
     )));
-    let body = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("団員"));
+    let body = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title("団員"),
+    );
     f.render_widget(body, area);
 }
 
@@ -162,14 +262,14 @@ fn render_camp(
     area: Rect,
     click_state: &Rc<RefCell<ClickState>>,
 ) {
+    // 本文 + フル幅プライマリ CTA（ネイティブの bottom sheet button）
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(8),
-            Constraint::Length(3),
-        ])
+        .constraints([Constraint::Min(8), Constraint::Length(3)])
         .split(area);
 
+    // 24行端末でも「目標・CTA・団員全員」が同時に見える密度にする。
+    // ネイティブ放置ゲーのホームは説明文より状態と主ボタンが先に来る。
     let mut lines: Vec<Line> = Vec::new();
     lines.push(Line::from(vec![
         Span::styled(
@@ -183,74 +283,83 @@ fn render_camp(
     ]));
     lines.push(Line::from(Span::styled(
         next_goal_line(state),
-        Style::default()
-            .fg(Color::LightGreen)
-            .add_modifier(Modifier::BOLD),
+        goal_style(),
     )));
-    lines.push(Line::from(format!(
-        " 突破目標: 第{}層 （クリアすると団が強くなる）",
-        state.best_depth
-    )));
+    lines.push(Line::from(vec![
+        Span::styled(" 突破目標 ", Style::default().fg(Color::Yellow)),
+        Span::styled(
+            format!("第{}層", state.best_depth),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" （クリアすると団が強くなる）", muted()),
+    ]));
     lines.push(Line::from(Span::styled(
         " ※放置では戦力は上がらない。貯まるのは出撃用の糧だけ。",
-        Style::default().fg(Color::DarkGray),
+        muted(),
     )));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "やること",
-        Style::default().fg(Color::Yellow),
-    )));
-    lines.push(Line::from(" 1. 糧を貯める（放置でもOK）"));
-    lines.push(Line::from(" 2. 下のボタンで3人を選んで出発"));
-    lines.push(Line::from(" 3. 自動戦闘 → 分かれ道で選ぶ → 絆ゲット"));
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "団員  (絆↑で強くなり、糧の回復も少し速くなる)",
-        Style::default().fg(Color::Gray),
-    )));
+    lines.push(Line::from(vec![
+        Span::styled(" やること ", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw("貯める → 3人で出発 → 分かれ道 → 絆"),
+    ]));
+    lines.push(section_title("控えの団員"));
     for h in &state.roster {
         lines.push(Line::from(format!(
-            " [{}]{} 絆{}  力{}  体力{}/{}",
+            " [{}]{} 絆{}  力{}  {}",
             h.role.label(),
             h.name,
             h.bond,
             h.atk(),
-            h.hp,
-            h.max_hp
+            hp_bar(h.hp, h.max_hp)
         )));
     }
     if !state.log.is_empty() {
         lines.push(Line::from(Span::styled(
-            "最近",
-            Style::default().fg(Color::Gray),
+            format!(
+                " 最近 · {}",
+                state.log.iter().rev().take(2).cloned().rev().collect::<Vec<_>>().join(" / ")
+            ),
+            muted(),
         )));
-        for line in state.log.iter().rev().take(2).rev() {
-            lines.push(Line::from(Span::styled(
-                format!(" · {line}"),
-                Style::default().fg(Color::DarkGray),
-            )));
-        }
     }
-    let body = Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title("拠点"));
+    let body = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::DarkGray))
+            .title("拠点"),
+    );
     f.render_widget(body, chunks[0]);
 
     let (label, style) = if state.rations == 0 {
         (
-            " [糧が貯まるまで待つ] ",
+            "糧が貯まるまで待つ",
             Style::default().fg(Color::DarkGray),
         )
     } else {
         (
-            " [▶ 遠征に出る] ",
+            "▶ 遠征に出る",
             Style::default()
                 .fg(Color::Black)
                 .bg(accent())
                 .add_modifier(Modifier::BOLD),
         )
     };
+    // フル幅の主ボタン。左右に余白を置かず、ネイティブの primary CTA と同じ存在感にする。
+    let cta = Paragraph::new(Line::from(Span::styled(
+        format!(" {label} "),
+        style,
+    )))
+    .alignment(Alignment::Center)
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(if state.rations == 0 {
+                Color::DarkGray
+            } else {
+                accent()
+            })),
+    );
     // 糧0でもタップ可能にして、logic 側のログで理由を返す（押した反応を残す）。
-    Clickable::new(Paragraph::new(Line::from(Span::styled(label, style))), START_FORMING)
-        .render(f, chunks[1], &mut click_state.borrow_mut());
+    Clickable::new(cta, START_FORMING).render(f, chunks[1], &mut click_state.borrow_mut());
 }
 
 fn ration_fill_bar(state: &ExpeditionState) -> String {
@@ -259,12 +368,12 @@ fn ration_fill_bar(state: &ExpeditionState) -> String {
     }
     let need = state.ration_regen_ticks().max(1);
     let done = state.ration_progress.min(need);
-    let cells = 6u32;
+    let cells = 8u32;
     let filled = (done * cells / need) as usize;
     let bar: String = (0..cells as usize)
-        .map(|i| if i < filled { '■' } else { '□' })
+        .map(|i| if i < filled { '█' } else { '░' })
         .collect();
-    format!("次+1 {bar}")
+    format!("[{bar}]")
 }
 
 fn render_forming(
@@ -285,19 +394,27 @@ fn render_forming(
         .split(area);
 
     let header = Paragraph::new(vec![
-        Line::from(Span::styled(
-            next_goal_line(state),
-            Style::default()
-                .fg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(format!(
-            " 参加 {}/{}  ★が行く人  出発で行軍糧-1",
-            state.forming_count(),
-            PARTY_SIZE
-        )),
+        Line::from(Span::styled(next_goal_line(state), goal_style())),
+        Line::from(vec![
+            Span::raw(format!(
+                " 参加 {}/{}  ",
+                state.forming_count(),
+                PARTY_SIZE
+            )),
+            Span::styled("★", Style::default().fg(Color::LightYellow)),
+            Span::raw(" が行く人   "),
+            Span::styled(
+                "出発で行軍糧-1",
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            ),
+        ]),
     ])
-    .block(Block::default().borders(Borders::ALL).title("編成"));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(accent()))
+            .title(" 編成シート "),
+    );
     f.render_widget(header, chunks[0]);
 
     let hero_chunks = Layout::default()
@@ -306,14 +423,22 @@ fn render_forming(
         .split(chunks[1]);
     for (i, h) in state.roster.iter().enumerate() {
         let marked = state.forming.contains(&Some(h.id));
-        let mark = if marked { "★" } else { "・" };
-        let line = Paragraph::new(format!(
-            "{mark} [{}]{} 絆{} 力{}  (キー{})",
-            h.role.label(),
-            h.name,
-            h.bond,
-            h.atk(),
-            h.id + 1
+        let mark = if marked { "★" } else { "·" };
+        let style = if marked {
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        let line = Paragraph::new(Span::styled(
+            format!(
+                " {mark} [{}]{}  絆{}  力{}  キー{}",
+                h.role.label(),
+                h.name,
+                h.bond,
+                h.atk(),
+                h.id + 1
+            ),
+            style,
         ));
         Clickable::new(line, toggle_hero_id(h.id)).render(
             f,
@@ -325,37 +450,52 @@ fn render_forming(
     let row = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
-            Constraint::Percentage(40),
-            Constraint::Percentage(40),
-            Constraint::Percentage(20),
+            Constraint::Percentage(42),
+            Constraint::Percentage(36),
+            Constraint::Percentage(22),
         ])
         .split(chunks[2]);
     let ready = state.forming_count() == PARTY_SIZE && state.rations > 0;
     let launch_style = if ready {
-        Style::default().fg(Color::Black).bg(accent()).add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(Color::DarkGray)
-    };
-    Clickable::new(Paragraph::new(" [出発する] ").style(launch_style), LAUNCH)
-        .render(f, row[0], &mut click_state.borrow_mut());
-    let scout_style = if state.scout_memos > 0 && ready {
-        Style::default().fg(Color::Cyan)
+        Style::default()
+            .fg(Color::Black)
+            .bg(accent())
+            .add_modifier(Modifier::BOLD)
     } else {
         Style::default().fg(Color::DarkGray)
     };
     Clickable::new(
-        Paragraph::new(" [下調べ出発] ").style(scout_style),
+        Paragraph::new(" 出発する ")
+            .alignment(Alignment::Center)
+            .style(launch_style)
+            .block(Block::default().borders(Borders::ALL)),
+        LAUNCH,
+    )
+    .render(f, row[0], &mut click_state.borrow_mut());
+    let scout_style = if state.scout_memos > 0 && ready {
+        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    Clickable::new(
+        Paragraph::new(" 下調べ出発 ")
+            .alignment(Alignment::Center)
+            .style(scout_style)
+            .block(Block::default().borders(Borders::ALL)),
         LAUNCH_WITH_SCOUT,
     )
     .render(f, row[1], &mut click_state.borrow_mut());
     Clickable::new(
-        Paragraph::new(" [やめる] ").style(Style::default().fg(Color::Gray)),
+        Paragraph::new(" やめる ")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::Gray))
+            .block(Block::default().borders(Borders::ALL)),
         CANCEL_FORMING,
     )
     .render(f, row[2], &mut click_state.borrow_mut());
 
     let help = Paragraph::new("下調べ=メモを1消費し敵の特徴が見える / 1-4選択 Space出発 Q戻る")
-        .style(Style::default().fg(Color::DarkGray));
+        .style(muted());
     f.render_widget(help, chunks[3]);
 }
 
@@ -365,44 +505,73 @@ fn render_running(state: &ExpeditionState, f: &mut Frame, area: Rect) {
     };
     let progress = road_progress(sortie.node_index, sortie.nodes_total);
     let mut lines = vec![
-        next_goal_line(state),
-        format!(
-            "第{}層  道のり {}  ({}/{})",
-            sortie.depth,
-            progress,
-            sortie.node_index + 1,
-            sortie.nodes_total
-        ),
+        Line::from(Span::styled(next_goal_line(state), goal_style())),
+        Line::from(vec![
+            Span::styled(
+                format!(" 第{}層 ", sortie.depth),
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                " {progress}  ({}/{})",
+                sortie.node_index + 1,
+                sortie.nodes_total
+            )),
+        ]),
     ];
     if let Some(hint) = sortie.scout_hint {
-        lines.push(format!("下調べ: {hint}"));
+        lines.push(Line::from(Span::styled(
+            format!(" 下調べ: {hint}"),
+            Style::default().fg(Color::Cyan),
+        )));
     }
     if let Some(enemy) = sortie.enemy.as_ref() {
-        lines.push(format!(
-            "敵 {}  体力 {}/{}  攻撃{}",
-            enemy.name, enemy.hp, enemy.max_hp, enemy.atk
-        ));
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" 敵 {}", enemy.name),
+            Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD),
+        )));
+        lines.push(Line::from(format!(
+            " 体力 {}/{} {}  攻撃{}",
+            enemy.hp,
+            enemy.max_hp,
+            hp_bar(enemy.hp, enemy.max_hp),
+            enemy.atk
+        )));
     } else {
-        lines.push("次の地点へ進んでいます…".into());
+        lines.push(Line::from(Span::styled(
+            " 次の地点へ進んでいます…",
+            label_style(),
+        )));
     }
-    lines.push("仲間:".into());
+    lines.push(Line::from(""));
+    lines.push(section_title("仲間"));
     for &id in &sortie.party {
         if let Some(h) = state.hero(id) {
-            lines.push(format!(
-                "  {} [{}] 体力 {}/{}",
+            lines.push(Line::from(format!(
+                "  {} [{}]  {} {}/{}",
                 h.name,
                 h.role.label(),
+                hp_bar(h.hp, h.max_hp),
                 h.hp,
                 h.max_hp
-            ));
+            )));
         }
     }
-    lines.push(String::new());
-    for line in state.log.iter().rev().take(4).rev() {
-        lines.push(format!(" · {line}"));
+    if !state.log.is_empty() {
+        lines.push(Line::from(""));
+        for line in state.log.iter().rev().take(3).rev() {
+            lines.push(Line::from(Span::styled(
+                format!(" · {line}"),
+                muted(),
+            )));
+        }
     }
-    let para = Paragraph::new(lines.join("\n"))
-        .block(Block::default().borders(Borders::ALL).title("遠征中（自動戦闘）"));
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(accent()))
+            .title(" 遠征中（自動戦闘） "),
+    );
     f.render_widget(para, area);
 }
 
@@ -422,9 +591,7 @@ fn render_choice(f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>
     let para = Paragraph::new(vec![
         Line::from(Span::styled(
             "次: 休むか、突っ込むか選ぶ",
-            Style::default()
-                .fg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
+            goal_style(),
         )),
         Line::from(""),
         Line::from("分かれ道に来た。"),
@@ -437,7 +604,12 @@ fn render_choice(f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>
             Style::default().fg(Color::Red),
         )),
     ])
-    .block(Block::default().borders(Borders::ALL).title("選択"));
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow))
+            .title(" 選択 "),
+    );
     f.render_widget(para, chunks[0]);
 
     let row = Layout::default()
@@ -445,14 +617,18 @@ fn render_choice(f: &mut Frame, area: Rect, click_state: &Rc<RefCell<ClickState>
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[1]);
     Clickable::new(
-        Paragraph::new(" [休む] (R) ")
-            .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Paragraph::new(" 休む (R) ")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD))
+            .block(Block::default().borders(Borders::ALL)),
         CHOICE_REST,
     )
     .render(f, row[0], &mut click_state.borrow_mut());
     Clickable::new(
-        Paragraph::new(" [突っ込む] (P) ")
-            .style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+        Paragraph::new(" 突っ込む (P) ")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD))
+            .block(Block::default().borders(Borders::ALL)),
         CHOICE_PUSH,
     )
     .render(f, row[1], &mut click_state.borrow_mut());
@@ -470,39 +646,41 @@ fn render_result(
         .split(area);
 
     let mut lines = vec![
-        Line::from(Span::styled(
-            next_goal_line(state),
-            Style::default()
-                .fg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(state.result_summary.clone()),
+        Line::from(Span::styled(next_goal_line(state), goal_style())),
         Line::from(""),
         Line::from(Span::styled(
-            "団員のいまの絆",
-            Style::default().fg(Color::Gray),
+            state.result_summary.clone(),
+            Style::default().fg(Color::White),
         )),
+        Line::from(""),
+        section_title("団員のいまの絆"),
     ];
     for h in &state.roster {
         lines.push(Line::from(format!(
-            " [{}]{} 絆{}  力{}",
+            " [{}]{}  絆{}  力{}",
             h.role.label(),
             h.name,
             h.bond,
             h.atk()
         )));
     }
-    let para = Paragraph::new(lines)
-        .block(Block::default().borders(Borders::ALL).title("遠征の結果"));
+    let para = Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::LightGreen))
+            .title(" 遠征の結果 "),
+    );
     f.render_widget(para, chunks[0]);
     Clickable::new(
-        Paragraph::new(" [拠点に戻る] ").style(
-            Style::default()
-                .fg(Color::Black)
-                .bg(accent())
-                .add_modifier(Modifier::BOLD),
-        ),
+        Paragraph::new(" 拠点に戻る ")
+            .alignment(Alignment::Center)
+            .style(
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(accent())
+                    .add_modifier(Modifier::BOLD),
+            )
+            .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(accent()))),
         ACK_RESULT,
     )
     .render(f, chunks[1], &mut click_state.borrow_mut());
@@ -534,6 +712,7 @@ mod tests {
         assert!(text.contains("下調べメモ"), "{text}");
         assert!(text.contains("拠点"), "{text}");
         assert!(text.contains("団員"), "{text}");
+        assert!(text.contains("● 拠点"), "{text}");
     }
 
     #[test]
@@ -545,6 +724,7 @@ mod tests {
         assert!(text.contains("灰"), "{text}");
         assert!(text.contains("ステータス"), "{text}");
         assert!(text.contains("拠点"), "{text}");
+        assert!(text.contains("● 団員"), "{text}");
     }
 
     #[test]
@@ -562,6 +742,11 @@ mod tests {
             text.contains("放置では戦力は上がらない"),
             "{text}"
         );
+            // 24行でも控え団員が欠けないこと（ネイティブホーム相当の情報密度）
+        assert!(text.contains("灰"), "{text}");
+        assert!(text.contains("焔"), "{text}");
+        assert!(text.contains("雫"), "{text}");
+        assert!(text.contains("嵐"), "{text}");
     }
 
     #[test]
@@ -583,6 +768,8 @@ mod tests {
         assert!(text.contains("下調べ"), "{text}");
         assert!(text.contains("ステータス"), "{text}");
         assert!(text.contains("団員"), "{text}");
+        assert!(text.contains("編成シート"), "{text}");
+        assert!(text.contains("編成中"), "{text}");
     }
 
     #[test]
