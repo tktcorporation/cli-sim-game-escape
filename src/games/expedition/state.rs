@@ -3,19 +3,24 @@
 use std::cell::Cell;
 
 pub const PARTY_SIZE: usize = 3;
-pub const BASE_NODES: u32 = 4;
+pub const PATH_LEN: usize = 5;
 pub const BASE_RATION_CAP: u32 = 5;
 pub const MAX_BONUS_RATION_CAP: u32 = 3;
 pub const BASE_RATION_REGEN_TICKS: u32 = 450;
-pub const SCOUT_MEMO_CAP: u32 = 3;
-pub const SCOUT_MEMO_REGEN_TICKS: u32 = 1_800;
-pub const COMBAT_ROUND_TICKS: u32 = 4;
 pub const LOG_CAP: usize = 8;
 pub const STAGES_PER_CHAPTER: u32 = 4;
-/// 節クリアで得られる補給の基礎値。
-pub const SUPPLY_CLEAR_BASE: u32 = 3;
-/// 敗退時の持ち帰り補給。
-pub const SUPPLY_FAIL: u32 = 1;
+/// 節クリアで得られるメダルの基礎値。
+pub const MEDAL_CLEAR_BASE: u32 = 5;
+/// 敗退時の持ち帰りメダル。
+pub const MEDAL_FAIL: u32 = 2;
+/// すごろく1回のベット。
+pub const MEDAL_BET: u32 = 2;
+/// 目的地までのマス数。
+pub const BOARD_GOAL: u32 = 10;
+/// 敵が1マス進む間隔。
+pub const ENEMY_STEP_TICKS: u32 = 6;
+/// 団員が攻撃する間隔。
+pub const HERO_ATK_TICKS: u32 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -32,19 +37,28 @@ impl Role {
             Role::Support => "癒",
         }
     }
+
+    /// 攻撃が届く最大距離（マス差）。
+    pub fn range(self) -> i32 {
+        match self {
+            Role::Vanguard => 1,
+            Role::Striker => 3,
+            Role::Support => 2,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HubTab {
     Camp,
-    Train,
+    Arcade,
 }
 
 impl HubTab {
     pub fn label(self) -> &'static str {
         match self {
             HubTab::Camp => "拠点",
-            HubTab::Train => "育成",
+            HubTab::Arcade => "遊技場",
         }
     }
 }
@@ -53,14 +67,9 @@ impl HubTab {
 pub enum Screen {
     Camp,
     Forming,
+    Placing,
     Running,
     Result,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NodeKind {
-    Battle,
-    Boss,
 }
 
 #[derive(Clone, Debug)]
@@ -69,61 +78,49 @@ pub struct Hero {
     pub name: &'static str,
     pub role: Role,
     pub level: u32,
-    pub hp: i32,
-    pub max_hp: i32,
 }
 
 impl Hero {
     pub fn atk(&self) -> i32 {
         let base = match self.role {
-            Role::Vanguard => 4,
-            Role::Striker => 7,
-            Role::Support => 3,
+            Role::Vanguard => 5,
+            Role::Striker => 4,
+            Role::Support => 2,
         };
         base + self.level as i32
-    }
-
-    pub fn level_max_hp(&self) -> i32 {
-        let base = match self.role {
-            Role::Vanguard => 28,
-            Role::Striker => 18,
-            Role::Support => 20,
-        };
-        base + self.level as i32 * 2
-    }
-
-    pub fn refresh_max_hp(&mut self) {
-        let new_max = self.level_max_hp();
-        let missing = self.max_hp.saturating_sub(self.hp);
-        self.max_hp = new_max;
-        self.hp = (new_max - missing).clamp(1, new_max);
     }
 }
 
 #[derive(Clone, Debug)]
-pub struct Enemy {
+pub struct Creep {
     pub name: &'static str,
     pub hp: i32,
     pub max_hp: i32,
-    pub atk: i32,
+    /// 0 = 出現側、PATH_LEN-1 = 門直前。
+    pub pos: usize,
+    /// 遅延残り tick（癒の減速）。
+    pub slow_ticks: u32,
+    pub step_progress: u32,
 }
 
 #[derive(Clone, Debug)]
 pub struct Sortie {
     pub chapter: u32,
     pub stage: u32,
-    /// 敵スケール用。`(chapter-1)*STAGES + stage`
     pub difficulty: u32,
-    pub node_index: u32,
-    pub nodes_total: u32,
     pub party: [u8; PARTY_SIZE],
-    pub enemy: Option<Enemy>,
-    pub used_scout: bool,
-    pub scout_hint: Option<&'static str>,
-    /// 遠征中に一度だけ使える任意援護。使わなくても自動で完走する。
-    pub aid_ready: bool,
+    /// 道の各マスにいる団員。None = 空き。
+    pub path: [Option<u8>; PATH_LEN],
+    pub placing_cursor: usize,
+    pub creeps: Vec<Creep>,
+    pub wave_index: u32,
+    pub waves_total: u32,
+    pub spawn_cooldown: u32,
+    pub pending_spawns: u32,
+    pub gate_hp: i32,
+    pub gate_max_hp: i32,
     pub combat_tick: u32,
-    pub supplies_gained: u32,
+    pub medals_gained: u32,
     pub last_hit_log: String,
 }
 
@@ -135,21 +132,25 @@ pub struct ExpeditionState {
     pub forming: [Option<u8>; PARTY_SIZE],
     pub rations: u32,
     pub ration_progress: u32,
-    pub scout_memos: u32,
-    pub scout_progress: u32,
     /// 次に攻略する章（1始まり）。
     pub chapter: u32,
     /// 次に攻略する節（1..=STAGES_PER_CHAPTER）。
     pub stage: u32,
-    /// 拠点育成用の通貨。探索クリアで増え、レベル上げで減る。
-    pub supplies: u32,
-    /// 直近の探索が敗退なら true（育成誘導用）。
+    /// 遊技場用メダル。戦役で増え、すごろくで減る。
+    pub medals: u32,
+    /// すごろく現在地（0..=board_goal）。
+    pub board_pos: u32,
+    pub board_goal: u32,
+    /// 目的地到達後、レベルを上げる団員を選ぶ待ち。
+    pub pending_level_pick: bool,
+    /// 直近の探索が敗退なら true（遊技場誘導用）。
     pub last_failed: bool,
     pub sortie: Option<Sortie>,
     pub log: Vec<String>,
     pub result_summary: String,
     pub elapsed_ticks: u64,
     pub last_wall_ms: u64,
+    pub rng: u32,
     pub camp_scroll: Cell<i32>,
 }
 
@@ -161,34 +162,51 @@ impl Default for ExpeditionState {
 
 impl ExpeditionState {
     pub fn new() -> Self {
-        let mut roster = vec![
-            Hero { id: 0, name: "灰", role: Role::Vanguard, level: 1, hp: 28, max_hp: 28 },
-            Hero { id: 1, name: "焔", role: Role::Striker, level: 1, hp: 18, max_hp: 18 },
-            Hero { id: 2, name: "雫", role: Role::Support, level: 1, hp: 20, max_hp: 20 },
-            Hero { id: 3, name: "嵐", role: Role::Striker, level: 1, hp: 18, max_hp: 18 },
-        ];
-        for h in &mut roster {
-            h.refresh_max_hp();
-            h.hp = h.max_hp;
-        }
         Self {
             screen: Screen::Camp,
             hub_tab: HubTab::Camp,
-            roster,
+            roster: vec![
+                Hero {
+                    id: 0,
+                    name: "灰",
+                    role: Role::Vanguard,
+                    level: 1,
+                },
+                Hero {
+                    id: 1,
+                    name: "焔",
+                    role: Role::Striker,
+                    level: 1,
+                },
+                Hero {
+                    id: 2,
+                    name: "雫",
+                    role: Role::Support,
+                    level: 1,
+                },
+                Hero {
+                    id: 3,
+                    name: "嵐",
+                    role: Role::Striker,
+                    level: 1,
+                },
+            ],
             forming: [Some(0), Some(1), Some(2)],
             rations: BASE_RATION_CAP,
             ration_progress: 0,
-            scout_memos: 1,
-            scout_progress: 0,
             chapter: 1,
             stage: 1,
-            supplies: 0,
+            medals: 4,
+            board_pos: 0,
+            board_goal: BOARD_GOAL,
+            pending_level_pick: false,
             last_failed: false,
             sortie: None,
             log: Vec::new(),
             result_summary: String::new(),
             elapsed_ticks: 0,
             last_wall_ms: 0,
+            rng: 0xC0FFEE,
             camp_scroll: Cell::new(0),
         }
     }
@@ -246,8 +264,17 @@ impl ExpeditionState {
         stage >= STAGES_PER_CHAPTER
     }
 
-    /// 団員1人を1レベル上げる補給コスト。
-    pub fn upgrade_cost(level: u32) -> u32 {
-        level + 1
+    pub fn board_remaining(&self) -> u32 {
+        self.board_goal.saturating_sub(self.board_pos)
+    }
+
+    pub fn next_rng(&mut self) -> u32 {
+        // xorshift32
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = if x == 0 { 1 } else { x };
+        self.rng
     }
 }

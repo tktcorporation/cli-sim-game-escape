@@ -1,9 +1,9 @@
-//! 遠征団 — マップを進め、詰まったら拠点で育てる。
+//! 遠征団 — 戦役はTD配置、レベルは遊技場のメダルすごろく。
 //!
 //! コアループ:
 //! 1. 拠点で行軍糧が自然回復する（放置は燃料だけ）
-//! 2. 章マップ（1-1, 1-2, …）をオート探索で切り拓き、補給を得る
-//! 3. 詰まったら育成タブで補給を使いレベルを上げ、またマップへ戻る
+//! 2. 章マップ（1-1, 1-2, …）を道への配置防衛で切り拓き、メダルを得る
+//! 3. 遊技場ですごろくを回し、目的地到達でレベルを上げ、また戦役へ戻る
 
 pub mod actions;
 pub mod logic;
@@ -24,8 +24,8 @@ use crate::games::{Game, GameChoice};
 use crate::input::{ClickScope, ClickState, InputEvent};
 
 use actions::{
-    hero_id_from_toggle, hero_id_from_upgrade, ACK_RESULT, CANCEL_FORMING, LAUNCH, LAUNCH_WITH_SCOUT,
-    OPEN_FORMING, START_FORMING, TAB_CAMP, TAB_TRAIN, USE_AID,
+    hero_id_from_level, hero_id_from_toggle, slot_from_place, ACK_RESULT, CANCEL_FORMING,
+    CONFIRM_PLACEMENT, LAUNCH, MEDAL_ROLL, OPEN_FORMING, START_FORMING, TAB_ARCADE, TAB_CAMP,
 };
 use state::{ExpeditionState, HubTab, Screen};
 
@@ -61,23 +61,26 @@ impl ExpeditionGame {
         if let Some(hero_id) = hero_id_from_toggle(id) {
             return logic::toggle_forming_hero(&mut self.state, hero_id);
         }
-        if let Some(hero_id) = hero_id_from_upgrade(id) {
-            return logic::upgrade_hero(&mut self.state, hero_id);
+        if let Some(hero_id) = hero_id_from_level(id) {
+            return logic::pick_level_hero(&mut self.state, hero_id);
+        }
+        if let Some(slot) = slot_from_place(id) {
+            return logic::place_on_slot(&mut self.state, slot as usize);
         }
         match id {
             START_FORMING => logic::primary_depart(&mut self.state),
             OPEN_FORMING => logic::begin_forming(&mut self.state),
             CANCEL_FORMING => logic::cancel_forming(&mut self.state),
-            LAUNCH => logic::launch_sortie(&mut self.state, false),
-            LAUNCH_WITH_SCOUT => logic::launch_sortie(&mut self.state, true),
-            USE_AID => logic::use_aid(&mut self.state),
+            LAUNCH => logic::launch_sortie(&mut self.state),
+            CONFIRM_PLACEMENT => logic::confirm_placement(&mut self.state),
+            MEDAL_ROLL => logic::medal_roll(&mut self.state),
             ACK_RESULT => logic::acknowledge_result(&mut self.state),
             TAB_CAMP => logic::set_hub_tab(&mut self.state, HubTab::Camp),
-            TAB_TRAIN => {
+            TAB_ARCADE => {
                 if self.state.screen == Screen::Result {
                     let _ = logic::acknowledge_result(&mut self.state);
                 }
-                logic::set_hub_tab(&mut self.state, HubTab::Train)
+                logic::set_hub_tab(&mut self.state, HubTab::Arcade)
             }
             _ => false,
         }
@@ -85,23 +88,40 @@ impl ExpeditionGame {
 
     fn handle_key(&mut self, key: char) -> bool {
         match (self.state.screen, key) {
-            (Screen::Camp, ' ' | 'e' | 'E') => logic::primary_depart(&mut self.state),
-            (Screen::Camp, 'f' | 'F') => logic::begin_forming(&mut self.state),
-            (Screen::Camp, '1'..='4') if self.state.hub_tab == HubTab::Train => {
-                let id = key as u8 - b'1';
-                logic::upgrade_hero(&mut self.state, id)
+            (Screen::Camp, ' ' | 'e' | 'E') if self.state.hub_tab == HubTab::Camp => {
+                logic::primary_depart(&mut self.state)
             }
-            (Screen::Forming, ' ') => logic::launch_sortie(&mut self.state, false),
-            (Screen::Forming, 's' | 'S') => logic::launch_sortie(&mut self.state, true),
+            (Screen::Camp, ' ' | 'r' | 'R') if self.state.hub_tab == HubTab::Arcade => {
+                if self.state.pending_level_pick {
+                    false
+                } else {
+                    logic::medal_roll(&mut self.state)
+                }
+            }
+            (Screen::Camp, '1'..='4')
+                if self.state.hub_tab == HubTab::Arcade && self.state.pending_level_pick =>
+            {
+                let id = key as u8 - b'1';
+                logic::pick_level_hero(&mut self.state, id)
+            }
+            (Screen::Camp, 'f' | 'F') => logic::begin_forming(&mut self.state),
+            (Screen::Forming, ' ') => logic::launch_sortie(&mut self.state),
             (Screen::Forming, 'q' | 'Q' | 'b' | 'B') => logic::cancel_forming(&mut self.state),
             (Screen::Forming, '1'..='4') => {
                 let id = key as u8 - b'1';
                 logic::toggle_forming_hero(&mut self.state, id)
             }
-            (Screen::Running, 'a' | 'A' | ' ') => logic::use_aid(&mut self.state),
+            (Screen::Placing, ' ') => logic::confirm_placement(&mut self.state),
+            (Screen::Placing, '0'..='4') => {
+                let slot = (key as u8 - b'0') as usize;
+                logic::place_on_slot(&mut self.state, slot)
+            }
+            (Screen::Placing, 'q' | 'Q' | 'b' | 'B') => logic::cancel_forming(&mut self.state),
             (Screen::Result, ' ' | '\n') => logic::acknowledge_result(&mut self.state),
             (_, '{') => logic::set_hub_tab(&mut self.state, HubTab::Camp),
-            (_, '|' | 't' | 'T') => logic::set_hub_tab(&mut self.state, HubTab::Train),
+            (_, '|' | 't' | 'T' | 'a' | 'A') => {
+                logic::set_hub_tab(&mut self.state, HubTab::Arcade)
+            }
             _ => false,
         }
     }
@@ -160,7 +180,7 @@ mod tests {
     fn camp_start_via_key() {
         let mut game = ExpeditionGame::new();
         assert!(game.handle_input(&InputEvent::Key('e')));
-        assert_eq!(game.state.screen, Screen::Running);
+        assert_eq!(game.state.screen, Screen::Placing);
     }
 
     #[test]
@@ -174,7 +194,7 @@ mod tests {
     fn hub_tab_switches_via_key() {
         let mut game = ExpeditionGame::new();
         assert!(game.handle_input(&InputEvent::Key('|')));
-        assert_eq!(game.state.hub_tab, HubTab::Train);
+        assert_eq!(game.state.hub_tab, HubTab::Arcade);
         assert!(game.handle_input(&InputEvent::Key('{')));
         assert_eq!(game.state.hub_tab, HubTab::Camp);
     }
@@ -186,5 +206,15 @@ mod tests {
         let need = game.state.ration_regen_ticks();
         game.tick(need);
         assert!(game.state.rations >= 1);
+    }
+
+    #[test]
+    fn arcade_roll_via_key() {
+        let mut game = ExpeditionGame::new();
+        game.state.hub_tab = HubTab::Arcade;
+        game.state.medals = 10;
+        let pos = game.state.board_pos;
+        assert!(game.handle_input(&InputEvent::Key('r')));
+        assert!(game.state.board_pos > pos || game.state.pending_level_pick);
     }
 }

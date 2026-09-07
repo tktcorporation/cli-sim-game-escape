@@ -1,13 +1,13 @@
-//! 遠征団 — 開口は「次: 遠征に出る」と主 CTA。
+//! 遠征団 — 開口は「次: 防衛する」と主 CTA。配置と遊技場が本編／育成。
 
 use crate::critique::frame::{capture_frame, ScreenSnapshot};
 use crate::critique::probe::{ActionFact, ProbeFacts, Subject};
 use crate::games::expedition::actions::{
-    ACK_RESULT, CANCEL_FORMING, LAUNCH, LAUNCH_WITH_SCOUT, START_FORMING, USE_AID,
+    ACK_RESULT, CANCEL_FORMING, CONFIRM_PLACEMENT, LAUNCH, MEDAL_ROLL, START_FORMING,
 };
 use crate::games::expedition::logic;
 use crate::games::expedition::render::{self, next_goal_line};
-use crate::games::expedition::state::{ExpeditionState, Screen};
+use crate::games::expedition::state::{ExpeditionState, HubTab, Screen};
 
 pub struct ExpeditionSubject {
     state: ExpeditionState,
@@ -29,13 +29,26 @@ impl Subject for ExpeditionSubject {
     fn probe(&self) -> ProbeFacts {
         let goal = next_goal_line(&self.state);
         let (actions, phase) = match self.state.screen {
+            Screen::Camp if self.state.hub_tab == HubTab::Arcade => (
+                vec![ActionFact {
+                    id: MEDAL_ROLL,
+                    label: if self.state.pending_level_pick {
+                        "団員を選ぶ".into()
+                    } else {
+                        "サイコロを振る".into()
+                    },
+                    hint: Some('R'),
+                    primary: true,
+                }],
+                "arcade",
+            ),
             Screen::Camp => (
                 vec![ActionFact {
                     id: START_FORMING,
                     label: if self.state.rations == 0 {
                         "糧が貯まるまで待つ".into()
                     } else {
-                        "遠征に出る".into()
+                        "戦役に出る".into()
                     },
                     hint: None,
                     primary: true,
@@ -46,15 +59,9 @@ impl Subject for ExpeditionSubject {
                 vec![
                     ActionFact {
                         id: LAUNCH,
-                        label: "出発する".into(),
+                        label: "配置へ".into(),
                         hint: None,
                         primary: true,
-                    },
-                    ActionFact {
-                        id: LAUNCH_WITH_SCOUT,
-                        label: "下調べ出発".into(),
-                        hint: None,
-                        primary: false,
                     },
                     ActionFact {
                         id: CANCEL_FORMING,
@@ -65,27 +72,32 @@ impl Subject for ExpeditionSubject {
                 ],
                 "forming",
             ),
-            Screen::Running => {
-                let mut actions = vec![];
-                if self.state
-                    .sortie
-                    .as_ref()
-                    .map(|s| s.aid_ready && s.enemy.is_some())
-                    .unwrap_or(false)
-                {
-                    actions.push(ActionFact {
-                        id: USE_AID,
-                        label: "援護する".into(),
-                        hint: Some('A'),
+            Screen::Placing => (
+                vec![
+                    ActionFact {
+                        id: CONFIRM_PLACEMENT,
+                        label: "防衛開始".into(),
+                        hint: None,
                         primary: true,
-                    });
-                }
-                (actions, "running")
-            }
+                    },
+                    ActionFact {
+                        id: CANCEL_FORMING,
+                        label: "撤退".into(),
+                        hint: None,
+                        primary: false,
+                    },
+                ],
+                "placing",
+            ),
+            Screen::Running => (vec![], "running"),
             Screen::Result => (
                 vec![ActionFact {
                     id: ACK_RESULT,
-                    label: "拠点に戻る".into(),
+                    label: if self.state.last_failed {
+                        "遊技場へ".into()
+                    } else {
+                        "拠点に戻る".into()
+                    },
                     hint: None,
                     primary: true,
                 }],
@@ -101,7 +113,8 @@ impl Subject for ExpeditionSubject {
                 ("rations".into(), self.state.rations as f64),
                 ("level".into(), self.state.total_level() as f64),
                 ("chapter".into(), self.state.chapter as f64),
-                ("supplies".into(), self.state.supplies as f64),
+                ("medals".into(), self.state.medals as f64),
+                ("board_pos".into(), self.state.board_pos as f64),
             ],
             recent_feedback: self.state.log.iter().rev().take(3).cloned().collect(),
         }
@@ -121,9 +134,9 @@ impl Subject for ExpeditionSubject {
         match action_id {
             START_FORMING => logic::primary_depart(&mut self.state),
             CANCEL_FORMING => logic::cancel_forming(&mut self.state),
-            LAUNCH => logic::launch_sortie(&mut self.state, false),
-            LAUNCH_WITH_SCOUT => logic::launch_sortie(&mut self.state, true),
-            USE_AID => logic::use_aid(&mut self.state),
+            LAUNCH => logic::launch_sortie(&mut self.state),
+            CONFIRM_PLACEMENT => logic::confirm_placement(&mut self.state),
+            MEDAL_ROLL => logic::medal_roll(&mut self.state),
             ACK_RESULT => logic::acknowledge_result(&mut self.state),
             _ => false,
         }
@@ -131,10 +144,14 @@ impl Subject for ExpeditionSubject {
 
     fn suggest_action(&self, _facts: &ProbeFacts, _screen: &ScreenSnapshot) -> Option<u16> {
         match self.state.screen {
+            Screen::Camp if self.state.hub_tab == HubTab::Arcade && !self.state.pending_level_pick => {
+                Some(MEDAL_ROLL)
+            }
             Screen::Camp if self.state.rations > 0 => Some(START_FORMING),
             Screen::Camp => None,
             Screen::Forming => Some(LAUNCH),
-            Screen::Running => None, // オート完走が基本。援護は任意
+            Screen::Placing => Some(CONFIRM_PLACEMENT),
+            Screen::Running => None,
             Screen::Result => Some(ACK_RESULT),
         }
     }

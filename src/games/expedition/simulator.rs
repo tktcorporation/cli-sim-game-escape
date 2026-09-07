@@ -1,97 +1,107 @@
-//! 遠征団の自動プレイシミュレーター。
+//! 遠征団の自動プレイ・バランス用シミュレータ。
 
 use super::logic::{
-    acknowledge_result, begin_forming, launch_sortie, set_hub_tab, tick, upgrade_hero, use_aid,
+    acknowledge_result, confirm_placement, launch_sortie, medal_roll, pick_level_hero,
+    primary_depart, set_hub_tab, tick,
 };
 use super::state::{ExpeditionState, HubTab, Screen};
 
-fn finish_or_progress(state: &mut ExpeditionState, use_optional_aid: bool) {
+fn finish_or_progress(state: &mut ExpeditionState) {
     match state.screen {
-        Screen::Camp if state.rations > 0 => {
-            // 補給があれば先に育成してから出る（詰まったときの強化ループ）
-            if state.supplies > 0 {
-                let _ = set_hub_tab(state, HubTab::Train);
-                for id in 0..4u8 {
-                    let _ = upgrade_hero(state, id);
+        Screen::Camp => {
+            // メダルがあれば遊技場で育ててから出る
+            if state.medals >= 2 {
+                let _ = set_hub_tab(state, HubTab::Arcade);
+                for _ in 0..20 {
+                    if state.pending_level_pick {
+                        let _ = pick_level_hero(state, 0);
+                        break;
+                    }
+                    if !medal_roll(state) {
+                        break;
+                    }
                 }
                 let _ = set_hub_tab(state, HubTab::Camp);
             }
-            let _ = begin_forming(state);
-            let _ = launch_sortie(state, state.scout_memos > 0);
+            let _ = primary_depart(state);
+            if state.screen == Screen::Placing {
+                let _ = confirm_placement(state);
+            }
         }
         Screen::Forming => {
-            let _ = launch_sortie(state, state.scout_memos > 0);
-        }
-        Screen::Running => {
-            if use_optional_aid {
-                let _ = use_aid(state);
+            let _ = launch_sortie(state);
+            if state.screen == Screen::Placing {
+                let _ = confirm_placement(state);
             }
-            tick(state, 1);
         }
+        Screen::Placing => {
+            let _ = confirm_placement(state);
+        }
+        Screen::Running => {}
         Screen::Result => {
-            if state.last_failed {
-                let _ = acknowledge_result(state);
-                let _ = set_hub_tab(state, HubTab::Train);
-                for id in 0..4u8 {
-                    let _ = upgrade_hero(state, id);
+            let failed = state.last_failed;
+            let _ = acknowledge_result(state);
+            if failed {
+                let _ = set_hub_tab(state, HubTab::Arcade);
+                for _ in 0..12 {
+                    if state.pending_level_pick {
+                        let id = (state.elapsed_ticks % 4) as u8;
+                        let _ = pick_level_hero(state, id);
+                        break;
+                    }
+                    if !medal_roll(state) {
+                        break;
+                    }
                 }
                 let _ = set_hub_tab(state, HubTab::Camp);
-            } else {
-                let _ = acknowledge_result(state);
             }
         }
-        Screen::Camp => tick(state, 1),
     }
 }
 
-fn bot_run(ticks: u32, use_optional_aid: bool) -> ExpeditionState {
+fn bot_run(ticks: u32) -> ExpeditionState {
     let mut state = ExpeditionState::new();
     for _ in 0..ticks {
-        finish_or_progress(&mut state, use_optional_aid);
+        finish_or_progress(&mut state);
+        tick(&mut state, 1);
     }
     state
 }
 
 #[test]
 fn long_run_never_panics_and_keeps_ration_bounds() {
-    let state = bot_run(30_000, false);
+    let state = bot_run(8_000);
     eprintln!(
-        "expedition report: chapter={} stage={} level={} supplies={} rations={}/{}",
+        "expedition report: chapter={} stage={} level={} medals={} board={}/{} rations={}/{}",
         state.chapter,
         state.stage,
         state.total_level(),
-        state.supplies,
+        state.medals,
+        state.board_pos,
+        state.board_goal,
         state.rations,
-        state.ration_cap(),
+        state.ration_cap()
     );
-    assert!(state.chapter >= 1);
     assert!(state.rations <= state.ration_cap());
+    assert!(state.chapter >= 1);
+    assert!((1..=4).contains(&state.stage));
 }
 
 #[test]
 fn idle_only_does_not_increase_level() {
     let mut state = ExpeditionState::new();
     let before = state.total_level();
-    tick(&mut state, 20_000);
+    for _ in 0..5_000 {
+        tick(&mut state, 1);
+    }
     assert_eq!(state.total_level(), before);
-    assert!(state.rations > 0);
 }
 
 #[test]
-fn active_play_advances_map_or_levels_via_train() {
-    let plain = bot_run(12_000, false);
-    let aided = bot_run(12_000, true);
-    eprintln!(
-        "plain chapter={} stage={} level={} / aided chapter={} stage={} level={}",
-        plain.chapter,
-        plain.stage,
-        plain.total_level(),
-        aided.chapter,
-        aided.stage,
-        aided.total_level(),
-    );
+fn active_play_advances_map_or_levels_via_arcade() {
+    let state = bot_run(12_000);
     let progressed = |s: &ExpeditionState| {
-        s.chapter > 1 || s.stage > 1 || s.total_level() > 4 || s.supplies > 0
+        s.chapter > 1 || s.stage > 1 || s.total_level() > 4 || s.medals > 0 || s.board_pos > 0
     };
-    assert!(progressed(&plain) || progressed(&aided));
+    assert!(progressed(&state), "bot should progress map, medals, or levels");
 }
