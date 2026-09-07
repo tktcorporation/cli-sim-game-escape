@@ -1,9 +1,9 @@
-//! 遠征団 — 開口は「次: 防衛する」と主 CTA。配置と遊技場が本編／育成。
+//! 遠征団 — 開口は「次: 防衛する」と主 CTA。配置とプッシャーが本編／育成。
 
 use crate::critique::frame::{capture_frame, ScreenSnapshot};
 use crate::critique::probe::{ActionFact, ProbeFacts, Subject};
 use crate::games::expedition::actions::{
-    ACK_RESULT, CANCEL_FORMING, CONFIRM_PLACEMENT, LAUNCH, MEDAL_ROLL, START_FORMING,
+    drop_lane_id, ACK_RESULT, CANCEL_FORMING, CONFIRM_PLACEMENT, LAUNCH, START_FORMING,
 };
 use crate::games::expedition::logic;
 use crate::games::expedition::render::{self, next_goal_line};
@@ -31,13 +31,13 @@ impl Subject for ExpeditionSubject {
         let (actions, phase) = match self.state.screen {
             Screen::Camp if self.state.hub_tab == HubTab::Arcade => (
                 vec![ActionFact {
-                    id: MEDAL_ROLL,
+                    id: drop_lane_id(2),
                     label: if self.state.pending_level_pick {
                         "団員を選ぶ".into()
                     } else {
-                        "サイコロを振る".into()
+                        "メダルを落とす".into()
                     },
-                    hint: Some('R'),
+                    hint: Some('2'),
                     primary: true,
                 }],
                 "arcade",
@@ -114,7 +114,7 @@ impl Subject for ExpeditionSubject {
                 ("level".into(), self.state.total_level() as f64),
                 ("chapter".into(), self.state.chapter as f64),
                 ("medals".into(), self.state.medals as f64),
-                ("board_pos".into(), self.state.board_pos as f64),
+                ("orb_gauge".into(), self.state.orb_gauge as f64),
             ],
             recent_feedback: self.state.log.iter().rev().take(3).cloned().collect(),
         }
@@ -131,12 +131,14 @@ impl Subject for ExpeditionSubject {
     }
 
     fn apply_action(&mut self, action_id: u16) -> bool {
+        if let Some(lane) = crate::games::expedition::actions::lane_from_drop(action_id) {
+            return logic::drop_medal(&mut self.state, lane as usize);
+        }
         match action_id {
             START_FORMING => logic::primary_depart(&mut self.state),
             CANCEL_FORMING => logic::cancel_forming(&mut self.state),
             LAUNCH => logic::launch_sortie(&mut self.state),
             CONFIRM_PLACEMENT => logic::confirm_placement(&mut self.state),
-            MEDAL_ROLL => logic::medal_roll(&mut self.state),
             ACK_RESULT => logic::acknowledge_result(&mut self.state),
             _ => false,
         }
@@ -145,7 +147,7 @@ impl Subject for ExpeditionSubject {
     fn suggest_action(&self, _facts: &ProbeFacts, _screen: &ScreenSnapshot) -> Option<u16> {
         match self.state.screen {
             Screen::Camp if self.state.hub_tab == HubTab::Arcade && !self.state.pending_level_pick => {
-                Some(MEDAL_ROLL)
+                Some(drop_lane_id(2))
             }
             Screen::Camp if self.state.rations > 0 => Some(START_FORMING),
             Screen::Camp => None,

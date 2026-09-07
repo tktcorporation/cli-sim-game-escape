@@ -13,10 +13,16 @@ pub const STAGES_PER_CHAPTER: u32 = 4;
 pub const MEDAL_CLEAR_BASE: u32 = 5;
 /// 敗退時の持ち帰りメダル。
 pub const MEDAL_FAIL: u32 = 2;
-/// すごろく1回のベット。
-pub const MEDAL_BET: u32 = 2;
-/// 目的地までのマス数。
-pub const BOARD_GOAL: u32 = 10;
+/// プッシャー横幅（レーン数）。
+pub const PUSH_W: usize = 5;
+/// プッシャー奥行き。手前端 (DEPTH-1) から落下する。
+pub const PUSH_D: usize = 4;
+/// マスに積めるメダル上限。
+pub const CELL_CAP: u8 = 9;
+/// 押し板が進む間隔 (tick)。
+pub const PUSHER_STEP_TICKS: u32 = 5;
+/// レベルアップに必要な光珠。
+pub const ORB_NEED: u32 = 3;
 /// 敵が1マス進む間隔。
 pub const ENEMY_STEP_TICKS: u32 = 6;
 /// 団員が攻撃する間隔。
@@ -124,6 +130,48 @@ pub struct Sortie {
     pub last_hit_log: String,
 }
 
+/// プッシャー1マス。メダル枚数と光珠の有無。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PushCell {
+    pub medals: u8,
+    pub has_orb: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct Pusher {
+    /// [奥行き][レーン]。row 0 = 投入側、row PUSH_D-1 = 落下端。
+    pub cells: [[PushCell; PUSH_W]; PUSH_D],
+    pub step_progress: u32,
+    /// 押し板の視覚位相 0..PUSH_W（往復表示用）。
+    pub plate_col: usize,
+    pub plate_dir: i8,
+    /// 直近に落ちたメダル（演出用）。
+    pub last_drop_medals: u32,
+    pub last_drop_orb: bool,
+}
+
+impl Pusher {
+    pub fn new_seeded(next: &mut dyn FnMut() -> u32) -> Self {
+        let mut cells = [[PushCell::default(); PUSH_W]; PUSH_D];
+        for row in 1..PUSH_D {
+            for col in 0..PUSH_W {
+                let n = (next() % 3) as u8;
+                cells[row][col].medals = n;
+            }
+        }
+        let oc = (next() as usize) % PUSH_W;
+        cells[1][oc].has_orb = true;
+        Self {
+            cells,
+            step_progress: 0,
+            plate_col: 0,
+            plate_dir: 1,
+            last_drop_medals: 0,
+            last_drop_orb: false,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ExpeditionState {
     pub screen: Screen,
@@ -136,12 +184,12 @@ pub struct ExpeditionState {
     pub chapter: u32,
     /// 次に攻略する節（1..=STAGES_PER_CHAPTER）。
     pub stage: u32,
-    /// 遊技場用メダル。戦役で増え、すごろくで減る。
+    /// 遊技場用メダル。戦役で増え、プッシャー投入で減る。
     pub medals: u32,
-    /// すごろく現在地（0..=board_goal）。
-    pub board_pos: u32,
-    pub board_goal: u32,
-    /// 目的地到達後、レベルを上げる団員を選ぶ待ち。
+    pub pusher: Pusher,
+    /// 落とした光珠の累計（ORB_NEED でレベル選択）。
+    pub orb_gauge: u32,
+    /// 光珠規定数到達後、レベルを上げる団員を選ぶ待ち。
     pub pending_level_pick: bool,
     /// 直近の探索が敗退なら true（遊技場誘導用）。
     pub last_failed: bool,
@@ -162,6 +210,16 @@ impl Default for ExpeditionState {
 
 impl ExpeditionState {
     pub fn new() -> Self {
+        let mut rng = 0xC0FFEE_u32;
+        let mut next = || {
+            let mut x = rng;
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            rng = if x == 0 { 1 } else { x };
+            rng
+        };
+        let pusher = Pusher::new_seeded(&mut next);
         Self {
             screen: Screen::Camp,
             hub_tab: HubTab::Camp,
@@ -196,9 +254,9 @@ impl ExpeditionState {
             ration_progress: 0,
             chapter: 1,
             stage: 1,
-            medals: 4,
-            board_pos: 0,
-            board_goal: BOARD_GOAL,
+            medals: 8,
+            pusher,
+            orb_gauge: 0,
             pending_level_pick: false,
             last_failed: false,
             sortie: None,
@@ -206,7 +264,7 @@ impl ExpeditionState {
             result_summary: String::new(),
             elapsed_ticks: 0,
             last_wall_ms: 0,
-            rng: 0xC0FFEE,
+            rng,
             camp_scroll: Cell::new(0),
         }
     }
@@ -264,12 +322,11 @@ impl ExpeditionState {
         stage >= STAGES_PER_CHAPTER
     }
 
-    pub fn board_remaining(&self) -> u32 {
-        self.board_goal.saturating_sub(self.board_pos)
+    pub fn orb_remaining(&self) -> u32 {
+        ORB_NEED.saturating_sub(self.orb_gauge.min(ORB_NEED))
     }
 
     pub fn next_rng(&mut self) -> u32 {
-        // xorshift32
         let mut x = self.rng;
         x ^= x << 13;
         x ^= x >> 17;

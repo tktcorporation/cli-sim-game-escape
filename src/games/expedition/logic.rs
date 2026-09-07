@@ -1,9 +1,9 @@
 //! 遠征団の純粋ロジック。
 
 use super::state::{
-    Creep, ExpeditionState, HubTab, Role, Screen, Sortie, BOARD_GOAL, ENEMY_STEP_TICKS,
-    HERO_ATK_TICKS, MEDAL_BET, MEDAL_CLEAR_BASE, MEDAL_FAIL, PARTY_SIZE, PATH_LEN,
-    STAGES_PER_CHAPTER,
+    Creep, ExpeditionState, HubTab, PushCell, Role, Screen, Sortie, CELL_CAP, ENEMY_STEP_TICKS,
+    HERO_ATK_TICKS, MEDAL_CLEAR_BASE, MEDAL_FAIL, ORB_NEED, PARTY_SIZE, PATH_LEN, PUSHER_STEP_TICKS,
+    PUSH_D, PUSH_W, STAGES_PER_CHAPTER,
 };
 
 fn creep_for(difficulty: u32, wave: u32, is_boss_wave: bool) -> Creep {
@@ -77,6 +77,10 @@ pub fn tick(state: &mut ExpeditionState, delta_ticks: u32) {
     for _ in 0..delta_ticks {
         state.elapsed_ticks = state.elapsed_ticks.saturating_add(1);
         tick_fuel(state);
+        // 遊技場タブを開いている間は押し板が動き続ける（物理の手触り）
+        if state.screen == Screen::Camp && state.hub_tab == HubTab::Arcade {
+            tick_pusher(state);
+        }
         if state.screen == Screen::Running {
             tick_defense(state);
         }
@@ -470,8 +474,8 @@ fn fail_sortie(state: &mut ExpeditionState) {
     state.push_log(state.result_summary.clone());
 }
 
-/// 遊技場: メダルを消費してサイコロを振り、すごろくを進める。
-pub fn medal_roll(state: &mut ExpeditionState) -> bool {
+/// 遊技場: 指定レーンの奥へメダル1枚を投入する。
+pub fn drop_medal(state: &mut ExpeditionState, lane: usize) -> bool {
     if state.screen != Screen::Camp || state.hub_tab != HubTab::Arcade {
         return false;
     }
@@ -479,33 +483,134 @@ pub fn medal_roll(state: &mut ExpeditionState) -> bool {
         state.push_log("先にレベルアップする団員を選ぼう。");
         return false;
     }
-    if state.medals < MEDAL_BET {
+    if lane >= PUSH_W {
+        return false;
+    }
+    if state.medals == 0 {
         state.push_log("メダルが足りない。戦役で集めよう。");
         return false;
     }
-    state.medals -= MEDAL_BET;
-    let roll = (state.next_rng() % 6) + 1;
-    state.board_pos = state.board_pos.saturating_add(roll);
-    state.push_log(format!("サイコロ {roll}！"));
-
-    // 途中マスの小さな払い出し（目的地以外）
-    if state.board_pos < state.board_goal && roll == 6 {
-        state.medals += 1;
-        state.push_log("出目6 — メダル+1");
+    state.medals -= 1;
+    let cell = &mut state.pusher.cells[0][lane];
+    if cell.medals < CELL_CAP {
+        cell.medals += 1;
+    } else {
+        // 溢れた分は隣へこぼす
+        let spill = if lane + 1 < PUSH_W { lane + 1 } else { lane.saturating_sub(1) };
+        let n = &mut state.pusher.cells[0][spill];
+        if n.medals < CELL_CAP {
+            n.medals += 1;
+        }
     }
-
-    if state.board_pos >= state.board_goal {
-        state.board_pos = state.board_goal;
-        state.pending_level_pick = true;
-        // 小当たりのメダル払い出し
-        let payout = 3 + state.chapter;
-        state.medals = state.medals.saturating_add(payout);
-        state.push_log(format!("目的地到着！ メダル+{payout} — 誰を育てる？"));
+    // まれに投入で光珠も載せる
+    if state.next_rng() % 12 == 0 {
+        let has_orb = state.pusher.cells.iter().any(|r| r.iter().any(|c| c.has_orb));
+        if !has_orb {
+            state.pusher.cells[0][lane].has_orb = true;
+            state.push_log("光珠が乗った！");
+        }
     }
     true
 }
 
-/// 目的地到達後: 団員を選んでレベル+1。盤面をリセットする。
+/// 押し板1ステップ: 奥→手前へメダルを押し、手前端からは落下。
+pub fn tick_pusher(state: &mut ExpeditionState) {
+    if state.pending_level_pick {
+        return;
+    }
+    state.pusher.step_progress += 1;
+    // 押し板の見た目往復
+    if state.pusher.plate_dir > 0 {
+        if state.pusher.plate_col + 1 >= PUSH_W {
+            state.pusher.plate_dir = -1;
+        } else {
+            state.pusher.plate_col += 1;
+        }
+    } else if state.pusher.plate_col == 0 {
+        state.pusher.plate_dir = 1;
+    } else {
+        state.pusher.plate_col -= 1;
+    }
+
+    if state.pusher.step_progress < PUSHER_STEP_TICKS {
+        return;
+    }
+    state.pusher.step_progress = 0;
+    state.pusher.last_drop_medals = 0;
+    state.pusher.last_drop_orb = false;
+
+    let mut dropped_medals = 0u32;
+    let mut dropped_orb = false;
+    let mut next = [[PushCell::default(); PUSH_W]; PUSH_D];
+
+    // 手前行から落下。端に乗った光珠は押し1回で落ちる。
+    for col in 0..PUSH_W {
+        let edge = state.pusher.cells[PUSH_D - 1][col];
+        if edge.medals > 0 {
+            let fall = ((edge.medals as u32 + 1) / 2).max(1).min(edge.medals as u32);
+            dropped_medals += fall;
+            let remain = edge.medals.saturating_sub(fall as u8);
+            next[PUSH_D - 1][col].medals = remain;
+        }
+        if edge.has_orb {
+            dropped_orb = true;
+        }
+    }
+
+    // 奥の行を1つ手前へ押す（溢れは手前マスへ合算）
+    for row in (0..PUSH_D - 1).rev() {
+        for col in 0..PUSH_W {
+            let src = state.pusher.cells[row][col];
+            if src.medals == 0 && !src.has_orb {
+                continue;
+            }
+            let dest = &mut next[row + 1][col];
+            let room = CELL_CAP.saturating_sub(dest.medals);
+            let moved = src.medals.min(room);
+            dest.medals += moved;
+            if src.has_orb {
+                if dest.has_orb {
+                    // 光珠がぶつかったら手前側を優先、余りは隣へ
+                    let side = if col + 1 < PUSH_W { col + 1 } else { col.saturating_sub(1) };
+                    next[row + 1][side].has_orb = true;
+                } else {
+                    dest.has_orb = true;
+                }
+            }
+            // 押し切れなかった分は元の行に残す
+            let left = src.medals.saturating_sub(moved);
+            if left > 0 {
+                next[row][col].medals = next[row][col].medals.saturating_add(left).min(CELL_CAP);
+            }
+        }
+    }
+
+    state.pusher.cells = next;
+
+    if dropped_medals > 0 {
+        state.medals = state.medals.saturating_add(dropped_medals);
+        state.pusher.last_drop_medals = dropped_medals;
+        state.push_log(format!("メダル落下 +{dropped_medals}"));
+    }
+    if dropped_orb {
+        state.pusher.last_drop_orb = true;
+        state.orb_gauge = state.orb_gauge.saturating_add(1);
+        state.push_log(format!("光珠ゲット！ ({}/{})", state.orb_gauge, ORB_NEED));
+        // フィールドに光珠が無ければ奥へ再配置
+        let has = state.pusher.cells.iter().any(|r| r.iter().any(|c| c.has_orb));
+        if !has {
+            let col = (state.next_rng() as usize) % PUSH_W;
+            state.pusher.cells[0][col].has_orb = true;
+            state.pusher.cells[0][col].medals = state.pusher.cells[0][col].medals.max(1);
+        }
+        if state.orb_gauge >= ORB_NEED {
+            state.pending_level_pick = true;
+            state.push_log("光珠が揃った — 誰を育てる？");
+        }
+    }
+}
+
+/// 光珠規定数到達後: 団員を選んでレベル+1。
 pub fn pick_level_hero(state: &mut ExpeditionState, hero_id: u8) -> bool {
     if !state.pending_level_pick {
         return false;
@@ -520,8 +625,7 @@ pub fn pick_level_hero(state: &mut ExpeditionState, hero_id: u8) -> bool {
     let name = h.name;
     let lv = h.level;
     state.pending_level_pick = false;
-    state.board_pos = 0;
-    state.board_goal = BOARD_GOAL;
+    state.orb_gauge = 0;
     state.push_log(format!("{name} は Lv{lv} になった。"));
     true
 }
@@ -609,26 +713,54 @@ mod tests {
     }
 
     #[test]
-    fn medal_roll_reaches_goal_then_levels_hero() {
+    fn drop_and_push_can_drop_orb_then_level() {
         let mut state = ExpeditionState::new();
         state.hub_tab = HubTab::Arcade;
-        state.medals = 20;
-        state.board_pos = state.board_goal - 1;
+        state.medals = 30;
+        // 光珠を手前端に置いて確実に落とす
+        for row in 0..PUSH_D {
+            for col in 0..PUSH_W {
+                state.pusher.cells[row][col] = PushCell::default();
+            }
+        }
+        state.pusher.cells[PUSH_D - 1][2] = PushCell {
+            medals: 4,
+            has_orb: true,
+        };
+        state.pusher.step_progress = PUSHER_STEP_TICKS;
         let before = state.hero(0).unwrap().level;
-        assert!(medal_roll(&mut state));
-        assert!(state.pending_level_pick);
+        tick_pusher(&mut state);
+        assert!(
+            state.pusher.last_drop_orb || state.orb_gauge >= 1,
+            "edge orb should fall"
+        );
+        // ゲージを満タンにしてレベル選択へ
+        state.orb_gauge = ORB_NEED;
+        state.pending_level_pick = true;
         assert!(pick_level_hero(&mut state, 0));
         assert_eq!(state.hero(0).unwrap().level, before + 1);
         assert!(!state.pending_level_pick);
-        assert_eq!(state.board_pos, 0);
     }
 
     #[test]
-    fn medal_roll_requires_medals() {
+    fn drop_medal_requires_medals() {
         let mut state = ExpeditionState::new();
         state.hub_tab = HubTab::Arcade;
         state.medals = 0;
-        assert!(!medal_roll(&mut state));
+        assert!(!drop_medal(&mut state, 0));
+    }
+
+    #[test]
+    fn drop_medal_adds_to_back_row() {
+        let mut state = ExpeditionState::new();
+        state.hub_tab = HubTab::Arcade;
+        state.medals = 5;
+        for c in state.pusher.cells[0].iter_mut() {
+            *c = PushCell::default();
+        }
+        assert!(drop_medal(&mut state, 1));
+        assert_eq!(state.medals, 4);
+        assert!(state.pusher.cells[0][1].medals >= 1);
     }
 
     #[test]

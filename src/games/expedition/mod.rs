@@ -1,9 +1,9 @@
-//! 遠征団 — 戦役はTD配置、レベルは遊技場のメダルすごろく。
+//! 遠征団 — 戦役はTD配置、レベルは遊技場のメダルプッシャー。
 //!
 //! コアループ:
 //! 1. 拠点で行軍糧が自然回復する（放置は燃料だけ）
 //! 2. 章マップ（1-1, 1-2, …）を道への配置防衛で切り拓き、メダルを得る
-//! 3. 遊技場ですごろくを回し、目的地到達でレベルを上げ、また戦役へ戻る
+//! 3. 遊技場でメダルを落として光珠を稼ぎ、レベルを上げてまた戦役へ戻る
 
 pub mod actions;
 pub mod logic;
@@ -24,8 +24,8 @@ use crate::games::{Game, GameChoice};
 use crate::input::{ClickScope, ClickState, InputEvent};
 
 use actions::{
-    hero_id_from_level, hero_id_from_toggle, slot_from_place, ACK_RESULT, CANCEL_FORMING,
-    CONFIRM_PLACEMENT, LAUNCH, MEDAL_ROLL, OPEN_FORMING, START_FORMING, TAB_ARCADE, TAB_CAMP,
+    hero_id_from_level, hero_id_from_toggle, lane_from_drop, slot_from_place, ACK_RESULT,
+    CANCEL_FORMING, CONFIRM_PLACEMENT, LAUNCH, OPEN_FORMING, START_FORMING, TAB_ARCADE, TAB_CAMP,
 };
 use state::{ExpeditionState, HubTab, Screen};
 
@@ -67,13 +67,15 @@ impl ExpeditionGame {
         if let Some(slot) = slot_from_place(id) {
             return logic::place_on_slot(&mut self.state, slot as usize);
         }
+        if let Some(lane) = lane_from_drop(id) {
+            return logic::drop_medal(&mut self.state, lane as usize);
+        }
         match id {
             START_FORMING => logic::primary_depart(&mut self.state),
             OPEN_FORMING => logic::begin_forming(&mut self.state),
             CANCEL_FORMING => logic::cancel_forming(&mut self.state),
             LAUNCH => logic::launch_sortie(&mut self.state),
             CONFIRM_PLACEMENT => logic::confirm_placement(&mut self.state),
-            MEDAL_ROLL => logic::medal_roll(&mut self.state),
             ACK_RESULT => logic::acknowledge_result(&mut self.state),
             TAB_CAMP => logic::set_hub_tab(&mut self.state, HubTab::Camp),
             TAB_ARCADE => {
@@ -91,11 +93,12 @@ impl ExpeditionGame {
             (Screen::Camp, ' ' | 'e' | 'E') if self.state.hub_tab == HubTab::Camp => {
                 logic::primary_depart(&mut self.state)
             }
-            (Screen::Camp, ' ' | 'r' | 'R') if self.state.hub_tab == HubTab::Arcade => {
+            (Screen::Camp, '0'..='4') if self.state.hub_tab == HubTab::Arcade => {
                 if self.state.pending_level_pick {
                     false
                 } else {
-                    logic::medal_roll(&mut self.state)
+                    let lane = (key as u8 - b'0') as usize;
+                    logic::drop_medal(&mut self.state, lane)
                 }
             }
             (Screen::Camp, '1'..='4')
@@ -209,12 +212,12 @@ mod tests {
     }
 
     #[test]
-    fn arcade_roll_via_key() {
+    fn arcade_drop_via_key() {
         let mut game = ExpeditionGame::new();
         game.state.hub_tab = HubTab::Arcade;
         game.state.medals = 10;
-        let pos = game.state.board_pos;
-        assert!(game.handle_input(&InputEvent::Key('r')));
-        assert!(game.state.board_pos > pos || game.state.pending_level_pick);
+        let before = game.state.medals;
+        assert!(game.handle_input(&InputEvent::Key('2')));
+        assert_eq!(game.state.medals, before - 1);
     }
 }

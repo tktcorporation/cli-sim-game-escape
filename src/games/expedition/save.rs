@@ -1,19 +1,19 @@
 //! 遠征団のセーブ / ロード。
 //!
-//! 永続対象: 行軍糧・レベル・章節・メダル・すごろく位置。
-//! 遠征中の進行は保存しない（拠点から再開）。
+//! 永続対象: 行軍糧・レベル・章節・メダル・光珠ゲージ。
+//! プッシャー盤面と遠征中進行は保存しない（拠点から再開）。
 
 #[cfg(any(target_arch = "wasm32", test))]
 use serde::{Deserialize, Serialize};
 
 #[cfg(any(target_arch = "wasm32", test))]
-use super::state::{ExpeditionState, Screen, BOARD_GOAL};
+use super::state::{ExpeditionState, Screen};
 
 /// オートセーブ間隔 (tick)。10 tick/秒 × 30秒。
 pub const AUTOSAVE_INTERVAL: u32 = 300;
 
 #[cfg(any(target_arch = "wasm32", test))]
-const SAVE_VERSION: u32 = 3;
+const SAVE_VERSION: u32 = 4;
 #[cfg(target_arch = "wasm32")]
 const MIN_COMPATIBLE_VERSION: u32 = 1;
 
@@ -43,10 +43,12 @@ struct GameSave {
     #[serde(default)]
     supplies: u32,
     #[serde(default)]
+    orb_gauge: u32,
+    /// 旧すごろく互換フィールド（無視）。
+    #[serde(default)]
     board_pos: u32,
-    #[serde(default = "default_board_goal")]
+    #[serde(default)]
     board_goal: u32,
-    /// 旧セーブ互換。chapter/stage が無いときだけ使う。
     #[serde(default)]
     best_depth: u32,
     #[serde(alias = "bonds")]
@@ -63,10 +65,6 @@ fn default_chapter() -> u32 {
 fn default_stage() -> u32 {
     1
 }
-#[cfg(any(target_arch = "wasm32", test))]
-fn default_board_goal() -> u32 {
-    BOARD_GOAL
-}
 
 #[cfg(any(target_arch = "wasm32", test))]
 fn extract_save(state: &ExpeditionState) -> SaveData {
@@ -79,8 +77,9 @@ fn extract_save(state: &ExpeditionState) -> SaveData {
             stage: state.stage,
             medals: state.medals,
             supplies: 0,
-            board_pos: state.board_pos,
-            board_goal: state.board_goal,
+            orb_gauge: state.orb_gauge,
+            board_pos: 0,
+            board_goal: 0,
             best_depth: 0,
             levels: state.roster.iter().map(|h| h.level).collect(),
             elapsed_ticks: state.elapsed_ticks,
@@ -104,18 +103,12 @@ fn apply_save(state: &mut ExpeditionState, save: &GameSave) {
         state.chapter = 1;
         state.stage = 1;
     }
-    // メダルが無ければ旧補給を引き継ぐ
     state.medals = if save.medals > 0 {
         save.medals
     } else {
         save.supplies
     };
-    state.board_pos = save.board_pos.min(save.board_goal.max(BOARD_GOAL));
-    state.board_goal = if save.board_goal == 0 {
-        BOARD_GOAL
-    } else {
-        save.board_goal
-    };
+    state.orb_gauge = save.orb_gauge;
     state.pending_level_pick = false;
     state.elapsed_ticks = save.elapsed_ticks;
     state.last_wall_ms = save.last_wall_ms;
@@ -200,7 +193,7 @@ mod tests {
         state.chapter = 1;
         state.stage = 3;
         state.medals = 9;
-        state.board_pos = 4;
+        state.orb_gauge = 2;
         let save = extract_save(&state);
         let mut loaded = ExpeditionState::new();
         apply_save(&mut loaded, &save.game);
@@ -209,7 +202,7 @@ mod tests {
         assert_eq!(loaded.chapter, 1);
         assert_eq!(loaded.stage, 3);
         assert_eq!(loaded.medals, 9);
-        assert_eq!(loaded.board_pos, 4);
+        assert_eq!(loaded.orb_gauge, 2);
         assert_eq!(loaded.screen, Screen::Camp);
     }
 

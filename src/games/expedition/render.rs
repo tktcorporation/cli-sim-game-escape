@@ -18,10 +18,10 @@ use crate::theme;
 use crate::widgets::{Clickable, ClickableList, TabBar};
 
 use super::actions::{
-    level_hero_id, place_slot_id, toggle_hero_id, ACK_RESULT, CANCEL_FORMING, CONFIRM_PLACEMENT,
-    LAUNCH, MEDAL_ROLL, OPEN_FORMING, START_FORMING, TAB_ARCADE, TAB_CAMP,
+    drop_lane_id, level_hero_id, place_slot_id, toggle_hero_id, ACK_RESULT, CANCEL_FORMING,
+    CONFIRM_PLACEMENT, LAUNCH, OPEN_FORMING, START_FORMING, TAB_ARCADE, TAB_CAMP,
 };
-use super::state::{ExpeditionState, HubTab, Screen, MEDAL_BET, PARTY_SIZE, PATH_LEN};
+use super::state::{ExpeditionState, HubTab, Screen, ORB_NEED, PARTY_SIZE, PATH_LEN, PUSH_D, PUSH_W};
 
 fn accent() -> Color {
     theme::accent(&GameChoice::Expedition)
@@ -48,7 +48,7 @@ pub fn next_goal_line(state: &ExpeditionState) -> String {
             "次: 育てる団員を選ぶ".into()
         }
         Screen::Camp if state.hub_tab == HubTab::Arcade => {
-            format!("次: 目的地まであと{}", state.board_remaining())
+            format!("次: 光珠あと{}でレベルアップ", state.orb_remaining().max(1))
         }
         Screen::Camp if state.rations == 0 => "次: 行軍糧が貯まるのを待つ".into(),
         Screen::Camp if state.last_failed => {
@@ -157,7 +157,7 @@ fn render_status_bar(state: &ExpeditionState, f: &mut Frame, area: Rect) {
             Style::default().fg(Color::LightYellow),
         ),
         Span::styled(
-            format!("あと{}マス ", state.board_remaining()),
+            format!("光珠{}/{} ", state.orb_gauge.min(ORB_NEED), ORB_NEED),
             Style::default().fg(Color::Cyan),
         ),
     ]);
@@ -237,6 +237,22 @@ fn ration_fill_bar(state: &ExpeditionState) -> String {
     format!("[{}{}]", "#".repeat(p as usize), "-".repeat(3 - p as usize))
 }
 
+fn cell_glyph(cell: super::state::PushCell) -> String {
+    if cell.has_orb {
+        if cell.medals == 0 {
+            "●".into()
+        } else {
+            format!("◉{}", cell.medals.min(9))
+        }
+    } else if cell.medals == 0 {
+        "·".into()
+    } else if cell.medals == 1 {
+        "○".into()
+    } else {
+        format!("{}", cell.medals.min(9))
+    }
+}
+
 fn render_arcade(
     state: &ExpeditionState,
     f: &mut Frame,
@@ -246,64 +262,67 @@ fn render_arcade(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(6),
-            Constraint::Min(5),
+            Constraint::Length(7),
+            Constraint::Min(4),
             Constraint::Length(3),
         ])
         .split(area);
 
-    let track = {
-        let goal = state.board_goal.max(1);
-        let pos = state.board_pos.min(goal);
-        let mut cells = Vec::new();
-        for i in 0..=goal {
-            if i == pos {
-                cells.push("●".to_string());
-            } else if i == goal {
-                cells.push("旗".to_string());
-            } else {
-                cells.push("·".to_string());
-            }
-        }
-        cells.join("─")
-    };
-    let board = Paragraph::new(vec![
+    let mut plate = vec![' '; PUSH_W];
+    if state.pusher.plate_col < PUSH_W {
+        plate[state.pusher.plate_col] = '▓';
+    }
+    let plate_line: String = plate.into_iter().collect();
+
+    let mut field_lines = vec![
         Line::from(Span::styled(
-            " 街道すごろく",
+            " メダル落とし",
             Style::default()
                 .fg(accent())
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            format!(" {track}"),
-            Style::default().fg(Color::White),
+            format!(" 押 [{plate_line}]"),
+            Style::default().fg(Color::DarkGray),
         )),
-        Line::from(Span::styled(
-            format!(
-                " 位置 {}/{}  残り{}",
-                state.board_pos,
-                state.board_goal,
-                state.board_remaining()
-            ),
-            Style::default().fg(Color::Cyan),
-        )),
-        Line::from(Span::styled(
-            format!(" メダル {}  (1回 -{MEDAL_BET})", state.medals),
-            Style::default().fg(Color::LightYellow),
-        )),
-    ])
-    .block(
-        Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title("遊技場"),
+    ];
+    for row in 0..PUSH_D {
+        let mut row_s = String::from("  ");
+        for col in 0..PUSH_W {
+            row_s.push_str(&cell_glyph(state.pusher.cells[row][col]));
+            row_s.push(' ');
+        }
+        let tag = if row + 1 == PUSH_D { "←端" } else { "" };
+        field_lines.push(Line::from(Span::styled(
+            format!("{row_s}{tag}"),
+            if row + 1 == PUSH_D {
+                Style::default().fg(Color::LightYellow)
+            } else {
+                Style::default().fg(Color::White)
+            },
+        )));
+    }
+    if state.pusher.last_drop_medals > 0 || state.pusher.last_drop_orb {
+        let mut msg = format!(" 落下 +{}", state.pusher.last_drop_medals);
+        if state.pusher.last_drop_orb {
+            msg.push_str(" 光珠!");
+        }
+        field_lines.push(Line::from(Span::styled(msg, Style::default().fg(Color::LightCyan))));
+    }
+    f.render_widget(
+        Paragraph::new(field_lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::DarkGray))
+                .title(format!("遊技場 光珠{}/{}", state.orb_gauge.min(ORB_NEED), ORB_NEED)),
+        ),
+        chunks[0],
     );
-    f.render_widget(board, chunks[0]);
 
     if state.pending_level_pick {
         let mut cl = ClickableList::new();
         cl.push(Line::from(Span::styled(
-            " 目的地！ 育てる団員を選ぶ",
+            " 光珠揃い！ 育てる団員を選ぶ",
             goal_style(),
         )));
         for h in &state.roster {
@@ -327,27 +346,6 @@ fn render_arcade(
             false,
             0,
         );
-    } else {
-        let mut lines = vec![section_title("団員")];
-        for h in &state.roster {
-            lines.push(Line::from(format!(
-                "  {} [{}] Lv{}",
-                h.name,
-                h.role.label(),
-                h.level
-            )));
-        }
-        f.render_widget(
-            Paragraph::new(lines).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
-            ),
-            chunks[1],
-        );
-    }
-
-    if state.pending_level_pick {
         f.render_widget(
             Paragraph::new(" 上の団員をタップ ")
                 .alignment(Alignment::Center)
@@ -356,35 +354,36 @@ fn render_arcade(
             chunks[2],
         );
     } else {
-        let can = state.medals >= MEDAL_BET;
-        let (label, style, border) = if can {
-            (
-                format!(" ▶ サイコロ -{MEDAL_BET} "),
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(accent())
-                    .add_modifier(Modifier::BOLD),
-                accent(),
-            )
-        } else {
-            (
-                " メダル不足 — 戦役で集める ".into(),
-                Style::default().fg(Color::DarkGray),
-                Color::DarkGray,
-            )
-        };
-        Clickable::new(
-            Paragraph::new(label)
+        let mut cl = ClickableList::new();
+        cl.push(Line::from(Span::styled(
+            format!(" レーンへ投入 (所持{})", state.medals),
+            label_style(),
+        )));
+        for lane in 0..PUSH_W {
+            let edge = state.pusher.cells[PUSH_D - 1][lane].medals;
+            let mark = if edge >= 3 { "!" } else { " " };
+            let label = if state.medals == 0 {
+                format!("  [{lane}] 山端{edge}{mark} (メダル不足)")
+            } else {
+                format!("  ▶[{lane}] 投入  山端{edge}{mark}")
+            };
+            cl.push_clickable(Line::from(label), drop_lane_id(lane as u8));
+        }
+        cl.render(
+            f,
+            chunks[1],
+            Block::default().borders(Borders::ALL).title(" 投入 "),
+            &mut click_state.borrow_mut(),
+            false,
+            0,
+        );
+        f.render_widget(
+            Paragraph::new(" 押し板は自動 — 端の山を落とそう ")
                 .alignment(Alignment::Center)
-                .style(style)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(border)),
-                ),
-            MEDAL_ROLL,
-        )
-        .render(f, chunks[2], &mut click_state.borrow_mut());
+                .style(muted())
+                .block(Block::default().borders(Borders::ALL)),
+            chunks[2],
+        );
     }
 }
 
@@ -897,12 +896,12 @@ mod tests {
     }
 
     #[test]
-    fn arcade_shows_sugoroku() {
+    fn arcade_shows_pusher() {
         let mut state = ExpeditionState::new();
         state.hub_tab = HubTab::Arcade;
         let text = draw_text(&state);
-        assert!(text.contains("すごろく") || text.contains("遊技場"));
-        assert!(text.contains("サイコロ") || text.contains("メダル"));
+        assert!(text.contains("落とし") || text.contains("遊技場"));
+        assert!(text.contains("投入") || text.contains("レーン") || text.contains("[0]"));
     }
 
     #[test]
