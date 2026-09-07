@@ -1,7 +1,6 @@
 //! 遠征団の描画。
 //!
-//! 常設シェル（上部 HUD + 下部タブバー）の上に拠点・配置・防衛・遊技場を載せる。
-//! ループは説明文ではなく、マップ・配置盤・残りマスと主ボタンで伝える。
+//! 説明文は出さず、マップ・道・プッシャー場・バー／記号で状況を伝える。
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -21,7 +20,9 @@ use super::actions::{
     drop_lane_id, level_hero_id, place_slot_id, toggle_hero_id, ACK_RESULT, CANCEL_FORMING,
     CONFIRM_PLACEMENT, LAUNCH, OPEN_FORMING, START_FORMING, TAB_ARCADE, TAB_CAMP,
 };
-use super::state::{ExpeditionState, HubTab, Screen, ORB_NEED, PARTY_SIZE, PATH_LEN, PUSH_D, PUSH_W};
+use super::state::{
+    ExpeditionState, Hero, HubTab, Role, Screen, ORB_NEED, PARTY_SIZE, PATH_LEN, PUSH_D, PUSH_W,
+};
 
 fn accent() -> Color {
     theme::accent(&GameChoice::Expedition)
@@ -31,17 +32,7 @@ fn muted() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
-fn label_style() -> Style {
-    Style::default().fg(Color::Gray)
-}
-
-fn goal_style() -> Style {
-    Style::default()
-        .fg(Color::LightGreen)
-        .add_modifier(Modifier::BOLD)
-}
-
-/// 画面に出す「いまの目標」一文。critique の goal 照合にも使う。
+/// critique の goal 照合用。画面には出さない。
 pub fn next_goal_line(state: &ExpeditionState) -> String {
     match state.screen {
         Screen::Camp if state.hub_tab == HubTab::Arcade && state.pending_level_pick => {
@@ -73,6 +64,23 @@ pub fn next_goal_line(state: &ExpeditionState) -> String {
     }
 }
 
+fn role_glyph(role: Role) -> char {
+    match role {
+        Role::Vanguard => '▣',
+        Role::Striker => '▲',
+        Role::Support => '✚',
+    }
+}
+
+fn hero_chip(h: &Hero) -> String {
+    format!(
+        "{}{}{}",
+        role_glyph(h.role),
+        h.name.chars().next().unwrap_or('?'),
+        h.level
+    )
+}
+
 fn on_sortie(state: &ExpeditionState) -> bool {
     !matches!(state.screen, Screen::Camp)
 }
@@ -86,7 +94,7 @@ pub fn render(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(2),
             Constraint::Min(6),
             Constraint::Length(3),
         ])
@@ -106,62 +114,43 @@ pub fn render(
     render_bottom_nav(state, f, chunks[2], click_state);
 }
 
-fn render_status_bar(state: &ExpeditionState, f: &mut Frame, area: Rect) {
-    let fill = ration_fill_bar(state);
-    let phase = match state.screen {
-        Screen::Camp => Span::styled(" 待機", label_style()),
-        Screen::Forming => Span::styled(
-            " 編成中",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Screen::Placing => Span::styled(
-            " 配置中",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Screen::Running => Span::styled(
-            " 防衛中",
-            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
-        ),
-        Screen::Result => Span::styled(
-            " 帰還",
-            Style::default()
-                .fg(Color::LightGreen)
-                .add_modifier(Modifier::BOLD),
-        ),
-    };
+fn pip_bar(filled: u32, cap: u32, on: char, off: char) -> String {
+    let mut s = String::new();
+    for i in 0..cap {
+        s.push(if i < filled { on } else { off });
+    }
+    s
+}
 
-    let line1 = Line::from(vec![
+fn render_status_bar(state: &ExpeditionState, f: &mut Frame, area: Rect) {
+    let ration_pips = pip_bar(state.rations, state.ration_cap(), '◆', '◇');
+    let orb_pips = pip_bar(state.orb_gauge.min(ORB_NEED), ORB_NEED, '●', '○');
+    let phase = match state.screen {
+        Screen::Camp => "·",
+        Screen::Forming => "◇",
+        Screen::Placing => "▣",
+        Screen::Running => "⚔",
+        Screen::Result => "✓",
+    };
+    let line = Line::from(vec![
         Span::styled(
-            " 遠征団 ",
+            format!(" {} ", state.current_stage_label()),
             Style::default()
                 .fg(accent())
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::styled(format!("{phase} "), Style::default().fg(Color::White)),
         Span::styled(
-            format!("{} ", state.current_stage_label()),
-            Style::default().fg(Color::White),
-        ),
-        phase,
-    ]);
-    let line2 = Line::from(vec![
-        Span::styled(
-            format!("糧{}/{}{} ", state.rations, state.ration_cap(), fill),
+            format!("{ration_pips} "),
             Style::default().fg(Color::LightGreen),
         ),
         Span::styled(
-            format!("メダル{} ", state.medals),
+            format!("◎{} ", state.medals),
             Style::default().fg(Color::LightYellow),
         ),
-        Span::styled(
-            format!("光珠{}/{} ", state.orb_gauge.min(ORB_NEED), ORB_NEED),
-            Style::default().fg(Color::Cyan),
-        ),
+        Span::styled(orb_pips, Style::default().fg(Color::Cyan)),
     ]);
-    f.render_widget(Paragraph::new(vec![line1, line2]), area);
+    f.render_widget(Paragraph::new(line), area);
 }
 
 fn tab_style(active: bool) -> Style {
@@ -183,49 +172,38 @@ fn render_bottom_nav(
 ) {
     if on_sortie(state) && state.screen != Screen::Result {
         f.render_widget(
-            Paragraph::new(" 出撃中 — タブ切替不可 ")
+            Paragraph::new(" ··· ")
                 .alignment(Alignment::Center)
                 .style(muted()),
             area,
         );
         return;
     }
-    let camp_label = if state.hub_tab == HubTab::Camp {
-        "● 拠点"
+    let camp = if state.hub_tab == HubTab::Camp {
+        "● ⌂"
     } else {
-        "拠点"
+        "⌂"
     };
-    let arcade_label = if state.hub_tab == HubTab::Arcade {
-        "● 遊技場"
+    let arcade = if state.hub_tab == HubTab::Arcade {
+        "● ◎"
     } else {
-        "遊技場"
+        "◎"
     };
     TabBar::new("│")
+        .tab(camp, tab_style(state.hub_tab == HubTab::Camp), TAB_CAMP)
         .tab(
-            camp_label,
-            tab_style(state.hub_tab == HubTab::Camp),
-            TAB_CAMP,
-        )
-        .tab(
-            arcade_label,
+            arcade,
             tab_style(state.hub_tab == HubTab::Arcade),
             TAB_ARCADE,
         )
         .render(f, area, &mut click_state.borrow_mut());
 }
 
-fn section_title(text: &str) -> Line<'static> {
-    Line::from(Span::styled(
-        format!(" {text}"),
-        Style::default().fg(Color::Gray),
-    ))
-}
-
 fn hp_bar(hp: i32, max_hp: i32) -> String {
     let max_hp = max_hp.max(1);
     let filled = ((hp.max(0) * 8) / max_hp).clamp(0, 8) as usize;
     let empty = 8 - filled;
-    format!("[{}{}]", "■".repeat(filled), "·".repeat(empty))
+    format!("{}{}", "█".repeat(filled), "░".repeat(empty))
 }
 
 fn ration_fill_bar(state: &ExpeditionState) -> String {
@@ -234,22 +212,33 @@ fn ration_fill_bar(state: &ExpeditionState) -> String {
     }
     let need = state.ration_regen_ticks().max(1);
     let p = ((state.ration_progress * 4) / need).min(3);
-    format!("[{}{}]", "#".repeat(p as usize), "-".repeat(3 - p as usize))
+    format!("{}{}", "▓".repeat(p as usize), "░".repeat(3 - p as usize))
 }
 
-fn cell_glyph(cell: super::state::PushCell) -> String {
+fn cell_glyph(cell: super::state::PushCell) -> char {
     if cell.has_orb {
-        if cell.medals == 0 {
-            "●".into()
-        } else {
-            format!("◉{}", cell.medals.min(9))
-        }
-    } else if cell.medals == 0 {
-        "·".into()
-    } else if cell.medals == 1 {
-        "○".into()
+        '◉'
     } else {
-        format!("{}", cell.medals.min(9))
+        match cell.medals {
+            0 => '·',
+            1 => '○',
+            2 => '◎',
+            3 => '◍',
+            4 => '◉',
+            _ => '█',
+        }
+    }
+}
+
+/// 山の高さを縦棒で（端レーンの危険度）。
+fn stack_bar(n: u8) -> String {
+    match n {
+        0 => "·".into(),
+        1 => "▂".into(),
+        2 => "▃".into(),
+        3 => "▅".into(),
+        4 => "▆".into(),
+        _ => "█".into(),
     }
 }
 
@@ -262,59 +251,69 @@ fn render_arcade(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(7),
+            Constraint::Length(8),
             Constraint::Min(4),
             Constraint::Length(3),
         ])
         .split(area);
 
-    let mut plate = vec![' '; PUSH_W];
+    let mut plate = vec!['─'; PUSH_W];
     if state.pusher.plate_col < PUSH_W {
         plate[state.pusher.plate_col] = '▓';
     }
     let plate_line: String = plate.into_iter().collect();
 
-    let mut field_lines = vec![
-        Line::from(Span::styled(
-            " メダル落とし",
-            Style::default()
-                .fg(accent())
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            format!(" 押 [{plate_line}]"),
-            Style::default().fg(Color::DarkGray),
-        )),
-    ];
+    let mut field_lines = vec![Line::from(Span::styled(
+        format!("  {plate_line}"),
+        Style::default().fg(Color::DarkGray),
+    ))];
     for row in 0..PUSH_D {
-        let mut row_s = String::from("  ");
+        let mut spans = vec![Span::raw("  ")];
         for col in 0..PUSH_W {
-            row_s.push_str(&cell_glyph(state.pusher.cells[row][col]));
-            row_s.push(' ');
-        }
-        let tag = if row + 1 == PUSH_D { "←端" } else { "" };
-        field_lines.push(Line::from(Span::styled(
-            format!("{row_s}{tag}"),
-            if row + 1 == PUSH_D {
-                Style::default().fg(Color::LightYellow)
+            let g = cell_glyph(state.pusher.cells[row][col]);
+            let style = if row + 1 == PUSH_D {
+                Style::default()
+                    .fg(Color::LightYellow)
+                    .add_modifier(Modifier::BOLD)
+            } else if state.pusher.cells[row][col].has_orb {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(Color::White)
-            },
+            };
+            spans.push(Span::styled(format!("{g} "), style));
+        }
+        if row + 1 == PUSH_D {
+            spans.push(Span::styled("▽", Style::default().fg(Color::LightRed)));
+        }
+        field_lines.push(Line::from(spans));
+    }
+    // 端の山高さ
+    let mut edge = String::from("  ");
+    for col in 0..PUSH_W {
+        edge.push_str(&stack_bar(state.pusher.cells[PUSH_D - 1][col].medals));
+        edge.push(' ');
+    }
+    field_lines.push(Line::from(Span::styled(edge, Style::default().fg(Color::Yellow))));
+
+    if state.pusher.last_drop_medals > 0 || state.pusher.last_drop_orb {
+        let flash = if state.pusher.last_drop_orb {
+            format!("  ✦ +{}", state.pusher.last_drop_medals)
+        } else {
+            format!("  ↓ +{}", state.pusher.last_drop_medals)
+        };
+        field_lines.push(Line::from(Span::styled(
+            flash,
+            Style::default().fg(Color::LightCyan),
         )));
     }
-    if state.pusher.last_drop_medals > 0 || state.pusher.last_drop_orb {
-        let mut msg = format!(" 落下 +{}", state.pusher.last_drop_medals);
-        if state.pusher.last_drop_orb {
-            msg.push_str(" 光珠!");
-        }
-        field_lines.push(Line::from(Span::styled(msg, Style::default().fg(Color::LightCyan))));
-    }
+
+    let orb = pip_bar(state.orb_gauge.min(ORB_NEED), ORB_NEED, '●', '○');
     f.render_widget(
         Paragraph::new(field_lines).block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray))
-                .title(format!("遊技場 光珠{}/{}", state.orb_gauge.min(ORB_NEED), ORB_NEED)),
+                .title(format!(" {orb} ")),
         ),
         chunks[0],
     );
@@ -322,65 +321,61 @@ fn render_arcade(
     if state.pending_level_pick {
         let mut cl = ClickableList::new();
         cl.push(Line::from(Span::styled(
-            " 光珠揃い！ 育てる団員を選ぶ",
-            goal_style(),
+            " ●●● →",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )));
         for h in &state.roster {
             cl.push_clickable(
-                Line::from(format!(
-                    " ▶ {} [{}] Lv{}",
-                    h.name,
-                    h.role.label(),
-                    h.level
-                )),
+                Line::from(format!("  ▶ {}", hero_chip(h))),
                 level_hero_id(h.id),
             );
         }
         cl.render(
             f,
             chunks[1],
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::DarkGray)),
+            Block::default().borders(Borders::ALL),
             &mut click_state.borrow_mut(),
             false,
             0,
         );
-        f.render_widget(
-            Paragraph::new(" 上の団員をタップ ")
-                .alignment(Alignment::Center)
-                .style(muted())
-                .block(Block::default().borders(Borders::ALL)),
-            chunks[2],
-        );
+        f.render_widget(Paragraph::new("").block(Block::default().borders(Borders::ALL)), chunks[2]);
     } else {
+        // レーンは ▼ だけの横一列風リスト
         let mut cl = ClickableList::new();
+        let mut row = String::from(" ");
+        for lane in 0..PUSH_W {
+            let hot = state.pusher.cells[PUSH_D - 1][lane].medals >= 3;
+            row.push_str(if hot { "▼!" } else { "▼ " });
+            let _ = lane;
+        }
         cl.push(Line::from(Span::styled(
-            format!(" レーンへ投入 (所持{})", state.medals),
-            label_style(),
+            row,
+            Style::default().fg(accent()),
         )));
         for lane in 0..PUSH_W {
-            let edge = state.pusher.cells[PUSH_D - 1][lane].medals;
-            let mark = if edge >= 3 { "!" } else { " " };
-            let label = if state.medals == 0 {
-                format!("  [{lane}] 山端{edge}{mark} (メダル不足)")
-            } else {
-                format!("  ▶[{lane}] 投入  山端{edge}{mark}")
-            };
+            let edge_n = state.pusher.cells[PUSH_D - 1][lane].medals;
+            let label = format!(
+                "  [{}] {}{}",
+                lane,
+                stack_bar(edge_n),
+                if state.medals == 0 { " ·" } else { "" }
+            );
             cl.push_clickable(Line::from(label), drop_lane_id(lane as u8));
         }
         cl.render(
             f,
             chunks[1],
-            Block::default().borders(Borders::ALL).title(" 投入 "),
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" ◎{} ", state.medals)),
             &mut click_state.borrow_mut(),
             false,
             0,
         );
         f.render_widget(
-            Paragraph::new(" 押し板は自動 — 端の山を落とそう ")
-                .alignment(Alignment::Center)
-                .style(muted())
+            Paragraph::new("")
                 .block(Block::default().borders(Borders::ALL)),
             chunks[2],
         );
@@ -397,108 +392,97 @@ fn render_camp(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(5),
-            Constraint::Min(5),
+            Constraint::Min(4),
             Constraint::Length(3),
         ])
         .split(area);
 
-    let map_line = {
-        let mut parts = Vec::new();
-        for s in 1..=4u32 {
-            let label = format!("{}-{}", state.chapter, s);
-            if s < state.stage {
-                parts.push(format!("[{label}✓]"));
-            } else if s == state.stage {
-                parts.push(format!("▶{label}"));
-            } else {
-                parts.push(format!(" {label} "));
-            }
+    // 章マップ: ●─●─▶◉─○ 形式
+    let mut map_spans = vec![Span::styled(
+        format!(" {} ", state.chapter),
+        Style::default()
+            .fg(accent())
+            .add_modifier(Modifier::BOLD),
+    )];
+    for s in 1..=4u32 {
+        if s > 1 {
+            map_spans.push(Span::styled("─", muted()));
         }
-        parts.join("─")
-    };
-    let boss_note = if state.stage >= 4 { " Boss" } else { "" };
+        let (sym, style) = if s < state.stage {
+            (
+                "●",
+                Style::default().fg(Color::LightGreen),
+            )
+        } else if s == state.stage {
+            (
+                if state.last_failed { "✗" } else { "▶" },
+                Style::default()
+                    .fg(if state.last_failed {
+                        Color::LightRed
+                    } else {
+                        accent()
+                    })
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else if s == 4 {
+            ("◉", Style::default().fg(Color::DarkGray))
+        } else {
+            ("○", Style::default().fg(Color::DarkGray))
+        };
+        map_spans.push(Span::styled(sym, style));
+    }
     let dest = Paragraph::new(vec![
+        Line::from(map_spans),
+        Line::from(""),
         Line::from(Span::styled(
-            format!(" 第{}章{}", state.chapter, boss_note),
+            format!("  {}", state.current_stage_label()),
             Style::default()
-                .fg(accent())
+                .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            format!(" {map_line}"),
-            Style::default().fg(Color::White),
-        )),
-        Line::from(Span::styled(
-            if state.last_failed {
-                " 敗退 — 遊技場で育てて再配置"
-            } else {
-                " 道に置いて防衛し、次の節を開く"
-            },
-            muted(),
         )),
     ])
     .block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title("戦役"),
+            .border_style(Style::default().fg(Color::DarkGray)),
     );
     f.render_widget(dest, chunks[0]);
 
-    let mut party_lines: Vec<Line> = Vec::new();
-    party_lines.push(Line::from(Span::styled(
-        " 出撃メンバー",
-        Style::default().fg(Color::Gray),
-    )));
+    // パーティを横一列のチップで
+    let mut chips = String::from("  ");
     for slot in &state.forming {
         match slot {
             Some(id) => {
                 if let Some(h) = state.hero(*id) {
-                    party_lines.push(Line::from(vec![
-                        Span::styled(
-                            format!(" [{}]", h.role.label()),
-                            Style::default().fg(accent()).add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("{} ", h.name),
-                            Style::default()
-                                .fg(Color::White)
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(
-                            format!("Lv{} ", h.level),
-                            Style::default().fg(Color::LightYellow),
-                        ),
-                    ]));
+                    chips.push_str(&hero_chip(h));
+                    chips.push(' ');
                 }
             }
-            None => {
-                party_lines.push(Line::from(Span::styled(
-                    " [?] 未選択",
-                    Style::default().fg(Color::DarkGray),
-                )));
-            }
+            None => chips.push_str("·· "),
         }
     }
-    let party = Paragraph::new(party_lines).block(
+    let party = Paragraph::new(Line::from(Span::styled(
+        chips,
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+    )))
+    .block(
         Block::default()
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(" 編成 "),
+            .border_style(Style::default().fg(Color::DarkGray)),
     );
     Clickable::new(party, OPEN_FORMING).render(f, chunks[1], &mut click_state.borrow_mut());
 
     let party_ready = state.forming_count() == PARTY_SIZE;
     let (label, style, border, action) = if state.rations == 0 {
         (
-            format!("行軍糧 回復中 {}", ration_fill_bar(state)),
+            format!(" ◆ {}", ration_fill_bar(state)),
             Style::default().fg(Color::DarkGray),
             Color::DarkGray,
             START_FORMING,
         )
     } else if !party_ready {
         (
-            "メンバーを選ぶ".into(),
+            " ◇◇◇ ".into(),
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Yellow)
@@ -508,7 +492,7 @@ fn render_camp(
         )
     } else {
         (
-            format!("▶ {} に出る", state.current_stage_label()),
+            format!(" ▶ {} ", state.current_stage_label()),
             Style::default()
                 .fg(Color::Black)
                 .bg(accent())
@@ -547,25 +531,24 @@ fn render_forming(
         .split(area);
 
     let mut cl = ClickableList::new();
-    cl.push(Line::from(Span::styled(next_goal_line(state), goal_style())));
-    cl.push(section_title("名簿"));
+    // 選択状況を ◆◆◆ で
+    let sel = state.forming_count();
+    cl.push(Line::from(Span::styled(
+        format!("  {}{}", "◆".repeat(sel), "◇".repeat(PARTY_SIZE.saturating_sub(sel))),
+        Style::default().fg(accent()),
+    )));
     for h in &state.roster {
         let selected = state.forming.contains(&Some(h.id));
         let mark = if selected { "◆" } else { "◇" };
         cl.push_clickable(
-            Line::from(format!(
-                " {mark} {} [{}] Lv{}",
-                h.name,
-                h.role.label(),
-                h.level
-            )),
+            Line::from(format!("  {mark} {}", hero_chip(h))),
             toggle_hero_id(h.id),
         );
     }
     cl.render(
         f,
         chunks[0],
-        Block::default().borders(Borders::ALL).title(" 編成 "),
+        Block::default().borders(Borders::ALL),
         &mut click_state.borrow_mut(),
         false,
         0,
@@ -574,7 +557,7 @@ fn render_forming(
     let ready = state.forming_count() == PARTY_SIZE;
     if ready {
         Clickable::new(
-            Paragraph::new(" ▶ 配置へ ")
+            Paragraph::new(" ▶▣ ")
                 .alignment(Alignment::Center)
                 .style(
                     Style::default()
@@ -592,7 +575,7 @@ fn render_forming(
         .render(f, chunks[1], &mut click_state.borrow_mut());
     } else {
         f.render_widget(
-            Paragraph::new(" 3人選ぶ ")
+            Paragraph::new(" ◇◇◇ ")
                 .alignment(Alignment::Center)
                 .style(muted())
                 .block(Block::default().borders(Borders::ALL)),
@@ -600,7 +583,7 @@ fn render_forming(
         );
     }
     Clickable::new(
-        Paragraph::new(" 戻る ")
+        Paragraph::new(" ← ")
             .alignment(Alignment::Center)
             .style(muted())
             .block(Block::default().borders(Borders::ALL)),
@@ -609,26 +592,42 @@ fn render_forming(
     .render(f, chunks[2], &mut click_state.borrow_mut());
 }
 
-fn path_cell_label(state: &ExpeditionState, slot: usize) -> String {
+fn path_glyph(state: &ExpeditionState, slot: usize) -> (String, Style) {
     let Some(sortie) = state.sortie.as_ref() else {
-        return "·".into();
+        return ("·".into(), muted());
     };
-    if let Some(id) = sortie.path[slot] {
-        if let Some(h) = state.hero(id) {
-            return format!("{}{}", h.role.label(), h.name.chars().next().unwrap_or('?'));
-        }
-    }
-    // 敵がこのマスにいるか
-    let enemies_here: Vec<_> = sortie
+    let enemies = sortie
         .creeps
         .iter()
         .filter(|c| c.pos == slot && c.hp > 0)
-        .collect();
-    if !enemies_here.is_empty() {
-        let n = enemies_here.len();
-        return format!("敵{n}");
+        .count();
+    if let Some(id) = sortie.path[slot] {
+        if let Some(h) = state.hero(id) {
+            let g = format!("{}{}", role_glyph(h.role), h.name.chars().next().unwrap_or('?'));
+            let style = if enemies > 0 {
+                Style::default()
+                    .fg(Color::LightRed)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(accent()).add_modifier(Modifier::BOLD)
+            };
+            return (g, style);
+        }
     }
-    format!("{slot}")
+    if enemies > 0 {
+        let g = match enemies {
+            1 => "※",
+            2 => "※※",
+            _ => "※3",
+        };
+        return (
+            g.into(),
+            Style::default()
+                .fg(Color::LightRed)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
+    ("·".into(), muted())
 }
 
 fn render_placing(
@@ -640,52 +639,62 @@ fn render_placing(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
-            Constraint::Min(4),
+            Constraint::Length(3),
+            Constraint::Min(5),
             Constraint::Length(3),
             Constraint::Length(3),
         ])
         .split(area);
 
+    // 概略ロード
+    let mut overview = String::from(" ※ ");
+    for i in 0..PATH_LEN {
+        let (g, _) = path_glyph(state, i);
+        overview.push_str(&g);
+        if i + 1 < PATH_LEN {
+            overview.push('─');
+        }
+    }
+    overview.push_str(" ■");
     f.render_widget(
-        Paragraph::new(vec![
-            Line::from(Span::styled(next_goal_line(state), goal_style())),
-            Line::from(Span::styled(
-                " 出現 → 道 → 門   マスをタップして配置",
-                muted(),
-            )),
-        ])
-        .block(Block::default().borders(Borders::ALL).title(" 配置 ")),
+        Paragraph::new(Line::from(Span::styled(
+            overview,
+            Style::default().fg(Color::White),
+        )))
+        .block(Block::default().borders(Borders::ALL)),
         chunks[0],
     );
 
     let mut cl = ClickableList::new();
-    cl.push(Line::from(Span::styled(
-        " 出現側 ──────────────── 門",
-        muted(),
-    )));
     for i in 0..PATH_LEN {
-        let cell = path_cell_label(state, i);
-        let label = if i + 1 == PATH_LEN {
-            format!(" マス{i} [{cell}] ←門")
-        } else if i == 0 {
-            format!(" マス{i} [{cell}] 出現")
+        let (g, style) = path_glyph(state, i);
+        let edge = if i == 0 {
+            "◁"
+        } else if i + 1 == PATH_LEN {
+            "■"
         } else {
-            format!(" マス{i} [{cell}]")
+            " "
         };
-        cl.push_clickable(Line::from(label), place_slot_id(i as u8));
+        cl.push_clickable(
+            Line::from(vec![
+                Span::raw(format!("  {edge}[")),
+                Span::styled(g, style),
+                Span::raw("]"),
+            ]),
+            place_slot_id(i as u8),
+        );
     }
     cl.render(
         f,
         chunks[1],
-        Block::default().borders(Borders::ALL).title(" 道 "),
+        Block::default().borders(Borders::ALL),
         &mut click_state.borrow_mut(),
         false,
         0,
     );
 
     Clickable::new(
-        Paragraph::new(" ▶ 防衛開始 ")
+        Paragraph::new(" ▶⚔ ")
             .alignment(Alignment::Center)
             .style(
                 Style::default()
@@ -703,7 +712,7 @@ fn render_placing(
     .render(f, chunks[2], &mut click_state.borrow_mut());
 
     Clickable::new(
-        Paragraph::new(" 撤退 ")
+        Paragraph::new(" ← ")
             .alignment(Alignment::Center)
             .style(muted())
             .block(Block::default().borders(Borders::ALL)),
@@ -716,89 +725,109 @@ fn render_running(
     state: &ExpeditionState,
     f: &mut Frame,
     area: Rect,
-    click_state: &Rc<RefCell<ClickState>>,
+    _click_state: &Rc<RefCell<ClickState>>,
 ) {
-    let _ = click_state;
     let Some(sortie) = state.sortie.as_ref() else {
         return;
     };
+
+    // ウェーブを点で
+    let wave = pip_bar(
+        sortie.wave_index + 1,
+        sortie.waves_total,
+        '◆',
+        '◇',
+    );
+
     let mut lines = vec![
-        Line::from(Span::styled(next_goal_line(state), goal_style())),
         Line::from(vec![
             Span::styled(
-                format!(
-                    " {} ",
-                    ExpeditionState::stage_label(sortie.chapter, sortie.stage)
-                ),
+                format!(" {} ", ExpeditionState::stage_label(sortie.chapter, sortie.stage)),
                 Style::default().fg(accent()).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(format!(
-                "波{}/{}  門{} {}",
-                sortie.wave_index + 1,
-                sortie.waves_total,
-                hp_bar(sortie.gate_hp, sortie.gate_max_hp),
-                if ExpeditionState::is_boss_stage(sortie.stage) {
-                    "BOSS"
-                } else {
-                    ""
-                }
-            )),
+            Span::styled(format!("{wave} "), Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("■{}", hp_bar(sortie.gate_hp, sortie.gate_max_hp)),
+                Style::default().fg(Color::LightGreen),
+            ),
         ]),
         Line::from(""),
     ];
 
-    // 道の可視化
-    let mut road = String::from(" ");
+    // 2行の道: 上=敵、下=配置
+    let mut enemy_row = String::from(" ");
+    let mut hero_row = String::from(" ");
     for i in 0..PATH_LEN {
-        road.push_str(&path_cell_label(state, i));
-        if i + 1 < PATH_LEN {
-            road.push('─');
+        let enemies = sortie
+            .creeps
+            .iter()
+            .filter(|c| c.pos == i && c.hp > 0)
+            .count();
+        enemy_row.push_str(match enemies {
+            0 => " · ",
+            1 => " ※ ",
+            2 => "※※ ",
+            _ => "※※※",
+        });
+        if let Some(id) = sortie.path[i] {
+            if let Some(h) = state.hero(id) {
+                hero_row.push(role_glyph(h.role));
+                hero_row.push(h.name.chars().next().unwrap_or('?'));
+                hero_row.push(' ');
+            }
+        } else {
+            hero_row.push_str(" · ");
         }
     }
-    road.push_str("■門");
+    enemy_row.push(' ');
+    hero_row.push_str("■");
     lines.push(Line::from(Span::styled(
-        road,
-        Style::default().fg(Color::White),
+        enemy_row,
+        Style::default().fg(Color::LightRed),
+    )));
+    lines.push(Line::from(Span::styled(
+        hero_row,
+        Style::default().fg(accent()).add_modifier(Modifier::BOLD),
     )));
 
     if !sortie.last_hit_log.is_empty() {
+        // ログも短く記号化: 撃破っぽければ ✦
+        let flash = if sortie.last_hit_log.contains("撃破") {
+            " ✦"
+        } else if sortie.last_hit_log.contains("門") {
+            " ■!"
+        } else {
+            " ›"
+        };
         lines.push(Line::from(Span::styled(
-            format!(" » {}", sortie.last_hit_log),
+            flash,
             Style::default().fg(Color::LightCyan),
         )));
     }
 
-    lines.push(section_title("配置"));
-    for (i, slot) in sortie.path.iter().enumerate() {
-        if let Some(id) = slot {
-            if let Some(h) = state.hero(*id) {
-                lines.push(Line::from(format!(
-                    "  マス{i} {} [{}] 射程{} 攻{}",
-                    h.name,
-                    h.role.label(),
-                    h.role.range(),
-                    h.atk()
-                )));
-            }
-        }
-    }
-
-    if !sortie.creeps.is_empty() {
-        lines.push(section_title("敵"));
-        for c in sortie.creeps.iter().take(4) {
-            lines.push(Line::from(format!(
-                "  {} @{} {}/{}",
-                c.name, c.pos, c.hp, c.max_hp
-            )));
-        }
+    // 敵HPをミニバーで（名前なし）
+    for c in sortie.creeps.iter().take(3) {
+        let frac = if c.max_hp > 0 {
+            (c.hp.max(0) * 4) / c.max_hp
+        } else {
+            0
+        };
+        let bar = format!(
+            "  ※{} {}",
+            c.pos,
+            "▮".repeat(frac as usize) + &"▯".repeat(4usize.saturating_sub(frac as usize))
+        );
+        lines.push(Line::from(Span::styled(
+            bar,
+            Style::default().fg(Color::LightRed),
+        )));
     }
 
     f.render_widget(
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(accent()))
-                .title(" 防衛中 "),
+                .border_style(Style::default().fg(accent())),
         ),
         area,
     );
@@ -815,40 +844,44 @@ fn render_result(
         .constraints([Constraint::Min(6), Constraint::Length(3)])
         .split(area);
 
+    let big = if state.last_failed { " ✗ " } else { " ✓ " };
+    let big_color = if state.last_failed {
+        Color::LightRed
+    } else {
+        Color::LightGreen
+    };
+
     let mut lines = vec![
-        Line::from(Span::styled(next_goal_line(state), goal_style())),
+        Line::from(Span::styled(
+            big,
+            Style::default()
+                .fg(big_color)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("  {}", state.current_stage_label()),
+            Style::default().fg(Color::White),
+        )),
         Line::from(""),
     ];
-    for line in state.result_summary.lines() {
-        lines.push(Line::from(Span::styled(
-            format!(" {line}"),
-            Style::default().fg(Color::White),
-        )));
-    }
-    lines.push(Line::from(""));
-    lines.push(section_title("団員 Lv"));
+    // 結果サマリから数字だけ拾うのは難しいので、メダル表記は HUD に任せる
+    // 団員チップ
+    let mut chips = String::from("  ");
     for h in &state.roster {
-        lines.push(Line::from(format!(
-            "  {} [{}] Lv{}",
-            h.name,
-            h.role.label(),
-            h.level
-        )));
+        chips.push_str(&hero_chip(h));
+        chips.push(' ');
     }
+    lines.push(Line::from(Span::styled(
+        chips,
+        Style::default().fg(Color::LightYellow),
+    )));
+
     f.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" 結果 "),
-        ),
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL)),
         chunks[0],
     );
 
-    let cta = if state.last_failed {
-        " 遊技場へ "
-    } else {
-        " 拠点へ "
-    };
+    let cta = if state.last_failed { " ▶◎ " } else { " ▶⌂ " };
     Clickable::new(
         Paragraph::new(cta)
             .alignment(Alignment::Center)
@@ -881,7 +914,12 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                render(state, f, f.area(), &Rc::new(RefCell::new(ClickState::new())));
+                render(
+                    state,
+                    f,
+                    f.area(),
+                    &Rc::new(RefCell::new(ClickState::new())),
+                );
             })
             .unwrap();
         buffer_text(terminal.backend().buffer())
@@ -892,28 +930,27 @@ mod tests {
         let state = ExpeditionState::new();
         let text = draw_text(&state);
         assert!(text.contains("1-1"));
-        assert!(text.contains("に出る") || text.contains("出る"));
+        assert!(text.contains('▶'));
     }
 
     #[test]
-    fn arcade_shows_pusher() {
+    fn arcade_shows_pusher_field() {
         let mut state = ExpeditionState::new();
         state.hub_tab = HubTab::Arcade;
         let text = draw_text(&state);
-        assert!(text.contains("落とし") || text.contains("遊技場"));
-        assert!(text.contains("投入") || text.contains("レーン") || text.contains("[0]"));
+        assert!(text.contains('▼') || text.contains('[') || text.contains('◎'));
+        assert!(text.contains('·') || text.contains('○') || text.contains('◉'));
     }
 
     #[test]
-    fn bottom_nav_labels() {
+    fn bottom_nav_uses_icons() {
         let mut state = ExpeditionState::new();
         state.hub_tab = HubTab::Arcade;
         let text = draw_text(&state);
-        assert!(text.contains("拠点"));
-        assert!(text.contains("遊技場"));
+        assert!(text.contains('⌂') || text.contains('◎'));
         state.hub_tab = HubTab::Camp;
         let text = draw_text(&state);
-        assert!(text.contains("拠点"));
+        assert!(text.contains('⌂'));
     }
 
     #[test]
@@ -925,5 +962,10 @@ mod tests {
         eprintln!("=== ARCADE ===\n{}", draw_text(&state));
         assert!(super::super::logic::launch_sortie(&mut state));
         eprintln!("=== PLACING ===\n{}", draw_text(&state));
+        assert!(super::super::logic::confirm_placement(&mut state));
+        for _ in 0..30 {
+            super::super::logic::tick(&mut state, 1);
+        }
+        eprintln!("=== RUNNING ===\n{}", draw_text(&state));
     }
 }
