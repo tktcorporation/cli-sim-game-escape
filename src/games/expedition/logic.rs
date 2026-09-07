@@ -18,9 +18,8 @@ fn creep_for(difficulty: u32, wave: u32, is_boss_wave: bool) -> Creep {
             },
             hp,
             max_hp: hp,
-            pos: 0,
+            pos: 0.0,
             slow_ticks: 0,
-            step_progress: 0,
         }
     } else {
         let hp = 8 + scale as i32 * 3;
@@ -33,9 +32,8 @@ fn creep_for(difficulty: u32, wave: u32, is_boss_wave: bool) -> Creep {
             },
             hp,
             max_hp: hp,
-            pos: 0,
+            pos: 0.0,
             slow_ticks: 0,
-            step_progress: 0,
         }
     }
 }
@@ -328,29 +326,22 @@ fn tick_defense(state: &mut ExpeditionState) {
         return;
     };
 
-    // 敵移動
+    // 敵移動（連続座標。1マス進むのに ENEMY_STEP_TICKS かかる）
     let mut leaks = 0i32;
+    let step = 1.0 / ENEMY_STEP_TICKS as f64;
     for creep in &mut sortie.creeps {
         if creep.hp <= 0 {
             continue;
         }
+        let mut speed = step;
         if creep.slow_ticks > 0 {
             creep.slow_ticks -= 1;
-            // 減速中は半分の速度
-            if sortie.combat_tick % 2 == 1 {
-                continue;
-            }
+            speed *= 0.45;
         }
-        creep.step_progress += 1;
-        let need = ENEMY_STEP_TICKS;
-        if creep.step_progress >= need {
-            creep.step_progress = 0;
-            if creep.pos + 1 >= PATH_LEN {
-                leaks += 1;
-                creep.hp = 0;
-            } else {
-                creep.pos += 1;
-            }
+        creep.pos += speed;
+        if creep.pos >= PATH_LEN as f64 {
+            leaks += 1;
+            creep.hp = 0;
         }
     }
     if leaks > 0 {
@@ -402,10 +393,14 @@ fn hero_attacks(state: &mut ExpeditionState) {
             .iter_mut()
             .filter(|c| c.hp > 0)
             .filter(|c| {
-                let dist = (c.pos as i32 - slot as i32).abs();
-                dist <= range
+                let dist = (c.pos - slot as f64).abs();
+                dist <= range as f64 + 0.35
             })
-            .max_by_key(|c| c.pos);
+            .max_by(|a, b| {
+                a.pos
+                    .partial_cmp(&b.pos)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
         if let Some(creep) = target {
             creep.hp -= atk;
@@ -503,7 +498,7 @@ pub fn drop_medal(state: &mut ExpeditionState, lane: usize) -> bool {
         }
     }
     // まれに投入で光珠も載せる
-    if state.next_rng() % 12 == 0 {
+    if state.next_rng().is_multiple_of(12) {
         let has_orb = state.pusher.cells.iter().any(|r| r.iter().any(|c| c.has_orb));
         if !has_orb {
             state.pusher.cells[0][lane].has_orb = true;
@@ -544,10 +539,9 @@ pub fn tick_pusher(state: &mut ExpeditionState) {
     let mut next = [[PushCell::default(); PUSH_W]; PUSH_D];
 
     // 手前行から落下。端に乗った光珠は押し1回で落ちる。
-    for col in 0..PUSH_W {
-        let edge = state.pusher.cells[PUSH_D - 1][col];
+    for (col, edge) in state.pusher.cells[PUSH_D - 1].iter().enumerate() {
         if edge.medals > 0 {
-            let fall = ((edge.medals as u32 + 1) / 2).max(1).min(edge.medals as u32);
+            let fall = (edge.medals as u32).div_ceil(2).max(1).min(edge.medals as u32);
             dropped_medals += fall;
             let remain = edge.medals.saturating_sub(fall as u8);
             next[PUSH_D - 1][col].medals = remain;
@@ -778,9 +772,8 @@ mod tests {
                 name: "野犬",
                 hp: 99,
                 max_hp: 99,
-                pos: PATH_LEN - 1,
+                pos: PATH_LEN as f64 - 0.01,
                 slow_ticks: 0,
-                step_progress: ENEMY_STEP_TICKS,
             });
             s.combat_tick = 1;
         }

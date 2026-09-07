@@ -102,11 +102,31 @@ pub struct Creep {
     pub name: &'static str,
     pub hp: i32,
     pub max_hp: i32,
-    /// 0 = 出現側、PATH_LEN-1 = 門直前。
-    pub pos: usize,
+    /// 道上の連続位置。0.0 = 出現側、PATH_LEN as f64 = 門（到達で漏洩）。
+    pub pos: f64,
     /// 遅延残り tick（癒の減速）。
     pub slow_ticks: u32,
-    pub step_progress: u32,
+}
+
+/// 防衛画面のワールド座標（Canvas）。道は左→右へ進む。
+pub const WORLD_W: f64 = 100.0;
+pub const WORLD_H: f64 = 36.0;
+pub const PATH_Y: f64 = 18.0;
+pub const PATH_X0: f64 = 8.0;
+pub const PATH_X1: f64 = 88.0;
+
+/// プッシャー Canvas 座標。
+pub const PUSH_WORLD_W: f64 = 50.0;
+pub const PUSH_WORLD_H: f64 = 42.0;
+
+/// 拠点情景パネル座標。
+pub const CAMP_AMB_W: f64 = 40.0;
+pub const CAMP_AMB_H: f64 = 60.0;
+
+/// 道上の連続位置 → ワールド x。
+pub fn path_to_world_x(pos: f64) -> f64 {
+    let t = (pos / PATH_LEN as f64).clamp(0.0, 1.0);
+    PATH_X0 + (PATH_X1 - PATH_X0) * t
 }
 
 #[derive(Clone, Debug)]
@@ -153,10 +173,10 @@ pub struct Pusher {
 impl Pusher {
     pub fn new_seeded(next: &mut dyn FnMut() -> u32) -> Self {
         let mut cells = [[PushCell::default(); PUSH_W]; PUSH_D];
-        for row in 1..PUSH_D {
-            for col in 0..PUSH_W {
+        for row in cells.iter_mut().skip(1) {
+            for cell in row.iter_mut() {
                 let n = (next() % 3) as u8;
-                cells[row][col].medals = n;
+                cell.medals = n;
             }
         }
         let oc = (next() as usize) % PUSH_W;
