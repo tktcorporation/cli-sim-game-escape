@@ -682,10 +682,6 @@ mod tests {
     fn auto_defense_reaches_result() {
         let mut state = ExpeditionState::new();
         state.rations = 3;
-        // 強めにして確実に勝たせる
-        for h in &mut state.roster {
-            h.level = 8;
-        }
         place_all_and_start(&mut state);
         for _ in 0..30_000 {
             if matches!(state.screen, Screen::Result) {
@@ -725,5 +721,21 @@ mod tests {
         }
         assert!(!confirm_placement(&mut state));
         assert_eq!(state.screen, Screen::Placing);
+    }
+
+    #[test]
+    fn fresh_start_can_clear_first_stage() {
+        let mut state = ExpeditionState::new();
+        state.rations = 3;
+        place_all_and_start(&mut state);
+        for _ in 0..50_000 {
+            if matches!(state.screen, Screen::Result) {
+                break;
+            }
+            tick(&mut state, 1);
+        }
+        assert_eq!(state.screen, Screen::Result);
+        assert!(!state.last_failed, "Lv1 party should clear 1-1");
+        assert_eq!(state.stage, 2);
     }
 }
