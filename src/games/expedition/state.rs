@@ -326,8 +326,30 @@ impl ExpeditionState {
         format!("{chapter}-{stage}")
     }
 
+    /// 節の情景名。マップと防衛 HUD で「今どこを守っているか」を伝える。
+    pub fn stage_flavor(stage: u32) -> &'static str {
+        match stage {
+            1 => "斥候道",
+            2 => "峡谷口",
+            3 => "砦の坂",
+            _ => "門前決戦",
+        }
+    }
+
+    pub fn stage_title(chapter: u32, stage: u32) -> String {
+        format!(
+            "{} {}",
+            Self::stage_label(chapter, stage),
+            Self::stage_flavor(stage)
+        )
+    }
+
     pub fn current_stage_label(&self) -> String {
         Self::stage_label(self.chapter, self.stage)
+    }
+
+    pub fn current_stage_title(&self) -> String {
+        Self::stage_title(self.chapter, self.stage)
     }
 
     pub fn difficulty(chapter: u32, stage: u32) -> u32 {
