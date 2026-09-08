@@ -29,6 +29,12 @@ cargo test --lib games::pachinko::physics::tests::dump_launch_path_to_twelve -- 
 
 他ゲームでも同じ型の `#[ignore]` dump を `render.rs` のテストに置く。名前は `dump_` で始め、`--ignored --nocapture` で標準エラーへ出す。
 
+Canvas の `Marker` 解像度カタログ（Braille / HalfBlock / Quadrant 等の見え方比較）:
+
+```bash
+cargo test --lib canvas_fx::tests::dump_marker_resolution_catalog -- --ignored --nocapture
+```
+
 レイアウトの退行（「この文言がこの行にある」）は dump ではなく、通常の `cargo test` でバッファを assert する。dump は人間が形を判断するための出口であり、回帰の網ではない。
 
 ## 成果物
