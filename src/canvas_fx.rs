@@ -1,11 +1,31 @@
-//! `ratatui::widgets::canvas::Canvas` + `Marker::Braille` で疑似ピクセル表現を
-//! 作るための純粋な幾何計算ヘルパー。
+//! `ratatui::widgets::canvas::Canvas` で疑似ピクセル表現を作るための純粋な
+//! 幾何計算ヘルパー。
 //!
-//! Canvas 自体が world 座標→braille セルの変換を担うため、ここでは「どの
+//! Canvas 自体が world 座標→セル内マーカーの変換を担うため、ここでは「どの
 //! 座標に何を描くか」だけを返す。実際の `Canvas`/`Shape` の組み立て・色・
-//! x_bounds/y_bounds の設定は呼び出し側 (各ゲームの render.rs) の責務にする
-//! — パネルのサイズや配色はゲームごとに違うため、ここで固定すると
-//! かえって使い回しにくくなる。
+//! x_bounds/y_bounds・`Marker` の選択は呼び出し側 (各ゲームの render.rs)
+//! の責務にする — パネルのサイズや配色はゲームごとに違うため、ここで固定
+//! するとかえって使い回しにくくなる。
+//!
+//! # 端末ビジュアルの技術メニュー（このリポジトリ向け）
+//!
+//! 描画先はブラウザ DOM の `<pre>`（Ratzilla）。Sixel / Kitty graphics /
+//! 別 `<canvas>` オーバーレイは使えない（クリックヒットが壊れる）。
+//! 使えるのは **Unicode セル + 前景/背景色** だけ。
+//!
+//! | 技術 | 解像度/性質 | この repo での状態 | 向いている用途 |
+//! | --- | --- | --- | --- |
+//! | `Marker::Braille` | 2×4 点/セル。点描 | **主力**（戦場・情景） | 曲線・粒子・滑らかな形 |
+//! | `Marker::HalfBlock` | 1×2。fg+bg 2色/セル | **未使用**（ratatui にはある） | 塗り面・グラデ帯 |
+//! | `Marker::Quadrant` | 2×2。帯が出にくい | **未使用**（手動 ▖▗ は Metropolis） | ソリッドなシルエット |
+//! | `Marker::Sextant` / `Octant` | 2×3 / 2×4 密充填 | **未使用・フォント要注意** | 高密度シルエット（要検証） |
+//! | `Marker::Dot` / `Block` / `Bar` | 1×1 | **未使用** | 粗い HUD チャート |
+//! | 手動 box-drawing / ░▒▓█ | セル単位 | Factory / Metropolis | 機械・タイル・道路 |
+//! | `Color::Rgb` | 24bit | Everlight / Pachinko 等 | 連続パレット |
+//! | tachyonfx (`effects`) | Buffer post-process | Abyss / RPG / Everlight | フラッシュ・シェーダ風 |
+//!
+//! フォントカバレッジの目視確認は
+//! `dump_marker_resolution_catalog`（`--ignored --nocapture`）を使う。
 
 /// 塗りつぶした楕円の内部座標を返す。
 ///
@@ -206,5 +226,74 @@ mod tests {
     fn ellipse_ring_points_empty_for_non_positive_radii() {
         assert!(ellipse_ring_points(0.0, 0.0, 0.0, 3.0, 0.2).is_empty());
         assert!(ellipse_ring_points(0.0, 0.0, 4.0, -1.0, 0.2).is_empty());
+    }
+
+    /// 同一の円＋矩形を各 `Marker` で描き、解像度とフォントカバレッジを目視する。
+    ///
+    /// ```bash
+    /// cargo test --lib canvas_fx::tests::dump_marker_resolution_catalog -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore]
+    fn dump_marker_resolution_catalog() {
+        use ratzilla::ratatui::backend::TestBackend;
+        use ratzilla::ratatui::layout::Rect;
+        use ratzilla::ratatui::style::Color;
+        use ratzilla::ratatui::symbols::Marker;
+        use ratzilla::ratatui::widgets::canvas::{Canvas, Points};
+        use ratzilla::ratatui::widgets::{Block, Borders};
+        use ratzilla::ratatui::Terminal;
+
+        use crate::tui_inspect::buffer_text;
+
+        let markers = [
+            ("Braille", Marker::Braille),
+            ("HalfBlock", Marker::HalfBlock),
+            ("Quadrant", Marker::Quadrant),
+            ("Sextant", Marker::Sextant),
+            ("Octant", Marker::Octant),
+            ("Block", Marker::Block),
+            ("Dot", Marker::Dot),
+            ("Bar", Marker::Bar),
+        ];
+
+        let disc = filled_ellipse_points(20.0, 12.0, 8.0, 7.0, 0.35);
+        let ring = ring_points(20.0, 12.0, 10.0, 0.12);
+        let bar = filled_rect_points(34.0, 6.0, 42.0, 18.0, 0.4);
+
+        for (name, marker) in markers {
+            let backend = TestBackend::new(48, 14);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal
+                .draw(|f| {
+                    let area = Rect::new(0, 0, 48, 14);
+                    let canvas = Canvas::default()
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .title(format!(" {name} ")),
+                        )
+                        .x_bounds([0.0, 48.0])
+                        .y_bounds([0.0, 24.0])
+                        .marker(marker)
+                        .paint(|ctx| {
+                            ctx.draw(&Points {
+                                coords: &ring,
+                                color: Color::DarkGray,
+                            });
+                            ctx.draw(&Points {
+                                coords: &disc,
+                                color: Color::LightYellow,
+                            });
+                            ctx.draw(&Points {
+                                coords: &bar,
+                                color: Color::LightGreen,
+                            });
+                        });
+                    f.render_widget(canvas, area);
+                })
+                .unwrap();
+            eprintln!("=== {name} ===\n{}", buffer_text(terminal.backend().buffer()));
+        }
     }
 }

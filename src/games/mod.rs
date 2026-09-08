@@ -3,6 +3,7 @@
 pub mod abyss;
 pub mod cookie;
 pub mod everlight;
+pub mod expedition;
 pub mod factory;
 pub mod godfield;
 pub mod loopmarch;
@@ -56,6 +57,8 @@ pub enum GameChoice {
     StarRing,
     /// 玉響 — 釘を読んで台を選び、玉の行方に祈るパチンコ
     Pachinko,
+    /// 遠征団 — 行軍糧を貯めて短い遠征へ出し、結果でのみ絆が育つ
+    Expedition,
 }
 
 /// Top-level application state.
@@ -96,5 +99,6 @@ pub fn create_game(choice: &GameChoice) -> Box<dyn Game> {
         GameChoice::Everlight => Box::new(everlight::EverlightGame::new()),
         GameChoice::StarRing => Box::new(starringe::StarRingGame::new()),
         GameChoice::Pachinko => Box::new(pachinko::PachinkoGame::new()),
+        GameChoice::Expedition => Box::new(expedition::ExpeditionGame::new()),
     }
 }

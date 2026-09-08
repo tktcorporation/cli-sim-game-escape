@@ -43,9 +43,10 @@ pub const MENU_SELECT_LOOPMARCH: u16 = 16;
 pub const MENU_SELECT_EVERLIGHT: u16 = 19;
 pub const MENU_SELECT_STARRINGE: u16 = 21;
 pub const MENU_SELECT_PACHINKO: u16 = 23;
+pub const MENU_SELECT_EXPEDITION: u16 = 25;
 
-/// Last valid index of the main menu cards (10 games + settings → 0..=10).
-const MENU_LAST_INDEX: u8 = 10;
+/// Last valid index of the main menu cards (11 games + settings → 0..=11).
+const MENU_LAST_INDEX: u8 = 11;
 
 /// Cursor → menu action, used for the A button on the main menu.
 enum MenuPick {
@@ -65,6 +66,7 @@ fn menu_pick_for(idx: u8) -> MenuPick {
         7 => MenuPick::Game(GameChoice::Everlight),
         8 => MenuPick::Game(GameChoice::StarRing),
         9 => MenuPick::Game(GameChoice::Pachinko),
+        10 => MenuPick::Game(GameChoice::Expedition),
         _ => MenuPick::Settings,
     }
 }
@@ -81,6 +83,7 @@ const SETTINGS_SCROLL_DOWN: u16 = 18;
 const SETTINGS_RESET_EVERLIGHT: u16 = 20;
 const SETTINGS_RESET_STARRINGE: u16 = 22;
 const SETTINGS_RESET_PACHINKO: u16 = 24;
+const SETTINGS_RESET_EXPEDITION: u16 = 26;
 /// 1クリック/1行キー入力あたりのスクロール量。
 const SETTINGS_SCROLL_STEP: i32 = 3;
 
@@ -295,8 +298,11 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                 InputEvent::Key('0') | InputEvent::Click(_, MENU_SELECT_PACHINKO) => {
                     Some(MenuPick::Game(GameChoice::Pachinko))
                 }
-                // 数字キーはゲームで使い切っているので、設定は `-` へ回す。
-                // `-` は index.html のタップ用正規表現が拾える文字。
+                InputEvent::Key('=') | InputEvent::Click(_, MENU_SELECT_EXPEDITION) => {
+                    Some(MenuPick::Game(GameChoice::Expedition))
+                }
+                // 数字キーと `=` はゲームで使う。設定は `-` へ回す。
+                // `-` / `=` は index.html のタップ用正規表現が拾える文字。
                 InputEvent::Key('-') | InputEvent::Click(_, MENU_SELECT_SETTINGS) => {
                     Some(MenuPick::Settings)
                 }
@@ -387,6 +393,9 @@ fn dispatch_event(event: &InputEvent, app_state: &Rc<RefCell<AppState>>) {
                     InputEvent::Key('7') | InputEvent::Click(_, SETTINGS_RESET_PACHINKO) => {
                         *confirm_reset = Some(GameChoice::Pachinko);
                     }
+                    InputEvent::Key('8') | InputEvent::Click(_, SETTINGS_RESET_EXPEDITION) => {
+                        *confirm_reset = Some(GameChoice::Expedition);
+                    }
                     InputEvent::Key('k') | InputEvent::Click(_, SETTINGS_SCROLL_UP) => {
                         adjust_scroll(scroll, -SETTINGS_SCROLL_STEP);
                     }
@@ -434,6 +443,7 @@ fn perform_reset(game: &GameChoice) {
         GameChoice::Everlight => cli_sim_game_escape::games::everlight::save::delete_save(),
         GameChoice::StarRing => cli_sim_game_escape::games::starringe::save::delete_save(),
         GameChoice::Pachinko => cli_sim_game_escape::games::pachinko::save::delete_save(),
+        GameChoice::Expedition => cli_sim_game_escape::games::expedition::save::delete_save(),
         _ => {}
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -644,6 +654,7 @@ fn render_menu(
         ('8', "常夜灯", "降り注ぐ魔物から灯を守る縦画面バレットヘヴン", MENU_SELECT_EVERLIGHT, '▶', theme::accent(&GameChoice::Everlight)),
         ('9', "星環", "上空から降る鉱石を公転武装で刈り取る放置採掘", MENU_SELECT_STARRINGE, '▶', theme::accent(&GameChoice::StarRing)),
         ('0', "玉響", "釘を読んで台を選び玉の行方に祈るパチンコホール", MENU_SELECT_PACHINKO, '▶', theme::accent(&GameChoice::Pachinko)),
+        ('=', "遠征団", "糧がたまる→短い遠征→絆だけ育つ。放置では強くならない", MENU_SELECT_EXPEDITION, '▶', theme::accent(&GameChoice::Expedition)),
         ('-', "設定", "セーブデータの管理", MENU_SELECT_SETTINGS, '⚙', Color::Gray),
     ];
 
@@ -1036,6 +1047,16 @@ fn render_settings_main(
         SETTINGS_RESET_PACHINKO,
     );
 
+    // 遠征団
+    cl.push_clickable(
+        Line::from(vec![
+            Span::styled(" ✕ ", Style::default().fg(Color::Red)),
+            Span::styled("遠征団", Style::default().fg(Color::Green)),
+            Span::styled(" — データをリセット", Style::default().fg(Color::DarkGray)),
+        ]),
+        SETTINGS_RESET_EXPEDITION,
+    );
+
     cl.push(Line::from(""));
     cl.push(Line::from(""));
     cl.push(Line::from(Span::styled(
@@ -1073,6 +1094,7 @@ fn render_confirm_dialog(
         GameChoice::Everlight => "常夜灯",
         GameChoice::StarRing => "星環",
         GameChoice::Pachinko => "玉響",
+        GameChoice::Expedition => "遠征団",
         _ => "Unknown",
     };
 
@@ -1162,7 +1184,7 @@ mod tests {
     /// 「selected=i で描画した時、そのカード自身のタップ対象は必ず見える
     /// 範囲に入る」という auto-scroll の契約を検証する。
     fn assert_selected_card_is_always_reachable(width: u16, height: u16) {
-        const ACTION_IDS: [u16; 11] = [
+        const ACTION_IDS: [u16; 12] = [
             MENU_SELECT_COOKIE,
             MENU_SELECT_FACTORY,
             MENU_SELECT_RPG,
@@ -1173,6 +1195,7 @@ mod tests {
             MENU_SELECT_EVERLIGHT,
             MENU_SELECT_STARRINGE,
             MENU_SELECT_PACHINKO,
+            MENU_SELECT_EXPEDITION,
             MENU_SELECT_SETTINGS,
         ];
         for (i, &action_id) in ACTION_IDS.iter().enumerate() {
