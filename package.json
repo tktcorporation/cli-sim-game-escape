@@ -17,6 +17,6 @@
     "mdast-util-from-markdown": "^2.0.0",
     "unist-util-visit": "^5.0.0",
     "@types/luxon": "^3.0.0",
-    "vitest": "^3.0.0"
+    "vitest": "^4.1.11"
   }
 }
